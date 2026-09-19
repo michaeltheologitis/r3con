@@ -1,0 +1,32 @@
+r3con
+Copyright (c) 2026 Michael Theologitis
+
+This product includes software developed at Hugging Face Inc.
+
+--------------------------------------------------------------------------------
+src/r3con/runtime/python_executor.py
+--------------------------------------------------------------------------------
+
+This file is a modified copy of `local_python_executor.py` from smolagents v1.25.0,
+copyright 2024 The HuggingFace Inc. team, licensed under the Apache License,
+Version 2.0. A copy of that licence is distributed with this package as
+LICENSE-APACHE-2.0; the file itself retains the original copyright and licence
+notice, and its header enumerates every modification made.
+
+    Upstream: https://github.com/huggingface/smolagents/blob/v1.25.0/src/smolagents/local_python_executor.py
+
+Modifications (also listed in the file header):
+  - Removed the smolagents `Tool` import and the `send_tools` method; static tools
+    are wired directly in `__init__`.
+  - Inlined `BASE_BUILTIN_MODULES` and `truncate_content` from `smolagents.utils`
+    so the file has no smolagents imports.
+  - Upgraded `BreakException` / `ContinueException` / `ReturnException` from
+    `Exception` to `BaseException`, so agent-emitted `try/except` cannot swallow
+    control flow (upstream already does this for `FinalAnswerException`).
+  - Repackaged from `smolagents` into `r3con.runtime`.
+
+The behaviour of `evaluate_python_code`, the AST walker, the authorized-imports
+allowlist, the dunder/operation/while/timeout limits, and `BASE_PYTHON_TOOLS` is
+unchanged from upstream.
+
+Everything else in this package is licensed under the MIT License (see LICENSE).

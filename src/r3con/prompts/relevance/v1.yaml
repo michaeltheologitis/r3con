@@ -1,0 +1,44 @@
+instructions: |-
+  You are given one document from a collection, and a single **task** (between `<task>` and `</task>` tags) that the whole collection will be used to answer. Write a **task-conditioned summary** of this one document: what does it contribute toward the task?
+
+  Produce a summary, **not an answer**. Even when the task is phrased as an instruction ("list…", "rank…", "construct the chain…", "how many…"), do not try to carry it out or commit to a final answer here — you are looking at only one document, and the answer is assembled later from all the summaries together. Just record, faithfully and in your own words, what THIS document offers toward the task; do not invent.
+
+  Open with a brief, high-level orientation of what this document broadly is (e.g. "a municipal budget memo", "a 10-Q filing", "a chapter of a noir novel", "a government press release") — this latent, big-picture read helps the collection be understood as a whole — then note the task-relevant specifics. Keep it tight: a larger document still gets a short summary; include only what is durable and bears on the task.
+
+  <task>
+  {{ task }}
+  </task>
+
+  {% if other_states %}## Task-conditioned summaries of the other documents (previous round)
+
+  Below are the other documents' task-conditioned summaries for this same task, from the previous round. Use them to read THIS document in light of the collection — a document often only becomes useful and understandable for the task once you know information from the other documents. Still write only about THIS document (the one the user provides).
+
+  {{ other_states }}
+
+  {% endif %}## Output
+  Reply with the task-conditioned summary of this document only — no preamble, no restating the task. If this document contributes nothing relevant to the task, it is fine to say so briefly (or reply with nothing).
+
+examples:
+  - name: task-conditioned-summary-one-of-several
+    text: |-
+      Input:
+      <task>
+      Across the candidates' platform papers, who proposes the largest cut to the city transit budget?
+      </task>
+      Document:
+      [Councilmember Dana Reyes — "A Leaner, Fairer City": Platform on City Services]
+
+      Introduction. Our city stands at a crossroads. After three years of rising costs and flat revenue, the next council must make hard choices about where every dollar goes. This paper lays out my priorities across transit, public safety, parks, and city administration.
+
+      Public safety. I will protect frontline policing and fire services from cuts; response times have already slipped and residents feel it.
+
+      Transit. The current transit budget stands at $80 million. In my view it has grown bloated by underused routes — three of our crosstown lines run at less than 20% capacity outside rush hour. I propose reducing the transit budget by $12 million and redirecting those savings to road maintenance, where our backlog of potholes and failing bridges is now a genuine safety issue. To be clear, this is a reallocation, not an attack on riders; the core commuter lines stay funded.
+
+      City administration. I will impose a hiring freeze at City Hall and cut the outside-consulting budget by 30%.
+
+      Parks and quality of life. I support a modest downtown bike-lane pilot, funded from the parks capital reserve — not from transit.
+
+      Closing. These choices reflect one principle: spend where residents see the result.
+
+      Output (task-conditioned summary):
+      A candidate's campaign platform paper (Councilmember Dana Reyes). Relevant to the task: Reyes proposes cutting the city transit budget by $12M (from $80M), reallocating it to road maintenance. Her hiring freeze, consulting cut, and bike-lane pilot are not transit cuts. As just one candidate's paper, it gives only Reyes's proposed cut — not enough on its own to say who proposes the largest.

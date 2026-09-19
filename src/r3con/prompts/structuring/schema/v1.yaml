@@ -1,0 +1,121 @@
+instructions: |-
+  You design a Pydantic schema that captures exactly the information needed to complete a single **task** over a collection of documents you have not seen. The task — given to you between `<task>` and `</task>` tags — could be a question, a comparison, a verification, a count, a request to list or summarize, anything. The documents could be anything — news articles, an email thread, court documents, narratives, transcripts, reports, financial filings, research papers.
+
+  The schema is handed downstream to a parser LLM that fills instances of your classes from the documents; a final inference agent then computes the answer from those instances. You don't need to think about those downstream stages — just design the schema that captures the right information.
+
+  Use `Literal[...]` only for values derivable from the task itself — entities named in the task are safe. Anything you would need to read the documents to enumerate (locations, dates, names, predicates) must stay as `str`. Model only what is required to compute the answer.
+
+  Your output must define a top-level `Parse(BaseModel)` class that aggregates every other class you define as one of its fields (typically `list[...]` of each).
+
+  {% if relevance %}## Task-conditioned document summaries
+
+  In order to know what the documents contain, we have summarized each document for you upstream in a task-specific way: we summarize the useful information learned from each document so you have enough understanding to propose a good schema. Use them to ground your schema in what the documents actually contain, rather than the task's surface words alone. (Do not bake any answer into the schema; just let the summaries inform which information is worth a field.)
+
+  {{ relevance }}
+
+  {% endif %}## Output format
+
+  Reply with two parts:
+
+  1. A brief `Thought:` snippet (1–2 sentences) saying why this schema design fits the task.
+  2. A `<schema>...</schema>` block containing only Python source. The runtime extracts the body between the tags and `exec`s it.
+
+  ## Rules
+
+  **The parser sees ONE document at a time.** It cannot aggregate or compare across the whole collection, so no derived/computed/aggregate fields (e.g. `difference_years`, `total_count`, `most_recent`) — those force the parser to invent values it can't see. Put extractable facts as rows in `list[...]` fields; the inference agent aggregates downstream.
+
+  **Every top-level field of `Parse` must itself be a `list[...]`.**
+
+  **Model the underlying domain, not the task's surface form.** The task may rest on a premise that doesn't hold in the text. If the task is *"How does X react when Y does Z?"* and the schema only records "X's reaction to Y doing Z", you miss the case where the text says *Y didn't do Z, X did it themselves*. Model the underlying event class (e.g. *"any event where the object is destroyed, by whom"*) so both framings surface.
+
+  **Class and field names must be valid Python identifiers** — no apostrophes, no spaces, no punctuation (`hasn't_heard` → `has_not_heard`). The schema is `exec`'d as Python.
+
+examples:
+  - name: financial figure across a collection (count, no derived field)
+    text: |-
+      Input:
+      <task>
+      How many of these companies reported a net loss for their most recent quarter?
+      </task>
+
+      Task-conditioned document summaries:
+      ### Document 1
+      Aeva Technologies 10-Q — bottom line is a "Net loss" of $(43.2) million for the quarter.
+      ### Document 2
+      ClearOne 10-Q — the line is labeled "Net income (loss)", reported as $(1,196) thousand.
+      ### Document 3
+      Cross Timbers Royalty Trust 10-Q — reports positive "Distributable income" of $4.1 million.
+
+      Thought: "How many … net loss" is a count computed downstream — the parser sees one filing at a time and cannot count across them. Each filing labels the bottom line differently (the summaries tell us which), so capture each company's net result as a signed amount plus its as-written label and unit; inference counts how many are negative.
+
+      <schema>
+      from pydantic import BaseModel, Field
+
+      class CompanyNetResult(BaseModel):
+          """The bottom-line net result reported in one company's filing for the period in question."""
+          company: str | None = Field(description="The company the filing belongs to, as named")
+          label: str | None = Field(description="The line-item label as written (e.g. 'Net loss', 'Net income (loss)')")
+          net_result: float | None = Field(description="The amount as reported; a loss is negative")
+          unit_scale: str | None = Field(description="How the amount is expressed: 'dollars', 'thousands', 'millions'")
+          period: str | None = Field(description="The period the figure covers")
+          quote: str = Field(description="Verbatim line containing the label and amount")
+
+      class Parse(BaseModel):
+          company_net_results: list[CompanyNetResult]
+      </schema>
+
+  - name: cross-document relation the summaries make possible (citations)
+    text: |-
+      Input:
+      <task>
+      Among the provided papers, which ones does "Activation Beacon: Extending LLM Context" reference, and which ones cite it?
+      </task>
+
+      Task-conditioned document summaries:
+      ### Document 1
+      "Activation Beacon: Extending LLM Context" — the paper named in the task; condenses activations for long context.
+      ### Document 2
+      "PoSE: Positional Skip-wise Training for Context Extension".
+      ### Document 3
+      "LongLoRA: Efficient Fine-tuning of Long-context LLMs".
+
+      Thought: This is a citation relation among the collection. While reading one paper's (long) bibliography, you can only pick out the in-collection citations if you know the other papers' titles — and the summaries give exactly those. So per paper, capture its title and which OTHER provided papers it references; inference reads off both directions (what the target references, and what references the target).
+
+      <schema>
+      from pydantic import BaseModel, Field
+
+      class Paper(BaseModel):
+          """One provided paper: its own title and which of the OTHER provided papers it references."""
+          title: str | None = Field(description="This paper's title")
+          references_provided_papers: list[str] = Field(description="Titles of the OTHER provided papers (known from the document summaries) that appear in this paper's reference list")
+
+      class Parse(BaseModel):
+          papers: list[Paper]
+      </schema>
+
+  - name: verification (model the domain, don't bake the judgment)
+    text: |-
+      Input:
+      <task>
+      Is the following claim correct? Mara resigns because the merger was announced.
+      </task>
+
+      Task-conditioned document summaries:
+      ### Document 1
+      A workplace drama; Mara is the operations lead. A merger and several staff departures occur in the second half.
+
+      Thought: The claim pins an event (Mara resigns) and a motive (because of the merger). Don't pre-judge either — model every departure with the reason the text gives, so inference can check whether Mara actually resigns and what reason, if any, the text attributes.
+
+      <schema>
+      from pydantic import BaseModel, Field
+
+      class DepartureEvent(BaseModel):
+          """An event where a named person leaves, resigns, or is removed from their role."""
+          person: str | None = Field(description="Who leaves, as named")
+          manner: str | None = Field(description="How they leave — resigns, is fired, retires, etc.")
+          stated_reason: str | None = Field(description="The reason the text gives, verbatim or short paraphrase; None if none is stated")
+          quote: str = Field(description="A short verbatim excerpt anchoring the event")
+
+      class Parse(BaseModel):
+          departure_events: list[DepartureEvent]
+      </schema>

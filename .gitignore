@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# Secrets — never commit
+token
+*.token
+.pypirc
+.env
+
+# Working notes — local only, never published (this repo is public)
+STATUS.md
+
+# Run artifacts
+logs/
+
+# OS
+.DS_Store

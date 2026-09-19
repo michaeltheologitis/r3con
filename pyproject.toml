@@ -1,0 +1,56 @@
+[project]
+name = "r3con"
+version = "0.1.0"
+description = "Just-in-time reasoning over a collection of documents: surface relevance, structure it, reason over it."
+readme = "README.md"
+authors = [
+    { name = "Michael Theologitis", email = "michael.theologitis@outlook.com" }
+]
+requires-python = ">=3.11"
+license = "MIT AND Apache-2.0"
+license-files = ["LICENSE", "LICENSE-APACHE-2.0", "NOTICE"]
+keywords = ["llm", "agent", "documents", "reasoning", "multi-document", "question-answering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing",
+]
+dependencies = [
+    "litellm>=1.83,<2",
+    "jinja2>=3.1.0",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "tiktoken>=0.7.0",
+    # Required even though nothing here imports it: `runtime/llm.py` sets litellm's
+    # `num_retries`, and litellm imports tenacity lazily on that retry path. Without it
+    # the first transient error raises "tenacity import failed" instead of retrying.
+    "tenacity>=8.0",
+]
+
+# Local development only — NOT part of the published package (PEP 735 dependency groups
+# never reach the wheel). uv installs the `dev` group by default, so a plain `uv sync`
+# gives you an environment that can run examples/quickstart.ipynb as a notebook: pick
+# .venv as the kernel and go. `pip` is here because editors shell out to it when they
+# offer to fix a kernel themselves, and a uv-made venv has none.
+[dependency-groups]
+dev = [
+    "ipykernel>=6.29",
+    "pip>=24.0",
+]
+
+[project.scripts]
+r3con = "r3con.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/michaeltheologitis/r3con"
+Repository = "https://github.com/michaeltheologitis/r3con"
+
+[build-system]
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"

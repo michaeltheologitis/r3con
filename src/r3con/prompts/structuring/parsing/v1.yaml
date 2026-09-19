@@ -1,0 +1,88 @@
+instructions: |-
+  You read a document and extract structured instances according to a Pydantic schema. The schema was designed to capture exactly the information needed to complete a specific task — be exhaustive and faithful to it.
+
+  ## Task the schema was designed for
+  <task>
+  {{ task }}
+  </task>
+
+  ## Pydantic schema
+
+  ```python
+  {{ schema_code }}
+  ```
+
+  {% if relevance %}## Task-conditioned document summaries (background to help you — do NOT extract from these)
+  To help you extract well, each document in the collection has already been summarized upstream in a task-specific way. Together they give you a *latent* understanding of what the whole collection contains — context you would otherwise be missing while looking at a single document in isolation, which helps you resolve references and extract more completely and accurately. These are provided only as help; the actual document to extract from is the one the user provides next. Extract only from that document, never from these summaries.
+
+  {{ relevance }}
+
+  {% endif %}## Your job
+  Populate `Parse` with every instance found in the document below (the user message). Resolve pronouns to their named entities. An empty list is correct when the document has no instances.
+
+examples:
+  - name: same-substance-different-words-extract-with-a-quote
+    text: |-
+      Input:
+      <task>
+      Which employees were dismissed from the company?
+      </task>
+
+      Schema:
+
+      ```python
+      class Dismissal(BaseModel):
+          person: str = Field(description="the dismissed employee, resolved to their full name")
+          quote: str = Field(description="the verbatim line showing the dismissal")
+      class Parse(BaseModel):
+          dismissals: list[Dismissal] = []
+      ```
+
+      Task-conditioned document summaries:
+      ### Document 1
+      An internal HR memo about a post-audit restructuring; "Reyes" is the analyst Dana Reyes, not the board chair who shares the surname.
+
+      Document:
+      After the audit, the board moved quickly. Reyes was let go on Friday, her badge deactivated by noon. Park, seeing which way the wind blew, handed in her resignation the same afternoon. A memo noted that Okafor's position had been eliminated in the restructuring.
+
+      Thinking: "Let go" and "position eliminated" are dismissals in different words than the task's — extract both, each anchored by a quote. The summaries fix which Reyes is meant, so the name resolves to Dana Reyes. Park resigned: leaving voluntarily is a different event, so skip it.
+
+      Parse:
+
+      ```json
+      {"dismissals": [
+        {"person": "Dana Reyes", "quote": "Reyes was let go on Friday,"},
+        {"person": "Okafor", "quote": "Okafor's position had been eliminated in the restructuring."}
+      ]}
+      ```
+
+  - name: don-t-manufacture-when-the-document-is-vague
+    text: |-
+      Input:
+      <task>
+      How does Maria respond when insulted?
+      </task>
+
+      Schema:
+
+      ```python
+      class Encounter(BaseModel):
+          insulter: str = Field(description="who delivered the insult, as named")
+          insult_quote: str = Field(description="the insulting line, verbatim")
+          maria_response_quote: str = Field(description="her reply, verbatim; empty if she did not respond")
+      class Parse(BaseModel):
+          encounters: list[Encounter] = []
+      ```
+
+      Document:
+      She knew the routine. Anton sneered, "You'll never amount to anything." Maria didn't flinch. "Then I'll surprise you," she said quietly. Later, at the cafe, a stranger muttered something about her shoes; she pretended not to hear.
+
+      Thinking: Anton's sneer is a clear insult. The cafe muttering is too vague to identify the insult — skipping the record rather than guessing the quote.
+
+      Parse:
+
+      ```json
+      {"encounters": [
+        {"insulter": "Anton", "insult_quote": "You'll never amount to anything.", "maria_response_quote": "Then I'll surprise you,"}
+      ]}
+      ```
