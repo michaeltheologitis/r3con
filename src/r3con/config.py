@@ -68,9 +68,9 @@ def normalize_model_name(model: str | None) -> str | None:
     """Reduce a LiteLLM model string to the bare model name — drop the provider/route
     prefix, which is *transport*, not identity::
 
-        openai/gpt-5.4-nano             -> gpt-5.4-nano
+        openai/gpt-5.6-luna             -> gpt-5.6-luna
         hosted_vllm/Qwen/Qwen3.5-35B-A3B -> Qwen3.5-35B-A3B
-        gpt-5.4-nano                    -> gpt-5.4-nano   (no prefix → unchanged)
+        gpt-5.6-luna                    -> gpt-5.6-luna   (no prefix → unchanged)
         None                            -> None
 
     Used wherever the model is **persisted or shown** (the run label, the manifest's

@@ -158,7 +158,7 @@ def propose_schema(
             the system prompt so the schema is grounded in what the documents
             actually surfaced, not the task's surface words alone. ``None``/empty
             → no relevance block (the model sees only the task).
-        model: LiteLLM provider-prefixed model string (e.g. ``"openai/gpt-5.4-nano"``).
+        model: LiteLLM provider-prefixed model string (e.g. ``"openai/gpt-5.6-luna"``).
         max_attempts: Cap on model calls. Defaults to
             ``settings.SCHEMA_MAX_ATTEMPTS``; pass a smaller value
             for a faster fail in tests, or a larger one if you expect
