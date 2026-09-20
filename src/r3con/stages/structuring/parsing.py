@@ -6,7 +6,7 @@ chunking**. Parsing runs **one LLM call per document**, all documents in paralle
 (bounded by :func:`r3con.settings.active_doc_workers`):
 
 - The **system prompt** carries the task, the proposed schema source, and the
-  corpus-wide relevance state (every document's note, not just this one's) — the
+  corpus-wide relevance snippets (every document's note, not just this one's) — the
   cross-document context that lets a single document be read in light of what the
   rest of the corpus says.
 - The **user message** is the document being parsed, whole.
@@ -197,7 +197,7 @@ def parse_one_document(
     parse_cls: type[BaseModel],
     task: str,
     prompt_version: str,
-    relevance_states: list[str] | None = None,
+    relevance_snippets: list[str] | None = None,
     model: str,
     max_attempts: int = settings.PARSING_MAX_ATTEMPTS,
     run: StageRun | None = None,
@@ -207,7 +207,7 @@ def parse_one_document(
     """Parse one whole ``document`` into a populated ``Parse``.
 
     The system prompt carries the task, the schema source, and the corpus-wide
-    relevance state (``relevance_states`` — every document's note, the
+    relevance snippet (``relevance_snippets`` — every document's note, the
     cross-document context); the document itself is the user message. One LLM
     call with ``schema=parse_cls``.
 
@@ -230,7 +230,7 @@ def parse_one_document(
         version=prompt_version,
         task=task,
         schema_code=schema_code,
-        relevance=render_relevance(relevance_states),
+        relevance=render_relevance(relevance_snippets),
     )
     user_prompt = document
     last_error: str = ""
@@ -294,7 +294,7 @@ def parse_documents(
     parse_cls: type[BaseModel],
     task: str,
     prompt_version: str,
-    relevance_states: list[str] | None = None,
+    relevance_snippets: list[str] | None = None,
     doc_ids: list[str] | None = None,
     model: str,
     run: StageRun | None = None,
@@ -306,7 +306,7 @@ def parse_documents(
     Each document is fed **whole** (no chunking) through one
     :func:`parse_one_document` call; the documents are processed **in parallel**
     (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`). Every
-    call's system prompt carries the same corpus-wide relevance state, so each
+    call's system prompt carries the same corpus-wide relevance snippets, so each
     document is read with the cross-document context even though the calls are
     independent.
 
@@ -330,7 +330,7 @@ def parse_documents(
             parse_cls=parse_cls,
             task=task,
             prompt_version=prompt_version,
-            relevance_states=relevance_states,
+            relevance_snippets=relevance_snippets,
             model=model,
             run=run,
             # ``kind`` encodes the doc so the per-call cost ledger (calls.json)

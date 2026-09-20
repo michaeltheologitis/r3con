@@ -24,8 +24,8 @@ aligned; if the paper's wording changes, the code follows.
 | 2 | **structuring** | what form does that mattering take, and what are its instances? | `stages/structuring/{schema,parsing}.py` |
 | 3 | **reasoning** | what follows, over what was surfaced and what was structured? | `stages/reasoning.py` |
 
-Each per-document note from stage 1 is a **relevance state**; all of them together are the
-**corpus-wide relevance state**. Stage 2 is two steps that are one idea — propose the
+Each per-document note from stage 1 is a **relevance snippet**; all of them together are the
+**corpus-wide relevance snippets**. Stage 2 is two steps that are one idea — propose the
 schema, then **parse** every document into it. Stage 3 loads the parse into a Python
 runtime and reasons there.
 
@@ -35,15 +35,15 @@ runtime and reasons there.
       ▼
 RELEVANCE   (relevance_rounds=2 default; each round fans out over docs in parallel)
    R1:  state(q, doc)                              # the document read against the question alone
-   R2:  state(q, doc, OTHER docs' R1 states)       → the corpus-wide relevance state
+   R2:  snippet(q, doc, OTHER docs' R1 snippets)       → the corpus-wide relevance snippets
       │   round k reads the FROZEN round k-1 set; a doc never sees its own prior state
       ▼
-STRUCTURING · schema    schema(q, corpus-wide relevance state) → a per-task `Parse` class
-STRUCTURING · parsing   per-doc in parallel: records(q, states, doc) against that schema
+STRUCTURING · schema    schema(q, corpus-wide relevance snippets) → a per-task `Parse` class
+STRUCTURING · parsing   per-doc in parallel: records(q, snippets, doc) against that schema
                         merge → one Parse (list-concat), each record tagged with its source doc
       ▼
 REASONING   the sandboxed multi-turn Python loop, over
-            (question, parse, corpus-wide relevance state) → the answer
+            (question, parse, corpus-wide relevance snippets) → the answer
 ```
 
 Orchestrated in plain Python in `run_pipeline` — no coordinator class.
@@ -205,7 +205,7 @@ what you saw. A change justified
 only by reasoning about the prompt text is not justified.
 
 When an answer is wrong, read the artifacts in order and attribute the failure to a
-**stage** before touching anything: did the relevance states stay faithful descriptions
+**stage** before touching anything: did the relevance snippets stay faithful descriptions
 (or collapse into premature per-document verdicts)? did the schema capture the right
 concepts? are the answer-bearing records present and populated? did the agent use both
 views, or anchor on the parse alone? Then fix *that* stage.

@@ -3,7 +3,7 @@ and the merge.
 
 The parsing step no longer chunks: every document is fed **whole** through one
 ``parse_one_document`` call, all documents in parallel, each call's system prompt
-carrying the corpus-wide relevance state. The per-document parses merge into one
+carrying the corpus-wide relevance snippets. The per-document parses merge into one
 (list fields concatenated in document order), and each merged record is tagged
 with its source-document index (``ParseResult.source_docs``).
 
@@ -79,7 +79,7 @@ def _run(
     fake: Callable[..., BaseModel],
     *,
     documents: list[str],
-    relevance_states: list[str] | None = None,
+    relevance_snippets: list[str] | None = None,
     doc_ids: list[str] | None = None,
     workers: int = 1,
 ) -> tuple[Any, list[dict[str, Any]]]:
@@ -89,7 +89,7 @@ def _run(
             schema_code="SCHEMA",
             parse_cls=Parse,
             task="q",
-            relevance_states=relevance_states,
+            relevance_snippets=relevance_snippets,
             doc_ids=doc_ids,
             model="m",
             prompt_version="v1",
@@ -133,19 +133,19 @@ def test_each_call_carries_doc_index_kind() -> None:
 
 
 def test_summaries_passed_to_each_doc() -> None:
-    """The corpus-wide relevance state reaches every per-document parsing call."""
+    """The corpus-wide relevance snippets reaches every per-document parsing call."""
     summ = ["Doc A is about whales.", "Doc B is about ships."]
 
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[])
 
-    _, calls = _run(fake, documents=[DOC_A, DOC_B], relevance_states=summ)
+    _, calls = _run(fake, documents=[DOC_A, DOC_B], relevance_snippets=summ)
     for c in calls:
-        assert c["relevance_states"] == summ
+        assert c["relevance_snippets"] == summ
 
 
 def test_summaries_rendered_into_system_prompt() -> None:
-    """The real parse_one_document renders the relevance states into the system prompt's
+    """The real parse_one_document renders the relevance snippets into the system prompt's
     '## Document summaries' block; the document is the user message."""
     summ = ["Doc A is about whales.", "Doc B is about ships."]
 
@@ -156,7 +156,7 @@ def test_summaries_rendered_into_system_prompt() -> None:
     with _patched_llm(fake) as calls:
         parsing_mod.parse_documents(
             documents=[DOC_A], schema_code="SCHEMA", parse_cls=Parse,
-            task="What is discussed?", relevance_states=summ, model="m", prompt_version="v1", workers=1,
+            task="What is discussed?", relevance_snippets=summ, model="m", prompt_version="v1", workers=1,
         )
     sys_msg = calls[0]["system_prompt"]
     # The injected block heading (distinct from the example's "Document summaries:" label).
@@ -174,7 +174,7 @@ def test_no_summaries_omits_block() -> None:
     with _patched_llm(fake) as calls:
         parsing_mod.parse_documents(
             documents=[DOC_A], schema_code="SCHEMA", parse_cls=Parse,
-            task="q", relevance_states=None, model="m", prompt_version="v1", workers=1,
+            task="q", relevance_snippets=None, model="m", prompt_version="v1", workers=1,
         )
     # The injected block (not the example's label) is omitted when there are no summaries.
     assert "## Task-conditioned document summaries" not in calls[0]["system_prompt"]

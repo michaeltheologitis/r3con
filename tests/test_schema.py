@@ -267,7 +267,7 @@ def test_retry_includes_invalid_syntax_error() -> None:
 
 
 def test_relevance_states_rendered_into_system_prompt() -> None:
-    """When relevance states are passed, propose_schema renders them into the system prompt's
+    """When relevance snippets are passed, propose_schema renders them into the system prompt's
     '## Task-conditioned document summaries' block; with none, the block is omitted."""
     seen: dict[str, str] = {}
 
@@ -280,14 +280,14 @@ def test_relevance_states_rendered_into_system_prompt() -> None:
     try:
         schema_mod.propose_schema(
             task="Q?", model="x", prompt_version="v1",
-            relevance_states=["Doc A is about whales.", "Doc B is about ships."],
+            relevance_snippets=["Doc A is about whales.", "Doc B is about ships."],
         )
         # Distinctive prose of the injected block (the in-context examples contain a
         # "Task-conditioned document summaries:" label, so key on the block's own text).
         assert "In order to know what the documents contain" in seen["system"]
         assert "Doc A is about whales." in seen["system"]
         assert "Doc B is about ships." in seen["system"]
-        # No relevance states → no injected block.
+        # No relevance snippets → no injected block.
         schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1")
         assert "In order to know what the documents contain" not in seen["system"]
     finally:

@@ -159,14 +159,14 @@ def run(
             It is transport, so it does not change the run's identity.
         logs_dir: where the run folder goes. Defaults to ``./logs``
             (or ``R3CON_LOGS_DIR``).
-        save_artifacts: write the per-stage artifacts — the relevance states, the
+        save_artifacts: write the per-stage artifacts — the relevance snippets, the
             proposed schema, the parse, the reasoning transcript — into a run folder.
             On by default: they are how you see what the run actually did. Set ``False``
             to run without touching the filesystem.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the corpus-wide relevance state (``.relevance``), the
+        ``str()`` of the result), the corpus-wide relevance snippets (``.relevance``), the
         structured parse (``.struct_data``), the schema proposed for this question
         (``.schema_code``), and where the artifacts were written (``.run_dir``).
 

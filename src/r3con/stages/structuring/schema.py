@@ -137,7 +137,7 @@ def _retry_prompt(task: str, prev_code: str, error: str) -> str:
 def propose_schema(
     *,
     task: str,
-    relevance_states: list[str] | None = None,
+    relevance_snippets: list[str] | None = None,
     model: str,
     prompt_version: str,
     max_attempts: int = settings.SCHEMA_MAX_ATTEMPTS,
@@ -153,7 +153,7 @@ def propose_schema(
 
     Args:
         task: The task the schema must capture information for.
-        relevance_states: The corpus-wide relevance state from stage 1 — the
+        relevance_snippets: The corpus-wide relevance snippets from stage 1 — the
             final per-document notes. Rendered by :func:`render_relevance` into
             the system prompt so the schema is grounded in what the documents
             actually surfaced, not the task's surface words alone. ``None``/empty
@@ -181,7 +181,7 @@ def propose_schema(
             f"{settings.SCHEMA_MAX_ATTEMPTS})."
         )
 
-    system_prompt = load_prompt("structuring/schema", version=prompt_version, relevance=render_relevance(relevance_states))
+    system_prompt = load_prompt("structuring/schema", version=prompt_version, relevance=render_relevance(relevance_snippets))
     user_prompt = f"Input:\n<task>\n{task}\n</task>\nOutput:"
 
     attempts: list[ProposalAttempt] = []

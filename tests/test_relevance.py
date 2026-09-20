@@ -2,18 +2,18 @@
 cross-document relevance stage.
 
 Covers the load-bearing invariants of the design:
-- ``rounds`` synchronous rounds, each rewriting every document's relevance state;
+- ``rounds`` synchronous rounds, each rewriting every document's relevance snippet;
 - **others-only conditioning**: in round k ≥ 2 a document is conditioned on the
-  OTHER documents' frozen round-(k-1) relevance_states, never its own;
-- the final (last-round) states are returned aligned to the input documents,
+  OTHER documents' frozen round-(k-1) relevance_snippets, never its own;
+- the final (last-round) snippets are returned aligned to the input documents,
   with every round kept for debugging;
-- ``rounds=1`` degenerates to independent round-1 states;
+- ``rounds=1`` degenerates to independent round-1 snippets;
 - empty / one-document edge cases;
 - the prompt-render contract (task + other-docs block in the system prompt; the
   document in the user message; round 1 omits the other-docs block).
 
 The LLM call is monkeypatched two ways: the conditioning/round tests patch
-``relevance.relevance_state`` (capturing the ``other_states`` each doc sees),
+``relevance.relevance_snippet`` (capturing the ``other_snippets`` each doc sees),
 and the prompt-contract test patches ``relevance.litellm_chat_completion`` to
 inspect the rendered messages.
 
@@ -34,19 +34,19 @@ from r3con.stages import relevance
 def _patched_relevance_state(
     fake: Callable[..., str],
 ) -> Iterator[list[dict[str, Any]]]:
-    """Swap ``relevance_state`` for a scripted fake; yield the captured kwargs."""
-    original = relevance.relevance_state
+    """Swap ``relevance_snippet`` for a scripted fake; yield the captured kwargs."""
+    original = relevance.relevance_snippet
     calls: list[dict[str, Any]] = []
 
     def wrapper(**kwargs: Any) -> str:
-        calls.append({k: (list(v) if k == "other_states" else v) for k, v in kwargs.items()})
+        calls.append({k: (list(v) if k == "other_snippets" else v) for k, v in kwargs.items()})
         return fake(**kwargs)
 
-    relevance.relevance_state = wrapper  # type: ignore[assignment]
+    relevance.relevance_snippet = wrapper  # type: ignore[assignment]
     try:
         yield calls
     finally:
-        relevance.relevance_state = original  # type: ignore[assignment]
+        relevance.relevance_snippet = original  # type: ignore[assignment]
 
 
 @contextlib.contextmanager
@@ -67,7 +67,7 @@ def _patched_llm(fake: Callable[..., str]) -> Iterator[list[dict[str, Any]]]:
 
 
 def _tagged(**kwargs: Any) -> str:
-    """Fake relevance_state: return a summary that encodes its (round, doc) from kind."""
+    """Fake relevance_snippet: return a summary that encodes its (round, doc) from kind."""
     m = re.match(r"relevance-r(\d+)-d(\d+)", kwargs["kind"])
     return f"S(r={m.group(1)},d={m.group(2)})"
 
@@ -89,10 +89,10 @@ def test_returns_final_round_summaries_aligned_to_docs() -> None:
         result = relevance.surface_relevance(
             task="q", documents=docs, model="m", prompt_version="v1", rounds=3, workers=4
         )
-    assert result.states == ["S(r=3,d=0)", "S(r=3,d=1)", "S(r=3,d=2)"]
+    assert result.snippets == ["S(r=3,d=0)", "S(r=3,d=1)", "S(r=3,d=2)"]
     # Every round is kept for debugging; the last IS the returned relevance.
     assert len(result.rounds) == 3
-    assert result.rounds[-1] == result.states
+    assert result.rounds[-1] == result.snippets
     assert result.rounds[0] == ["S(r=1,d=0)", "S(r=1,d=1)", "S(r=1,d=2)"]
 
 
@@ -110,20 +110,20 @@ def test_round1_has_no_other_states() -> None:
     with _patched_relevance_state(_tagged) as calls:
         relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=2, workers=4)
     for d in range(3):
-        assert _by_kind(calls, f"relevance-r1-d{d}")["other_states"] == []
+        assert _by_kind(calls, f"relevance-r1-d{d}")["other_snippets"] == []
 
 
 def test_round2_conditions_on_others_only_frozen_prior() -> None:
-    """Round 2, doc d sees exactly the OTHER docs' round-1 states — never its own."""
+    """Round 2, doc d sees exactly the OTHER docs' round-1 snippets — never its own."""
     docs = ["A", "B", "C"]
     with _patched_relevance_state(_tagged) as calls:
         relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=2, workers=4)
     # doc 1 in round 2 sees round-1 of docs 0 and 2, not its own (d=1).
-    others_d1 = _by_kind(calls, "relevance-r2-d1")["other_states"]
+    others_d1 = _by_kind(calls, "relevance-r2-d1")["other_snippets"]
     assert others_d1 == ["S(r=1,d=0)", "S(r=1,d=2)"]
     assert "S(r=1,d=1)" not in others_d1
     # doc 0 sees docs 1 and 2.
-    assert _by_kind(calls, "relevance-r2-d0")["other_states"] == ["S(r=1,d=1)", "S(r=1,d=2)"]
+    assert _by_kind(calls, "relevance-r2-d0")["other_snippets"] == ["S(r=1,d=1)", "S(r=1,d=2)"]
 
 
 def test_round3_conditions_on_round2_not_round1() -> None:
@@ -131,7 +131,7 @@ def test_round3_conditions_on_round2_not_round1() -> None:
     with _patched_relevance_state(_tagged) as calls:
         relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=3, workers=4)
     # round 3 doc 0 sees round-2 of doc 1 (the frozen previous round), not round 1.
-    others = _by_kind(calls, "relevance-r3-d0")["other_states"]
+    others = _by_kind(calls, "relevance-r3-d0")["other_snippets"]
     assert others == ["S(r=2,d=1)"]
 
 
@@ -139,10 +139,10 @@ def test_rounds_one_degenerates_to_independent() -> None:
     docs = ["A", "B"]
     with _patched_relevance_state(_tagged) as calls:
         result = relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=1, workers=4)
-    assert result.states == ["S(r=1,d=0)", "S(r=1,d=1)"]
+    assert result.snippets == ["S(r=1,d=0)", "S(r=1,d=1)"]
     assert len(result.rounds) == 1
-    # No round produced an other-states context.
-    assert all(c["other_states"] == [] for c in calls)
+    # No round produced an other-snippets context.
+    assert all(c["other_snippets"] == [] for c in calls)
 
 
 # --------------------------------------------------------------------------- #
@@ -153,7 +153,7 @@ def test_rounds_one_degenerates_to_independent() -> None:
 def test_empty_documents() -> None:
     with _patched_relevance_state(_tagged) as calls:
         result = relevance.surface_relevance(task="q", documents=[], model="m", prompt_version="v1", rounds=3)
-    assert result.states == []
+    assert result.snippets == []
     assert result.rounds == []
     assert calls == []
 
@@ -161,18 +161,18 @@ def test_empty_documents() -> None:
 def test_single_document_has_empty_others_every_round() -> None:
     with _patched_relevance_state(_tagged) as calls:
         result = relevance.surface_relevance(task="q", documents=["only"], model="m", prompt_version="v1", rounds=3, workers=4)
-    assert result.states == ["S(r=3,d=0)"]
+    assert result.snippets == ["S(r=3,d=0)"]
     assert len(result.rounds) == 3
     # Only document → no others, ever.
-    assert all(c["other_states"] == [] for c in calls)
+    assert all(c["other_snippets"] == [] for c in calls)
 
 
 def test_rounds_zero_means_no_relevance_states() -> None:
     # rounds=0 is a deliberate "no relevance" run: empty result AND not a single
-    # relevance_state call — round 1 must be skipped, not merely the later rounds.
+    # relevance_snippet call — round 1 must be skipped, not merely the later rounds.
     with _patched_relevance_state(_tagged) as calls:
         result = relevance.surface_relevance(task="q", documents=["a", "b"], model="m", prompt_version="v1", rounds=0)
-    assert result.states == []
+    assert result.snippets == []
     assert result.rounds == []
     assert calls == []
 

@@ -17,9 +17,9 @@ Layout per ``logs/<run-folder>/``:
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
   block (:meth:`r3con.config.RunConfig.label`).
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  rounds: [{round, states}], totals}`` — within a round the per-document relevance
-  states align to ``documents[i]``; the last round is the corpus-wide relevance state
-  that feeds downstream) + ``calls.json`` (one per ``relevance_state`` call, tagged
+  rounds: [{round, snippets}], totals}`` — within a round the per-document relevance
+  snippets align to ``documents[i]``; the last round is the corpus-wide relevance snippets
+  that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
   ``relevance-r{round}-d{doc}``).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.

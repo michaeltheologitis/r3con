@@ -11,7 +11,7 @@ model: openai/gpt-5.6-luna
 seed: 42
 
 # How many times each document is read. 1 = each read against the question alone;
-# 2+ = re-read in light of the other documents' relevance states.
+# 2+ = re-read in light of the other documents' relevance snippets.
 relevance_rounds: 2
 
 prompts:

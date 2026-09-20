@@ -15,7 +15,7 @@ from r3con.prompts import load_prompt, prompt_search_path  # noqa: E402
 from r3con.settings import settings  # noqa: E402
 
 # Enough kwargs to render any stage's template; Jinja ignores the ones it doesn't use.
-CTX = dict(task="T", schema_code="S", relevance="", other_states="", parsed="{}",
+CTX = dict(task="T", schema_code="S", relevance="", other_snippets="", parsed="{}",
            parse_block="{}", samples_block="", parse_json="")
 
 

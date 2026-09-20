@@ -2,7 +2,7 @@
 
 The generic CodeAct loop itself is tested in ``test_codeact.py``; this file covers
 the reasoning-specific part: ``reason`` renders the ``reasoning`` prompt correctly
-(the parse view and the corpus-wide relevance state in the system message; the task
+(the parse view and the corpus-wide relevance snippets in the system message; the task
 wrapped in `<task>` tags in the user message), binds the parse as the sandbox
 variable ``parse``, and stamps each record with its source document.
 
@@ -99,7 +99,7 @@ def test_system_prompt_includes_document_relevance_states() -> None:
 
     with _patched_llm(fake) as msgs:
         reason(task="?", schema_code="class Parse(BaseModel): x: list[X]",
-                      parsed={"x": [{"y": 1}]}, relevance_states=RELEVANCE_STATES, model="m", prompt_version="v1")
+                      parsed={"x": [{"y": 1}]}, relevance_snippets=RELEVANCE_STATES, model="m", prompt_version="v1")
     sys_msg = msgs[0][0]["content"]
     assert "## Document summaries" in sys_msg
     assert "1923 court opinion" in sys_msg
@@ -115,15 +115,15 @@ def test_system_prompt_omits_relevance_block_when_none() -> None:
     sentinel = "ZZQX-relevance-sentinel-42"
     with _patched_llm(fake) as ml_present:
         reason(task="?", schema_code="class Parse(BaseModel): x: list[X]",
-                      parsed={"x": [{"y": 1}]}, relevance_states=[sentinel], model="m", prompt_version="v1")
+                      parsed={"x": [{"y": 1}]}, relevance_snippets=[sentinel], model="m", prompt_version="v1")
     assert sentinel in ml_present[0][0]["content"]
 
     with _patched_llm(fake) as ml_none:
         reason(task="?", schema_code="class Parse(BaseModel): x: list[X]",
-                      parsed={"x": [{"y": 1}]}, relevance_states=None, model="m", prompt_version="v1")
+                      parsed={"x": [{"y": 1}]}, relevance_snippets=None, model="m", prompt_version="v1")
     with _patched_llm(fake) as ml_empty:
         reason(task="?", schema_code="class Parse(BaseModel): x: list[X]",
-                      parsed={"x": [{"y": 1}]}, relevance_states=[], model="m", prompt_version="v1")
+                      parsed={"x": [{"y": 1}]}, relevance_snippets=[], model="m", prompt_version="v1")
     for ml in (ml_none, ml_empty):
         assert sentinel not in ml[0][0]["content"]
 
@@ -160,7 +160,7 @@ def test_reason_surfaces_relevance_states_for_alias_resolution() -> None:
         {"actor": "Mike", "action": "burned the library"},
         {"actor": "Jenny", "action": "watched"},
     ]}
-    relevance_states = ["A 1992 noir. Mike is also referred to as 'The Destroyer' throughout."]
+    relevance_snippets = ["A 1992 noir. Mike is also referred to as 'The Destroyer' throughout."]
     response = (
         "Thought: summaries say The Destroyer is Mike.\n<code>\n"
         "m = [r for r in parse['actions'] if r['actor'] == 'Mike']\n"
@@ -172,7 +172,7 @@ def test_reason_surfaces_relevance_states_for_alias_resolution() -> None:
 
     with _patched_llm(fake) as msgs:
         r = reason(task="How many actions did The Destroyer perform?",
-                          schema_code="...", parsed=parse, relevance_states=relevance_states, model="m", prompt_version="v1")
+                          schema_code="...", parsed=parse, relevance_snippets=relevance_snippets, model="m", prompt_version="v1")
     assert r.terminated_by == "final_answer"
     assert "2 actions" in r.answer
     assert "Mike is also referred to as 'The Destroyer'" in msgs[0][0]["content"]

@@ -3,7 +3,7 @@
     r3con run "Which supplier missed the most delivery windows?" ./reports
 
 Everything the pipeline did is left in a run folder under ``./logs`` — the relevance
-states, the proposed schema, the parse, and the reasoning transcript — because the
+snippets, the proposed schema, the parse, and the reasoning transcript — because the
 answer alone rarely tells you whether to trust it.
 """
 

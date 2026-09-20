@@ -3,16 +3,16 @@
 Wires the three moves of the method — see :mod:`r3con.stages`:
 
 1. **surfacing relevance** (:mod:`r3con.stages.relevance`) — each document gets a
-   task-conditioned **relevance state**, rebuilt over ``relevance_rounds`` synchronous
+   task-conditioned **relevance snippet**, rebuilt over ``relevance_rounds`` synchronous
    rounds; from round 2 on, each document is re-read in light of the *other* documents'
-   previous states. The collection of them is the **corpus-wide relevance state**, and
+   previous snippets. The collection of them is the **corpus-wide relevance snippets**, and
    it is what every later stage reads.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
-   from the task and the corpus-wide relevance state
+   from the task and the corpus-wide relevance snippets
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document, whole and
    in parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
-   the corpus-wide relevance state, in a multi-turn sandboxed Python loop.
+   the corpus-wide relevance snippets, in a multi-turn sandboxed Python loop.
 
 The document is the unit throughout: nothing is chunked, and the whole collection is
 never placed in one prompt.
@@ -55,7 +55,7 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the committed answer text.
-    - ``relevance`` — the **corpus-wide relevance state**: the final-round relevance state
+    - ``relevance`` — the **corpus-wide relevance snippets**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevance[i]`` describes ``documents[i]``). A document that contributes nothing
       is an empty string, which is a real result rather than a failure.
@@ -102,7 +102,7 @@ def run_pipeline(
 ) -> Answer:
     """Run all three stages for one ``(task, documents)`` pair under one ``config``.
 
-    Returns an :class:`Answer` — the answer text plus the corpus-wide relevance state,
+    Returns an :class:`Answer` — the answer text plus the corpus-wide relevance snippets,
     the structured parse, and the schema that was proposed for this question.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
@@ -145,37 +145,37 @@ def run_pipeline(
             n_docs=len(documents), context_chars=sum(len(d) for d in documents),
         )
 
-    # --- Stage 1: surface relevance — the corpus-wide relevance state. ---
+    # --- Stage 1: surface relevance — the corpus-wide relevance snippets. ---
     _log.info("stage 1/3 · surfacing relevance (%d round(s), %d doc(s))", rounds, len(documents))
     relevance_run = _run("relevance", model)
     relevance = surface_relevance(
         task=task, documents=documents, model=model, prompt_version=config.prompts["relevance"],
         rounds=rounds, run=relevance_run, **llm_kwargs,
     )
-    relevance_states = relevance.states  # the corpus-wide relevance state feeds every later stage
+    relevance_snippets = relevance.snippets  # the corpus-wide relevance snippets feeds every later stage
     if relevance_run is not None:
         relevance_run.flush(write_transcript=False)
     if task_logger is not None:
         # Per-round, per-document — `round` is the refinement depth; the LAST round
-        # is what downstream stages consume. states[doc_i] aligns to documents[i].
+        # is what downstream stages consume. snippets[doc_i] aligns to documents[i].
         task_logger.write_json(
             "relevance/result",
             {
                 "n_rounds": rounds,
                 "n_docs": len(documents),
                 "rounds": [
-                    {"round": k + 1, "states": per_doc}
+                    {"round": k + 1, "snippets": per_doc}
                     for k, per_doc in enumerate(relevance.rounds)
                 ],
                 "totals": relevance_run.compute_totals() if relevance_run else None,
             },
         )
 
-    # --- Stage 2a: structuring — propose the schema (task + corpus-wide relevance state). ---
+    # --- Stage 2a: structuring — propose the schema (task + corpus-wide relevance snippets). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
     schema_run = _run("structuring/schema", model)
     proposal = propose_schema(
-        task=task, relevance_states=relevance_states, model=model, prompt_version=config.prompts["structuring/schema"],
+        task=task, relevance_snippets=relevance_snippets, model=model, prompt_version=config.prompts["structuring/schema"],
         run=schema_run, **llm_kwargs,
     )
     if schema_run is not None:
@@ -199,7 +199,7 @@ def run_pipeline(
     parsing_run = _run("structuring/parsing", model)
     extraction = parse_documents(
         documents=documents, schema_code=proposal.schema_code, parse_cls=proposal.parse_cls,
-        task=task, prompt_version=config.prompts["structuring/parsing"], relevance_states=relevance_states, model=model,
+        task=task, prompt_version=config.prompts["structuring/parsing"], relevance_snippets=relevance_snippets, model=model,
         run=parsing_run, **llm_kwargs,
     )
     parsed = extraction.parse
@@ -215,13 +215,13 @@ def run_pipeline(
             },
         )
 
-    # --- Stage 3: reasoning over the parse + the corpus-wide relevance state. ---
+    # --- Stage 3: reasoning over the parse + the corpus-wide relevance snippets. ---
     _log.info("stage 3/3 · reasoning")
     reasoning_run = _run("reasoning", model)
     try:
         result = reasoning.reason(
             task=task, schema_code=proposal.schema_code, parsed=parsed,
-            source_docs=extraction.source_docs, relevance_states=relevance_states,
+            source_docs=extraction.source_docs, relevance_snippets=relevance_snippets,
             model=model, prompt_version=config.prompts["reasoning"],
             max_turns=max_reasoning_turns, timeout_s=reasoning_timeout_s,
             run=reasoning_run, **llm_kwargs,
@@ -261,7 +261,7 @@ def run_pipeline(
         raise
     return Answer(
         answer=result.answer,
-        relevance=list(relevance_states),
+        relevance=list(relevance_snippets),
         # the parse exactly as the agent saw it: plain data, each record stamped with the
         # 1-based document it came from
         struct_data=reasoning.tag_source_documents(

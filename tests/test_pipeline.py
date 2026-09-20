@@ -3,7 +3,7 @@
 The four stage functions (`surface_relevance`, `propose_schema`, `parse_documents`,
 `reasoning.reason`) are monkeypatched so no LLM is called; the fakes capture the
 kwargs they receive. Verifies the relevance → schema → parsing → reasoning flow, that
-the corpus-wide relevance state reaches every downstream stage, that the config's
+the corpus-wide relevance snippets reaches every downstream stage, that the config's
 `params` + seed + per-stage prompt versions reach every stage, and that a reasoning
 failure writes a discoverable `error.txt` before re-raising.
 
@@ -63,21 +63,21 @@ def _patched_stages(captured: dict) -> Iterator[None]:
 
     def fake_surface_relevance(*, task, documents, model, rounds, run, **kw):
         captured["relevance"] = {"rounds": rounds, "kw": kw}
-        return SimpleNamespace(states=["s0", "s1"], rounds=[["a", "b"], ["s0", "s1"]])
+        return SimpleNamespace(snippets=["s0", "s1"], rounds=[["a", "b"], ["s0", "s1"]])
 
-    def fake_propose(*, task, relevance_states, model, run, **kw):
-        captured["structuring/schema"] = {"relevance": relevance_states, "kw": kw}
+    def fake_propose(*, task, relevance_snippets, model, run, **kw):
+        captured["structuring/schema"] = {"relevance": relevance_snippets, "kw": kw}
         return SimpleNamespace(
             schema_code="class Parse: pass", parse_cls=object,
             attempts=[SimpleNamespace(thought="t", schema_code="x", error=None)],
         )
 
-    def fake_extract(*, documents, schema_code, parse_cls, task, relevance_states, model, run, **kw):
-        captured["structuring/parsing"] = {"relevance": relevance_states, "kw": kw}
+    def fake_extract(*, documents, schema_code, parse_cls, task, relevance_snippets, model, run, **kw):
+        captured["structuring/parsing"] = {"relevance": relevance_snippets, "kw": kw}
         return SimpleNamespace(parse={"records": []}, source_docs={"records": []})
 
-    def fake_reason(*, task, schema_code, parsed, relevance_states, model, max_turns, timeout_s, run, **kw):
-        captured["reasoning"] = {"relevance": relevance_states, "kw": kw}
+    def fake_reason(*, task, schema_code, parsed, relevance_snippets, model, max_turns, timeout_s, run, **kw):
+        captured["reasoning"] = {"relevance": relevance_snippets, "kw": kw}
         return SimpleNamespace(answer="the-answer", terminated_by="final_answer", turns=[])
 
     pipeline_mod.surface_relevance = fake_surface_relevance
@@ -100,7 +100,7 @@ def test_runs_all_stages_into_the_run_folder() -> None:
         # the pipeline hands back the answer AND the views it was derived from
         assert res.answer == "the-answer"
         assert str(res) == "the-answer"
-        assert res.relevance == ["s0", "s1"]              # final-round states, per document
+        assert res.relevance == ["s0", "s1"]              # final-round snippets, per document
         assert res.struct_data == {"records": []}         # the merged parse
         assert res.schema_code == "class Parse: pass"     # the per-question schema
         assert res.source_docs == {"records": []}
@@ -113,7 +113,7 @@ def test_runs_all_stages_into_the_run_folder() -> None:
         assert summ["n_rounds"] == 3 and summ["n_docs"] == 2
         assert len(summ["rounds"]) == 2
         assert summ["rounds"][0]["round"] == 1
-        assert summ["rounds"][-1]["states"] == ["s0", "s1"]
+        assert summ["rounds"][-1]["snippets"] == ["s0", "s1"]
 
 
 def test_relevance_states_flow_into_every_downstream_stage() -> None:

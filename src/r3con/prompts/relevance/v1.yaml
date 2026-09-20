@@ -9,11 +9,11 @@ instructions: |-
   {{ task }}
   </task>
 
-  {% if other_states %}## Task-conditioned summaries of the other documents (previous round)
+  {% if other_snippets %}## Task-conditioned summaries of the other documents (previous round)
 
   Below are the other documents' task-conditioned summaries for this same task, from the previous round. Use them to read THIS document in light of the collection — a document often only becomes useful and understandable for the task once you know information from the other documents. Still write only about THIS document (the one the user provides).
 
-  {{ other_states }}
+  {{ other_snippets }}
 
   {% endif %}## Output
   Reply with the task-conditioned summary of this document only — no preamble, no restating the task. If this document contributes nothing relevant to the task, it is fine to say so briefly (or reply with nothing).
