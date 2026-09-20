@@ -5,5 +5,5 @@
 - :mod:`r3con.stages.structuring` — stage 2, structuring: propose the schema, then
   parse every document into it.
 - :mod:`r3con.stages.reasoning` — stage 3, reasoning: answer over the structured
-  parse and the corpus-wide relevance snippets.
+  parse and the relevant context.
 """

@@ -2,7 +2,7 @@
 
 The generic CodeAct loop itself is tested in ``test_codeact.py``; this file covers
 the reasoning-specific part: ``reason`` renders the ``reasoning`` prompt correctly
-(the parse view and the corpus-wide relevance snippets in the system message; the task
+(the parse view and the relevant context in the system message; the task
 wrapped in `<task>` tags in the user message), binds the parse as the sandbox
 variable ``parse``, and stamps each record with its source document.
 

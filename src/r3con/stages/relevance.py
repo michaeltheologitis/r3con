@@ -4,7 +4,7 @@ A relevance snippet is **not** a generic summary. Each one is written *for a spe
 task* and is conditioned on it — the note one document contributes toward the task,
 read in light of the rest of the corpus. The point is cross-document reasoning: to use
 one document for the task you often need to know what the others say. The per-document
-snippets taken together are the **corpus-wide relevance snippets**.
+snippets taken together are the **relevant context**.
 
 Documents are assumed to each fit in context (no chunking). Cross-corpus awareness is
 built over ``rounds`` **synchronous** rounds:
@@ -19,7 +19,7 @@ built over ``rounds`` **synchronous** rounds:
 Round k reads the *frozen* round-(k-1) set, so within a round the per-document calls
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`). Downstream stages consume the
-**final-round** snippets (``CorpusRelevanceSnippets.snippets``); earlier rounds are kept only
+**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept only
 for inspection.
 """
 
@@ -42,8 +42,8 @@ _OTHER_SEP = "\n\n---\n\n"
 
 
 @dataclass
-class CorpusRelevanceSnippets:
-    """Output of :func:`surface_relevance` — the corpus-wide relevance snippets.
+class RelevantContext:
+    """Output of :func:`surface_relevance` — the relevant context.
 
     - ``snippets`` — the final-round per-document relevance snippets, aligned 1:1 with the
       input ``documents`` (``snippets[d]`` is the note document ``d`` contributes toward
@@ -59,7 +59,7 @@ class CorpusRelevanceSnippets:
 
 def render_relevance(relevance_snippets: list[str] | None, doc_ids: list[str] | None = None) -> str:
     """Render the final-round relevance snippets into the labeled block that stages 2
-    and 3 embed as the corpus-wide relevance snippets.
+    and 3 embed as the relevant context.
 
     Each document gets a ``### Document N`` (or its ``doc_ids`` label) heading. A
     document with nothing relevant renders as ``(no relevant summary for this task)``.
@@ -123,12 +123,12 @@ def surface_relevance(
     run: StageRun | None = None,
     workers: int | None = None,
     **llm_kwargs: Any,
-) -> CorpusRelevanceSnippets:
-    """Surface the corpus-wide relevance snippets over ``rounds`` synchronous rounds.
+) -> RelevantContext:
+    """Surface the relevant context over ``rounds`` synchronous rounds.
 
     Round 1 writes each document's state from the task + document alone; each later
     round rewrites every document given the *previous round's* snippets of the OTHER
-    documents (never its own). Returns a :class:`CorpusRelevanceSnippets` (`.snippets` =
+    documents (never its own). Returns a :class:`RelevantContext` (`.snippets` =
     last-round per-document, `.rounds` = all rounds). ``rounds=1`` = independent
     round-1 only; ``rounds < 1`` = no relevance snippets at all (`.snippets` / `.rounds`
     empty — a deliberate "no-relevance" run). An empty ``documents`` → empty results.
@@ -137,7 +137,7 @@ def surface_relevance(
     # document corpus is likewise empty. Both short-circuit BEFORE round 1 runs (the
     # unconditional run_round(None, 1) below) — a `return`, not a fall-through.
     if rounds < 1 or not documents:
-        return CorpusRelevanceSnippets(snippets=[], rounds=[])
+        return RelevantContext(snippets=[], rounds=[])
 
     max_workers = workers if workers is not None else active_doc_workers()
 
@@ -165,4 +165,4 @@ def surface_relevance(
     for r in range(2, rounds + 1):
         all_rounds.append(run_round(all_rounds[-1], r))  # only the previous round feeds in
 
-    return CorpusRelevanceSnippets(snippets=all_rounds[-1], rounds=all_rounds)
+    return RelevantContext(snippets=all_rounds[-1], rounds=all_rounds)

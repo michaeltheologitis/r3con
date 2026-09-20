@@ -166,7 +166,7 @@ def run(
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the corpus-wide relevance snippets (``.relevance``), the
+        ``str()`` of the result), the relevant context (``.relevance``), the
         structured parse (``.struct_data``), the schema proposed for this question
         (``.schema_code``), and where the artifacts were written (``.run_dir``).
 

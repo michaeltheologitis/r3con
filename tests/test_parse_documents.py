@@ -3,7 +3,7 @@ and the merge.
 
 The parsing step no longer chunks: every document is fed **whole** through one
 ``parse_one_document`` call, all documents in parallel, each call's system prompt
-carrying the corpus-wide relevance snippets. The per-document parses merge into one
+carrying the relevant context. The per-document parses merge into one
 (list fields concatenated in document order), and each merged record is tagged
 with its source-document index (``ParseResult.source_docs``).
 
@@ -133,7 +133,7 @@ def test_each_call_carries_doc_index_kind() -> None:
 
 
 def test_summaries_passed_to_each_doc() -> None:
-    """The corpus-wide relevance snippets reaches every per-document parsing call."""
+    """The relevant context reaches every per-document parsing call."""
     summ = ["Doc A is about whales.", "Doc B is about ships."]
 
     def fake(*, document: str, **_: Any) -> Parse:

@@ -1,7 +1,7 @@
 """Stage 2 (structuring), step 1: the per-task schema-proposal driver.
 
-Calls the model with the task — and, when available, the corpus-wide relevance
-state from stage 1 — validates the emitted code with
+Calls the model with the task — and, when available, the relevant
+context from stage 1 — validates the emitted code with
 :func:`r3con.stages.structuring.parsing.check_schema`, and on failure feeds the
 validator's error back so the model can correct itself. That retry-feedback channel
 is the whole point of ``check_schema`` raising :class:`SchemaError` with a shaped
@@ -153,7 +153,7 @@ def propose_schema(
 
     Args:
         task: The task the schema must capture information for.
-        relevance_snippets: The corpus-wide relevance snippets from stage 1 — the
+        relevance_snippets: The relevant context from stage 1 — the
             final per-document notes. Rendered by :func:`render_relevance` into
             the system prompt so the schema is grounded in what the documents
             actually surfaced, not the task's surface words alone. ``None``/empty

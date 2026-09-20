@@ -5,7 +5,7 @@ variable ``parse`` in a sandboxed interpreter, the ``reasoning`` prompt is rende
 the schema and a view of the records, and the agent writes and runs code until it commits
 with ``final_answer(x)``.
 
-It reasons over the parse *together with* the corpus-wide relevance snippets from stage 1 —
+It reasons over the parse *together with* the relevant context from stage 1 —
 the two are co-equal views, and the parse alone is lossy. It never sees the source
 documents.
 
@@ -97,7 +97,7 @@ def tag_source_documents(parse_dict: Any, source_docs: dict[str, list[int]] | No
     ``source_docs[field]`` by construction) but otherwise drops it at the reasoning
     boundary, leaving the model unable to say *which* document a fact came from. The label
     matches :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
-    and the corpus-wide relevance snippets share **one** document-id space and the agent can
+    and the relevant context share **one** document-id space and the agent can
     cross-reference a record against the note its document contributed. That identity rests
     on both views being built over the documents in the same order — reorder the collection
     between stages and the ids stop meaning the same thing. No-op without ``source_docs`` or
@@ -178,7 +178,7 @@ def reason(
     The LLM never sees the long source text — only the task, the schema
     source (so it knows the parse's shape), a view of the parse itself (the whole
     thing when it fits, else one sample record per top-level field), and the
-    **corpus-wide relevance snippets** from stage 1.
+    **relevant context** from stage 1.
     The full parse is bound as the Python variable ``parse`` in the sandbox; the
     agent inspects it via ``print(...)`` across turns and commits via
     ``final_answer(x)``.

@@ -3,7 +3,7 @@
 The four stage functions (`surface_relevance`, `propose_schema`, `parse_documents`,
 `reasoning.reason`) are monkeypatched so no LLM is called; the fakes capture the
 kwargs they receive. Verifies the relevance → schema → parsing → reasoning flow, that
-the corpus-wide relevance snippets reaches every downstream stage, that the config's
+the relevant context reaches every downstream stage, that the config's
 `params` + seed + per-stage prompt versions reach every stage, and that a reasoning
 failure writes a discoverable `error.txt` before re-raising.
 

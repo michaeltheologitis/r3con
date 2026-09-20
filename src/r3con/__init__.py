@@ -13,7 +13,7 @@ Three moves, in order:
 
 1. **surfacing relevance** — every document is read against the question and written up
    as a **relevance snippet**; then re-read in light of the *other* documents' snippets.
-   Together they are the **corpus-wide relevance snippets**. Relevance is not a property a
+   Together they are the **relevant context**. Relevance is not a property a
    document has; it is a relation between the document, the question, and the rest of
    the collection, so it cannot be settled from a document in isolation.
 2. **structuring** — a Pydantic schema is proposed for exactly what this question needs,
@@ -35,7 +35,7 @@ from r3con.runs import StageRun, TaskLogger
 from r3con.settings import settings
 from r3con.stages.reasoning import reason
 from r3con.stages.relevance import (
-    CorpusRelevanceSnippets,
+    RelevantContext,
     relevance_snippet,
     render_relevance,
     surface_relevance,
@@ -72,7 +72,7 @@ __all__ = [
     "load_prompt",
     "settings",
     # stage 1 — surfacing relevance
-    "CorpusRelevanceSnippets",
+    "RelevantContext",
     "surface_relevance",
     "relevance_snippet",
     "render_relevance",

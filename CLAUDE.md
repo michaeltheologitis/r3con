@@ -25,7 +25,7 @@ aligned; if the paper's wording changes, the code follows.
 | 3 | **reasoning** | what follows, over what was surfaced and what was structured? | `stages/reasoning.py` |
 
 Each per-document note from stage 1 is a **relevance snippet**; all of them together are the
-**corpus-wide relevance snippets**. Stage 2 is two steps that are one idea — propose the
+**relevant context**. Stage 2 is two steps that are one idea — propose the
 schema, then **parse** every document into it. Stage 3 loads the parse into a Python
 runtime and reasons there.
 
@@ -35,15 +35,15 @@ runtime and reasons there.
       ▼
 RELEVANCE   (relevance_rounds=2 default; each round fans out over docs in parallel)
    R1:  state(q, doc)                              # the document read against the question alone
-   R2:  snippet(q, doc, OTHER docs' R1 snippets)       → the corpus-wide relevance snippets
+   R2:  snippet(q, doc, OTHER docs' R1 snippets)       → the relevant context
       │   round k reads the FROZEN round k-1 set; a doc never sees its own prior state
       ▼
-STRUCTURING · schema    schema(q, corpus-wide relevance snippets) → a per-task `Parse` class
+STRUCTURING · schema    schema(q, relevant context) → a per-task `Parse` class
 STRUCTURING · parsing   per-doc in parallel: records(q, snippets, doc) against that schema
                         merge → one Parse (list-concat), each record tagged with its source doc
       ▼
 REASONING   the sandboxed multi-turn Python loop, over
-            (question, parse, corpus-wide relevance snippets) → the answer
+            (question, parse, relevant context) → the answer
 ```
 
 Orchestrated in plain Python in `run_pipeline` — no coordinator class.

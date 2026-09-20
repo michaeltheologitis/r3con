@@ -6,7 +6,7 @@ chunking**. Parsing runs **one LLM call per document**, all documents in paralle
 (bounded by :func:`r3con.settings.active_doc_workers`):
 
 - The **system prompt** carries the task, the proposed schema source, and the
-  corpus-wide relevance snippets (every document's note, not just this one's) — the
+  relevant context (every document's note, not just this one's) — the
   cross-document context that lets a single document be read in light of what the
   rest of the corpus says.
 - The **user message** is the document being parsed, whole.
@@ -206,8 +206,8 @@ def parse_one_document(
 ) -> BaseModel:
     """Parse one whole ``document`` into a populated ``Parse``.
 
-    The system prompt carries the task, the schema source, and the corpus-wide
-    relevance snippet (``relevance_snippets`` — every document's note, the
+    The system prompt carries the task, the schema source, and the relevant
+    context (``relevance_snippets`` — every document's note, the
     cross-document context); the document itself is the user message. One LLM
     call with ``schema=parse_cls``.
 
@@ -306,7 +306,7 @@ def parse_documents(
     Each document is fed **whole** (no chunking) through one
     :func:`parse_one_document` call; the documents are processed **in parallel**
     (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`). Every
-    call's system prompt carries the same corpus-wide relevance snippets, so each
+    call's system prompt carries the same relevant context, so each
     document is read with the cross-document context even though the calls are
     independent.
 

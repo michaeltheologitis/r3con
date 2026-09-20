@@ -18,7 +18,7 @@ Layout per ``logs/<run-folder>/``:
   block (:meth:`r3con.config.RunConfig.label`).
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
   rounds: [{round, snippets}], totals}`` — within a round the per-document relevance
-  snippets align to ``documents[i]``; the last round is the corpus-wide relevance snippets
+  snippets align to ``documents[i]``; the last round is the relevant context
   that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
   ``relevance-r{round}-d{doc}``).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``

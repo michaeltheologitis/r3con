@@ -5,14 +5,14 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 1. **surfacing relevance** (:mod:`r3con.stages.relevance`) — each document gets a
    task-conditioned **relevance snippet**, rebuilt over ``relevance_rounds`` synchronous
    rounds; from round 2 on, each document is re-read in light of the *other* documents'
-   previous snippets. The collection of them is the **corpus-wide relevance snippets**, and
+   previous snippets. The collection of them is the **relevant context**, and
    it is what every later stage reads.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
-   from the task and the corpus-wide relevance snippets
+   from the task and the relevant context
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document, whole and
    in parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
-   the corpus-wide relevance snippets, in a multi-turn sandboxed Python loop.
+   the relevant context, in a multi-turn sandboxed Python loop.
 
 The document is the unit throughout: nothing is chunked, and the whole collection is
 never placed in one prompt.
@@ -55,7 +55,7 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the committed answer text.
-    - ``relevance`` — the **corpus-wide relevance snippets**: the final-round relevance snippet
+    - ``relevance`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevance[i]`` describes ``documents[i]``). A document that contributes nothing
       is an empty string, which is a real result rather than a failure.
@@ -102,7 +102,7 @@ def run_pipeline(
 ) -> Answer:
     """Run all three stages for one ``(task, documents)`` pair under one ``config``.
 
-    Returns an :class:`Answer` — the answer text plus the corpus-wide relevance snippets,
+    Returns an :class:`Answer` — the answer text plus the relevant context,
     the structured parse, and the schema that was proposed for this question.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
@@ -145,14 +145,14 @@ def run_pipeline(
             n_docs=len(documents), context_chars=sum(len(d) for d in documents),
         )
 
-    # --- Stage 1: surface relevance — the corpus-wide relevance snippets. ---
+    # --- Stage 1: surface relevance — the relevant context. ---
     _log.info("stage 1/3 · surfacing relevance (%d round(s), %d doc(s))", rounds, len(documents))
     relevance_run = _run("relevance", model)
     relevance = surface_relevance(
         task=task, documents=documents, model=model, prompt_version=config.prompts["relevance"],
         rounds=rounds, run=relevance_run, **llm_kwargs,
     )
-    relevance_snippets = relevance.snippets  # the corpus-wide relevance snippets feeds every later stage
+    relevance_snippets = relevance.snippets  # the relevant context feeds every later stage
     if relevance_run is not None:
         relevance_run.flush(write_transcript=False)
     if task_logger is not None:
@@ -171,7 +171,7 @@ def run_pipeline(
             },
         )
 
-    # --- Stage 2a: structuring — propose the schema (task + corpus-wide relevance snippets). ---
+    # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
     schema_run = _run("structuring/schema", model)
     proposal = propose_schema(
@@ -215,7 +215,7 @@ def run_pipeline(
             },
         )
 
-    # --- Stage 3: reasoning over the parse + the corpus-wide relevance snippets. ---
+    # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
     reasoning_run = _run("reasoning", model)
     try:
