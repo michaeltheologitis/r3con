@@ -98,6 +98,16 @@ evaluation harness several times its size. The bias is **toward deletion**.
 
 ## This is a published package (the rules that follow from that)
 
+**The distribution is `r3context`; the import package is `r3con`.** They differ because
+the PyPI name `r3con` is refused as too similar to the existing `recon`. Only three places
+know the distribution name — `[project] name`, and the two `importlib.metadata` lookups in
+`__init__.py` and `runs.py` — and **both lookups swallow their failure**, so a wrong one
+does not raise: it silently freezes the recorded version at the in-source literal, and that
+version is a run's provenance. `[tool.uv.build-backend] module-name` is what tells the
+backend to ship `src/r3con/` under that distribution name. Everything else — the import,
+the CLI verb, `R3CON_*`, the logger namespace, the manifest's `r3con_version` key — is
+`r3con` and stays that way.
+
 `r3con` is built to be published on PyPI and `pip install`ed by strangers. That constrains things the
 research repo it came from never had to think about:
 

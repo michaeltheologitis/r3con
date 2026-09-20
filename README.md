@@ -7,8 +7,12 @@ answer it with a fixed pipeline — it *builds the apparatus for that question*,
 moment you ask, and then runs it.
 
 ```bash
-pip install r3con
+pip install r3context
 ```
+
+The package installs as **`r3context`** and imports as **`r3con`** — the PyPI name was
+taken, the code's name wasn't. Everything else says `r3con`: the import, the CLI, the
+environment variables.
 
 ```bash
 r3con run "Which supplier missed the most delivery windows, and by how much?" ./reports

@@ -1,5 +1,5 @@
 [project]
-name = "r3con"
+name = "r3context"
 version = "0.1.0"
 description = "Just-in-time reasoning over a collection of documents: surface relevance, structure it, reason over it."
 readme = "README.md"
@@ -50,6 +50,13 @@ r3con = "r3con.cli:main"
 [project.urls]
 Homepage = "https://github.com/michaeltheologitis/r3con"
 Repository = "https://github.com/michaeltheologitis/r3con"
+
+# The DISTRIBUTION is `r3context` (the PyPI name); the IMPORT PACKAGE is `r3con`.
+# uv_build derives the module name from the project name by default, so it has to be
+# told explicitly — otherwise it looks for src/r3context/ and the build fails.
+[tool.uv.build-backend]
+module-name = "r3con"
+module-root = "src"
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]

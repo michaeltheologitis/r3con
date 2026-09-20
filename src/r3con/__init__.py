@@ -54,7 +54,7 @@ from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_f
 try:  # the installed wheel's version is the truth; the literal is the checkout fallback
     from importlib.metadata import version as _pkg_version
 
-    __version__ = _pkg_version("r3con")
+    __version__ = _pkg_version("r3context")  # the DISTRIBUTION name, not the module
 except Exception:  # noqa: BLE001 — running from a source checkout
     __version__ = "0.1.0"
 

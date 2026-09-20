@@ -203,7 +203,7 @@ def _version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("r3con")
+        return version("r3context")  # the DISTRIBUTION name, not the module
     except Exception:  # noqa: BLE001 — not installed (a source checkout); the literal is fine
         from r3con import __version__
 
