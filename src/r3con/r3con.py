@@ -91,10 +91,17 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
 def _check_documents(documents: Any) -> list[str]:
     """``documents`` is the document *texts* — a sequence of strings, and nothing else.
 
-    Deliberately no path-sniffing. Guessing whether a string is a filename or a document
-    means a one-line document that happens to match a file on disk gets silently replaced
-    by that file's contents. Reading the filesystem is :func:`read_documents`' job, and
-    the caller says which they meant.
+    Deliberately no path-sniffing and no silent filtering. Guessing whether a string is a
+    filename or a document means a one-line document that happens to match a file on disk
+    gets silently replaced by that file's contents. Dropping a blank entry is the same
+    mistake one step later: every index downstream is positional — ``relevant_context[i]``,
+    the ``source_docs`` indices, and the ``"document": N`` the agent cites *in its own
+    answer text* — so a silent drop renumbers the caller's collection without telling them,
+    and the wrong number has already left the library by the time anyone could notice.
+
+    :func:`read_documents` drops blank *files*, which is a different thing: it drops them
+    before the list ever reaches the caller, where no index can shift yet. Here the list is
+    the caller's, so a blank is refused rather than quietly removed.
     """
     if isinstance(documents, (str, Path)):
         raise TypeError(
@@ -111,10 +118,19 @@ def _check_documents(documents: Any) -> list[str]:
         raise TypeError(
             f"`documents` must be a sequence of strings — item {bad[0]} is {type(bad[1]).__name__}."
         )
-    kept = [d for d in docs if d.strip()]
-    if not kept:
+    # After the type scan, so `[" ", 42]` reports the type problem rather than the blank.
+    blank = next((i for i, d in enumerate(docs) if not d.strip()), None)
+    if blank is not None:
+        raise ValueError(
+            f"`documents` item {blank} is blank. Every entry must be a document — the "
+            "indices are positional, so dropping it would silently renumber the rest: "
+            'relevant_context[i], the source_docs indices and the "document" number cited '
+            "in the answer all refer to documents[i]. Drop the blanks yourself, or build "
+            "the list with r3con.read_documents(...), which skips empty files."
+        )
+    if not docs:
         raise ValueError("`documents` is empty — there is nothing to read.")
-    return kept
+    return docs
 
 
 def run(
@@ -138,10 +154,11 @@ def run(
         question: what to ask. It is the task the whole pipeline is built for — the
             schema and the reasoning are proposed *from it*, so a specific question
             gets a much better apparatus than a vague one.
-        documents: the document **texts**, as a sequence of strings. To read them off
-            disk instead, call :func:`read_documents` and pass its result. Each document
-            must fit in the model's context: there is no chunking, and one that doesn't
-            fit raises ``litellm.ContextWindowExceededError``.
+        documents: the document **texts**, as a sequence of strings; no entry may be
+            blank, so that every index the run reports refers to *your* list. To read
+            them off disk instead, call :func:`read_documents` and pass its result. Each
+            document must fit in the model's context: there is no chunking, and one that
+            doesn't fit raises ``litellm.ContextWindowExceededError``.
         model: a litellm model string (e.g. ``"openai/gpt-5.6-luna"``,
             ``"anthropic/claude-sonnet-4"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
             Defaults to the config's.
@@ -173,9 +190,10 @@ def run(
     Raises:
         TypeError: if ``documents`` is not a sequence of strings (a bare string or a
             path is rejected rather than guessed at).
-        ValueError: if ``documents`` is empty, or if ``config`` is a prebuilt
-            :class:`RunConfig` *and* field overrides were also given (which would be
-            silently ignored).
+        ValueError: if ``documents`` is empty or any entry is blank (a blank is refused,
+            not dropped — dropping it would renumber every index the run reports), or if
+            ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
+            given (which would be silently ignored).
         Anything the underlying stages raise — most usefully
         ``litellm.ContextWindowExceededError`` when a document does not fit.
     """

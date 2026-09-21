@@ -73,14 +73,29 @@ def test_non_strings_are_refused_with_the_offending_index() -> None:
     raise AssertionError("expected TypeError")
 
 
-def test_blank_documents_are_dropped_and_all_blank_is_an_error() -> None:
-    assert _check_documents(["real", "   ", ""]) == ["real"]
+def test_blank_documents_are_refused_with_the_offending_index() -> None:
+    # Refused, never dropped. Dropping would renumber every index the run reports —
+    # relevant_context[i], the source_docs indices, and the "document" N the agent cites
+    # in its answer text, where no docstring could correct it afterwards.
+    try:
+        _check_documents(["real", "   ", "also real"])
+    except ValueError as e:
+        assert "item 1" in str(e)
+    else:
+        raise AssertionError("expected ValueError for a blank entry")
     try:
         _check_documents(["  ", ""])
     except ValueError as e:
-        assert "empty" in str(e)
-        return
-    raise AssertionError("expected ValueError")
+        assert "item 0" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an all-blank list")
+
+
+def test_accepted_documents_are_returned_unchanged_so_indices_align() -> None:
+    # The invariant the whole refusal exists to protect: what the pipeline indexes is
+    # exactly what the caller passed, so Answer.relevant_context[i] describes documents[i].
+    docs = ["one", "two", "three"]
+    assert _check_documents(docs) == docs
 
 
 def test_run_validates_documents_before_spending_anything() -> None:
@@ -212,7 +227,8 @@ if __name__ == "__main__":
         test_a_document_is_never_read_off_disk_behind_your_back,
         test_a_bare_string_is_refused_not_guessed,
         test_non_strings_are_refused_with_the_offending_index,
-        test_blank_documents_are_dropped_and_all_blank_is_an_error,
+        test_blank_documents_are_refused_with_the_offending_index,
+        test_accepted_documents_are_returned_unchanged_so_indices_align,
         test_run_validates_documents_before_spending_anything,
         test_read_documents_walks_a_directory_in_sorted_order,
         test_read_documents_skips_binaries,
