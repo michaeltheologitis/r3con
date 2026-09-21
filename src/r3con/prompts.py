@@ -1,3 +1,25 @@
+"""Versioned, per-stage prompts — ``prompts/<stage>/<version>.yaml``.
+
+Each stage reads exactly one prompt, and **which version it reads is part of the run's
+identity**: the version is pinned per stage in the :class:`~r3con.config.RunConfig` and
+passed explicitly to :func:`load_prompt`. There is deliberately no ambient default and no
+environment variable that selects a version — a run that cannot say which prompt text
+produced it is not reproducible.
+
+Prompts ship **inside the installed package** (``src/r3con/prompts/``) as read-only package
+data. A user overlay — ``R3CON_PROMPTS_DIR``, else ``./prompts`` — is searched first, so
+trying a new wording is one file dropped beside your work plus a config pin, never a fork.
+
+**A published version is immutable.** A run's manifest records the version *string*, so
+editing ``v1.yaml`` in place retroactively changes what every past run claims to have run
+under. To change a prompt, add ``v2.yaml`` and bump the config's pin; the old file stays on
+disk untouched. The same holds while a run is in flight — :func:`load_prompt` re-reads the
+YAML on every call.
+
+Because the files travel in the wheel, ``v1`` names content only *relative to a release*,
+which is why a run's manifest records ``r3con_version`` alongside the version strings.
+"""
+
 from __future__ import annotations
 
 import os

@@ -1,3 +1,30 @@
+"""The LiteLLM call every stage makes, plus structured-output enforcement.
+
+**The connection is litellm's, not ours.** ``model`` is a litellm model string, credentials
+come from the provider's own environment variable, and ``**kwargs`` reaches
+``litellm.completion`` verbatim. There is deliberately no model registry, no provider
+abstraction and no r3con-branded credential variable here — litellm already is that
+abstraction, and re-implementing it would be building a framework inside a package that
+exists not to be one.
+
+The one escape hatch is ``completion=``, the callable that makes each request (default
+``litellm.completion``): hand it a configured ``litellm.Router``'s ``.completion``, or any
+wrapper with the same shape. It is **transport**, so it never enters a run's identity.
+
+Two entry points. :func:`litellm_chat_completion_full` returns the raw response object;
+:func:`litellm_chat_completion` — what the stages actually call — returns the text, or a
+validated Pydantic instance when a ``schema`` is given, re-rolling with a perturbed seed if
+the model answers with empty content (a 200 with no JSON, which transport retries never see).
+
+Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
+Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
+
+``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
+though nothing in this package imports it** — litellm imports it lazily, on the retry path
+only. Drop it and every call that hits a transient error fails instead of retrying, on the
+one path you are least likely to exercise before shipping.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -248,5 +275,3 @@ def _extract_tokens(response: Any) -> dict[str, int] | None:
         "completion": int(getattr(usage, "completion_tokens", 0) or 0),
         "total": int(getattr(usage, "total_tokens", 0) or 0),
     }
-
-
