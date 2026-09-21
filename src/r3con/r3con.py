@@ -37,17 +37,44 @@ from dotenv import find_dotenv, load_dotenv
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
+from pypdf import PdfReader
+
 from r3con.config import DEFAULT_CONFIG, RunConfig, load_config
+from r3con.logging_setup import get_logger
 from r3con.pipeline import Answer, run_pipeline
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.settings import active_logs_dir
 
+_log = get_logger("documents")
+
 # Which files a folder walk picks up. A walk that swallowed binaries would produce
-# garbage documents and confusing model errors, so keep it to text-ish files; pass
-# explicit paths for anything else.
+# garbage documents and confusing model errors, so keep it to files we can turn into
+# text — the text-ish ones, read directly, plus PDF, which is extracted. Pass explicit
+# paths for anything else.
 TEXT_SUFFIXES: frozenset[str] = frozenset(
-    {".txt", ".md", ".markdown", ".rst", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml", ".html", ".xml"}
+    {".txt", ".md", ".markdown", ".rst", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml",
+     ".html", ".xml", ".pdf"}
 )
+
+
+def _read_one(path: Path) -> str:
+    """One file's text.
+
+    A PDF is extracted page by page; everything else is read as UTF-8, replacing
+    undecodable bytes rather than failing — one bad byte in one document should not sink
+    a run. A PDF with no text layer (a scan) extracts to nothing and is dropped by the
+    caller, so say so rather than letting it vanish: the fix is OCR, outside this package.
+    """
+    if path.suffix.lower() != ".pdf":
+        return path.read_text(encoding="utf-8", errors="replace")
+    try:
+        text = "\n\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+    except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
+        _log.warning("%s: not readable as a PDF (%s); skipping it", path, type(e).__name__)
+        return ""
+    if not text.strip():
+        _log.warning("%s: no extractable text — a scanned PDF needs OCR first; skipping it", path)
+    return text
 
 
 def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
@@ -58,9 +85,16 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     path), a single file, or a glob such as ``"reports/*.md"``; pass several and they are
     concatenated in the order given.
 
-    Files are read as UTF-8, replacing undecodable bytes rather than failing: one bad byte
-    in one document should not sink a run. Empty documents are dropped — an empty document
-    contributes nothing and costs a relevance call.
+    A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files
+    and PDFs. An explicit path or a glob reads **whatever you name**, so that a ``.log``, a
+    ``.py`` or an extensionless file is yours to pass; the flip side is that a glob aimed
+    at binaries will happily turn them into garbage documents.
+
+    PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
+    is logged and then dropped; OCR is outside this package. Everything else is read as
+    UTF-8, replacing undecodable bytes rather than failing: one bad byte in one document
+    should not sink a run. Empty documents are dropped — an empty document contributes
+    nothing and costs a relevance call.
 
     Document order is preserved end to end (it is what ``Document N`` refers to
     throughout the artifacts), so a stable, sorted walk matters.
@@ -84,7 +118,7 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
             )
         if not files:
             raise FileNotFoundError(f"No documents found at {src!r}.")
-        texts.extend(p.read_text(encoding="utf-8", errors="replace") for p in files)
+        texts.extend(_read_one(p) for p in files)
     return [t for t in texts if t.strip()]
 
 

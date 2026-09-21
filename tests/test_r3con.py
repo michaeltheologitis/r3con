@@ -119,6 +119,46 @@ def test_read_documents_walks_a_directory_in_sorted_order() -> None:
     assert docs == ["alpha document", "beta document", "gamma document"]
 
 
+def _write_pdf(path: Path, text: str | None = None) -> None:
+    """A minimal but VALID PDF (correct xref offsets + %%EOF), with or without a text
+    layer. Generated rather than committed as a binary blob, so the fixture is readable."""
+    objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>"]
+    if text:
+        stream = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET"
+        objs += ["<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R"
+                 "/Resources<</Font<</F1 5 0 R>>>>>>",
+                 f"<</Length {len(stream)}>>stream\n{stream}\nendstream",
+                 "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+    else:
+        objs.append("<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>")
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj{body}endobj\n".encode()
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    for o in offsets:
+        out += f"{o:010d} 00000 n \n".encode()
+    out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n".encode()
+    path.write_bytes(bytes(out))
+
+
+def test_pdfs_are_extracted_and_a_bad_one_never_sinks_the_run() -> None:
+    assert ".pdf" in TEXT_SUFFIXES
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        _write_pdf(root / "a_memo.pdf", "Incidents this quarter: 7.")
+        _write_pdf(root / "b_scanned.pdf")  # valid PDF, no text layer — a scan
+        (root / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
+        (root / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
+        docs = read_documents(root)
+    # The scan and the corrupt file are logged and dropped — one unreadable file among
+    # many must not abort a run before a single token is spent.
+    assert len(docs) == 2, docs
+    assert "Incidents this quarter: 7." in docs[0]
+    assert "a plain memo" in docs[1]
+
+
 def test_read_documents_skips_binaries() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -231,6 +271,7 @@ if __name__ == "__main__":
         test_accepted_documents_are_returned_unchanged_so_indices_align,
         test_run_validates_documents_before_spending_anything,
         test_read_documents_walks_a_directory_in_sorted_order,
+        test_pdfs_are_extracted_and_a_bad_one_never_sinks_the_run,
         test_read_documents_skips_binaries,
         test_read_documents_expands_a_glob,
         test_read_documents_accepts_several_sources_in_order,

@@ -145,7 +145,13 @@ research repo it came from never had to think about:
   with `OpenAIProvider(openai_client=…)`. It is transport, so it must never enter the run
   identity.
 - **Dependencies are a cost the user pays.** Current set: `litellm`, `jinja2`, `pydantic`,
-  `pyyaml`, `python-dotenv`, `tiktoken`, `tenacity`. Adding one needs a reason. `rich` is
+  `pyyaml`, `python-dotenv`, `tiktoken`, `tenacity`, `pypdf`. Adding one needs a reason —
+  a reason, not a workaround: an optional extra costs a table, a lazy import, a bespoke
+  error and a second install path forever, so it is *more* machinery than the dependency
+  it avoids. `pypdf`'s reason: PDF is the format the target corpora actually arrive in
+  (filings, papers, reports), it is pure-Python BSD-3 with zero transitive deps, and the
+  alternative with the best extraction (PyMuPDF) is AGPL and would push copyleft onto
+  everyone downstream. `rich` is
   *not* a dependency — it arrives transitively via litellm and must not be imported here.
   **Do not "clean up" `tenacity` because nothing imports it**: `runtime/llm.py` sets
   `num_retries` on every call and litellm imports tenacity lazily on the retry path, so

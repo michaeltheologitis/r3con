@@ -30,6 +30,7 @@ r3con run "Which supplier missed the most delivery windows?" ./reports
 from r3con import r3con
 
 docs = r3con.read_documents("./reports")     # a folder, a glob, or a list of files
+                                             # .txt .md .csv .json .html .xml … and .pdf
 result = r3con.run("Which supplier missed the most delivery windows?", docs)
 print(result)
 ```
