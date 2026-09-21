@@ -242,6 +242,11 @@ real provider, and states the correct answer in a comment so a reader can check 
 rather than trust it. Keep it that way: an example that can only be believed is not an
 example.
 
+Add further notebooks when they earn their place, and **keep each one concise** — one
+point per notebook, executed against a real provider, with the correct answer stated so
+it can be checked. No scaffolding around the point: no endpoint probing, no provider
+loops, no instrumentation wrappers.
+
 ## Tests
 
 Don't run everything for every change — run the test file(s) for the modules you touched.
