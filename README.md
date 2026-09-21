@@ -2,8 +2,8 @@
 
 **Reasoning over a corpus of documents — by building the right representation first.**
 
-Ask a question whose evidence is scattered across many documents. `r3con` doesn't answer it
-with a fixed pipeline: it constructs a representation *for that question*, then reasons over it.
+Ask a question whose evidence is scattered across many documents. `r3con` constructs a
+representation *for that question*, then reasons over it.
 
 ![How r3con works](docs/r3con.png)
 
@@ -43,18 +43,12 @@ result = r3con.run("Which supplier missed the most delivery windows?", [doc_a, d
 
 `documents` is a list of strings — the documents themselves.
 
-**Options:**
+**Notebooks**, over five short memos arranged so no single one holds the answer:
 
-```python
-r3con.run(question, docs,
-          model="anthropic/claude-sonnet-4",    # any litellm model string
-          relevance_rounds=3,                   # how many times each document is re-read
-          params={"temperature": 0.7},          # passed straight to litellm
-          completion=router.completion)         # your own connection, if you have one
-```
-
-[`examples/quickstart.ipynb`](examples/quickstart.ipynb) runs the whole thing over five short
-memos arranged so no single one holds the answer.
+- [`examples/quickstart.ipynb`](examples/quickstart.ipynb) — the whole thing end to end.
+- [`examples/options.ipynb`](examples/options.ipynb) — the settings: model, rounds,
+  generation params, run configs, your own connection, where artifacts go.
+- [`examples/vllm.ipynb`](examples/vllm.ipynb) — pointing it at a self-hosted endpoint.
 
 ## What you get back
 

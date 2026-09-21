@@ -219,11 +219,10 @@ When an answer is wrong, read the artifacts in order and attribute the failure t
 concepts? are the answer-bearing records present and populated? did the agent use both
 views, or anchor on the parse alone? Then fix *that* stage.
 
-Benchmark evaluation does **not** live here. It lives in a separate research repo
-(`grounded-reasoning`) which keeps its **own** copy of this pipeline — the two are
-independent, and that duplication is deliberate. Don't add a benchmark harness, a
-scoreboard, a judge, or a results database here, and don't go modify that repo to depend
-on this one.
+Benchmark evaluation does **not** live here. It lives in a separate research repo that
+keeps its **own** copy of this pipeline — the two are independent, and that duplication
+is deliberate. Don't add a benchmark harness, a scoreboard, a judge, or a results
+database here, and don't go modify that repo to depend on this one.
 
 ## Code hygiene as you go
 
@@ -289,8 +288,8 @@ A release is outward-facing and irreversible.
 
 - **Chunking**, or any size-gated path that splits a document. Each document is assumed to
   fit; a non-fitting one is an accepted `ContextWindowExceededError`.
-- **A benchmark/eval harness, scoreboard, or judge** in this repo — that is
-  `grounded-reasoning`'s job, and the split is deliberate.
+- **A benchmark/eval harness, scoreboard, or judge** in this repo — that is the research
+  repo's job, and the split is deliberate.
 - **A registry, a plugin system, or a framework** of any kind.
 - **Identity in log folder names.** Folders stay opaque; the run config in the manifest is
   the identity.
