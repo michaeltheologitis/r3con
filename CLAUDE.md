@@ -57,7 +57,7 @@ thesis, it is wrong by definition.**
 
 ## The shape of the project (so you don't re-add complexity)
 
-This is a **deliberately small** codebase — ~4.7k lines, 39% of which is one vendored
+This is a **deliberately small** codebase — ~5.3k lines, 35% of which is one vendored
 sandbox file. It was simplified hard on purpose, and it arrived here by *deleting* an
 evaluation harness several times its size. The bias is **toward deletion**.
 
