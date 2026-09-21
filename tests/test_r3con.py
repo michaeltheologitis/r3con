@@ -185,11 +185,11 @@ def test_the_namespace_import_shape_works() -> None:
 def test_answer_object_exposes_the_intermediate_views() -> None:
     from r3con.pipeline import Answer
 
-    a = Answer(answer="42", relevance=["doc one's note", ""], struct_data={"rows": [{"document": 1}]},
+    a = Answer(answer="42", relevant_context=["doc one's note", ""], structured_context={"rows": [{"document": 1}]},
                schema_code="class Parse(BaseModel): ...", source_docs={"rows": [0]}, run_dir=None)
     assert a.answer == "42" and str(a) == "42"
-    assert a.relevance == ["doc one's note", ""]
-    assert a.struct_data["rows"][0]["document"] == 1
+    assert a.relevant_context == ["doc one's note", ""]
+    assert a.structured_context["rows"][0]["document"] == 1
     assert "Parse" in a.schema_code and a.source_docs == {"rows": [0]}
 
 

@@ -6,8 +6,8 @@ This is the whole surface most callers need::
 
     result = r3con.run("Who approved the Q3 budget increase?", [memo_a, memo_b, memo_c])
     print(result)                 # the answer text
-    result.relevance              # what each document was found to contribute
-    result.struct_data            # the structured parse the answer was computed over
+    result.relevant_context              # what each document was found to contribute
+    result.structured_context            # the structured parse the answer was computed over
     result.schema_code            # the schema proposed for this question
 
 (``from r3con import run`` works too — same function, imported from the package root.)
@@ -166,8 +166,8 @@ def run(
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the relevant context (``.relevance``), the
-        structured parse (``.struct_data``), the schema proposed for this question
+        ``str()`` of the result), the relevant context (``.relevant_context``), the
+        structured parse (``.structured_context``), the schema proposed for this question
         (``.schema_code``), and where the artifacts were written (``.run_dir``).
 
     Raises:

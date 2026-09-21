@@ -100,8 +100,8 @@ def test_runs_all_stages_into_the_run_folder() -> None:
         # the pipeline hands back the answer AND the views it was derived from
         assert res.answer == "the-answer"
         assert str(res) == "the-answer"
-        assert res.relevance == ["s0", "s1"]              # final-round snippets, per document
-        assert res.struct_data == {"records": []}         # the merged parse
+        assert res.relevant_context == ["s0", "s1"]              # final-round snippets, per document
+        assert res.structured_context == {"records": []}         # the merged parse
         assert res.schema_code == "class Parse: pass"     # the per-question schema
         assert res.source_docs == {"records": []}
         assert res.run_dir == root / "t1"                 # where to find the artifacts
@@ -209,7 +209,7 @@ def test_no_logger_returns_the_answer_without_writing() -> None:
         res = run_pipeline(task="q", documents=["d"], config=_cfg())
         assert res.answer == "the-answer"
         assert res.run_dir is None      # nothing was written, so there is nowhere to point
-        assert res.relevance == ["s0", "s1"]  # the views are returned regardless
+        assert res.relevant_context == ["s0", "s1"]  # the views are returned regardless
         assert not any(root.iterdir())  # nothing written without a task_logger
 
 

@@ -55,11 +55,11 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the committed answer text.
-    - ``relevance`` — the **relevant context**: the final-round relevance snippet
+    - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
-      (``relevance[i]`` describes ``documents[i]``). A document that contributes nothing
+      (``relevant_context[i]`` describes ``documents[i]``). A document that contributes nothing
       is an empty string, which is a real result rather than a failure.
-    - ``struct_data`` — the merged parse: the per-task schema filled from every document,
+    - ``structured_context`` — the merged parse: the per-task schema filled from every document,
       as plain JSON-able data. Each record carries a ``document`` key naming the 1-based
       document it came from.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
@@ -72,8 +72,8 @@ class Answer:
     """
 
     answer: str
-    relevance: list[str]
-    struct_data: dict[str, Any]
+    relevant_context: list[str]
+    structured_context: dict[str, Any]
     schema_code: str
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
@@ -261,10 +261,10 @@ def run_pipeline(
         raise
     return Answer(
         answer=result.answer,
-        relevance=list(relevance_snippets),
+        relevant_context=list(relevance_snippets),
         # the parse exactly as the agent saw it: plain data, each record stamped with the
         # 1-based document it came from
-        struct_data=reasoning.tag_source_documents(
+        structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
             extraction.source_docs,
         ),

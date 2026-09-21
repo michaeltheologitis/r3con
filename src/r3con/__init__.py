@@ -6,8 +6,8 @@ answering it is built *per question*, at the moment you ask:
     >>> from r3con import r3con
     >>> result = r3con.run("Which supplier missed the most delivery windows?", docs)
     >>> print(result)                 # the answer
-    >>> result.relevance              # what each document contributed
-    >>> result.struct_data            # the structured parse behind it
+    >>> result.relevant_context              # what each document contributed
+    >>> result.structured_context            # the structured parse behind it
 
 Three moves, in order:
 

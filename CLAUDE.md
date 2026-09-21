@@ -151,6 +151,13 @@ research repo it came from never had to think about:
   `num_retries` on every call and litellm imports tenacity lazily on the retry path, so
   dropping it breaks every call that hits a transient error — and only on the error path,
   which is exactly where you won't notice it.
+- **This package executes model-written Python, conditioned on the user's documents.**
+  Stage 2 `exec`s the proposed schema in-process to validate it — no sandbox at all. Stage 3
+  runs the agent's code in the vendored restricted AST interpreter (import allowlist, blocked
+  dunder access, operation/loop/wall-clock caps), which raises the bar but is not a boundary
+  to bet a production secret on. Don't weaken either without saying so; documents are
+  untrusted input. (Deliberately not in the README — the owner cut it as noise for readers.)
+
 - **Attribution is not optional.** `runtime/python_executor.py` is vendored from
   smolagents (Apache-2.0, HuggingFace Inc.). Its header, the upstream link, the list of
   modifications, and the `NOTICE` file must all stay intact. Don't "tidy" that header.
@@ -167,7 +174,7 @@ from r3con import r3con
 
 docs = r3con.read_documents("./docs")              # folder/glob/files -> list[str]
 result = r3con.run("your question", docs)          # documents ARE a list of strings
-result.answer, result.relevance, result.struct_data, result.schema_code, result.run_dir
+result.answer, result.relevant_context, result.structured_context, result.schema_code, result.run_dir
 ```
 
 The lower level, when you want a prebuilt config, your own `TaskLogger`, or your own
