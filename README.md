@@ -91,6 +91,11 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 └── reasoning/            result.json · calls.json · transcript.yaml
 ```
 
+## Evaluation
+
+How r3con was evaluated, with the baselines it was compared against:
+[r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE). `src/r3con/runtime/python_executor.py` is a modified copy of the
