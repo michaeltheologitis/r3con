@@ -13,16 +13,25 @@ representation *for that question*, then reasons over it.
 pip install r3context
 ```
 
-Set the key your provider already expects (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …), or drop
-a `.env` in your working directory.
+Set the key your provider already expects — r3con has no variable of its own:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+A `.env` in your working directory is loaded for you.
 
 ## Use
 
 **Command line** — point it at a folder, a glob, or files:
 
 ```bash
-r3con run "Which supplier missed the most delivery windows?" ./reports
+r3con run "Which supplier missed the most delivery windows?" ./reports \
+  --model openai/gpt-5.6-luna
 ```
+
+`--model` takes any litellm model string and is optional; leave it off for the default.
 
 **Python, reading documents off disk:**
 
