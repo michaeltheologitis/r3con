@@ -13,14 +13,14 @@ representation *for that question*, then reasons over it.
 pip install r3context
 ```
 
-Set the key your provider already expects — r3con has no variable of its own:
+Set the key your provider expects:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-A `.env` in your working directory is loaded for you.
+Or put them in a `.env` in your working directory.
 
 ## Use
 
