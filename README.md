@@ -33,6 +33,14 @@ r3con run "Which supplier missed the most delivery windows?" ./reports \
 
 `--model` takes any litellm model string and is optional; leave it off for the default.
 
+A folder is walked recursively. You can also match a pattern, or name the files:
+
+```bash
+r3con run "Who approved the Q3 overspend?" "./reports/*.pdf"      # quote the glob
+r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"   # ** recurses
+r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md      # or name them
+```
+
 **Python, reading documents off disk:**
 
 ```python
