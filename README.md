@@ -1,9 +1,9 @@
 # r3con
 
-**Reasoning over a corpus of documents — by building the right representation first.**
+**Context representation for large-scale reasoning.**
 
-Ask a question whose evidence is scattered across many documents. `r3con` constructs a
-representation *for that question*, then reasons over it.
+Ask a question whose evidence is scattered across many documents. `r3con` organizes that
+context into a representation built *for that question*, then reasons over it.
 
 ![How r3con works](docs/r3con.png)
 
