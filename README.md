@@ -31,7 +31,9 @@ r3con run "Which supplier missed the most delivery windows?" ./reports \
   --model openai/gpt-5.6-luna
 ```
 
-`--model` takes any litellm model string and is optional; leave it off for the default.
+`--model` takes any litellm model string. `openai/gpt-5.6-luna` is the default, so you only
+need the flag to pick something else — `anthropic/claude-sonnet-4`, `gemini/gemini-3-pro`,
+`hosted_vllm/Qwen/Qwen3.5-35B-A3B`, …
 
 A folder is walked recursively. You can also match a pattern, or name the files:
 
