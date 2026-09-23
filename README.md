@@ -73,10 +73,8 @@ result = r3con.run("Which supplier missed the most delivery windows?", [doc_a, d
 
 ```python
 result.answer             # str       — the answer; str(result) gives you the same
-result.relevant_context   # list[str] — one relevance snippet per document, in your order
-result.structured_context # dict      — the parse: {field: [records]}, each record tagged
-                          #             with the document it came from
-result.schema_code        # str       — the schema proposed for this question
+result.relevant_context   # list[str] — the final collection of relevance snippets
+result.structured_context # dict      — the structured context, in dict form
 result.run_dir            # Path      — where this run's artifacts went (below)
 ```
 
