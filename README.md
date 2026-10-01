@@ -2,8 +2,8 @@
 
 **Context representation for large-scale reasoning.**
 
-Ask a question whose evidence is scattered across many documents. `r3con` organizes that
-context into a representation built *for that question*, then reasons over it.
+Ask a question whose evidence is scattered across many documents. `r3con` builds a
+task-specific representation of that context, then reasons over it to produce an answer.
 
 ![How r3con works](docs/r3con.png)
 
@@ -13,93 +13,135 @@ context into a representation built *for that question*, then reasons over it.
 pip install r3context
 ```
 
-Set the key your provider expects:
+Set the API key(s) for the provider(s) you use:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Or put them in a `.env` in your working directory.
+You can also put them in a `.env` file in your working directory.
 
-## Use
+## Usage
 
-**Command line** — point it at a folder, a glob, or files:
+### Command line
+
+Pass a directory, glob, or list of files:
 
 ```bash
 r3con run "Which supplier missed the most delivery windows?" ./reports \
   --model openai/gpt-5.6-luna
 ```
 
-`--model` takes any litellm model string, e.g. `anthropic/claude-sonnet-5`,
-`gemini/gemini-3.8-flash`, `hosted_vllm/Qwen/Qwen3.5-35B-A3B`. The default is
-`openai/gpt-5.6-luna`.
+`--model` accepts any [LiteLLM](https://docs.litellm.ai/docs/providers) model string, for
+example:
 
-A folder is walked recursively. You can also match a pattern, or name the files:
-
-```bash
-r3con run "Who approved the Q3 overspend?" "./reports/*.pdf"      # quote the glob
-r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"   # ** recurses
-r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md      # or name them
+```
+anthropic/claude-sonnet-5
+gemini/gemini-3.8-flash
+hosted_vllm/Qwen/Qwen3.5-35B-A3B
 ```
 
-**Python, reading documents off disk:**
+The default is `openai/gpt-5.6-luna`.
+
+Directories are searched recursively. You can also use glob patterns or pass files directly:
+
+```bash
+r3con run "Who approved the Q3 overspend?" "./reports/*.pdf"
+r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"
+r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md
+```
+
+Quote glob patterns so your shell passes them to `r3con` unchanged.
+
+### Python
+
+Load documents from a directory, glob, or list of files:
 
 ```python
 from r3con import r3con
 
-docs = r3con.read_documents("./reports")     # a folder, a glob, or a list of files
-                                             # .txt .md .csv .json .html .xml … and .pdf
-result = r3con.run("Which supplier missed the most delivery windows?", docs)
+docs = r3con.read_documents("./reports")
+result = r3con.run(
+    "Which supplier missed the most delivery windows?",
+    docs,
+)
 print(result)
 ```
 
-**Python, documents you already have:**
+`read_documents` supports `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.pdf`, and
+other common text formats.
+
+If you already have the documents in memory, pass them directly:
 
 ```python
-result = r3con.run("Which supplier missed the most delivery windows?", [doc_a, doc_b, doc_c])
+result = r3con.run(
+    "Which supplier missed the most delivery windows?",
+    [doc_a, doc_b, doc_c],
+)
 ```
 
-`documents` is a list of strings — the documents themselves.
+`documents` is simply a list of strings, one per document.
 
-**Notebooks**, over five short memos arranged so no single one holds the answer:
+## Notebooks
 
-- [`examples/quickstart.ipynb`](examples/quickstart.ipynb) — the whole thing end to end.
-- [`examples/options.ipynb`](examples/options.ipynb) — the settings: model, rounds,
-  generation params, run configs, your own connection, where artifacts go.
-- [`examples/vllm.ipynb`](examples/vllm.ipynb) — pointing it at a self-hosted endpoint.
+The examples use five short memos arranged so that no single document contains the full
+answer:
 
-## What you get back
+- [`examples/quickstart.ipynb`](examples/quickstart.ipynb) — an end-to-end example.
+- [`examples/options.ipynb`](examples/options.ipynb) — models, relevance rounds, generation
+  parameters, run configuration, custom connections, and artifact paths.
+- [`examples/vllm.ipynb`](examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
+
+## Output
+
+`r3con.run(...)` returns a result object containing the final answer and the representation
+built during the run:
 
 ```python
-result.answer             # str       — the answer; str(result) gives you the same
-result.relevant_context   # list[str] — the final collection of relevance snippets
-result.structured_context # dict      — the structured context, in dict form
-result.run_dir            # Path      — where this run's artifacts went (below)
+result.answer             # str       — final answer
+result.relevant_context   # list[str] — final relevance snippets
+result.structured_context # dict      — structured representation
+result.run_dir            # Path      — directory containing run artifacts
 ```
 
-## Logs
+`str(result)` returns the same value as `result.answer`.
 
-Every run writes a folder under `./logs` with everything it did — each document's relevance
-snippet in every round, the schema it proposed, the parsed records, and the reasoning
-transcript.
+## Run artifacts
+
+Every run writes its intermediate artifacts to a directory under `./logs`. This includes the
+relevance snippet produced for each document at every round, the generated schema, parsed
+records, model calls, and the final reasoning transcript.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
-├── relevance/            result.json · calls.json
+├── relevance/
+│   ├── result.json
+│   └── calls.json
 ├── structuring/
-│   ├── schema/           result.json · calls.json · transcript.yaml
-│   └── parsing/          result.json · calls.json
-└── reasoning/            result.json · calls.json · transcript.yaml
+│   ├── schema/
+│   │   ├── result.json
+│   │   ├── calls.json
+│   │   └── transcript.yaml
+│   └── parsing/
+│       ├── result.json
+│       └── calls.json
+└── reasoning/
+    ├── result.json
+    ├── calls.json
+    └── transcript.yaml
 ```
 
 ## Evaluation
 
-How r3con was evaluated, with the baselines it was compared against:
+For benchmark results, baselines, and evaluation code, see
 [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
 
-## Licence
+## License
 
-MIT — see [LICENSE](LICENSE). `src/r3con/runtime/python_executor.py` is a modified copy of the
-sandboxed interpreter from [smolagents](https://github.com/huggingface/smolagents), Apache-2.0,
-© HuggingFace Inc. See [NOTICE](NOTICE) and [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
+MIT — see [LICENSE](LICENSE).
+
+`src/r3con/runtime/python_executor.py` contains a modified version of the sandboxed
+interpreter from [smolagents](https://github.com/huggingface/smolagents), licensed under
+Apache-2.0 and © HuggingFace Inc. See [NOTICE](NOTICE) and
+[LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
