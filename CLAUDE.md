@@ -279,10 +279,12 @@ commit that lands the work. Stage files explicitly (don't `git add -A`). End com
 messages with the `Co-Authored-By` trailer. Routine work lands on `main`; branch only for
 risky or long-lived changes. Pushing is worth a quick heads-up unless told otherwise.
 
-**Do not publish to PyPI.** A paper has to appear first, so releasing is blocked until the
-owner explicitly asks for it *in the moment* — a checklist, a TODO, or a finished version
-bump is not permission. Building a wheel locally to verify it is fine; uploading is not.
-A release is outward-facing and irreversible.
+**Never publish to PyPI yourself.** `r3context` is live (0.1.0, published by the owner on
+2026-09-30), so this is no longer a question of *whether* but of *who*: uploading needs the
+owner's API token, and a release cannot be undone — a version number can never be reused.
+Building a wheel locally to verify it is fine; running `uv publish` / `twine upload` is
+not, and a finished version bump is not permission. Build it, verify it, hand over the
+command.
 
 ## Non-goals (do not propose)
 
