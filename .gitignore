@@ -14,10 +14,6 @@ token
 .pypirc
 .env
 
-# Working notes and agent instructions — local only, never published
-STATUS.md
-CLAUDE.md
-
 # Run artifacts
 logs/
 
