@@ -1,9 +1,16 @@
 # r3con
 
+[![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
+[![PyPI](https://img.shields.io/pypi/v/r3context.svg)](https://pypi.org/project/r3context/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Context representation for large-scale reasoning.**
 
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
 task-specific representation of that context, then reasons over it to produce an answer.
+
+Paper: [*Realize What Matters: Principled Context Representation for Large-Scale
+Reasoning*](https://arxiv.org/abs/2609.27173).
 
 ![How r3con works](docs/r3con.png)
 
