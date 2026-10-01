@@ -1,18 +1,22 @@
+<div align="center">
+
 # r3con
 
-[![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
-[![PyPI](https://img.shields.io/pypi/v/r3context.svg)](https://pypi.org/project/r3context/)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<p>
+  <a href="https://arxiv.org/abs/2609.27173"><img src="https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg" alt="arXiv"></a>
+  <a href="https://pypi.org/project/r3context/"><img src="https://img.shields.io/pypi/v/r3context.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/r3context/"><img src="https://img.shields.io/pypi/pyversions/r3context.svg" alt="Python"></a>
+  <a href="https://github.com/michaeltheologitis/r3con/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+</p>
 
 **Context representation for large-scale reasoning.**
+
+</div>
 
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
 task-specific representation of that context, then reasons over it to produce an answer.
 
-Paper: [*Realize What Matters: Principled Context Representation for Large-Scale
-Reasoning*](https://arxiv.org/abs/2609.27173).
-
-![How r3con works](docs/r3con.png)
+![How r3con works](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/r3con.png)
 
 ## Install
 
@@ -95,10 +99,10 @@ result = r3con.run(
 The examples use five short memos arranged so that no single document contains the full
 answer:
 
-- [`examples/quickstart.ipynb`](examples/quickstart.ipynb) — an end-to-end example.
-- [`examples/options.ipynb`](examples/options.ipynb) — models, relevance rounds, generation
+- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
+- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, generation
   parameters, run configuration, custom connections, and artifact paths.
-- [`examples/vllm.ipynb`](examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
+- [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
 
 ## Output
 
@@ -146,9 +150,9 @@ For benchmark results, baselines, and evaluation code, see
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE).
 
 `src/r3con/runtime/python_executor.py` contains a modified version of the sandboxed
 interpreter from [smolagents](https://github.com/huggingface/smolagents), licensed under
-Apache-2.0 and © HuggingFace Inc. See [NOTICE](NOTICE) and
-[LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
+Apache-2.0 and © HuggingFace Inc. See [NOTICE](https://github.com/michaeltheologitis/r3con/blob/main/NOTICE) and
+[LICENSE-APACHE-2.0](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE-APACHE-2.0).
