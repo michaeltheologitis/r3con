@@ -1,7 +1,7 @@
 # r3con
 
 [![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
-[![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/r3context/)
+![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE)
 
 **Context representation for large-scale reasoning.**
