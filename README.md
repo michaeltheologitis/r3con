@@ -1,17 +1,11 @@
-<div align="center">
-
 # r3con
 
-<p>
-  <a href="https://arxiv.org/abs/2609.27173"><img src="https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg" alt="arXiv"></a>
-  <a href="https://pypi.org/project/r3context/"><img src="https://img.shields.io/pypi/v/r3context.svg" alt="PyPI"></a>
-  <a href="https://pypi.org/project/r3context/"><img src="https://img.shields.io/pypi/pyversions/r3context.svg" alt="Python"></a>
-  <a href="https://github.com/michaeltheologitis/r3con/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-</p>
+[![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
+[![PyPI](https://img.shields.io/badge/pypi-r3context-blue)](https://pypi.org/project/r3context/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)](https://pypi.org/project/r3context/)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE)
 
 **Context representation for large-scale reasoning.**
-
-</div>
 
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
 task-specific representation of that context, then reasons over it to produce an answer.
