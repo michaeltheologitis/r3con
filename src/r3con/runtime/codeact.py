@@ -124,7 +124,7 @@ def _supports_stop_parameter(model: str) -> bool:
     logger.setLevel(logging.CRITICAL)
     try:
         params = litellm.get_supported_openai_params(model=model) or []
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     finally:
         litellm.suppress_debug_info = prev_suppress

@@ -63,40 +63,32 @@ except Exception:  # noqa: BLE001 — running from a source checkout
     __version__ = "0.1.0"
 
 __all__ = [
-    # the entry point
-    "r3con",
-    "run",
     "Answer",
-    "read_documents",
-    # the pipeline, for callers who want the per-stage artifacts or a prebuilt config
-    "run_pipeline",
-    # run identity
-    "RunConfig",
-    "load_config",
-    "load_prompt",
-    "settings",
-    # stage 1 — surfacing relevance
-    "RelevantContext",
-    "surface_relevance",
-    "relevance_snippet",
-    "render_relevance",
-    # stage 2 — structuring
-    "ProposalResult",
-    "ProposalAttempt",
-    "propose_schema",
-    "ParseResult",
-    "SchemaError",
-    "check_schema",
-    "parse_documents",
-    "parse_one_document",
-    # stage 3 — reasoning
-    "reason",
     "CodeActResult",
     "CodeActTurn",
-    # artifacts
-    "TaskLogger",
+    "ParseResult",
+    "ProposalAttempt",
+    "ProposalResult",
+    "RelevantContext",
+    "RunConfig",
+    "SchemaError",
     "StageRun",
-    # transport
+    "TaskLogger",
+    "check_schema",
     "litellm_chat_completion",
     "litellm_chat_completion_full",
+    "load_config",
+    "load_prompt",
+    "parse_documents",
+    "parse_one_document",
+    "propose_schema",
+    "r3con",
+    "read_documents",
+    "reason",
+    "relevance_snippet",
+    "render_relevance",
+    "run",
+    "run_pipeline",
+    "settings",
+    "surface_relevance",
 ]

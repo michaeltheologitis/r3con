@@ -168,7 +168,7 @@ def _check_params(params: Any, where: str) -> dict[str, Any]:
     if params is None:
         return {}
     if not isinstance(params, Mapping):
-        raise ValueError(
+        raise ValueError(  # noqa: TRY004
             f"{where}: `params` must be a mapping of litellm keyword arguments "
             f"(temperature, top_p, extra_body, …) — got {type(params).__name__}."
         )

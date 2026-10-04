@@ -95,7 +95,7 @@ def check_schema(schema_code: str) -> type[BaseModel]:
     """
     namespace: dict[str, Any] = dict(_SCHEMA_EXEC_GLOBALS)
     try:
-        exec(schema_code, namespace)
+        exec(schema_code, namespace)  # noqa: S102
     except Exception as e:
         raise SchemaError(f"Schema code failed to execute: {e!r}") from e
 
