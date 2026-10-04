@@ -386,7 +386,7 @@ def _run_extract(
                 max_attempts=max_attempts,
             )
             return result, calls, None
-        except BaseException as e:
+        except (ValueError, RuntimeError) as e:
             return None, calls, e
 
 
@@ -430,7 +430,7 @@ def test_parse_one_document_raises_schema_error_after_max_attempts() -> None:
 
 def test_parse_one_document_zero_attempts_rejected() -> None:
     """max_attempts must be >= 1."""
-    result, calls, raised = _run_extract([], max_attempts=0)
+    _result, calls, raised = _run_extract([], max_attempts=0)
     assert isinstance(raised, ValueError)
     assert "max_attempts" in str(raised)
     assert len(calls) == 0
@@ -439,7 +439,7 @@ def test_parse_one_document_zero_attempts_rejected() -> None:
 def test_parse_one_document_non_validation_error_does_not_retry() -> None:
     """An unrelated exception (e.g. RuntimeError) bubbles up immediately — no retry."""
     err = RuntimeError("API outage")
-    result, calls, raised = _run_extract([err], max_attempts=3)
+    _result, calls, raised = _run_extract([err], max_attempts=3)
     assert isinstance(raised, RuntimeError)
     assert "API outage" in str(raised)
     # Only one call — we don't retry on non-ValidationError exceptions.

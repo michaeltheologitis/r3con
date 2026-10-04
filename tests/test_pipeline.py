@@ -36,14 +36,14 @@ _PROMPTS = {
 
 def _cfg(**over: Any) -> RunConfig:
     """A minimal RunConfig for the orchestration tests (no LLM is actually called)."""
-    base: dict[str, Any] = dict(
-        name="test",
-        model="m",
-        seed=0,
-        relevance_rounds=3,
-        prompts=dict(_PROMPTS),
-        params={},
-    )
+    base: dict[str, Any] = {
+        "name": "test",
+        "model": "m",
+        "seed": 0,
+        "relevance_rounds": 3,
+        "prompts": dict(_PROMPTS),
+        "params": {},
+    }
     base.update(over)
     return RunConfig(**base)
 

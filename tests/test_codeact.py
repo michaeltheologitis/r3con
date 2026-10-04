@@ -553,9 +553,11 @@ def test_run_omits_stop_when_model_does_not_support_it() -> None:
 def test_run_strips_hallucinated_tail_so_no_false_commit() -> None:
     responses = iter(
         [
-            "Thought: peek.\n<code>\nprint(parse['x'])\n</code>\n"
-            "<observation>\nFAKE 999\n</observation>\n"
-            "final_answer('WRONG')",
+            (
+                "Thought: peek.\n<code>\nprint(parse['x'])\n</code>\n"
+                "<observation>\nFAKE 999\n</observation>\n"
+                "final_answer('WRONG')"
+            ),
             _final("RIGHT"),
         ]
     )
@@ -683,22 +685,28 @@ KILL_EVENTS_PARSE = {
 def test_run_real_parse_explore_then_filter_then_commit() -> None:
     responses = iter(
         [
-            "Thought: peek at the schema before filtering.\n"
-            "<code>\n"
-            "print(sorted(parse.keys()))\n"
-            "print(parse['liz_kill_events'][0])\n"
-            "</code>",
-            "Thought: now filter to killer=Liz and night_ordinal contains 'first night'.\n"
-            "<code>\n"
-            "matches = [r for r in parse['liz_kill_events']\n"
-            "           if r['killer'].strip().lower() == 'liz'\n"
-            "           and 'first night' in r['night_ordinal'].lower()]\n"
-            "print(len(matches), 'matches')\n"
-            "</code>",
-            "Thought: 3 matches — commit.\n"
-            "<code>\n"
-            "final_answer(f'{len(matches)} men')\n"
-            "</code>",
+            (
+                "Thought: peek at the schema before filtering.\n"
+                "<code>\n"
+                "print(sorted(parse.keys()))\n"
+                "print(parse['liz_kill_events'][0])\n"
+                "</code>"
+            ),
+            (
+                "Thought: now filter to killer=Liz and night_ordinal contains 'first night'.\n"
+                "<code>\n"
+                "matches = [r for r in parse['liz_kill_events']\n"
+                "           if r['killer'].strip().lower() == 'liz'\n"
+                "           and 'first night' in r['night_ordinal'].lower()]\n"
+                "print(len(matches), 'matches')\n"
+                "</code>"
+            ),
+            (
+                "Thought: 3 matches — commit.\n"
+                "<code>\n"
+                "final_answer(f'{len(matches)} men')\n"
+                "</code>"
+            ),
         ]
     )
 
@@ -723,20 +731,24 @@ def test_run_real_parse_explore_then_filter_then_commit() -> None:
 def test_run_real_parse_filter_too_strict_then_refine() -> None:
     responses = iter(
         [
-            "Thought: filter exactly on night_ordinal.\n"
-            "<code>\n"
-            "matches = [r for r in parse['liz_kill_events']\n"
-            "           if r['night_ordinal'] == 'first night she lost control'\n"
-            "           and r['killer'] == 'Liz']\n"
-            "print('exact:', len(matches))\n"
-            "</code>",
-            "Thought: empty — loosen the night_ordinal match.\n"
-            "<code>\n"
-            "matches = [r for r in parse['liz_kill_events']\n"
-            "           if 'first night' in r['night_ordinal'].lower()\n"
-            "           and r['killer'].lower() == 'liz']\n"
-            "final_answer(f'{len(matches)} men')\n"
-            "</code>",
+            (
+                "Thought: filter exactly on night_ordinal.\n"
+                "<code>\n"
+                "matches = [r for r in parse['liz_kill_events']\n"
+                "           if r['night_ordinal'] == 'first night she lost control'\n"
+                "           and r['killer'] == 'Liz']\n"
+                "print('exact:', len(matches))\n"
+                "</code>"
+            ),
+            (
+                "Thought: empty — loosen the night_ordinal match.\n"
+                "<code>\n"
+                "matches = [r for r in parse['liz_kill_events']\n"
+                "           if 'first night' in r['night_ordinal'].lower()\n"
+                "           and r['killer'].lower() == 'liz']\n"
+                "final_answer(f'{len(matches)} men')\n"
+                "</code>"
+            ),
         ]
     )
 

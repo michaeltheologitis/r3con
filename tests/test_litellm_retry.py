@@ -1,3 +1,4 @@
+# ruff: noqa: BLE001, S110
 """Empirical check: does ``litellm.completion(num_retries=N)`` actually retry, and
 would it have rescued our transient-failure aborts?
 

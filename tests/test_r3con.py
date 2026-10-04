@@ -133,8 +133,10 @@ def _write_pdf(path: Path, text: str | None = None) -> None:
     if text:
         stream = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET"
         objs += [
-            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R"
-            "/Resources<</Font<</F1 5 0 R>>>>>>",
+            (
+                "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R"
+                "/Resources<</Font<</F1 5 0 R>>>>>>"
+            ),
             f"<</Length {len(stream)}>>stream\n{stream}\nendstream",
             "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
         ]

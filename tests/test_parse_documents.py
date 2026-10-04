@@ -109,7 +109,7 @@ def test_one_call_per_document_whole_doc() -> None:
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=document)])
 
-    result, calls = _run(fake, documents=[DOC_A, DOC_B, DOC_C])
+    _result, calls = _run(fake, documents=[DOC_A, DOC_B, DOC_C])
     assert len(calls) == 3
     seen_docs = sorted(c["document"] for c in calls)
     assert seen_docs == sorted([DOC_A, DOC_B, DOC_C])
