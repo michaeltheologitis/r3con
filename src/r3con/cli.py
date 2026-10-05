@@ -54,15 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         choices=available_configs() or None,
         default="default",
-        help="Run config: model, seed, relevance rounds, prompt versions, generation params.",
+        help="Run config: model, relevance rounds, prompt versions, generation params.",
     )
     run_cmd.add_argument(
         "--model",
         default=None,
         help="Override the config's model, e.g. openai/gpt-6-luna.",
-    )
-    run_cmd.add_argument(
-        "--seed", type=int, default=None, help="Override the config's seed."
     )
     run_cmd.add_argument(
         "--relevance-rounds",
@@ -130,7 +127,6 @@ def _run(args: argparse.Namespace) -> int:
     config = load_config(
         args.config,
         model=args.model,
-        seed=args.seed,
         relevance_rounds=args.relevance_rounds,
     )
     try:

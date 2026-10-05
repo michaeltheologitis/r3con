@@ -202,7 +202,6 @@ def run(
     *,
     model: str | None = None,
     config: str | RunConfig = DEFAULT_CONFIG,
-    seed: int | None = None,
     relevance_rounds: int | None = None,
     params: dict[str, Any] | None = None,
     api_key: str | None = None,
@@ -226,9 +225,9 @@ def run(
             ``"anthropic/claude-sonnet-5-5"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
             Defaults to the config's.
         config: a bundled config name, or a :class:`RunConfig` you built yourself.
-        seed, relevance_rounds: override single config fields.
+        relevance_rounds: overrides the config's.
         params: extra keyword arguments passed straight to ``litellm.completion`` —
-            ``temperature``, ``top_p``, ``extra_body``, anything it accepts.
+            ``temperature``, ``top_p``, ``seed``, ``extra_body``, anything it accepts.
         api_key, api_base: passed through to litellm. Usually unnecessary: litellm reads
             the provider's own environment variable, and a ``.env`` in your working
             directory is loaded for you.
@@ -267,7 +266,6 @@ def run(
 
     overrides = {
         "model": model,
-        "seed": seed,
         "relevance_rounds": relevance_rounds,
         "params": params,
     }

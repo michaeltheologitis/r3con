@@ -106,7 +106,7 @@ def run_pipeline(
     the structured parse, and the schema that was proposed for this question.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
-    output — model, seed, relevance rounds, the prompt version of each stage, and any
+    output — model, relevance rounds, the prompt version of each stage, and any
     generation params — so nothing output-affecting is threaded ad-hoc.
 
     ``api_base``, ``api_key`` and ``completion`` are **transport**: routing, auth, and how
@@ -126,9 +126,8 @@ def run_pipeline(
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
     model = config.model
     rounds = config.relevance_rounds
-    seed = config.seed
     # The output knobs flow from the config; api_base/api_key are transport only.
-    llm_kwargs: dict[str, Any] = {**config.params, "seed": seed}
+    llm_kwargs: dict[str, Any] = {**config.params}
     if api_base:
         llm_kwargs["api_base"] = api_base
     if api_key:
@@ -141,9 +140,7 @@ def run_pipeline(
     def _run(stage: str, model_for_log: str) -> StageRun | None:
         if task_logger is None:
             return None
-        return StageRun(
-            stage=stage, task_logger=task_logger, model=model_for_log, seed=seed
-        )
+        return StageRun(stage=stage, task_logger=task_logger, model=model_for_log)
 
     # The identity card first, so even a run that dies in stage 1 says what it was.
     if task_logger is not None:

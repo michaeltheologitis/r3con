@@ -107,7 +107,7 @@ def test_a_nested_name_creates_its_folders(logger):
 
 
 def test_a_stage_run_flushes_its_calls_and_its_transcript_into_its_folder(logger):
-    run = StageRun(stage="structuring/schema", task_logger=logger, model=MODEL, seed=0)
+    run = StageRun(stage="structuring/schema", task_logger=logger, model=MODEL)
     assert run.dir == logger.dir / "structuring" / "schema"
     run.add_step(
         messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
@@ -117,7 +117,7 @@ def test_a_stage_run_flushes_its_calls_and_its_transcript_into_its_folder(logger
     transcript = flushed_transcript(run)
     assert transcript["stage"] == "structuring/schema"
     assert transcript["model"] == "gpt-6-luna"
-    assert transcript["seed"] == 0
+    assert "seed" not in transcript
     assert [m["content"] for m in transcript["messages"]] == ["s", "u", "a"]
     assert (run.dir / "calls.json").is_file()
 
@@ -244,7 +244,7 @@ def test_a_model_is_recorded_without_its_provider_prefix(model, name):
 
 
 def test_the_manifest_records_the_identity_and_the_installed_version(logger):
-    run_config = config(model="hosted_vllm/Some/Model-X", seed=7, relevance_rounds=3)
+    run_config = config(model="hosted_vllm/Some/Model-X", relevance_rounds=3)
     write_manifest(
         logger, task="what happened?", config=run_config, n_docs=3, context_chars=1234
     )
@@ -256,7 +256,8 @@ def test_the_manifest_records_the_identity_and_the_installed_version(logger):
     assert manifest["run_folder"] == "run"
     assert manifest["config"]["model"] == "Model-X"
     recorded = manifest["config"]
-    assert (recorded["seed"], recorded["relevance_rounds"]) == (7, 3)
+    assert recorded["relevance_rounds"] == 3
+    assert "seed" not in recorded
     assert recorded["prompts"] == dict.fromkeys(PROMPT_STAGES, "v1")
     assert manifest["settings"]["reasoning_max_turns"] == settings.REASONING_MAX_TURNS
     assert manifest["created"].startswith("20")
