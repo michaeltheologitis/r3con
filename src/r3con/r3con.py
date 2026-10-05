@@ -218,9 +218,8 @@ def run(
             gets a much better apparatus than a vague one.
         documents: the document **texts**, as a sequence of strings; no entry may be
             blank, so that every index the run reports refers to *your* list. To read
-            them off disk instead, call :func:`read_documents` and pass its result. Each
-            document must fit in the model's context: there is no chunking, and one that
-            doesn't fit raises ``litellm.ContextWindowExceededError``.
+            them off disk instead, call :func:`read_documents` and pass its result. A
+            document too long for the model's window is read in parts.
         model: a litellm model string (e.g. ``"openai/gpt-6-luna"``,
             ``"anthropic/claude-sonnet-5-5"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
             Defaults to the config's.
@@ -263,7 +262,8 @@ def run(
         Each of these is raised before any request and before a run folder exists, as
         is anything :func:`~r3con.config.load_config` refuses.
         Anything the underlying stages raise — most usefully
-        ``litellm.ContextWindowExceededError`` when a document does not fit. With
+        ``litellm.ContextWindowExceededError`` when the prompt and notes sent beside a
+        document leave it no room in the model's window. With
         artifacts on, an exception from a stage carries a note naming the run folder,
         where the stage left its completed calls and ``error.txt``.
     """

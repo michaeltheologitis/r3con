@@ -26,7 +26,7 @@ Layout per ``logs/<run-folder>/``:
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
   (``{parsed, source_docs, totals}``) + ``calls.json`` (one entry per ``parse-d{doc}``
-  call).
+  call, or ``parse-d{doc}c{part}`` for a part).
 - ``reasoning/`` (stage 3) — ``result.json``
   (``{answer, terminated_by, n_turns, turns, totals}``) + ``calls.json`` +
   ``transcript.yaml``.
