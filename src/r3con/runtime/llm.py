@@ -13,8 +13,8 @@ wrapper with the same shape. It is **transport**, so it never enters a run's ide
 
 Two entry points. :func:`litellm_chat_completion_full` returns the raw response object;
 :func:`litellm_chat_completion` — what the stages actually call — returns the text, or a
-validated Pydantic instance when a ``schema`` is given, re-rolling with a perturbed seed if
-the model answers with empty content (a 200 with no JSON, which transport retries never see).
+validated Pydantic instance when a ``schema`` is given, re-rolling the same request if the
+model answers with empty content (a 200 with no JSON, which transport retries never see).
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
@@ -78,7 +78,6 @@ def litellm_chat_completion_full(
     api_base: str | None = None,
     api_key: str | None = None,
     schema: type[BaseModel] | None = None,
-    seed: int | None = None,
     completion: Callable[..., Any] | None = None,
     run: StageRun | None = None,
     kind: str = "llm_call",
@@ -137,8 +136,6 @@ def litellm_chat_completion_full(
         request["api_base"] = api_base
     if api_key is not None:
         request["api_key"] = api_key
-    if seed is not None:
-        request["seed"] = seed
     if schema is not None:
         request["response_format"] = {
             "type": "json_schema",
@@ -177,7 +174,6 @@ def litellm_chat_completion(
     api_base: str | None = None,
     api_key: str | None = None,
     schema: type[BaseModel] | None = None,
-    seed: int | None = None,
     completion: Callable[..., Any] | None = None,
     run: StageRun | None = None,
     kind: str = "llm_call",
@@ -196,11 +192,11 @@ def litellm_chat_completion(
     *empty* content, the call is **re-rolled** up to ``max_empty_retries`` times
     (default ``settings.LLM_EMPTY_CONTENT_RETRIES``) before raising — an empty body is
     a recoverable bad generation, not a hard error, and it's a successful HTTP 200 so
-    the transport ``num_retries`` never catches it. Each re-roll **perturbs the seed**
-    (``seed + attempt``) so a pinned-seed call produces a genuinely different roll
-    (deterministic → reproducible). This recovers the common transient case where a
-    reasoning model spent its budget on the thinking block; a *deterministic* empty
-    still raises after the re-rolls. (A non-empty-but-malformed JSON raises a Pydantic
+    the transport ``num_retries`` never catches it. Each re-roll re-sends the same
+    request, so it is an independent sample (a ``seed`` the caller passes in ``kwargs``
+    is re-sent unchanged). This recovers the common transient case where a reasoning
+    model spent its budget on the thinking block; a *deterministic* empty still raises
+    after the re-rolls. (A non-empty-but-malformed JSON raises a Pydantic
     ``ValidationError`` instead — that's the *caller's* retry to handle, e.g. the
     parsing stage's per-document retry loop.)
     """
@@ -209,9 +205,6 @@ def litellm_chat_completion(
 
     attempt = 0
     while True:
-        # Perturb the seed on a re-roll so a pinned seed doesn't reproduce the same
-        # empty output (deterministic offset → runs stay reproducible).
-        call_seed = seed + attempt if (seed is not None and attempt > 0) else seed
         response = litellm_chat_completion_full(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
@@ -220,7 +213,6 @@ def litellm_chat_completion(
             api_base=api_base,
             api_key=api_key,
             schema=schema,
-            seed=call_seed,
             completion=completion,
             run=run,
             kind=kind,
@@ -238,10 +230,9 @@ def litellm_chat_completion(
         if attempt > max_empty_retries:
             raise ValueError(
                 "Structured output was requested, but the model returned empty text "
-                f"after {attempt} attempt(s) (seed-perturbed re-rolls). For a reasoning "
-                "model this usually means thinking consumed the response — try a "
-                "no-thinking config, a higher max_tokens, or raising "
-                "settings.LLM_EMPTY_CONTENT_RETRIES."
+                f"after {attempt} attempt(s). For a reasoning model this usually means "
+                "thinking consumed the response — try a no-thinking config, a higher "
+                "max_tokens, or raising settings.LLM_EMPTY_CONTENT_RETRIES."
             )
         _log.warning(
             "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries

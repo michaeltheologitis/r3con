@@ -104,6 +104,15 @@ def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
     assert llm.requests == []
 
 
+@pytest.mark.parametrize(
+    "model", ["anthropic/claude-sonnet-5-5", "gemini/gemini-3.8-flash"]
+)
+def test_a_run_on_a_provider_that_takes_no_seed_completes(answering_llm, model):
+    result = run("Who?", ["Halloran memo"], model=model, completion=answering_llm)
+    assert result.answer == "Halloran memo"
+    assert {request["model"] for request in answering_llm.requests} == {model}
+
+
 def test_run_answers_through_the_callers_completion(answering_llm):
     result = run(
         "Who?", ["Halloran memo"], completion=answering_llm, save_artifacts=False

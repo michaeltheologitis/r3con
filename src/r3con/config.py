@@ -1,6 +1,6 @@
 """The run config: every knob that shapes the OUTPUT, in one place.
 
-A :class:`RunConfig` is the **identity of a run** — the model, seed, number of relevance
+A :class:`RunConfig` is the **identity of a run** — the model, number of relevance
 rounds, the prompt version of each stage, and any generation params. It is loaded from a
 bundled ``configs/<name>.yaml`` (with optional overrides) and flows through the whole
 pipeline as one object, so nothing output-affecting is threaded ad-hoc. Runtime-only
@@ -22,7 +22,6 @@ package data, resolved from the package directory.
 Config file shape (``configs/<name>.yaml``)::
 
     model: openai/gpt-6-luna
-    seed: 42
     relevance_rounds: 2
     prompts:
       relevance: v1
@@ -87,7 +86,6 @@ class RunConfig(BaseModel):
     # the config it was loaded from (the board's run label base)
     name: str = DEFAULT_CONFIG
     model: str
-    seed: int = 42
     # keep in sync with configs/default.yaml (the shipped default)
     relevance_rounds: int = 2
     prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
@@ -100,8 +98,8 @@ class RunConfig(BaseModel):
         """The output-shaping components that make up the run identity, in label order, each a
         ``key=value`` string. **This is the one place to extend the identity** — add a line here
         and the new axis flows into the board's grouping key *and* the eval's resume key. Values are
-        the *resolved* config (not how they were set), so seed 42 reads the same whether it came
-        from the config file or ``--seed 42``. The model is reduced to its bare name (the
+        the *resolved* config (not how they were set), so 3 rounds read the same whether they
+        came from the config file or ``--relevance-rounds 3``. The model is reduced to its bare name (the
         provider/route prefix is transport — see :func:`normalize_model_name`)."""
         prompts = ",".join(
             f"{_PROMPT_STAGE_ABBR.get(s, s)}={self.prompts[s]}"
@@ -110,7 +108,6 @@ class RunConfig(BaseModel):
         )
         parts = [
             f"model={normalize_model_name(self.model)}",
-            f"seed={self.seed}",
             f"rounds={self.relevance_rounds}",
         ]
         # Generation params are part of the identity only when set, so a provider-default
@@ -127,7 +124,7 @@ class RunConfig(BaseModel):
     def label(self) -> str:
         """Readable run label — the board's grouping key and the eval's resume key. The config
         name plus the run-identity components (:meth:`_identity_parts`), e.g.
-        ``default[model=gpt-6-luna,seed=42,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]``.
+        ``default[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]``.
         Two runs are the same run iff their labels match, so **every** output-shaping axis must
         appear in ``_identity_parts``."""
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
@@ -186,8 +183,7 @@ def _find(relative: str) -> Path | None:
 
 def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
     """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, then apply any non-``None``
-    overrides (``model`` / ``seed`` /
-    ``relevance_rounds`` / ``params``). Every override is recorded on the config and shows
+    overrides (``model`` / ``relevance_rounds`` / ``params``). Every override is recorded on the config and shows
     up in its label, because each of them shapes the output.
 
     Raises ``KeyError`` for an unknown config name, ``ValueError`` if the config omits a
@@ -210,7 +206,6 @@ def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
     cfg = RunConfig(
         name=name,
         model=raw["model"],
-        seed=int(raw.get("seed", 42)),
         relevance_rounds=int(raw.get("relevance_rounds", 2)),
         prompts=prompts,
         params=_check_params(raw.get("params"), f"config {name!r}"),
@@ -221,7 +216,7 @@ def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
     applied = {
         k: v
         for k, v in overrides.items()
-        if v is not None and k in {"model", "seed", "relevance_rounds", "params"}
+        if v is not None and k in {"model", "relevance_rounds", "params"}
     }
     if "params" in applied:
         applied["params"] = _check_params(applied["params"], "override")

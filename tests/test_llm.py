@@ -87,16 +87,24 @@ def test_a_callers_retry_count_wins(llm):
     assert llm.requests[0]["num_retries"] == 2
 
 
-def test_an_empty_structured_reply_is_rerolled_with_the_next_seed(llm):
-    out = ask(llm.replies("", "", '{"x": 7}'), schema=Number, seed=0)
+def test_an_empty_structured_reply_is_rerolled_with_the_same_request(llm):
+    out = ask(llm.replies("", "", '{"x": 7}'), schema=Number)
     assert out == Number(x=7)
-    assert [request["seed"] for request in llm.requests] == [0, 1, 2]
+    first, *rerolls = llm.requests
+    assert len(rerolls) == 2
+    assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
+    assert not any("seed" in request for request in llm.requests)
+
+
+def test_a_seed_the_caller_sends_is_resent_unchanged_on_a_reroll(llm):
+    ask(llm.replies("", "", '{"x": 7}'), schema=Number, seed=5)
+    assert [request["seed"] for request in llm.requests] == [5, 5, 5]
 
 
 def test_empty_structured_replies_raise_once_the_rerolls_run_out(llm):
     llm.replies("", "", "", "")
-    with pytest.raises(ValueError, match="empty text after 4 attempt"):
-        ask(llm, schema=Number, seed=0, max_empty_retries=3)
+    with pytest.raises(ValueError, match=r"empty text after 4 attempt\(s\)\. For a"):
+        ask(llm, schema=Number, max_empty_retries=3)
     assert len(llm.requests) == 4
 
 
@@ -106,8 +114,8 @@ def test_an_empty_plain_reply_is_returned_as_it_is(llm):
 
 
 def test_a_structured_reply_that_parses_is_not_rerolled(llm):
-    assert ask(llm.replies('{"x": 1}'), schema=Number, seed=5) == Number(x=1)
-    assert [request["seed"] for request in llm.requests] == [5]
+    assert ask(llm.replies('{"x": 1}'), schema=Number) == Number(x=1)
+    assert len(llm.requests) == 1
 
 
 def test_sampling_params_reach_the_request_untouched(llm):

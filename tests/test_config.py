@@ -6,7 +6,6 @@ from r3con.config import PROMPT_STAGES, available_configs, load_config
 PROMPTS = dict.fromkeys(PROMPT_STAGES, "v1")
 FULL = {
     "model": "openai/gpt-6-luna",
-    "seed": 42,
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
@@ -30,31 +29,29 @@ def test_the_default_config_loads_with_its_shipped_values():
     config = load_config("default")
     assert config.name == "default"
     assert config.model == "openai/gpt-6-luna"
-    assert (config.seed, config.relevance_rounds, config.params) == (42, 2, {})
+    assert (config.relevance_rounds, config.params) == (2, {})
     assert config.prompts == PROMPTS
-    assert (
-        config.label()
-        == f"default[model=gpt-6-luna,seed=42,rounds=2,{DEFAULT_PROMPTS}]"
-    )
+    assert "seed" not in config.model_dump()
+    assert config.label() == f"default[model=gpt-6-luna,rounds=2,{DEFAULT_PROMPTS}]"
 
 
 @pytest.mark.parametrize(
     ("overrides", "recorded", "label"),
     [
         (
-            {"seed": 7, "model": "openai/gpt-x"},
-            {"seed": 7, "model": "openai/gpt-x"},
-            "default[model=gpt-x,seed=7,rounds=2,",
+            {"relevance_rounds": 3, "model": "openai/gpt-x"},
+            {"relevance_rounds": 3, "model": "openai/gpt-x"},
+            "default[model=gpt-x,rounds=3,",
         ),
         (
             {"model": "hosted_vllm/Qwen/Qwen3.5-35B-A3B"},
             {"model": "hosted_vllm/Qwen/Qwen3.5-35B-A3B"},
-            "default[model=Qwen3.5-35B-A3B,seed=42,rounds=2,",
+            "default[model=Qwen3.5-35B-A3B,rounds=2,",
         ),
         (
-            {"seed": None, "model": None, "relevance_rounds": None},
+            {"model": None, "relevance_rounds": None, "params": None},
             {},
-            "default[model=gpt-6-luna,seed=42,rounds=2,",
+            "default[model=gpt-6-luna,rounds=2,",
         ),
     ],
 )
@@ -71,17 +68,16 @@ def test_overrides_are_applied_recorded_and_shown_in_the_label(
 def test_the_label_is_every_axis_of_the_resolved_identity(configs):
     configs(exp=FULL, exp2={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
     assert load_config("exp").label() == (
-        f"exp[model=gpt-6-luna,seed=42,rounds=3,{DEFAULT_PROMPTS}]"
-    )
-    assert load_config("exp", seed=7).label() == (
-        f"exp[model=gpt-6-luna,seed=7,rounds=3,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,rounds=3,{DEFAULT_PROMPTS}]"
     )
     assert load_config("exp", relevance_rounds=5).label() == (
-        f"exp[model=gpt-6-luna,seed=42,rounds=5,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,rounds=5,{DEFAULT_PROMPTS}]"
+    )
+    assert load_config("exp", params={"seed": 7}).label() == (
+        f"exp[model=gpt-6-luna,rounds=3,params={{seed=7}},{DEFAULT_PROMPTS}]"
     )
     assert load_config("exp2").label() == (
-        "exp2[model=gpt-6-luna,seed=42,rounds=3,"
-        "prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
+        "exp2[model=gpt-6-luna,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
     )
 
 

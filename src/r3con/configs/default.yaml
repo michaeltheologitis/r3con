@@ -1,5 +1,5 @@
-# The default run config. Everything here shapes the OUTPUT — model, seed, relevance
-# rounds, prompt versions, generation params — and together these are a run's identity
+# The default run config. Everything here shapes the OUTPUT — model, relevance rounds,
+# prompt versions, generation params — and together these are a run's identity
 # (RunConfig.label()). Runtime knobs (parallelism, retry caps, where logs go) live in
 # settings.py, not here.
 #
@@ -8,7 +8,6 @@
 
 # Any litellm model string: openai/…, anthropic/…, gemini/…, hosted_vllm/…, ollama/…
 model: openai/gpt-6-luna
-seed: 42
 
 # How many times each document is read. 1 = each read against the question alone;
 # 2+ = re-read in light of the other documents' relevance snippets.
@@ -20,6 +19,6 @@ prompts:
   structuring/parsing: v1
   reasoning: v1
 
-# Passed straight to litellm.completion — temperature, top_p, extra_body, anything it
-# accepts. Empty means provider defaults.
+# Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
+# it accepts. Empty means provider defaults.
 params: {}

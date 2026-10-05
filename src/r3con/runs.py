@@ -12,7 +12,7 @@ Layout per ``logs/<run-folder>/``:
 
 - ``manifest.json`` — written by the caller, if it wants one: the identity card + the
   full parameter snapshot — the task, a ``config`` block (the resolved
-  :class:`RunConfig` — model, seed, relevance_rounds, prompts, params, …), and a
+  :class:`RunConfig` — model, relevance_rounds, prompts, params, …), and a
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
   block (:meth:`r3con.config.RunConfig.label`).
@@ -259,12 +259,10 @@ class StageRun:
         stage: str,
         task_logger: TaskLogger,
         model: str | None = None,
-        seed: int | None = None,
     ) -> None:
         self.stage = stage
         self.task_logger = task_logger
         self.model = model
-        self.seed = seed
         self.steps: list[StepRecord] = []
         self._lock = threading.Lock()
         self.dir = task_logger.dir / stage
@@ -308,7 +306,6 @@ class StageRun:
             "stage": self.stage,
             "task_id": self.task_logger.task_id,
             "model": normalize_model_name(self.model),
-            "seed": self.seed,
             "messages": self._build_transcript_messages(),
         }
         transcript_path = self.dir / "transcript.yaml"
