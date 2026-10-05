@@ -1,7 +1,8 @@
 import pytest
-import yaml
+from pydantic import ValidationError
 
-from r3con.config import PROMPT_STAGES, available_configs, load_config
+from r3con import settings
+from r3con.config import PROMPT_STAGES, RunConfig, available_configs, load_config
 
 PROMPTS = dict.fromkeys(PROMPT_STAGES, "v1")
 FULL = {
@@ -10,19 +11,6 @@ FULL = {
     "prompts": PROMPTS,
 }
 DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
-
-
-@pytest.fixture
-def configs(tmp_path):
-    """Writes ``name -> fields`` into the working directory's config overlay."""
-    root = tmp_path / "configs"
-    root.mkdir()
-
-    def write(**by_name: dict) -> None:
-        for name, fields in by_name.items():
-            (root / f"{name}.yaml").write_text(yaml.safe_dump(fields))
-
-    return write
 
 
 def test_the_default_config_loads_with_its_shipped_values():
@@ -65,8 +53,11 @@ def test_overrides_are_applied_recorded_and_shown_in_the_label(
     assert config.model == recorded.get("model", "openai/gpt-6-luna")
 
 
-def test_the_label_is_every_axis_of_the_resolved_identity(configs):
+def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     configs(exp=FULL, exp2={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
+    v9 = tmp_path / "prompts" / "reasoning" / "v9.yaml"
+    v9.parent.mkdir(parents=True)
+    v9.write_text("instructions: |-\n  V9\n")
     assert load_config("exp").label() == (
         f"exp[model=gpt-6-luna,rounds=3,{DEFAULT_PROMPTS}]"
     )
@@ -98,13 +89,63 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
     [
         ({"prompts": PROMPTS}, "must define a `model`"),
         ({**FULL, "prompts": {"relevance": "v1"}}, "missing prompt versions"),
-        ({**FULL, "params": "temperature=0.7"}, "`params` must be a mapping"),
     ],
 )
 def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
     configs(bad=fields)
     with pytest.raises(ValueError, match=message):
         load_config("bad")
+
+
+@pytest.mark.parametrize(("name", "value"), [("relevence_rounds", 3), ("seed", 7)])
+def test_a_misspelt_override_is_refused(name, value):
+    with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
+        load_config("default", **{name: value})
+
+
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [("default", {"params": "temperature=0.7"}), ("bad", {})],
+    ids=["override", "file"],
+)
+def test_params_that_are_not_a_mapping_are_a_type_error(configs, name, overrides):
+    configs(bad={**FULL, "params": "temperature=0.7"})
+    with pytest.raises(TypeError, match="`params` must be a mapping.*got str"):
+        load_config(name, **overrides)
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        (
+            {"seed": 42},
+            r"\['seed'\].*`seed` was removed in r3con 0\.2\.0.*params: \{seed: 42\}",
+        ),
+        ({"relevence_rounds": 3}, r"does not read: \['relevence_rounds'\]"),
+        ({"overrides": {"model": "x"}}, r"does not read: \['overrides'\]"),
+        ({"name": "other"}, r"does not read: \['name'\]"),
+    ],
+    ids=["seed", "misspelt", "overrides", "name"],
+)
+def test_a_config_field_r3con_does_not_read_is_refused(configs, field, message):
+    configs(old={**FULL, **field})
+    with pytest.raises(ValueError, match=message):
+        load_config("old")
+
+
+def test_a_run_config_refuses_a_field_it_does_not_have():
+    with pytest.raises(ValidationError, match="relevence_rounds"):
+        RunConfig(model="openai/m", prompts=PROMPTS, relevence_rounds=3)
+
+
+def test_a_config_pinning_a_prompt_that_does_not_exist_is_refused_on_load(
+    configs, tmp_path
+):
+    configs(exp={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
+    with pytest.raises(FileNotFoundError, match="'reasoning' version 'v9'") as missing:
+        load_config("exp")
+    assert str(tmp_path / "prompts" / "reasoning" / "v9.yaml") in str(missing.value)
+    assert str(settings.PROMPTS_DIR / "reasoning" / "v9.yaml") in str(missing.value)
 
 
 def test_an_unknown_config_is_refused_by_name():

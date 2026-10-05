@@ -32,7 +32,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from r3con.config import RunConfig
+from r3con.config import RunConfig, check_prompts
 from r3con.logging_setup import get_logger
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
@@ -116,13 +116,15 @@ def run_pipeline(
     wrapper with the same ``(model, messages, **kwargs)`` shape.
 
 
-    Every runtime cap is read once, checked and recorded before the first request
-    (:func:`r3con.settings.settings_snapshot`); ``max_reasoning_turns`` replaces
-    ``settings.REASONING_MAX_TURNS`` when it is not ``None``.
+    Before the first request, every stage's prompt is checked to exist
+    (:func:`r3con.config.check_prompts`), and every runtime cap is read once, checked
+    and recorded (:func:`r3con.settings.settings_snapshot`); ``max_reasoning_turns``
+    replaces ``settings.REASONING_MAX_TURNS`` when it is not ``None``.
 
     If ``task_logger`` is provided, each stage's artifacts are written immediately
     after that stage succeeds, so a later failure still leaves earlier artifacts.
     """
+    check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
     model = config.model
     rounds = config.relevance_rounds

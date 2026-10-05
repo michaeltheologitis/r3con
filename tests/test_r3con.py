@@ -9,6 +9,8 @@ from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES
 from r3con.r3con import read_documents, run
 
+PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
+
 
 def write_tree(root: Path) -> None:
     (root / "nested").mkdir(parents=True)
@@ -94,12 +96,47 @@ def test_a_prebuilt_config_refuses_overrides_it_would_swallow(llm):
     assert llm.requests == []
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        "default",
+        RunConfig(model="openai/m", prompts=dict.fromkeys(PROMPT_STAGES, "v1")),
+    ],
+    ids=["by-name", "run-config"],
+)
 def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
-    llm, tmp_path, monkeypatch
+    llm, tmp_path, monkeypatch, config
 ):
     monkeypatch.setattr(r3con.settings, "REASONING_MAX_TURNS", 0)
     with pytest.raises(ValueError, match="REASONING_MAX_TURNS must be >= 1, got 0."):
-        run("Who?", ["memo"], completion=llm, logs_dir=tmp_path / "logs")
+        run("Who?", ["memo"], config=config, completion=llm, logs_dir=tmp_path / "logs")
+    assert not (tmp_path / "logs").exists()
+    assert llm.requests == []
+
+
+@pytest.mark.parametrize(
+    ("config", "error", "message"),
+    [
+        ("exp", FileNotFoundError, "'reasoning' version 'v9'"),
+        (
+            RunConfig(model="openai/m", prompts=PINS_A_MISSING_FILE),
+            FileNotFoundError,
+            "'reasoning' version 'v9'",
+        ),
+        (
+            RunConfig(model="openai/m", prompts={"relevance": "v1"}),
+            ValueError,
+            "missing prompt versions",
+        ),
+    ],
+    ids=["by-name", "run-config", "run-config-missing-a-stage"],
+)
+def test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists(
+    llm, configs, tmp_path, config, error, message
+):
+    configs(exp={"model": "openai/m", "prompts": PINS_A_MISSING_FILE})
+    with pytest.raises(error, match=message):
+        run("Who?", ["memo"], config=config, completion=llm, logs_dir=tmp_path / "logs")
     assert not (tmp_path / "logs").exists()
     assert llm.requests == []
 

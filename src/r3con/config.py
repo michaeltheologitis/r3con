@@ -40,9 +40,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from r3con import settings
+from r3con.prompts import require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PROMPT_STAGES: tuple[str, ...] = (
@@ -53,6 +54,9 @@ PROMPT_STAGES: tuple[str, ...] = (
 )
 
 DEFAULT_CONFIG = "default"
+
+# The fields a config file may set; any other is refused rather than dropped.
+_CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})
 
 # Compact per-stage abbreviations for the prompts tag in RunConfig.label().
 _PROMPT_STAGE_ABBR: dict[str, str] = {
@@ -82,6 +86,8 @@ def normalize_model_name(model: str | None) -> str | None:
 
 class RunConfig(BaseModel):
     """Everything that shapes the output of one run (the experiment identity)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     # the config it was loaded from (the board's run label base)
     name: str = DEFAULT_CONFIG
@@ -161,11 +167,11 @@ def resolve_config_path(name: str) -> Path | None:
 
 def _check_params(params: Any, where: str) -> dict[str, Any]:
     """``params`` must be a mapping of litellm keyword arguments. Caught here with a
-    readable message rather than surfacing as a TypeError from deep inside a call."""
+    readable message rather than deep inside a call."""
     if params is None:
         return {}
     if not isinstance(params, Mapping):
-        raise ValueError(  # noqa: TRY004
+        raise TypeError(
             f"{where}: `params` must be a mapping of litellm keyword arguments "
             f"(temperature, top_p, extra_body, …) — got {type(params).__name__}."
         )
@@ -181,45 +187,73 @@ def _find(relative: str) -> Path | None:
     return None
 
 
-def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
-    """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, then apply any non-``None``
-    overrides (``model`` / ``relevance_rounds`` / ``params``). Every override is recorded on the config and shows
-    up in its label, because each of them shapes the output.
+def load_config(
+    name: str = DEFAULT_CONFIG,
+    *,
+    model: str | None = None,
+    relevance_rounds: int | None = None,
+    params: Mapping[str, Any] | None = None,
+) -> RunConfig:
+    """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, then apply each override
+    that is not ``None``. Every override is recorded on the config and shows up in its
+    label, because each of them shapes the output.
 
-    Raises ``KeyError`` for an unknown config name, ``ValueError`` if the config omits a
-    required field or a prompt version for any stage.
+    Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
+    are not a mapping, ``ValueError`` if the config sets a field r3con does not read or
+    omits a required field or a prompt version for any stage, and
+    ``FileNotFoundError`` if a pinned prompt version has no file
+    (:func:`check_prompts`).
     """
     path = _find(f"{name}.yaml")
     if path is None:
         raise KeyError(f"Unknown config {name!r}. Known: {available_configs()}")
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    unknown = sorted(set(raw) - _CONFIG_FIELDS)
+    if unknown:
+        message = (
+            f"config {name!r} has field(s) r3con does not read: {unknown}. "
+            f"A config sets {sorted(_CONFIG_FIELDS)}."
+        )
+        if "seed" in unknown:
+            message += (
+                " `seed` was removed in r3con 0.2.0; to send one, put it in `params` "
+                f"(params: {{seed: {raw['seed']}}})."
+            )
+        raise ValueError(message)
     if "model" not in raw:
         raise ValueError(f"config {name!r} must define a `model`.")
-
-    prompts = dict(raw.get("prompts") or {})
-    missing = [s for s in PROMPT_STAGES if s not in prompts]
-    if missing:
-        raise ValueError(
-            f"config {name!r} is missing prompt versions for stage(s): {missing}"
-        )
 
     cfg = RunConfig(
         name=name,
         model=raw["model"],
         relevance_rounds=int(raw.get("relevance_rounds", 2)),
-        prompts=prompts,
+        prompts=dict(raw.get("prompts") or {}),
         params=_check_params(raw.get("params"), f"config {name!r}"),
     )
 
     # Overrides are recorded on the config as well as applied, so the manifest shows both
     # the resolved value and the fact that it was overridden.
-    applied = {
-        k: v
-        for k, v in overrides.items()
-        if v is not None and k in {"model", "relevance_rounds", "params"}
-    }
+    overrides = {"model": model, "relevance_rounds": relevance_rounds, "params": params}
+    applied = {k: v for k, v in overrides.items() if v is not None}
     if "params" in applied:
         applied["params"] = _check_params(applied["params"], "override")
     if applied:
         cfg = cfg.model_copy(update={**applied, "overrides": applied})
+    check_prompts(cfg)
     return cfg
+
+
+def check_prompts(config: RunConfig) -> None:
+    """Refuse a config that cannot render every stage's prompt, before any request.
+
+    Raises:
+        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned.
+        FileNotFoundError: if a pinned version has no file on the prompt search path.
+    """
+    missing = [s for s in PROMPT_STAGES if s not in config.prompts]
+    if missing:
+        raise ValueError(
+            f"config {config.name!r} is missing prompt versions for stage(s): {missing}"
+        )
+    for stage in PROMPT_STAGES:
+        require_prompt_path(stage, config.prompts[stage])
