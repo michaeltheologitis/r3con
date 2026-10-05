@@ -19,7 +19,6 @@ LATER_STAGES = ("schema", "parsing", "reasoning")
 CONFIG = {
     "name": "test",
     "model": MODEL,
-    "seed": 0,
     "relevance_rounds": 2,
     "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
 }
@@ -121,13 +120,19 @@ def test_each_document_is_read_once_per_configured_round(answering_llm, rounds):
     assert len(answering_llm.requests_for("relevance")) == rounds * len(DOCS)
 
 
-def test_the_configs_params_and_seed_are_in_every_request(answering_llm):
+def test_the_configs_params_are_in_every_request(answering_llm):
     params = {"temperature": 0.7, "extra_body": {"top_k": 20}}
-    answer(answering_llm, model="openai/gpt-4o", seed=7, params=params)
+    answer(answering_llm, model="openai/gpt-4o", params=params)
     for request in answering_llm.requests:
-        assert request["temperature"] == 0.7
-        assert request["extra_body"] == {"top_k": 20}
-        assert request["seed"] == 7
+        assert {key: request[key] for key in params} == params
+
+
+def test_no_request_carries_a_seed_unless_params_sets_one(answering_llm):
+    answer(answering_llm)
+    assert not any("seed" in request for request in answering_llm.requests)
+    answering_llm.requests.clear()
+    answer(answering_llm, model="openai/gpt-4o", params={"seed": 7})
+    assert [request["seed"] for request in answering_llm.requests] == [7] * 8
 
 
 def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tmp_path):

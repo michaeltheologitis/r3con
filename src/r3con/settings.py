@@ -1,7 +1,7 @@
 """Runtime knobs and the paths the package reads and writes.
 
 Everything here is RUNTIME only — parallelism, retry caps, timeouts, where files live.
-None of it changes a correct answer. Everything that shapes the OUTPUT (model, seed,
+None of it changes a correct answer. Everything that shapes the OUTPUT (model,
 relevance rounds, prompt versions, generation params) lives in a
 :class:`r3con.config.RunConfig`, not here.
 
@@ -54,7 +54,7 @@ PARSING_MAX_ATTEMPTS = 5
 LLM_NUM_RETRIES = 10
 
 # Re-rolls of an empty structured-output response (a 200 with no JSON, e.g. a
-# reasoning model that spent its budget on thinking). Each re-roll perturbs the seed.
+# reasoning model that spent its budget on thinking).
 LLM_EMPTY_CONTENT_RETRIES = 3
 
 # Show the WHOLE parse in the reasoning system prompt below this many tokens (tiktoken

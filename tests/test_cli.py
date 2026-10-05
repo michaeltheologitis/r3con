@@ -43,15 +43,21 @@ def test_a_run_prints_the_answer_alone_on_stdout(answering, capsys):
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
     out, err = capsys.readouterr()
     assert out == f"{ANSWER}\n"
-    assert "5 document(s) · default[model=gpt-6-luna,seed=42,rounds=1," in err
+    assert "5 document(s) · default[model=gpt-6-luna,rounds=1," in err
     assert (path_after("artifacts: ", err) / "manifest.json").is_file()
 
 
 def test_the_flags_override_the_config_and_show_in_the_label(answering, capsys):
-    argv = ["--model", QWEN, "--seed", "7", "--relevance-rounds", "1"]
+    argv = ["--model", QWEN, "--relevance-rounds", "1"]
     assert r3con("run", "Who?", str(MEMOS), *argv) == 0
-    assert "default[model=Qwen3.5-35B-A3B,seed=7,rounds=1," in capsys.readouterr().err
-    assert {(r["model"], r["seed"]) for r in answering.requests} == {(QWEN, 7)}
+    assert "default[model=Qwen3.5-35B-A3B,rounds=1," in capsys.readouterr().err
+    assert {r["model"] for r in answering.requests} == {QWEN}
+
+
+def test_seed_is_not_an_option(scripted, capsys):
+    assert r3con("run", "Who?", str(MEMOS), "--seed", "7") == 2
+    assert "unrecognized arguments: --seed" in capsys.readouterr().err
+    assert scripted.requests == []
 
 
 def test_a_source_that_matches_nothing_exits_2_and_says_so(scripted, capsys):
