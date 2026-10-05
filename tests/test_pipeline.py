@@ -16,6 +16,7 @@ MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
+NEVER_COMMITS = "<code>\nprint(1)\n</code>"
 STAGE_FOLDERS = {
     "relevance": "relevance",
     "schema": "structuring/schema",
@@ -162,6 +163,24 @@ def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tm
             assert set(re.findall(r"MARKER-v\w", prompt)) == {f"MARKER-{version}"}
 
 
+@pytest.mark.parametrize(
+    ("prompts", "error"),
+    [
+        ({**CONFIG["prompts"], "reasoning": "v9"}, FileNotFoundError),
+        ({"relevance": "v1"}, ValueError),
+    ],
+    ids=["missing-file", "missing-stage"],
+)
+def test_a_config_that_cannot_render_its_prompts_is_refused_before_any_request(
+    answering_llm, tmp_path, prompts, error
+):
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(error):
+        answer(answering_llm, logger, prompts=prompts)
+    assert answering_llm.requests == []
+    assert not (logger.dir / "manifest.json").exists()
+
+
 @pytest.mark.parametrize("stage", list(STAGE_FOLDERS))
 def test_a_failing_stage_leaves_its_calls_and_traceback_and_names_the_run_folder(
     answering_llm, tmp_path, stage
@@ -223,9 +242,6 @@ def test_every_request_of_a_run_goes_through_the_callers_completion(
     assert len(answering_llm.requests) == 8
     assert {r["model"] for r in answering_llm.requests} == {QWEN}
     assert "completion" not in (logger.dir / "manifest.json").read_text()
-
-
-NEVER_COMMITS = "<code>\nprint(1)\n</code>"
 
 
 def test_a_turn_cap_set_in_settings_bounds_the_run_and_is_recorded(
