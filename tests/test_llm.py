@@ -7,6 +7,16 @@ from r3con import settings
 from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
 
 MODEL = "openai/gpt-6-luna"
+VLLM_TOO_LONG = {
+    "object": "error",
+    "message": (
+        "This model's maximum context length is 4000 tokens. However, you requested "
+        "7956 tokens in the messages. Please reduce the length of the messages."
+    ),
+    "type": "BadRequestError",
+    "param": None,
+    "code": 400,
+}
 
 
 class Flat(BaseModel):
@@ -39,6 +49,28 @@ def ask(llm, **kwargs):
     return litellm_chat_completion(
         system_prompt="s", user_prompt="u", model=MODEL, completion=llm, **kwargs
     )
+
+
+def ask_vllm(httpserver):
+    """One call through litellm itself, to a local server in vLLM's words."""
+    return litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model="hosted_vllm/fake",
+        api_base=httpserver.url_for("/v1"),
+        api_key="sk-fake",
+    )
+
+
+def fails_then_answers(httpserver, *, failures: int) -> None:
+    """Script the local server to answer ``failures`` 500s, then a 200 saying OK."""
+    error = {"error": {"message": "scripted 500", "type": "server_error"}}
+    message = {"role": "assistant", "content": "OK"}
+    answer = {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
+    for status, body in [(500, error)] * failures + [(200, answer)]:
+        httpserver.expect_ordered_request("/v1/chat/completions").respond_with_json(
+            body, status=status
+        )
 
 
 def sent_schema(llm, schema: type[BaseModel]) -> dict:
@@ -82,9 +114,14 @@ def test_the_retry_count_sent_is_read_from_settings_when_the_call_runs(
     assert llm.requests[0]["num_retries"] == 3
 
 
-def test_a_callers_retry_count_wins(llm):
-    ask(llm.replies("ok"), num_retries=2)
+def test_every_call_asks_litellm_for_two_retries(llm):
+    ask(llm.replies("ok"))
     assert llm.requests[0]["num_retries"] == 2
+
+
+def test_a_callers_retry_count_wins(llm):
+    ask(llm.replies("ok"), num_retries=7)
+    assert llm.requests[0]["num_retries"] == 7
 
 
 def test_an_empty_structured_reply_is_rerolled_with_the_same_request(llm):
@@ -151,24 +188,36 @@ def test_without_a_completion_the_request_goes_to_litellm(llm, monkeypatch):
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_a_transient_server_error_is_retried(httpserver):
-    error = {"error": {"message": "scripted 500", "type": "server_error"}}
-    message = {"role": "assistant", "content": "OK"}
-    for status, body in [
-        (500, error),
-        (500, error),
-        (200, {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}),
-    ]:
-        httpserver.expect_ordered_request("/v1/chat/completions").respond_with_json(
-            body, status=status
-        )
-    reply = litellm_chat_completion(
-        system_prompt="s",
-        user_prompt="u",
-        model="hosted_vllm/fake",
-        api_base=httpserver.url_for("/v1"),
-        api_key="sk-fake",
+    fails_then_answers(httpserver, failures=2)
+    assert ask_vllm(httpserver) == "OK"
+    assert len(httpserver.log) == 3
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_server_failing_three_times_in_a_row_fails_the_call(httpserver):
+    fails_then_answers(httpserver, failures=3)
+    with pytest.raises(litellm.InternalServerError, match="scripted 500"):
+        ask_vllm(httpserver)
+    assert len(httpserver.log) == 3
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_request_refused_as_too_long_is_sent_three_times(httpserver):
+    httpserver.expect_request("/v1/chat/completions").respond_with_json(
+        VLLM_TOO_LONG, status=400
     )
-    assert reply == "OK"
+    with pytest.raises(litellm.ContextWindowExceededError, match="maximum context"):
+        ask_vllm(httpserver)
+    assert len(httpserver.log) == 3
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_refused_key_is_sent_three_times(httpserver):
+    httpserver.expect_request("/v1/chat/completions").respond_with_json(
+        {"error": "Unauthorized"}, status=401
+    )
+    with pytest.raises(litellm.AuthenticationError):
+        ask_vllm(httpserver)
     assert len(httpserver.log) == 3
 
 
