@@ -73,21 +73,6 @@ class SchemaError(ValueError):
     """Raised when a proposed schema is unusable (won't run, missing `Parse`, etc.)."""
 
 
-def _decorators(schema_code: str) -> list[str]:
-    """Every decorator in ``schema_code``, as ``@<decorator> on <name>``; ``[]`` for
-    code that does not parse, whose syntax error the interpreter reports."""
-    try:
-        tree = ast.parse(schema_code)
-    except SyntaxError:
-        return []
-    return [
-        f"@{ast.unparse(decorator)} on {node.name}"
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        for decorator in node.decorator_list
-    ]
-
-
 def check_schema(schema_code: str) -> type[BaseModel]:
     """Run ``schema_code`` in the restricted interpreter and return its ``Parse`` class.
 
@@ -175,6 +160,21 @@ def check_schema(schema_code: str) -> type[BaseModel]:
         )
 
     return parse_cls
+
+
+def _decorators(schema_code: str) -> list[str]:
+    """Every decorator in ``schema_code``, as ``@<decorator> on <name>``; ``[]`` for
+    code that does not parse, whose syntax error the interpreter reports."""
+    try:
+        tree = ast.parse(schema_code)
+    except SyntaxError:
+        return []
+    return [
+        f"@{ast.unparse(decorator)} on {node.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for decorator in node.decorator_list
+    ]
 
 
 def _find_untyped_objects(schema: Any, path: str = "$") -> list[str]:
