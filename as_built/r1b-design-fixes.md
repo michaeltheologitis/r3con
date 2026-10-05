@@ -46,7 +46,7 @@ Nothing I ran reached a provider.
 
 **Refused before any request and before a run folder exists**
 
-- **A misspelt override** raises a `TypeError` that names it.
+- **A misspelt override** raises a `TypeError` that names it [run].
 - **A config file field r3con does not read** raises a `ValueError` that lists the
   allowed fields. For `seed: 7` the message adds: `` `seed` was removed in r3con 0.2.0;
   to send one, put it in `params` (params: {seed: 7}). `` [run]
@@ -95,7 +95,7 @@ Nothing I ran reached a provider.
   manifest's `config` block and in the transcript headers [run: the two live artifacts
   compared].
 - Model-facing text changes only after a refused schema attempt, and in the timeout
-  observation.
+  observation [read].
 
 ## 2 · How it is built
 
@@ -113,8 +113,8 @@ Nothing I ran reached a provider.
 
 ### 2.1 Caps: `settings.settings_snapshot`
 
-`settings.py` is now a module of constants, with the same names and values as before and
-no class. One function reads and checks a run's caps:
+`settings.py` is a module of constants (`DOC_WORKERS`, `REASONING_MAX_TURNS`, …). One
+function reads and checks a run's caps:
 
 ```python
 def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, int]: ...
@@ -165,8 +165,7 @@ probe].
 
 ### 2.3 Stage records: `pipeline._recorded_stage`
 
-All four stages run inside this one context manager. It replaces four hand-written blocks
-and the reasoning-only `try`.
+All four stages run inside this one context manager.
 
 - **The body** passes `record.run` to the stage and fills `record.result`.
 - **On a clean exit** it flushes the calls (and `transcript.yaml` for schema and
@@ -176,23 +175,23 @@ and the reasoning-only `try`.
 - **Without a logger** it records nothing and adds no note.
 
 A call is recorded only after it returns, so the failing call is never in `calls.json`.
-The CLI prints the error and then each note; its own "partial artifacts" line is gone
-[read; run by tests and the CLI probe].
+The CLI prints the error and then each note [read; run by tests and the CLI probe].
 
 ### 2.4 The model's schema: `stages/structuring/parsing.check_schema`
 
-The signature is unchanged. It runs four steps:
+`check_schema(schema_code: str) -> type[BaseModel]` runs four steps:
 
 1. `_decorators` walks the AST and refuses any decorator, listing each one (e.g.
    `@field_validator('n') on pos, @classmethod on pos`) and saying to use `Field(...)`
    or a type instead.
 2. A fresh `LocalPythonExecutor` runs the code. It may also import pydantic, typing,
-   datetime, enum and decimal, uses its default 30 s timeout, and has the old pre-bound
-   names.
+   datetime, enum and decimal, uses its default 30 s timeout, and has the common
+   pydantic and typing names pre-bound.
 3. An `InterpreterError` or `ExecutionTimeoutError` becomes
    `SchemaError("Schema code failed to execute: …")`, the text `propose_schema` feeds
    back to the model.
-4. The 0.1.1 checks run on `executor.state`.
+4. The checks on the result run on `executor.state`: `Parse` exists, is a `BaseModel`,
+   rebuilds, has no untyped objects, and has only list fields.
 
 I tried six routes from an allowed module to `os`: `pydantic.main.sys`, `typing.sys`,
 `enum.sys`, `random._os`, `from pydantic import main`, and a function's `__globals__`.
@@ -213,25 +212,26 @@ and litellm's map says the model takes it.
 **Timeout.** `timeout_s` reaches the executor as the float it is given, with a pyright
 ignore on the vendored `int` annotation [read; run by tests and the local-server probe].
 
-### 2.6 Smaller changes
+### 2.6 The smaller seams
 
-- `parallel_map` is `list(ex.map(...))`; one worker runs in the calling thread.
-- **Seed is removed throughout.**
-  - `llm_kwargs` is `config.params` plus transport.
-  - The empty-reply re-roll re-sends the same request.
-  - A `seed=` passed to `runtime/llm.py` reaches the provider through `**kwargs`.
+- **`parallel_map`** is `list(ex.map(...))`. With one worker or one item, the calls run
+  in the calling thread.
+- **Requests** carry what `config.params` and the transport set, so they carry a seed
+  only when `params` has one. The empty-reply re-roll re-sends the same request, and a
+  `seed=` passed to `runtime/llm.py` reaches the provider through `**kwargs`.
 - **`stages/reasoning.py`.**
-  - `_LazyStr` is gone, and the parse is dumped to JSON once.
-  - tiktoken failures are narrowed to `(OSError, ValueError)`, with one warning.
-- **Removed.**
-  - `doc_ids`.
-  - The merge's non-list branch: `check_schema` refuses non-list fields.
-  - `runs._version()`.
-  - Five `noqa` markers [run].
-- **Docstrings** that named their callers or told history are rewritten [read, not
-  checked site by site].
-- **`examples/options.ipynb`** moves `seed=42` into `params`, and cell 5's stored
-  labels drop the seed [read; not executed].
+  - It dumps the parse to JSON once, and that string serves both `parse_block` and
+    `parse_json`.
+  - A tokenizer that cannot load (`OSError` or `ValueError`) falls back to a
+    4-characters-per-token estimate, with one warning.
+- **`_merge_with_source_docs`** concatenates every field, since `check_schema` admits
+  only list fields.
+- **The manifest** reads `r3con.__version__`.
+- **`noqa` markers.** Two remain in `src/` [run: grep].
+- **Docstrings** say what a thing does, not who calls it [read, not checked site by
+  site].
+- **`examples/options.ipynb`** passes its seed in `params`, and cell 5's stored output
+  shows labels without a seed [read; not executed].
 
 ## 3 · Divergences from the design
 
