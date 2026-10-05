@@ -152,7 +152,8 @@ def run_pipeline(
         task=task, documents=documents, model=model, prompt_version=config.prompts["relevance"],
         rounds=rounds, run=relevance_run, **llm_kwargs,
     )
-    relevance_snippets = relevance.snippets  # the relevant context feeds every later stage
+    # the relevant context feeds every later stage
+    relevance_snippets = relevance.snippets
     if relevance_run is not None:
         relevance_run.flush(write_transcript=False)
     if task_logger is not None:

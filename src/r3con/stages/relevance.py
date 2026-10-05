@@ -163,6 +163,7 @@ def surface_relevance(
 
     all_rounds: list[list[str]] = [run_round(None, 1)]
     for r in range(2, rounds + 1):
-        all_rounds.append(run_round(all_rounds[-1], r))  # only the previous round feeds in
+        # only the previous round feeds in
+        all_rounds.append(run_round(all_rounds[-1], r))
 
     return RelevantContext(snippets=all_rounds[-1], rounds=all_rounds)

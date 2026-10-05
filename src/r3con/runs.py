@@ -219,7 +219,8 @@ class StepRecord:
     messages: list[dict[str, Any]]
     response: dict[str, Any]  # {"role": ..., "content": ..., "finish_reason": ...}
     schema: dict[str, Any] | None = None
-    tokens: dict[str, int] | None = None  # {"prompt": int, "completion": int, "total": int}
+    # {"prompt": int, "completion": int, "total": int}
+    tokens: dict[str, int] | None = None
 
 
 class StageRun:

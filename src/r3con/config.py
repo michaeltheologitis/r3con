@@ -84,13 +84,17 @@ def normalize_model_name(model: str | None) -> str | None:
 class RunConfig(BaseModel):
     """Everything that shapes the output of one run (the experiment identity)."""
 
-    name: str = DEFAULT_CONFIG  # the config it was loaded from (the board's run label base)
+    # the config it was loaded from (the board's run label base)
+    name: str = DEFAULT_CONFIG
     model: str
     seed: int = 42
-    relevance_rounds: int = 2  # keep in sync with configs/default.yaml (the shipped default)
+    # keep in sync with configs/default.yaml (the shipped default)
+    relevance_rounds: int = 2
     prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
-    params: dict[str, Any] = Field(default_factory=dict)  # extra kwargs for litellm.completion
-    overrides: dict[str, Any] = Field(default_factory=dict)  # CLI overrides applied (recorded for the board)
+    # extra kwargs for litellm.completion
+    params: dict[str, Any] = Field(default_factory=dict)
+    # CLI overrides applied (recorded for the board)
+    overrides: dict[str, Any] = Field(default_factory=dict)
 
     def _identity_parts(self) -> list[str]:
         """The output-shaping components that make up the run identity, in label order, each a
