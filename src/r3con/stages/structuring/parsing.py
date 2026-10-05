@@ -1,18 +1,19 @@
-"""Stage 2, step 2 — parsing: read each document whole and fill instances of the
-per-task Pydantic schema.
+"""Stage 2, step 2 — parsing: read each document and fill instances of the per-task
+Pydantic schema.
 
-Every document is assumed to fit in the model's context, so there is **no
-chunking**. Parsing runs **one LLM call per document**, all documents in parallel
-(bounded by :func:`r3con.settings.active_doc_workers`):
+Each document is read whole, or in parts when it is too long for the model's window
+(:mod:`r3con.splitting`). Parsing runs **one LLM call per document** (one per part of a
+document read in parts), all documents in parallel (bounded by
+:func:`r3con.settings.active_doc_workers`):
 
 - The **system prompt** carries the task, the proposed schema source, and the
   relevant context (every document's note, not just this one's) — the
   cross-document context that lets a single document be read in light of what the
   rest of the corpus says.
-- The **user message** is the document being parsed, whole.
+- The **user message** is the document being parsed, or one part of it.
 
-Each document yields one populated ``Parse``; the per-document parses merge into
-one (list fields concatenated in document order). Every merged record is tagged
+Each document (or part) yields one populated ``Parse``; the parses merge into one
+(list fields concatenated in document order, a document's parts in order). Every merged record is tagged
 with its **source-document index** (``ParseResult.source_docs``), which the
 reasoning stage stamps onto each record as ``"document": N`` (the id-injection) so
 the model can name the document a fact came from.
@@ -29,6 +30,7 @@ document's records.
 from __future__ import annotations
 
 import ast
+import json
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -48,6 +50,7 @@ from r3con.runtime.python_executor import (
     LocalPythonExecutor,
 )
 from r3con.settings import active_doc_workers
+from r3con.splitting import Splits
 from r3con.stages.relevance import Snippet, render_relevance
 
 _log = get_logger("structuring.parsing")
@@ -221,6 +224,22 @@ def _parsing_retry_prompt(document: str, error: str) -> str:
     )
 
 
+def _system_prompt(
+    task: str,
+    schema_code: str,
+    relevance_snippets: Sequence[Snippet] | None,
+    prompt_version: str,
+) -> str:
+    """The parsing system prompt: the task, the schema source, the relevant context."""
+    return load_prompt(
+        "structuring/parsing",
+        version=prompt_version,
+        task=task,
+        schema_code=schema_code,
+        relevance=render_relevance(relevance_snippets),
+    )
+
+
 def parse_one_document(
     *,
     document: str,
@@ -235,7 +254,7 @@ def parse_one_document(
     kind: str = "llm_call",
     **llm_kwargs: Any,
 ) -> BaseModel:
-    """Parse one whole ``document`` into a populated ``Parse``.
+    """Parse one ``document``, or one part of one, into a populated ``Parse``.
 
     The system prompt carries the task, the schema source, and the relevant
     context (``relevance_snippets`` — every document's note, the
@@ -258,12 +277,8 @@ def parse_one_document(
             f"{settings.PARSING_MAX_ATTEMPTS})."
         )
 
-    system_prompt = load_prompt(
-        "structuring/parsing",
-        version=prompt_version,
-        task=task,
-        schema_code=schema_code,
-        relevance=render_relevance(relevance_snippets),
+    system_prompt = _system_prompt(
+        task, schema_code, relevance_snippets, prompt_version
     )
     user_prompt = document
     last_error: str = ""
@@ -322,21 +337,24 @@ def parse_documents(
     max_attempts: int | None = None,
     run: StageRun | None = None,
     workers: int | None = None,
+    splits: Splits | None = None,
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
 
-    Each document is fed **whole** (no chunking) through one
-    :func:`parse_one_document` call; the documents are processed **in parallel**
-    (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`). Every
-    call's system prompt carries the same relevant context, so each
-    document is read with the cross-document context even though the calls are
-    independent.
+    Each document is read whole, or in parts when too long for the model's window,
+    through one :func:`parse_one_document` call per part; the documents are processed
+    **in parallel** (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`).
+    Every call's system prompt carries the same relevant context, so each document is
+    read with the cross-document context even though the calls are independent.
 
-    The per-document parses merge into one (list fields concatenated in document
-    order), and each merged record is tagged with its source-document index in
-    :attr:`ParseResult.source_docs`. ``max_attempts`` bounds each document's retries
-    (see :func:`parse_one_document`). Returns a :class:`ParseResult`.
+    The parts come from ``splits`` (built over ``documents``; ``None`` builds one), so
+    parsing starts from the parts relevance left and may cut them further; it never
+    renumbers. The parses merge into one (list fields concatenated in document order, a
+    document's parts in order), and each merged record is tagged with its
+    source-document index in :attr:`ParseResult.source_docs`, a part's records with its
+    document's. ``max_attempts`` bounds each call's retries (see
+    :func:`parse_one_document`). Returns a :class:`ParseResult`.
     """
     if not documents:
         return ParseResult(
@@ -344,30 +362,37 @@ def parse_documents(
         )
 
     max_workers = workers if workers is not None else active_doc_workers()
-    _log.info(
-        "parsing %d doc(s) (≤%d parallel, no chunking)", len(documents), max_workers
-    )
+    reader = splits if splits is not None else Splits(documents, model=model)
+    rest = _system_prompt(
+        task, schema_code, relevance_snippets, prompt_version
+    ) + json.dumps(parse_cls.model_json_schema())
+    _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
-    def one(i: int, doc: str) -> BaseModel:
+    def one(i: int, _document: str) -> list[BaseModel]:
         _log.info("parse doc %d/%d", i + 1, len(documents))
-        return parse_one_document(
-            document=doc,
-            schema_code=schema_code,
-            parse_cls=parse_cls,
-            task=task,
-            prompt_version=prompt_version,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            max_attempts=max_attempts,
-            run=run,
-            # ``kind`` encodes the doc so the per-call cost ledger (calls.json)
-            # ties each call back to its source document.
-            kind=f"parse-d{i}",
-            **llm_kwargs,
+        return reader.read_in_parts(
+            i,
+            call="parse",
+            rest=rest,
+            send=lambda part, kind: parse_one_document(
+                document=part,
+                schema_code=schema_code,
+                parse_cls=parse_cls,
+                task=task,
+                prompt_version=prompt_version,
+                relevance_snippets=relevance_snippets,
+                model=model,
+                max_attempts=max_attempts,
+                run=run,
+                kind=kind,
+                **llm_kwargs,
+            ),
         )
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
-    parse, source_docs = _merge_with_source_docs(list(enumerate(per_doc)), parse_cls)
+    parse, source_docs = _merge_with_source_docs(
+        [(i, part) for i, parts in enumerate(per_doc) for part in parts], parse_cls
+    )
     counts = {f: len(v) for f, v in source_docs.items()}
     _log.info(
         "parsing complete · records per list field: %s", counts or "(no list fields)"

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import textwrap
 import time
 
@@ -7,6 +8,8 @@ import litellm
 import pytest
 from pydantic import ValidationError
 
+from r3con.runs import StageRun, TaskLogger
+from r3con.splitting import Splits
 from r3con.stages.structuring.parsing import (
     SchemaError,
     check_schema,
@@ -15,6 +18,10 @@ from r3con.stages.structuring.parsing import (
 )
 
 MODEL = "openai/gpt-6-luna"
+QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+# 3,920 characters in 20 paragraphs, P0 to P19: refused whole under a 5,500-character
+# limit beside the parse prompt, read in halves that start at P0 and P10.
+LONG = "\n\n".join(f"P{i}. " + "word " * 38 for i in range(20))
 SCHEMA = """from pydantic import BaseModel
 
 
@@ -93,6 +100,12 @@ def rows_named_after_the_document(request) -> str:
     return json.dumps({"rows": [{"who": f"{document}#a"}, {"who": f"{document}#b"}]})
 
 
+def a_row_named_by_the_first_word(request) -> str:
+    """One row per document or part, naming its first word."""
+    first_word = re.match(r"\w+", request["messages"][1]["content"]).group()
+    return json.dumps({"rows": [{"who": first_word}]})
+
+
 def parse_one(llm, **kwargs):
     return parse_one_document(
         document="memo",
@@ -106,14 +119,14 @@ def parse_one(llm, **kwargs):
     )
 
 
-def parse_all(llm, documents, **kwargs):
+def parse_all(llm, documents, model=MODEL, **kwargs):
     return parse_documents(
         documents=documents,
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who is mentioned?",
         prompt_version="v1",
-        model=MODEL,
+        model=model,
         completion=llm,
         **kwargs,
     )
@@ -409,3 +422,28 @@ def test_progress_is_logged_per_document_at_info(llm, caplog):
     parse_all(llm.answers(parsing=rows_named_after_the_document), DOCS[:2], workers=1)
     assert "parse doc 1/2" in caplog.text
     assert "parse doc 2/2" in caplog.text
+
+
+def test_a_refused_document_is_parsed_in_parts_and_every_record_keeps_its_index(llm):
+    llm.refuses_over(5_500).answers(parsing=a_row_named_by_the_first_word)
+    result = parse_all(llm, [DOCS[0], LONG, DOCS[2]], model=QWEN, workers=3)
+    assert [row.who for row in result.parse.rows] == ["Alpha", "P0", "P10", "Gamma"]
+    assert result.source_docs == {"rows": [0, 1, 1, 2]}
+
+
+def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
+    def refuses_the_whole(part, kind):
+        if part == LONG:
+            raise litellm.ContextWindowExceededError(
+                message="too long", model=QWEN, llm_provider="hosted_vllm"
+            )
+        return "a note"
+
+    splits = Splits([LONG], model=QWEN)
+    splits.read_in_parts(0, call="relevance-r1", rest="", send=refuses_the_whole)
+    run = StageRun(stage="parsing", task_logger=TaskLogger("run", root=tmp_path))
+    llm.answers(parsing=a_row_named_by_the_first_word)
+    parse_all(llm, [LONG], model=QWEN, splits=splits, run=run)
+    assert [step.kind for step in run.steps] == ["parse-d0c0", "parse-d0c1"]
+    sent = [request["messages"][1]["content"] for request in llm.requests]
+    assert sent == splits.parts(0)
