@@ -17,6 +17,8 @@ merged as 0.2.0). Line numbers below are at `cfc17bc`.
   item 5, §2.3, §7, §8, §9 and §11 follow them. Stop trusting the first version's three
   stop forms and its "names TASK-36". The prototype, re-run with the rulings, passes E2 to
   E5 and the new tests of §8 at 1.101 and 1.104.
+- 2026-10-05 · built (Implementer). §2.5 lists where the build departs from this design
+  and what it found; §4's 401 row is corrected; §9 gains E3's diff against `cfc17bc`, run.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, and every place this design
 decides something the spec left open or departs from it. §4 is R2.1. §5 is the new module
@@ -160,6 +162,50 @@ Three rules shape R2.2:
    `litellm.encode` (§5.2). Characters are not a bound, because one CJK character can be
    several tokens. Tests pin both sides (§8).
 
+### 2.5 Found while building (Implementer, 2026-10-05)
+
+1. **A 401 raises `litellm.AuthenticationError`**, not `BadRequestError` (§4's table, now
+   corrected). It is still sent 3 times. `test_a_refused_key_is_sent_three_times` asserts
+   the class litellm raises.
+2. **The caller-override test passed 2, the new default.** At `LLM_NUM_RETRIES = 2` it
+   would pass with the caller's value ignored. `test_a_callers_retry_count_wins` now
+   passes 7.
+3. **The widened types land with relevance (step 4), not in steps 5 to 7.** Once
+   `RelevantContext.snippets` is `list[Snippet]`, pyright rejects the pipeline's calls to
+   `propose_schema`, `parse_documents` and `reason`, and `Answer(relevant_context=…)`. So
+   step 4 also widens those three parameters and joins `Answer.relevant_context`; steps 5
+   and 7 add only behaviour, and every commit type-checks.
+4. **The measured stop names the first part.** When the rest alone is over the line,
+   every part is, so the event, the error's message and the note name part 0's kind, and
+   the estimate is the rest plus part 0.
+5. **`splitting.py` imports `ContextWindowExceededError` from `litellm.exceptions`.**
+   pyright reports `litellm.ContextWindowExceededError` as a private import
+   (`reportPrivateImportUsage`). It is the same class.
+6. **Docstrings §6.7 did not list.** `r3con/__init__.py` ("every document is parsed,
+   whole"), `stages/structuring/__init__.py` ("parse each document, whole") and
+   `parse_one_document` ("one whole document") now say a document may be read in parts.
+7. **E4's measured row is `window(6_000)`, a 5,100-token line.** Measured on the suite's
+   fake: the registry is 7,749 tokens, its halves 3,863 and 3,886, its quarters 1,925 to
+   1,959; relevance's rest is 692 tokens in round 1 and 828 in round 2; parsing's rest is
+   about 1,780 with the 2,000-character notes. §8's inequality then needs a line from
+   4,714 to about 5,640.
+8. **`test_a_stopped_run_keeps_its_calls_and_splits` stops in parsing.** The schema call
+   carries every note under a prompt about 3,600 characters longer than parsing's, and it
+   is never split, so the test sizes the run to keep the schema under the limit: two
+   5,000-character documents, 3,000-character notes, a 13,500-character limit.
+9. **A Router alias makes litellm print to stdout.** For a model string whose provider
+   litellm does not recognise (`my-router-alias`), `get_model_info` prints litellm's
+   "Provider List" banner to stdout, twice, unless `litellm.suppress_debug_info` is set.
+   Before R2, a run on a Router alias never asked litellm about the model string. The CLI
+   is not affected, since it takes no `completion=`. Silencing it means changing
+   litellm's global setting or redirecting stdout around the lookup, so it is left as it
+   is, for the Conductor.
+10. **Tests §8 did not name**: `test_a_text_of_one_character_cannot_be_halved`,
+    `test_the_measured_stop_says_what_was_estimated_against_which_window` (§5.6's
+    message, exactly) and `test_a_split_documents_notes_join_in_order_without_the_empty_ones`
+    (`join_parts`). E6's job has a 45-minute timeout, and each E6 case prints one line of
+    measurements before it asserts.
+
 ## 3 · Order of work
 
 Each step is test-first, and CI is green after every step.
@@ -190,7 +236,7 @@ counts on both):
 | Server answers | `num_retries=10` (today) | `num_retries=2` (R2.1) |
 | --- | --- | --- |
 | 400, context window | 11 requests, `ContextWindowExceededError` | 3 requests, same error |
-| 401, wrong key | 11 requests, `BadRequestError` | 3 requests, same error |
+| 401, wrong key | 11 requests, `AuthenticationError` (§2.5) | 3 requests, same error |
 | 500, 500, then 200 | recovers on request 3 | recovers on request 3 |
 | 500 four times, then 200 | recovers on request 5 | fails after 3, `InternalServerError` |
 
@@ -913,6 +959,10 @@ round 1 and 3,900 in round 2, and the parse prompt about 3,800.
 worker. It runs on `cfc17bc`'s `src/` and on the head's (`PYTHONPATH` to each), dumps
 every request without `num_retries`, and diffs. The as-built document reports it. The
 prototype gave 17 requests, all identical; the labels differ in `reason=` only.
+*Run* (Implementer, head `71ac060`, litellm 1.104): 17 requests on each side, identical
+apart from `num_retries` (10 at `cfc17bc`, 2 at the head); the labels are
+`default[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]` and
+`…reason=v2)]`, and the answers are equal.
 
 **E6 · a document read in parts still answers.** `tests/test_experiments.py` holds one
 test, marked like `test_live.py` (`live`, `enable_socket`, skipped without
@@ -1036,3 +1086,4 @@ would be 0.3.0: new behaviour, a setting and a prompt version, and nothing remov
 - **A server that truncates** (Ollama's default) never refuses. A mapped window still
   measures (§2.3 item 4).
 - **E6's null** ends R2.2 as designed (spec §4), and it comes back to the Conductor.
+- **A Router alias prints litellm's banner to stdout** once per run (§2.5 item 9).
