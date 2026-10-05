@@ -319,10 +319,11 @@ class Splits:
         """Halve every part of ``documents[doc]`` longer than one character, record the
         split with the provider's ``error`` message, if any, and return the number of
         parts."""
-        text = self._documents[doc]
-        bounds = itertools.pairwise([0, *self._cuts[doc], len(text)])
+        starts = [0, *self._cuts[doc]]
         cuts = [
-            start + halve(text[start:end]) for start, end in bounds if end - start > 1
+            start + halve(part)
+            for start, part in zip(starts, self.parts(doc))
+            if len(part) > 1
         ]
         self._cuts[doc] = sorted([*self._cuts[doc], *cuts])
         n_parts = len(self._cuts[doc]) + 1
