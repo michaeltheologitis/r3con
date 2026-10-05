@@ -62,6 +62,10 @@ LLM_EMPTY_CONTENT_RETRIES = 3
 # per field + a prominent note, so the prompt can't blow up.
 REASONING_PARSE_MAX_TOKS = 16000
 
+# The share of the model's input window kept free when r3con estimates whether a
+# request fits; a request estimated over the rest is split before it is sent.
+WINDOW_MARGIN_PERCENT = 15
+
 # The smallest value of each cap a run can execute under, keyed as in the snapshot.
 _FLOORS: dict[str, int] = {
     "doc_workers": 1,
@@ -71,7 +75,11 @@ _FLOORS: dict[str, int] = {
     "llm_num_retries": 0,
     "llm_empty_content_retries": 0,
     "reasoning_parse_max_toks": 0,
+    "window_margin_percent": 0,
 }
+
+# The largest value of a cap that has one, keyed as in the snapshot.
+_CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 
 
 def active_doc_workers() -> int:
@@ -96,8 +104,9 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
     ``RunConfig``, which is the run's identity.
 
     Raises:
-        ValueError: naming the first cap that is not an integer (a ``bool`` is not)
-            or is below its floor, e.g. ``REASONING_MAX_TURNS must be >= 1, got 0.``
+        ValueError: naming the first cap that is not an integer (a ``bool`` is not),
+            is below its floor, or is above its ceiling, e.g.
+            ``REASONING_MAX_TURNS must be >= 1, got 0.``
     """
     snapshot = {
         "doc_workers": active_doc_workers(),
@@ -109,13 +118,20 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         "llm_num_retries": LLM_NUM_RETRIES,
         "llm_empty_content_retries": LLM_EMPTY_CONTENT_RETRIES,
         "reasoning_parse_max_toks": REASONING_PARSE_MAX_TOKS,
+        "window_margin_percent": WINDOW_MARGIN_PERCENT,
     }
     for key, value in snapshot.items():
-        floor = _FLOORS[key]
-        if type(value) is not int:  # a bool is not a cap
-            raise ValueError(
-                f"{key.upper()} must be an integer >= {floor}, got {value!r}."
-            )
-        if value < floor:
-            raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
+        check_cap(key, value)
     return snapshot
+
+
+def check_cap(key: str, value: object) -> None:
+    """Raise ``ValueError``, naming the cap, unless ``value`` is an integer from the
+    floor of the cap ``key`` (keyed as in the snapshot) to its ceiling, if it has one."""
+    floor, ceiling = _FLOORS[key], _CEILINGS.get(key)
+    if type(value) is not int:  # a bool is not a cap
+        raise ValueError(f"{key.upper()} must be an integer >= {floor}, got {value!r}.")
+    if value < floor:
+        raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
+    if ceiling is not None and value > ceiling:
+        raise ValueError(f"{key.upper()} must be <= {ceiling}, got {value}.")

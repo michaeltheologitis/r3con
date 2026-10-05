@@ -19,6 +19,9 @@ content (a 200 with no JSON, which transport retries never see).
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
 
+Two helpers ask litellm something without calling a provider: :func:`count_tokens` and
+:func:`quiet_litellm`.
+
 ``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
 though nothing in this package imports it** — litellm imports it lazily, on the retry path
 only. Drop it and every call that hits a transient error fails instead of retrying, on the
@@ -27,7 +30,9 @@ one path you are least likely to exercise before shipping.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import logging
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import litellm
@@ -230,6 +235,31 @@ def litellm_chat_completion(
         _log.warning(
             "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
         )
+
+
+def count_tokens(text: str) -> int:
+    """The cl100k_base tokens in ``text``, from the vocabulary litellm ships: the same
+    count whatever the model, and offline."""
+    return len(litellm.encode(text=text))
+
+
+@contextlib.contextmanager
+def quiet_litellm() -> Iterator[None]:
+    """Keep litellm from printing during the block, then restore its settings.
+
+    litellm prints its provider list to stdout when asked about a model string it cannot
+    place (a Router alias). Its settings are globals, so the block silences another
+    thread's litellm calls too.
+    """
+    logger = logging.getLogger("LiteLLM")
+    suppress, level = litellm.suppress_debug_info, logger.level
+    litellm.suppress_debug_info = True
+    logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        litellm.suppress_debug_info = suppress
+        logger.setLevel(level)
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
