@@ -1,131 +1,26 @@
-"""`r3con.r3con` — the public surface.
-
-The contract these pin: **`documents` is a sequence of document texts**, and reading the
-filesystem is a separate, explicit job. Nothing sniffs a string to guess which you meant.
-"""
-
-from __future__ import annotations
-
-import os
-import tempfile
 from pathlib import Path
 
-from r3con.r3con import (
-    TEXT_SUFFIXES,
-    _check_documents,
-    read_documents,
-    run,
-)
+import pytest
+
+import r3con
+from r3con import Answer, RunConfig
+from r3con import r3con as namespace
+from r3con.config import PROMPT_STAGES
+from r3con.r3con import read_documents, run
 
 
-def _tree(root: Path) -> None:
+def write_tree(root: Path) -> None:
+    (root / "nested").mkdir(parents=True)
     (root / "a.md").write_text("alpha document", encoding="utf-8")
     (root / "b.txt").write_text("beta document", encoding="utf-8")
-    (root / "nested").mkdir()
     (root / "nested" / "c.md").write_text("gamma document", encoding="utf-8")
     (root / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n not text")
     (root / "empty.txt").write_text("   \n", encoding="utf-8")
 
 
-# ---------- documents are texts ----------
-
-
-def test_documents_is_a_list_of_strings() -> None:
-    assert _check_documents(["one", "two"]) == ["one", "two"]
-    assert _check_documents(("one", "two")) == ["one", "two"]  # any sequence
-    assert _check_documents(iter(["one", "two"])) == ["one", "two"]  # any iterable
-
-
-def test_a_document_is_never_read_off_disk_behind_your_back() -> None:
-    """The regression this contract exists to prevent: a short document whose text
-    happens to match a filename used to be silently replaced by that file's contents."""
-    with tempfile.TemporaryDirectory() as tmp:
-        cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
-            Path("Q3 was strong.").write_text(
-                "SOMETHING ELSE ENTIRELY", encoding="utf-8"
-            )
-            assert _check_documents(["Q3 was strong."]) == ["Q3 was strong."]
-        finally:
-            os.chdir(cwd)
-
-
-def test_a_bare_string_is_refused_not_guessed() -> None:
-    """Ambiguous input gets an error that says what to do, rather than a guess."""
-    for bad in ("./docs", "just some document text"):
-        try:
-            _check_documents(bad)
-        except TypeError as e:
-            assert "read_documents" in str(e) and "[text]" in str(e)
-        else:
-            raise AssertionError(f"expected TypeError for {bad!r}")
-    try:
-        _check_documents(Path("./docs"))
-    except TypeError:
-        pass
-    else:
-        raise AssertionError("expected TypeError for a Path")
-
-
-def test_non_strings_are_refused_with_the_offending_index() -> None:
-    try:
-        _check_documents(["fine", 42])
-    except TypeError as e:
-        assert "item 1" in str(e) and "int" in str(e)
-        return
-    raise AssertionError("expected TypeError")
-
-
-def test_blank_documents_are_refused_with_the_offending_index() -> None:
-    # Refused, never dropped. Dropping would renumber every index the run reports —
-    # relevant_context[i], the source_docs indices, and the "document" N the agent cites
-    # in its answer text, where no docstring could correct it afterwards.
-    try:
-        _check_documents(["real", "   ", "also real"])
-    except ValueError as e:
-        assert "item 1" in str(e)
-    else:
-        raise AssertionError("expected ValueError for a blank entry")
-    try:
-        _check_documents(["  ", ""])
-    except ValueError as e:
-        assert "item 0" in str(e)
-    else:
-        raise AssertionError("expected ValueError for an all-blank list")
-
-
-def test_accepted_documents_are_returned_unchanged_so_indices_align() -> None:
-    # The invariant the whole refusal exists to protect: what the pipeline indexes is
-    # exactly what the caller passed, so Answer.relevant_context[i] describes documents[i].
-    docs = ["one", "two", "three"]
-    assert _check_documents(docs) == docs
-
-
-def test_run_validates_documents_before_spending_anything() -> None:
-    for bad, exc in (("./docs", TypeError), ([], ValueError), (["  "], ValueError)):
-        try:
-            run("q", bad)
-        except exc:
-            continue
-        raise AssertionError(f"expected {exc.__name__} for {bad!r}")
-
-
-# ---------- reading the filesystem is a separate job ----------
-
-
-def test_read_documents_walks_a_directory_in_sorted_order() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _tree(root)
-        docs = read_documents(root)
-    # a.md, b.txt, nested/c.md — sorted by path; the PNG skipped, the blank file dropped
-    assert docs == ["alpha document", "beta document", "gamma document"]
-
-
-def _write_pdf(path: Path, text: str | None = None) -> None:
-    """A minimal but VALID PDF (correct xref offsets + %%EOF), with or without a text
-    layer. Generated rather than committed as a binary blob, so the fixture is readable."""
+def write_pdf(path: Path, text: str | None = None) -> None:
+    """A minimal valid PDF (correct xref offsets and %%EOF), with or without a text
+    layer: generated, so the fixture stays readable."""
     objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>"]
     if text:
         stream = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET"
@@ -147,174 +42,143 @@ def _write_pdf(path: Path, text: str | None = None) -> None:
     out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
     for o in offsets:
         out += f"{o:010d} 00000 n \n".encode()
-    out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n".encode()
+    out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R>>\n".encode()
+    out += f"startxref\n{xref}\n%%EOF\n".encode()
     path.write_bytes(bytes(out))
 
 
-def test_pdfs_are_extracted_and_a_bad_one_never_sinks_the_run() -> None:
-    assert ".pdf" in TEXT_SUFFIXES
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _write_pdf(root / "a_memo.pdf", "Incidents this quarter: 7.")
-        _write_pdf(root / "b_scanned.pdf")  # valid PDF, no text layer — a scan
-        (root / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
-        (root / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
-        docs = read_documents(root)
-    # The scan and the corrupt file are logged and dropped — one unreadable file among
-    # many must not abort a run before a single token is spent.
-    assert len(docs) == 2, docs
-    assert "Incidents this quarter: 7." in docs[0]
-    assert "a plain memo" in docs[1]
+@pytest.mark.parametrize(
+    ("documents", "error", "message"),
+    [
+        ("./docs", TypeError, r"not a single string or path.*\[text\].*read_documents"),
+        ("just some document text", TypeError, "not a single string or path"),
+        (Path("./docs"), TypeError, "not a single string or path"),
+        (42, TypeError, "must be a sequence of strings — got int"),
+        (["fine", 42], TypeError, "item 1 is int"),
+        (["real", "   ", "also real"], ValueError, "item 1 is blank"),
+        (["  ", ""], ValueError, "item 0 is blank"),
+        ([], ValueError, "is empty"),
+    ],
+)
+def test_documents_that_are_not_texts_are_refused_before_any_request(
+    llm, documents, error, message
+):
+    with pytest.raises(error, match=message):
+        run("Who?", documents, completion=llm)
+    assert llm.requests == []
 
 
-def test_read_documents_skips_binaries() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _tree(root)
-        assert not any("PNG" in d for d in read_documents(root))
-    assert ".png" not in TEXT_SUFFIXES
+@pytest.mark.parametrize("wrap", [list, tuple, iter])
+def test_each_document_text_is_read_as_given_and_reported_in_order(answering_llm, wrap):
+    documents = ["one", "two", "three"]
+    result = run("Who?", wrap(documents), completion=answering_llm)
+    assert result.relevant_context == [f"Notes on {d}." for d in documents]
+    assert result.answer == "one; two; three"
 
 
-def test_read_documents_expands_a_glob() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _tree(root)
-        cwd = os.getcwd()
-        os.chdir(tmp)
-        try:
-            assert read_documents("*.md") == ["alpha document"]
-        finally:
-            os.chdir(cwd)
+def test_a_document_that_names_a_file_is_never_read_off_disk(answering_llm, tmp_path):
+    (tmp_path / "Q3 was strong.").write_text("SOMETHING ELSE", encoding="utf-8")
+    result = run("Who?", ["Q3 was strong."], completion=answering_llm)
+    assert result.answer == "Q3 was strong."
+    reads = answering_llm.requests_for("relevance")
+    assert {request["messages"][1]["content"] for request in reads} == {
+        "Q3 was strong."
+    }
 
 
-def test_read_documents_accepts_several_sources_in_order() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        (root / "second.txt").write_text("second", encoding="utf-8")
-        (root / "first.txt").write_text("first", encoding="utf-8")
-        assert read_documents([root / "first.txt", root / "second.txt"]) == [
-            "first",
-            "second",
-        ]
+def test_a_prebuilt_config_refuses_overrides_it_would_swallow(llm):
+    config = RunConfig(model="openai/m", prompts=dict.fromkeys(PROMPT_STAGES, "v1"))
+    with pytest.raises(ValueError, match=r"already a RunConfig.*\['model'\]"):
+        run("q", ["a document"], config=config, model="openai/other", completion=llm)
+    assert llm.requests == []
 
 
-def test_read_documents_raises_when_a_source_matches_nothing() -> None:
-    try:
-        read_documents(Path("/definitely/not/here/at/all"))
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
-
-
-def test_read_documents_never_treats_its_argument_as_text() -> None:
-    """It is a filesystem reader; a string that is not a path is an error, not a document."""
-    try:
-        read_documents("this is document text, not a path")
-    except FileNotFoundError:
-        return
-    raise AssertionError("expected FileNotFoundError")
-
-
-def test_undecodable_bytes_do_not_sink_the_read() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        f = Path(tmp) / "bad.txt"
-        f.write_bytes(b"good text \xff\xfe more text")
-        docs = read_documents(f)
-    assert len(docs) == 1 and "good text" in docs[0] and "more text" in docs[0]
-
-
-def test_the_two_compose() -> None:
-    """The documented folder path: read, then answer."""
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        _tree(root)
-        assert _check_documents(read_documents(root)) == [
-            "alpha document",
-            "beta document",
-            "gamma document",
-        ]
-
-
-# ---------- the rest of the surface ----------
-
-
-def test_the_namespace_import_shape_works() -> None:
-    from r3con import r3con as ns
-
-    assert callable(ns.run) and callable(ns.read_documents)
-    import r3con as pkg
-
-    assert pkg.run is ns.run
-    from r3con import Answer
-    from r3con import run as flat
-
-    assert flat is ns.run
-    assert Answer is ns.Answer
-
-
-def test_answer_object_exposes_the_intermediate_views() -> None:
-    from r3con.pipeline import Answer
-
-    a = Answer(
-        answer="42",
-        relevant_context=["doc one's note", ""],
-        structured_context={"rows": [{"document": 1}]},
-        schema_code="class Parse(BaseModel): ...",
-        source_docs={"rows": [0]},
-        run_dir=None,
+def test_run_answers_through_the_callers_completion(answering_llm):
+    result = run(
+        "Who?", ["Halloran memo"], completion=answering_llm, save_artifacts=False
     )
-    assert a.answer == "42" and str(a) == "42"
-    assert a.relevant_context == ["doc one's note", ""]
-    assert a.structured_context["rows"][0]["document"] == 1
-    assert "Parse" in a.schema_code and a.source_docs == {"rows": [0]}
+    assert result.answer == "Halloran memo"
 
 
-def test_run_rejects_overrides_that_a_prebuilt_config_would_swallow() -> None:
-    from r3con.config import RunConfig
-
-    cfg = RunConfig(
-        model="openai/m",
-        prompts={
-            k: "v1"
-            for k in (
-                "relevance",
-                "structuring/schema",
-                "structuring/parsing",
-                "reasoning",
-            )
-        },
+@pytest.mark.parametrize("save_artifacts", [True, False])
+def test_save_artifacts_decides_whether_a_run_folder_is_written(
+    answering_llm, tmp_path, save_artifacts
+):
+    logs = tmp_path / "logs"
+    run(
+        "Who?",
+        ["memo"],
+        completion=answering_llm,
+        logs_dir=logs,
+        save_artifacts=save_artifacts,
     )
-    try:
-        run("q", ["a document"], config=cfg, model="openai/other")
-    except ValueError as e:
-        assert "RunConfig" in str(e) and "model" in str(e)
-        return
-    raise AssertionError("expected ValueError")
+    assert logs.exists() is save_artifacts
 
 
-if __name__ == "__main__":
-    tests = [
-        test_documents_is_a_list_of_strings,
-        test_a_document_is_never_read_off_disk_behind_your_back,
-        test_a_bare_string_is_refused_not_guessed,
-        test_non_strings_are_refused_with_the_offending_index,
-        test_blank_documents_are_refused_with_the_offending_index,
-        test_accepted_documents_are_returned_unchanged_so_indices_align,
-        test_run_validates_documents_before_spending_anything,
-        test_read_documents_walks_a_directory_in_sorted_order,
-        test_pdfs_are_extracted_and_a_bad_one_never_sinks_the_run,
-        test_read_documents_skips_binaries,
-        test_read_documents_expands_a_glob,
-        test_read_documents_accepts_several_sources_in_order,
-        test_read_documents_raises_when_a_source_matches_nothing,
-        test_read_documents_never_treats_its_argument_as_text,
-        test_undecodable_bytes_do_not_sink_the_read,
-        test_the_two_compose,
-        test_the_namespace_import_shape_works,
-        test_answer_object_exposes_the_intermediate_views,
-        test_run_rejects_overrides_that_a_prebuilt_config_would_swallow,
+def test_the_run_folder_goes_under_logs_dir_and_is_returned(answering_llm, tmp_path):
+    result = run("Who?", ["memo"], completion=answering_llm, logs_dir=tmp_path / "out")
+    assert result.run_dir.parent == tmp_path / "out"
+    assert (result.run_dir / "manifest.json").is_file()
+
+
+def test_a_directory_is_read_recursively_in_path_order_skipping_binaries_and_blanks(
+    tmp_path,
+):
+    write_tree(tmp_path)
+    assert read_documents(tmp_path) == [
+        "alpha document",
+        "beta document",
+        "gamma document",
     ]
-    for t in tests:
-        t()
-        print(f"  PASS  {t.__name__}")
-    print(f"\nOK — {len(tests)} tests")
+
+
+def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
+    write_pdf(tmp_path / "a_memo.pdf", "Incidents this quarter: 7.")
+    write_pdf(tmp_path / "b_scanned.pdf")
+    (tmp_path / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
+    (tmp_path / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
+    documents = read_documents(tmp_path)
+    assert len(documents) == 2
+    assert "Incidents this quarter: 7." in documents[0]
+    assert documents[1] == "a plain memo"
+
+
+def test_a_glob_is_expanded_from_the_working_directory(tmp_path):
+    write_tree(tmp_path)
+    assert read_documents("*.md") == ["alpha document"]
+
+
+def test_several_sources_are_read_in_the_order_given(tmp_path):
+    (tmp_path / "second.txt").write_text("second", encoding="utf-8")
+    (tmp_path / "first.txt").write_text("first", encoding="utf-8")
+    sources = [tmp_path / "first.txt", tmp_path / "second.txt"]
+    assert read_documents(sources) == ["first", "second"]
+
+
+@pytest.mark.parametrize(
+    "source", [Path("/definitely/not/here/at/all"), "this is document text, not a path"]
+)
+def test_a_source_that_matches_nothing_is_an_error_not_a_document(source):
+    with pytest.raises(FileNotFoundError, match="No documents found at"):
+        read_documents(source)
+
+
+def test_undecodable_bytes_are_replaced_not_fatal(tmp_path):
+    (tmp_path / "bad.txt").write_bytes(b"good text \xff\xfe more text")
+    [document] = read_documents(tmp_path / "bad.txt")
+    assert document.startswith("good text ")
+    assert document.endswith(" more text")
+
+
+def test_a_folder_read_with_read_documents_can_be_answered_over(
+    answering_llm, tmp_path
+):
+    write_tree(tmp_path / "docs")
+    result = run("Who?", read_documents(tmp_path / "docs"), completion=answering_llm)
+    assert result.answer == "alpha document; beta document; gamma document"
+
+
+def test_run_is_reachable_from_the_package_and_from_its_module():
+    assert r3con.run is namespace.run
+    assert r3con.read_documents is namespace.read_documents
+    assert Answer is namespace.Answer
