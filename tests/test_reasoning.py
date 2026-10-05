@@ -8,14 +8,18 @@ from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
+READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 
 
-def reasoning_prompt(llm, **kwargs) -> str:
+def reasoning_prompt(llm, version="v1", **kwargs) -> str:
     """The system prompt ``reason`` sends on its first turn."""
     kwargs.setdefault("task", "?")
     kwargs.setdefault("schema_code", "class Parse(BaseModel): rows: list[Row]")
-    reason(model=MODEL, prompt_version="v1", completion=llm.replies(COMMIT), **kwargs)
-    return llm.requests[0]["messages"][0]["content"]
+    kwargs.setdefault("parsed", {"rows": [{"who": "Halloran"}]})
+    reason(
+        model=MODEL, prompt_version=version, completion=llm.replies(COMMIT), **kwargs
+    )
+    return llm.requests[-1]["messages"][0]["content"]
 
 
 def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
@@ -130,3 +134,26 @@ def test_the_sample_view_keeps_non_ascii_values_readable(parse, shown):
     sample = _sample_record_per_field(parse)
     assert shown in sample
     assert "\\u" not in sample
+
+
+@pytest.mark.parametrize("snippets", [None, [], ["Northgate logged 5.", ""]])
+def test_without_a_part_v2_is_the_v1_prompt_byte_for_byte(llm, snippets):
+    v1 = reasoning_prompt(llm, "v1", relevance_snippets=snippets)
+    assert reasoning_prompt(llm, "v2", relevance_snippets=snippets) == v1
+
+
+@pytest.mark.parametrize(
+    ("version", "snippets", "sentence", "part_heading"),
+    [
+        ("v2", [["part one", "part two"], "whole"], True, True),
+        ("v2", ["one", "two"], False, False),
+        ("v1", [["part one", "part two"], "whole"], False, True),
+    ],
+    ids=["v2-with-a-part", "v2-without", "v1-with-a-part"],
+)
+def test_v2_says_documents_were_read_in_parts_only_when_a_summary_is_a_part(
+    llm, version, snippets, sentence, part_heading
+):
+    prompt = reasoning_prompt(llm, version, relevance_snippets=snippets)
+    assert (READ_IN_PARTS in prompt) is sentence
+    assert ("### Document 1.1\npart one\n\n### Document 1.2" in prompt) is part_heading
