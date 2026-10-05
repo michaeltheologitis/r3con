@@ -18,17 +18,21 @@ Layout per ``logs/<run-folder>/``:
   block (:meth:`r3con.config.RunConfig.label`).
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
   rounds: [{round, snippets}], totals}`` — within a round the per-document relevance
-  snippets align to ``documents[i]``; the last round is the relevant context
-  that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
-  ``relevance-r{round}-d{doc}``).
+  snippets align to ``documents[i]``, a document read in parts holding a list of its
+  parts' notes; the last round is the relevant context that feeds downstream) +
+  ``calls.json`` (one per ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``,
+  or ``relevance-r{round}-d{doc}c{part}`` for a part).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
   (``{parsed, source_docs, totals}``) + ``calls.json`` (one entry per ``parse-d{doc}``
-  call).
+  call, or ``parse-d{doc}c{part}`` for a part).
 - ``reasoning/`` (stage 3) — ``result.json``
   (``{answer, terminated_by, n_turns, turns, totals}``) + ``calls.json`` +
   ``transcript.yaml``.
+- ``splits.json`` — only when a document was read in parts or splitting stopped
+  (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
+  each call read, and every split and stop with its cause.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and
@@ -42,7 +46,8 @@ Two layers in code:
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
   writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, finish_reason, prompt, output}``) and, unless skipped, ``transcript.yaml``
+  tokens, finish_reason, prompt, output}``, where ``chunk`` is the part index of a
+  document read in parts) and, unless skipped, ``transcript.yaml``
   (the readable message thread). Aggregate token totals are available via
   ``compute_totals()`` so callers fold them into the stage's ``result.json``.
 """
@@ -68,9 +73,9 @@ from pydantic import BaseModel
 from r3con.config import normalize_model_name
 from r3con.settings import active_logs_dir
 
-# Pulls the source-document index (and an optional chunk index) out of a call kind so
-# calls.json carries per-call provenance. Matches ``parse-d0`` and ``relevance-r2-d3``;
-# the chunk group is unused by this pipeline — documents are read whole, never chunked.
+# Pulls the source-document index (and, for a document read in parts, the part index)
+# out of a call kind so calls.json carries per-call provenance. Matches ``parse-d0``,
+# ``relevance-r2-d3`` and ``parse-d3c1``.
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
 
 

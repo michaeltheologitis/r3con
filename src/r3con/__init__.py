@@ -17,13 +17,13 @@ Three moves, in order:
    document has; it is a relation between the document, the question, and the rest of
    the collection, so it cannot be settled from a document in isolation.
 2. **structuring** — a Pydantic schema is proposed for exactly what this question needs,
-   then every document is parsed, whole, into instances of it.
+   then every document is parsed into instances of it.
 3. **reasoning** — the merged parse is loaded into a sandboxed Python runtime and the
    agent reasons there, over the structured records and the relevance snippets together.
 
-Nothing is chunked, and the whole collection is never placed in a single prompt: each
-document is read on its own, and information crosses document boundaries through the
-relevance snippets.
+The whole collection is never placed in a single prompt: each document is read on its
+own, in parts when it is too long for the model's window, and information crosses
+document boundaries through the relevance snippets.
 """
 
 from importlib import metadata as _metadata
