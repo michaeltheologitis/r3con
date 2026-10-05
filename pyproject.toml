@@ -38,11 +38,15 @@ dependencies = [
 # never reach the wheel). uv installs the `dev` group by default, so a plain `uv sync`
 # gives you an environment that can run examples/quickstart.ipynb as a notebook: pick
 # .venv as the kernel and go. `pip` is here because editors shell out to it when they
-# offer to fix a kernel themselves, and a uv-made venv has none.
+# offer to fix a kernel themselves, and a uv-made venv has none. The rest are the
+# checks and the test runner.
 [dependency-groups]
 dev = [
     "ipykernel>=6.29",
     "pip>=24.0",
+    "pyright>=1.1.414",
+    "pytest>=9.0",
+    "ruff>=0.16",
 ]
 
 [project.scripts]
@@ -58,6 +62,16 @@ Repository = "https://github.com/michaeltheologitis/r3con"
 [tool.uv.build-backend]
 module-name = "r3con"
 module-root = "src"
+
+[tool.ruff]
+extend-exclude = ["src/r3con/runtime/python_executor.py"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["src/r3con/runtime/python_executor.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]
