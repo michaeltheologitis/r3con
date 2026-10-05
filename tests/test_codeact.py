@@ -1,3 +1,4 @@
+import litellm
 import pytest
 
 from r3con import settings
@@ -15,6 +16,19 @@ ITEMS = {"items": [{"n": 1}, {"n": 2}, {"n": 3}]}
 CANNOT_DETERMINE = (
     "Cannot determine — the reasoning loop hit max_turns with no committed answer."
 )
+
+
+def refusal(message: str, error=litellm.BadRequestError) -> litellm.BadRequestError:
+    """A 400 as litellm raises it for an OpenAI model."""
+    return error(
+        f"litellm.BadRequestError: OpenAIException - {message}",
+        model="gpt-4o",
+        llm_provider="openai",
+    )
+
+
+def stop_refused() -> litellm.BadRequestError:
+    return refusal("Unsupported parameter: 'stop' is not supported with this model.")
 
 
 def solve(llm, *replies, **options):
@@ -188,6 +202,15 @@ def test_a_turn_that_fails_is_told_why_and_the_loop_goes_on(llm, first, told):
     assert told in observation_fed_back(llm, 1)
 
 
+def test_a_timeout_under_a_second_is_kept_as_given(llm):
+    sleeps = "<code>\nimport time\ntime.sleep(0.2)\nprint('done')\n</code>"
+    result = solve(llm, sleeps, final("ok"), timeout_s=0.5)
+    assert result.turns[0].error is None
+    assert result.turns[0].execution.stdout == "done\n"
+    assert observation_fed_back(llm, 1).startswith("<observation>\ndone")
+    assert result.answer == "ok"
+
+
 @pytest.mark.parametrize(
     ("turn", "synthesis", "answer"),
     [
@@ -262,3 +285,38 @@ def test_final_answer_is_refused_as_a_tool_name_before_any_request(llm):
     with pytest.raises(ValueError, match="'final_answer' is reserved"):
         solve(llm, tools={"final_answer": lambda x=None: x})
     assert llm.requests == []
+
+
+def test_a_model_that_refuses_stop_is_asked_again_without_it_for_the_rest_of_the_run(
+    llm,
+):
+    result = solve(llm, stop_refused(), prints("1"), final("ok"), model="openai/gpt-4o")
+    assert ["stop" in request for request in llm.requests] == [True, False, False]
+    assert llm.requests[0]["messages"] == llm.requests[1]["messages"]
+    assert (len(result.turns), result.answer) == (2, "ok")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        refusal(
+            "Unsupported value: 'temperature' does not support 0.7 with this model."
+        ),
+        refusal("This request was cut at a stop sequence and cannot be resumed."),
+        refusal(
+            "This model's maximum context length is 4000 tokens.",
+            error=litellm.ContextWindowExceededError,
+        ),
+    ],
+    ids=["temperature", "the-word-stop", "context-window"],
+)
+def test_a_refusal_that_is_not_about_stop_is_raised(llm, error):
+    with pytest.raises(type(error)):
+        solve(llm, error, model="openai/gpt-4o")
+    assert len(llm.requests) == 1
+
+
+def test_a_callers_own_stop_is_never_dropped(llm):
+    with pytest.raises(litellm.BadRequestError, match="'stop'"):
+        solve(llm, stop_refused(), model="openai/gpt-4o", stop=["END"])
+    assert [request["stop"] for request in llm.requests] == [["END"]]

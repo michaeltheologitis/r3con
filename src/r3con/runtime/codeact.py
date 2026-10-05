@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import litellm
+from litellm.exceptions import BadRequestError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
@@ -71,6 +72,10 @@ _MARKDOWN_FENCE_RE = re.compile(
 # itself. Used both as a server-side `stop` (when the model supports it) and as
 # the client-side truncation boundary in `_clip_assistant_response`.
 _STOP_SEQUENCES = ["</code>", "<observation>"]
+
+# A provider's 400 for a request that carried `stop` names the parameter in quotes, as
+# does litellm's own client-side refusal; no other 400 does.
+_STOP_REFUSED = re.compile(r"""['"]stop['"]""")
 
 # Fed back when a response carries no runnable code. Reminds BOTH things: how
 # to run code (so an explore-but-forgot-the-tags turn recovers) and how to
@@ -126,6 +131,11 @@ def _supports_stop_parameter(model: str) -> bool:
         litellm.suppress_debug_info = prev_suppress
         logger.setLevel(prev_level)
     return "stop" in params
+
+
+def _refuses_stop(error: BadRequestError) -> bool:
+    """Whether the provider refused a request because it carried ``stop``."""
+    return bool(_STOP_REFUSED.search(str(error)))
 
 
 def _clip_assistant_response(response: str) -> str:
@@ -356,10 +366,10 @@ def run_codeact(
     # in early turns and read them in later turns. ``final_answer`` is
     # registered as a static tool; calling it raises FinalAnswerException
     # upstream, which surfaces here as ``CodeOutput.is_final_answer=True``.
-    timeout_int = int(timeout_s) if timeout_s is not None else None
     executor = LocalPythonExecutor(
         additional_authorized_imports=additional_authorized_imports or [],
-        timeout_seconds=timeout_int,
+        # Typed int upstream; it reaches Future.result(timeout=), which takes a float.
+        timeout_seconds=timeout_s,  # pyright: ignore[reportArgumentType]
         # final_answer is registered last so it can never be shadowed by a tool.
         additional_functions={**(tools or {}), "final_answer": _identity_final_answer},
     )
@@ -369,29 +379,44 @@ def run_codeact(
     turns: list[CodeActTurn] = []
     last_nonempty_observation: str | None = None
 
-    # Send `</code>`/`<observation>` as a server-side `stop` only when the
-    # model accepts it (reasoning models like the gpt-5 and gpt-6 families
-    # reject it).
-    # Either way `_clip_assistant_response` truncates client-side below — that
-    # is the correctness-bearing step; the server-side `stop` is just a
-    # token/latency optimization. A caller-supplied `stop` (via llm_kwargs)
-    # wins.
-    call_kwargs = dict(llm_kwargs)
-    if _supports_stop_parameter(model):
-        call_kwargs.setdefault("stop", _STOP_SEQUENCES)
+    # Send `</code>`/`<observation>` as a server-side `stop` only when litellm says
+    # the model accepts it (reasoning models like the gpt-5 and gpt-6 families
+    # reject it), and stop sending it for the rest of this loop once the provider
+    # refuses it (a model newer than litellm's map). Either way
+    # `_clip_assistant_response` truncates client-side below — that is the
+    # correctness-bearing step; the server-side `stop` is just a token/latency
+    # optimization. A caller-supplied `stop` (via llm_kwargs) wins and is never dropped.
+    stop = (
+        _STOP_SEQUENCES
+        if "stop" not in llm_kwargs and _supports_stop_parameter(model)
+        else None
+    )
 
-    for turn_idx in range(max_turns):
-        _log.info("codeact turn %d/%d", turn_idx + 1, max_turns)
-        raw_response = cast(
+    def ask(kind: str) -> str:
+        with_stop: dict[str, Any] = {"stop": stop} if stop is not None else {}
+        return cast(
             str,
             litellm_chat_completion(
                 messages=messages,
                 model=model,
                 run=run,
-                kind=f"turn-{turn_idx + 1}",
-                **call_kwargs,
+                kind=kind,
+                **llm_kwargs,
+                **with_stop,
             ),
         )
+
+    for turn_idx in range(max_turns):
+        _log.info("codeact turn %d/%d", turn_idx + 1, max_turns)
+        kind = f"turn-{turn_idx + 1}"
+        try:
+            raw_response = ask(kind)
+        except BadRequestError as error:
+            if stop is None or not _refuses_stop(error):
+                raise
+            _log.info("%s refused `stop`; this run's turns go without it", model)
+            stop = None
+            raw_response = ask(kind)
         # Cut any generation past the first stop sequence (the model tends to
         # hallucinate the <observation> + a final_answer after </code>, which
         # the runtime would otherwise discard while the model believes it
@@ -519,7 +544,7 @@ def run_codeact(
             model=model,
             run=run,
             kind="max-turns-fallback",
-            **llm_kwargs,  # NOTE: not call_kwargs — no stop sequence; we want full prose
+            **llm_kwargs,  # without our stop sequences: we want full prose
         ),
     ).strip()
 
