@@ -101,11 +101,13 @@ class RunConfig(BaseModel):
     overrides: dict[str, Any] = Field(default_factory=dict)
 
     def _identity_parts(self) -> list[str]:
-        """The output-shaping components that make up the run identity, in label order, each a
-        ``key=value`` string. **This is the one place to extend the identity** — add a line here
-        and the new axis becomes part of a run's identity. Values are the *resolved* config (not how they were set), so 3 rounds read the same whether they
-        came from the config file or ``--relevance-rounds 3``. The model is reduced to its bare name (the
-        provider/route prefix is transport — see :func:`normalize_model_name`)."""
+        """The output-shaping components that make up the run identity, in label
+        order, each a ``key=value`` string. **This is the one place to extend the
+        identity** — add a line here and the new axis becomes part of a run's identity.
+        Values are the *resolved* config (not how they were set), so 3 rounds read the
+        same whether they came from the config file or ``--relevance-rounds 3``. The
+        model is reduced to its bare name (the provider/route prefix is transport — see
+        :func:`normalize_model_name`)."""
         prompts = ",".join(
             f"{_PROMPT_STAGE_ABBR.get(s, s)}={self.prompts[s]}"
             for s in PROMPT_STAGES
@@ -127,11 +129,13 @@ class RunConfig(BaseModel):
         return parts
 
     def label(self) -> str:
-        """Readable run label — a run's identity. The config name plus the run-identity
-        components (:meth:`_identity_parts`), e.g.
-        ``default[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]``.
-        Two runs are the same run iff their labels match, so **every** output-shaping axis must
-        appear in ``_identity_parts``."""
+        """Readable run label — a run's identity: the config name plus the run-identity
+        components (:meth:`_identity_parts`). Two runs are the same run iff their labels
+        match, so **every** output-shaping axis must appear in ``_identity_parts``. For
+        example::
+
+            exp[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]
+        """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
 

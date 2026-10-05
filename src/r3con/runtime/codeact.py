@@ -368,7 +368,7 @@ def run_codeact(
     # upstream, which surfaces here as ``CodeOutput.is_final_answer=True``.
     executor = LocalPythonExecutor(
         additional_authorized_imports=additional_authorized_imports or [],
-        # Annotated int upstream, but it reaches Future.result(timeout=), which takes a float.
+        # Typed int upstream; it reaches Future.result(timeout=), which takes a float.
         timeout_seconds=timeout_s,  # pyright: ignore[reportArgumentType]
         # final_answer is registered last so it can never be shadowed by a tool.
         additional_functions={**(tools or {}), "final_answer": _identity_final_answer},

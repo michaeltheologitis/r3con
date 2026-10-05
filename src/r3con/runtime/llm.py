@@ -12,9 +12,9 @@ The one escape hatch is ``completion=``, the callable that makes each request (d
 wrapper with the same shape. It is **transport**, so it never enters a run's identity.
 
 Two entry points. :func:`litellm_chat_completion_full` returns the raw response object;
-:func:`litellm_chat_completion` returns the text, or a validated Pydantic instance when a
-``schema`` is given, re-rolling the same request if the model answers with empty content
-(a 200 with no JSON, which transport retries never see).
+:func:`litellm_chat_completion` returns the text, or a validated Pydantic instance when
+a ``schema`` is given, re-rolling the same request if the model answers with empty
+content (a 200 with no JSON, which transport retries never see).
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.

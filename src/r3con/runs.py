@@ -154,9 +154,9 @@ def write_manifest(
 
     The folder name is opaque **by design**, so this file is the only thing that says
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
-    runtime caps it ran under (``settings``, else :func:`r3con.settings.settings_snapshot`
-    taken now), and the package version. Written before the first stage, so even a
-    crashed run is identifiable.
+    runtime caps it ran under (``settings``, else
+    :func:`r3con.settings.settings_snapshot` taken now), and the package version.
+    Written before the first stage, so even a crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
     installed package, so a prompt version string like ``v1`` identifies content only

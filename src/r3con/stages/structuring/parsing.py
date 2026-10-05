@@ -20,9 +20,10 @@ the model can name the document a fact came from.
 This module also owns :func:`check_schema`, stage 2's schema validator. It lives
 here, with the code that *uses* a schema rather than with the code that proposes
 one, because validity is defined by this module's needs: a schema is usable only
-if it runs in the restricted interpreter, exposes a ``Parse`` class, survives the structured-output backend
-:func:`parse_one_document` drives it through, and declares every top-level field
-as ``list[...]`` so the merge below cannot silently drop a document's records.
+if it runs in the restricted interpreter, exposes a ``Parse`` class, survives the
+structured-output backend :func:`parse_one_document` drives it through, and declares
+every top-level field as ``list[...]`` so the merge below cannot silently drop a
+document's records.
 """
 
 from __future__ import annotations

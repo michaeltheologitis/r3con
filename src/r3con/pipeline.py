@@ -19,7 +19,8 @@ never placed in one prompt.
 
 With a ``task_logger``, each stage writes its artifacts into one flat run-folder as soon
 as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
-stage that fails leaves the calls it completed and its traceback (see :mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
+stage that fails leaves the calls it completed and its traceback (see
+:mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
 """
 
 from __future__ import annotations
