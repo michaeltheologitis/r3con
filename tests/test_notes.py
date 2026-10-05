@@ -183,7 +183,11 @@ def test_a_prompt_that_cannot_ask_for_a_length_stops_at_the_first_trouble(
         Splits([], model=window(8_192)), can_shorten=False, task_logger=logger
     )
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        budget.shorten(trouble(33, room=400, call="relevance-r2-d0"), round_idx=1)
+        budget.shorten(
+            trouble(33, room=400, call="relevance-r2-d0"),
+            round_idx=1,
+            also=[trouble(40, room=300, n=21)],
+        )
     assert stop.value.__notes__ == [
         (
             "r3con: relevance-r2-d0 carries the notes of 20 documents (about 680 tokens), "

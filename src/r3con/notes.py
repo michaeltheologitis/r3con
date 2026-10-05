@@ -182,20 +182,21 @@ class Budget:
             stop = ContextWindowExceededError(
                 message=str(trouble), model=trouble.model, llm_provider="r3con"
             )
-        stop.add_note(f"r3con: {self._why_not(binding)} {_OUTGROWN}")
+        stop.add_note(f"r3con: {self._why_not(trouble, binding)} {_OUTGROWN}")
         raise stop from None
 
-    def _why_not(self, binding: NotesTooLong) -> str:
-        """Why reading ``binding``'s notes shorter cannot help, for the stop's note."""
-        n = len(binding.notes)
+    def _why_not(self, trouble: NotesTooLong, binding: NotesTooLong) -> str:
+        """Why reading the notes shorter cannot help, for the stop's note: the prompt
+        cannot ask for it (``trouble`` names the request that did not fit), or the
+        request that binds (``binding``) would not fit even then."""
         if not self._can_shorten:
             return (
-                f"{binding.call} carries the notes of {n} documents (about "
-                f"{binding.notes_tokens:,} tokens), the bigger part of a request that "
-                "does not fit, and the relevance prompt this run pins cannot ask for "
-                "shorter notes (the shipped v2 can)."
+                f"{trouble.call} carries the notes of {len(trouble.notes)} documents "
+                f"(about {trouble.notes_tokens:,} tokens), the bigger part of a request "
+                "that does not fit, and the relevance prompt this run pins cannot ask "
+                "for shorter notes (the shipped v2 can)."
             )
-        room = binding.room
+        n, room = len(binding.notes), binding.room
         if room is not None and room <= 0:
             return (
                 f"what {binding.call} sends beside its notes fills the "
