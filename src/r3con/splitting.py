@@ -54,6 +54,7 @@ class Splits:
     file are written under a lock.
     """
 
+    model: str
     max_input_tokens: int | None
     margin_percent: int
     line: int | None
@@ -77,7 +78,7 @@ class Splits:
         settings.check_cap("window_margin_percent", margin_percent)
         self._documents = list(documents)
         self._cuts: list[list[int]] = [[] for _ in self._documents]
-        self._model = model
+        self.model = model
         self._task_logger = task_logger
         self._lock = threading.Lock()
         self.margin_percent = margin_percent
@@ -101,6 +102,15 @@ class Splits:
         text = self._documents[doc]
         bounds = itertools.pairwise([0, *self._cuts[doc], len(text)])
         return [text[start:end] for start, end in bounds]
+
+    def over_line(self, *texts: str) -> int | None:
+        """The tokens of ``texts`` together, when the window is known and they are over
+        the line; otherwise ``None``. Texts no larger than the line in UTF-8 bytes are
+        not counted."""
+        if self.line is None or sum(map(_utf8_size, texts)) <= self.line:
+            return None
+        tokens = sum(map(count_tokens, texts))
+        return tokens if tokens > self.line else None
 
     def read_in_parts(
         self, doc: int, *, call: str, rest: str, send: Callable[[str, str], T]
@@ -278,9 +288,9 @@ class Splits:
                 f"r3con estimated {event['call']} at {event['estimate']:,} tokens, "
                 f"over the {self.line:,}-token line (the "
                 f"{self.max_input_tokens:,}-token input window litellm's model map "
-                f"gives {self._model}, less {self.margin_percent}%); it was not sent."
+                f"gives {self.model}, less {self.margin_percent}%); it was not sent."
             ),
-            model=self._model,
+            model=self.model,
             llm_provider="r3con",
         )
 

@@ -367,3 +367,13 @@ def test_splits_json_is_written_as_each_split_happens(logger):
 
     read(PARAGRAPHS, send, task_logger=logger)
     assert seen == [0, 1, 2, 2, 2, 2]
+
+
+def test_over_line_counts_only_what_its_bytes_cannot_settle(window, encodes):
+    splits = Splits([], model=window(1_000))
+    assert splits.over_line("s" * 400, "t" * 450) is None
+    assert encodes == []
+    assert splits.over_line(" the" * 300) is None
+    assert splits.over_line(" the" * 300, " the" * 600) == 900
+    assert encodes == [" the" * 300, " the" * 300, " the" * 600]
+    assert Splits([], model=QWEN).over_line(" the" * 3_000) is None
