@@ -176,7 +176,7 @@ def _isolated(
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     monkeypatch.chdir(tmp_path)
-    if not request.node.get_closest_marker("allow_hosts"):
+    if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
         monkeypatch.setattr(litellm, "completion", FakeLLM())
     logger = logging.getLogger("r3con")
     level, propagate, handlers = logger.level, logger.propagate, list(logger.handlers)

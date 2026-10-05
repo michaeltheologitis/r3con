@@ -78,9 +78,13 @@ exclude = ["src/r3con/runtime/python_executor.py"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = [
+    "-m",
+    "not live",
     "--disable-socket",
     "--allow-unix-socket",
+    "--strict-markers",
 ]
+markers = ["live: calls a real provider; runs only under `pytest -m live`"]
 
 [tool.coverage.run]
 omit = ["*/r3con/runtime/python_executor.py"]
