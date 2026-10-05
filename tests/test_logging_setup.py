@@ -1,56 +1,26 @@
-"""Tests for `r3con.logging_setup` — the standard logger config.
-
-Run with:  uv run python tests/test_logging_setup.py
-"""
-
-from __future__ import annotations
-
-import io
 import logging
 
 from r3con.logging_setup import configure_logging, get_logger
 
 
-def test_get_logger_is_r3con_namespaced() -> None:
+def test_loggers_live_under_the_r3con_namespace():
     assert get_logger().name == "r3con"
     assert get_logger("relevance").name == "r3con.relevance"
 
 
-def test_configure_is_idempotent_and_sets_level() -> None:
+def test_configuring_twice_attaches_one_handler_at_the_level_asked(monkeypatch):
     logger = logging.getLogger("r3con")
-    # Clean slate for the test.
-    for h in list(logger.handlers):
-        logger.removeHandler(h)
+    monkeypatch.setattr(logger, "handlers", [])
     configure_logging("INFO")
-    configure_logging("INFO")  # second call must not add a second handler
+    configure_logging("INFO")
     assert len(logger.handlers) == 1
     assert logger.level == logging.INFO
+    assert logger.propagate is False
 
 
-def test_child_logs_reach_a_handler_at_info() -> None:
-    """A child logger's INFO record reaches a handler on `grounded` (propagation)."""
-    parent = get_logger()
-    child = get_logger("relevance")
-    buf = io.StringIO()
-    handler = logging.StreamHandler(buf)
-    old = parent.level
-    parent.addHandler(handler)
-    parent.setLevel(logging.INFO)
-    try:
-        child.info("hello %d", 3)
-    finally:
-        parent.removeHandler(handler)
-        parent.setLevel(old)
-    assert "hello 3" in buf.getvalue()
-
-
-if __name__ == "__main__":
-    tests = [
-        test_get_logger_is_r3con_namespaced,
-        test_configure_is_idempotent_and_sets_level,
-        test_child_logs_reach_a_handler_at_info,
+def test_a_stages_records_reach_the_r3con_loggers_handlers(caplog):
+    caplog.set_level(logging.INFO, logger="r3con")
+    get_logger("relevance").info("hello %d", 3)
+    assert [(r.name, r.getMessage()) for r in caplog.records] == [
+        ("r3con.relevance", "hello 3")
     ]
-    for t in tests:
-        t()
-        print(f"  PASS  {t.__name__}")
-    print(f"\nOK — {len(tests)} tests")
