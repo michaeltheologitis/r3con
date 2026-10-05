@@ -17,6 +17,7 @@ helper that feeds the prompt when the parse is too large to embed whole.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -30,7 +31,7 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.runtime.llm import count_tokens
-from r3con.stages.relevance import render_relevance
+from r3con.stages.relevance import Snippet, render_relevance
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -132,7 +133,7 @@ def reason(
     parsed: BaseModel | dict[str, Any],
     model: str,
     prompt_version: str,
-    relevance_snippets: list[str] | None = None,
+    relevance_snippets: Sequence[Snippet] | None = None,
     source_docs: dict[str, list[int]] | None = None,
     max_turns: int | None = None,
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
