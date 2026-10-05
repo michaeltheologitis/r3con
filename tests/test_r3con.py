@@ -9,6 +9,8 @@ from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES
 from r3con.r3con import read_documents, run
 
+PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
+
 
 def write_tree(root: Path) -> None:
     (root / "nested").mkdir(parents=True)
@@ -113,18 +115,27 @@ def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
 
 
 @pytest.mark.parametrize(
-    ("prompts", "error"),
+    ("config", "error", "message"),
     [
-        ({**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}, FileNotFoundError),
-        ({"relevance": "v1"}, ValueError),
+        ("exp", FileNotFoundError, "'reasoning' version 'v9'"),
+        (
+            RunConfig(model="openai/m", prompts=PINS_A_MISSING_FILE),
+            FileNotFoundError,
+            "'reasoning' version 'v9'",
+        ),
+        (
+            RunConfig(model="openai/m", prompts={"relevance": "v1"}),
+            ValueError,
+            "missing prompt versions",
+        ),
     ],
-    ids=["missing-file", "missing-stage"],
+    ids=["by-name", "run-config", "run-config-missing-a-stage"],
 )
-def test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists(
-    llm, tmp_path, prompts, error
+def test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists(
+    llm, configs, tmp_path, config, error, message
 ):
-    config = RunConfig(model="openai/m", prompts=prompts)
-    with pytest.raises(error):
+    configs(exp={"model": "openai/m", "prompts": PINS_A_MISSING_FILE})
+    with pytest.raises(error, match=message):
         run("Who?", ["memo"], config=config, completion=llm, logs_dir=tmp_path / "logs")
     assert not (tmp_path / "logs").exists()
     assert llm.requests == []
@@ -137,17 +148,6 @@ def test_a_run_on_a_provider_that_takes_no_seed_completes(answering_llm, model):
     result = run("Who?", ["Halloran memo"], model=model, completion=answering_llm)
     assert result.answer == "Halloran memo"
     assert {request["model"] for request in answering_llm.requests} == {model}
-
-
-def test_a_config_pinning_a_missing_prompt_is_refused_before_a_run_folder_exists(
-    llm, configs, tmp_path
-):
-    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
-    configs(exp={"model": "openai/m", "prompts": prompts})
-    with pytest.raises(FileNotFoundError, match="'reasoning' version 'v9'"):
-        run("Who?", ["memo"], config="exp", completion=llm, logs_dir=tmp_path / "logs")
-    assert not (tmp_path / "logs").exists()
-    assert llm.requests == []
 
 
 def test_run_answers_through_the_callers_completion(answering_llm):
