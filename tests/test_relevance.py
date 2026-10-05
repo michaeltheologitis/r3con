@@ -79,22 +79,18 @@ def test_the_system_prompt_holds_the_task_and_the_user_message_the_document(llm)
 
 
 @pytest.mark.parametrize(
-    ("snippets", "doc_ids", "rendered"),
+    ("snippets", "rendered"),
     [
-        (None, None, ""),
-        ([], None, ""),
+        (None, ""),
+        ([], ""),
         (
             ["first note", ""],
-            None,
             (
                 "### Document 1\nfirst note\n\n"
                 "### Document 2\n(no relevant summary for this task)"
             ),
         ),
-        (["s0", "s1"], ["10-K", "10-Q"], "### 10-K\ns0\n\n### 10-Q\ns1"),
     ],
 )
-def test_the_notes_render_as_one_labelled_section_per_document(
-    snippets, doc_ids, rendered
-):
-    assert render_relevance(snippets, doc_ids) == rendered
+def test_the_notes_render_as_one_labelled_section_per_document(snippets, rendered):
+    assert render_relevance(snippets) == rendered
