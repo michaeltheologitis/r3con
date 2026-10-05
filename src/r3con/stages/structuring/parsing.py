@@ -20,13 +20,15 @@ the model can name the document a fact came from.
 This module also owns :func:`check_schema`, stage 2's schema validator. It lives
 here, with the code that *uses* a schema rather than with the code that proposes
 one, because validity is defined by this module's needs: a schema is usable only
-if it execs, exposes a ``Parse`` class, survives the structured-output backend
-:func:`parse_one_document` drives it through, and declares every top-level field
-as ``list[...]`` so the merge below cannot silently drop a document's records.
+if it runs in the restricted interpreter, exposes a ``Parse`` class, survives the
+structured-output backend :func:`parse_one_document` drives it through, and declares
+every top-level field as ``list[...]`` so the merge below cannot silently drop a
+document's records.
 """
 
 from __future__ import annotations
 
+import ast
 import typing
 from dataclasses import dataclass, field
 from typing import Any, cast, get_origin
@@ -39,20 +41,20 @@ from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
+from r3con.runtime.python_executor import (
+    ExecutionTimeoutError,
+    InterpreterError,
+    LocalPythonExecutor,
+)
 from r3con.settings import active_doc_workers
 from r3con.stages.relevance import render_relevance
 
 _log = get_logger("structuring.parsing")
 
 
-# Names pre-seeded into the namespace a proposed schema is exec'd in, so a schema
-# that forgets an import (most commonly `from pydantic import BaseModel`) still
-# loads instead of dying on NameError. An explicit import in the code just
-# re-binds the same object, so seeding is harmless. Purely internal leniency —
-# the schema-proposal prompt is unchanged. (Modern schemas use `str | None` /
-# `list[...]` builtins and may need none of these; the seed covers the older-style
-# names.)
-_SCHEMA_EXEC_GLOBALS: dict[str, Any] = {
+_SCHEMA_IMPORTS = ("pydantic", "typing", "datetime", "enum", "decimal")
+# Bound before a schema runs, so one that forgets its pydantic import still loads.
+_SCHEMA_GLOBALS: dict[str, Any] = {
     "BaseModel": BaseModel,
     "Field": Field,
     "Optional": typing.Optional,
@@ -68,37 +70,43 @@ _SCHEMA_EXEC_GLOBALS: dict[str, Any] = {
 
 
 class SchemaError(ValueError):
-    """Raised when a proposed schema is unusable (won't exec, missing `Parse`, etc.)."""
+    """Raised when a proposed schema is unusable (won't run, missing `Parse`, etc.)."""
 
 
 def check_schema(schema_code: str) -> type[BaseModel]:
-    """Execute ``schema_code`` and return its ``Parse`` class.
+    """Run ``schema_code`` in the restricted interpreter and return its ``Parse`` class.
 
-    Intended to be called inside the schema-proposal loop
-    (:mod:`r3con.stages.structuring.schema`): on failure, the raised error
-    message is fed back to the LLM as feedback for the next attempt.
-
-    The exec namespace is pre-seeded with common pydantic/typing names
-    (:data:`_SCHEMA_EXEC_GLOBALS`) so a schema that forgets an import — most
-    commonly ``from pydantic import BaseModel`` — still loads rather than dying
-    on ``NameError``; this is purely an internal leniency and does not change
-    the schema-proposal prompt.
+    The code runs in a fresh :class:`~r3con.runtime.python_executor.LocalPythonExecutor`
+    that may import only from pydantic, typing, datetime, enum and decimal (plus the
+    interpreter's base modules), with the common pydantic and typing names already
+    bound. A decorator is refused before anything runs: the interpreter would build the
+    method without it, so a validator would silently never run. The error message is
+    what the schema-proposal loop feeds back to the model.
 
     Raises:
-        SchemaError: if the code fails to execute, does not define a ``Parse``
-            class, ``Parse`` is not a ``pydantic.BaseModel`` subclass, its JSON
-            schema cannot be generated, it contains untyped object fields
-            (``dict``, ``list[dict]``, ``dict[str, X]``) that are incompatible
-            with OpenAI strict structured-output mode, or any top-level ``Parse``
-            field is not a ``list[...]`` (each document is parsed separately and
-            the per-document parses are merged by list-concatenation, so a non-list
+        SchemaError: if the code uses a decorator, fails to execute in the interpreter,
+            does not define a ``Parse`` class, ``Parse`` is not a ``pydantic.BaseModel``
+            subclass, its JSON schema cannot be generated, it contains untyped object
+            fields (``dict``, ``list[dict]``, ``dict[str, X]``) that are incompatible
+            with OpenAI strict structured-output mode, or any top-level ``Parse`` field
+            is not a ``list[...]`` (each document is parsed separately and the
+            per-document parses are merged by list-concatenation, so a non-list
             top-level field would silently collapse to a single document).
     """
-    namespace: dict[str, Any] = dict(_SCHEMA_EXEC_GLOBALS)
+    decorators = _decorators(schema_code)
+    if decorators:
+        raise SchemaError(
+            "Schema code uses decorators, which r3con does not run: "
+            f"{', '.join(decorators)}. Express each constraint as a field type or a "
+            "Field(...) argument instead, for example Field(ge=0) or Literal[...]."
+        )
+    executor = LocalPythonExecutor(additional_authorized_imports=list(_SCHEMA_IMPORTS))
+    executor.send_variables(dict(_SCHEMA_GLOBALS))
     try:
-        exec(schema_code, namespace)  # noqa: S102
-    except Exception as e:
+        executor(schema_code)
+    except (InterpreterError, ExecutionTimeoutError) as e:
         raise SchemaError(f"Schema code failed to execute: {e!r}") from e
+    namespace = executor.state
 
     parse_cls = namespace.get("Parse")
     if parse_cls is None:
@@ -110,8 +118,8 @@ def check_schema(schema_code: str) -> type[BaseModel]:
         )
 
     try:
-        # NOTE: classes defined via exec() into a bare dict can't resolve their nested
-        # types by module lookup; rebuild with the exec namespace so Pydantic can find them.
+        # Classes the interpreter builds can't resolve their nested types by module
+        # lookup; rebuild with its namespace so Pydantic can find them.
         parse_cls.model_rebuild(_types_namespace=namespace)
         json_schema = parse_cls.model_json_schema()
     except Exception as e:
@@ -152,6 +160,21 @@ def check_schema(schema_code: str) -> type[BaseModel]:
         )
 
     return parse_cls
+
+
+def _decorators(schema_code: str) -> list[str]:
+    """Every decorator in ``schema_code``, as ``@<decorator> on <name>``; ``[]`` for
+    code that does not parse, whose syntax error the interpreter reports."""
+    try:
+        tree = ast.parse(schema_code)
+    except SyntaxError:
+        return []
+    return [
+        f"@{ast.unparse(decorator)} on {node.name}"
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        for decorator in node.decorator_list
+    ]
 
 
 def _find_untyped_objects(schema: Any, path: str = "$") -> list[str]:
