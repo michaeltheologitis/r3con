@@ -16,6 +16,7 @@ MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
+NEVER_COMMITS = "<code>\nprint(1)\n</code>"
 CONFIG = {
     "name": "test",
     "model": MODEL,
@@ -180,24 +181,16 @@ def test_every_request_of_a_run_goes_through_the_callers_completion(
     assert "completion" not in (logger.dir / "manifest.json").read_text()
 
 
-NEVER_COMMITS = "<code>\nprint(1)\n</code>"
-
-
-def test_a_turn_cap_set_in_settings_bounds_the_run_and_is_recorded(
-    answering_llm, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("setting", "explicit"), [(2, None), (5, 2)], ids=["in-settings", "explicit"]
+)
+def test_a_turn_cap_bounds_the_run_and_is_recorded(
+    answering_llm, tmp_path, monkeypatch, setting, explicit
 ):
-    monkeypatch.setattr(settings, "REASONING_MAX_TURNS", 3)
-    logger = TaskLogger("run", root=tmp_path)
-    answer(answering_llm.answers(reasoning=NEVER_COMMITS), logger)
-    assert len(answering_llm.requests_for("reasoning")) == 4
-    assert read_json(logger, "reasoning/result")["n_turns"] == 3
-    assert read_json(logger, "manifest")["settings"]["reasoning_max_turns"] == 3
-
-
-def test_an_explicit_turn_cap_bounds_the_run_and_is_recorded(answering_llm, tmp_path):
+    monkeypatch.setattr(settings, "REASONING_MAX_TURNS", setting)
     logger = TaskLogger("run", root=tmp_path)
     answering_llm.answers(reasoning=NEVER_COMMITS)
-    answer(answering_llm, logger, max_reasoning_turns=2)
+    answer(answering_llm, logger, max_reasoning_turns=explicit)
     assert len(answering_llm.requests_for("reasoning")) == 3
     assert read_json(logger, "reasoning/result")["n_turns"] == 2
     assert read_json(logger, "manifest")["settings"]["reasoning_max_turns"] == 2
