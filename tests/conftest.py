@@ -10,18 +10,11 @@ import logging
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
-from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
 
 import litellm
 import pytest
-
-# litellm 1.98 points tiktoken at its bundled vocabulary on import; 1.83 only lazily.
-os.environ.setdefault(
-    "TIKTOKEN_CACHE_DIR",
-    str(resources.files(litellm) / "litellm_core_utils" / "tokenizers"),
-)
 
 # Its import-time IPv6 probe opens a socket: here, before sockets are blocked.
 import urllib3  # noqa: F401

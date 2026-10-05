@@ -16,15 +16,13 @@ helper that feeds the prompt when the parse is too large to embed whole.
 
 from __future__ import annotations
 
-import functools
 import json
 from typing import Any
 
-import tiktoken
+import litellm
 from pydantic import BaseModel
 
 from r3con import settings
-from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -33,8 +31,6 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.stages.relevance import render_relevance
-
-_log = get_logger("reasoning")
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -105,41 +101,15 @@ def tag_source_documents(
     return parse_dict
 
 
-@functools.lru_cache(maxsize=1)
-def _parse_token_encoding() -> tiktoken.Encoding | None:
-    """tiktoken encoding for the parse-size guard, cached. ``None``, with a warning, if
-    its vocabulary cannot be loaded — tiktoken downloads it on first use, and a size
-    guard must never be what sinks a run that has already paid for stages 1 and 2."""
-    try:
-        return tiktoken.get_encoding("cl100k_base")
-    except (OSError, ValueError) as error:
-        _log.warning(
-            "tiktoken cannot load cl100k_base (%s); estimating the parse's size at 4 "
-            "characters per token",
-            error,
-        )
-        return None
-
-
-def _count_tokens(text: str) -> int:
-    """Approximate token count of ``text``. It is only a size guard, so the exact
-    tokenizer doesn't matter; without its vocabulary, fall back to the standard
-    ~4-chars-per-token estimate. ``disallowed_special=()`` so arbitrary text never
-    errors."""
-    encoding = _parse_token_encoding()
-    if encoding is None:
-        return len(text) // 4
-    return len(encoding.encode(text, disallowed_special=()))
-
-
 def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
     """The ``parse`` view embedded in the codeact system prompt: the WHOLE parse
     (``parse_json``) when it fits (the common case), else a prominent "this is only a
     sample" note + one sample record per field. Either way the full parse is also bound
     as the ``parse`` variable for the agent to compute over, so the sample path costs
-    reach, not access. The cap is ``settings.REASONING_PARSE_MAX_TOKS`` (tiktoken token
-    count; a flood guard for parses that run to thousands of records)."""
-    if _count_tokens(parse_json) <= settings.REASONING_PARSE_MAX_TOKS:
+    reach, not access. The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in
+    cl100k_base tokens from the vocabulary litellm ships (a flood guard for parses that
+    run to thousands of records)."""
+    if len(litellm.encode(text=parse_json)) <= settings.REASONING_PARSE_MAX_TOKS:
         return parse_json
     n = (
         sum(len(v) for v in parse_dict.values() if isinstance(v, list))
