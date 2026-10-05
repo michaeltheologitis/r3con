@@ -253,10 +253,13 @@ def run(
         TypeError: if ``documents`` is not a sequence of strings (a bare string or a
             path is rejected rather than guessed at).
         ValueError: if ``documents`` is empty or any entry is blank (a blank is refused,
-            not dropped — dropping it would renumber every index the run reports), or if
+            not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
             given (which would be silently ignored), or if a setting in
-            :mod:`r3con.settings` is below its floor; both before any request.
+            :mod:`r3con.settings` is below its floor.
+        FileNotFoundError: if the config pins a prompt version that has no file.
+        Each of these is raised before any request and before a run folder exists, as
+        is anything :func:`~r3con.config.load_config` refuses.
         Anything the underlying stages raise — most usefully
         ``litellm.ContextWindowExceededError`` when a document does not fit.
     """
