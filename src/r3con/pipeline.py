@@ -40,6 +40,7 @@ from r3con.logging_setup import get_logger
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
+from r3con.splitting import Splits
 from r3con.stages import reasoning
 from r3con.stages.relevance import join_parts, surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
@@ -194,6 +195,14 @@ def run_pipeline(
             settings=caps,
         )
 
+    # Where each document is cut into parts, shared by every stage that reads one.
+    splits = Splits(
+        documents,
+        model=model,
+        margin_percent=caps["window_margin_percent"],
+        task_logger=task_logger,
+    )
+
     # --- Stage 1: surface relevance — the relevant context. ---
     _log.info(
         "stage 1/3 · surfacing relevance (%d round(s), %d doc(s))",
@@ -209,6 +218,7 @@ def run_pipeline(
             rounds=rounds,
             workers=caps["doc_workers"],
             run=record.run,
+            splits=splits,
             **llm_kwargs,
         )
         # Per-round, per-document — `round` is the refinement depth; the LAST round
@@ -263,6 +273,7 @@ def run_pipeline(
             max_attempts=caps["parsing_max_attempts"],
             run=record.run,
             workers=caps["doc_workers"],
+            splits=splits,
             **llm_kwargs,
         )
         record.result = {
