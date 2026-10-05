@@ -132,7 +132,10 @@ def test_params_that_are_not_a_mapping_are_a_type_error(configs, name, overrides
             r"\['seed'\].*`seed` was removed in r3con 0\.2\.0.*params: \{seed: 42\}",
         ),
         ({"relevence_rounds": 3}, r"does not read: \['relevence_rounds'\]"),
+        ({"overrides": {"model": "x"}}, r"does not read: \['overrides'\]"),
+        ({"name": "other"}, r"does not read: \['name'\]"),
     ],
+    ids=["seed", "misspelt", "overrides", "name"],
 )
 def test_a_config_field_r3con_does_not_read_is_refused(configs, field, message):
     configs(old={**FULL, **field})
