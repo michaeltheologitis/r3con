@@ -16,6 +16,7 @@ with `main` merged in at `623d21b` (PR #13: default model `openai/gpt-6-luna`, l
   and 4), and what the build found (§3.3). §4.4, §7, §13 and §18 follow them.
 - 2026-10-05 · the Cartographer, reading the build at `243f647`: §3.3 items 6 and 7,
   two claims the build contradicts. §4.4 and §18 follow item 6.
+- 2026-10-05 · the Implementer: §3.3 item 6 fixed in `dd24413`; §4.4 and §18 say so.
 
 **Reading it.** §1 to §3 cover what R1b changes and where the design departs from the
 spec; that is the Gate B read. §4 to §12 take one item each: why it is needed, the
@@ -209,7 +210,11 @@ one of the four overrides that R1.10 makes keyword-only.
    folder.** `run()` checks prompts only through `load_config`, which it skips for a
    `RunConfig`, so the refusal comes from `run_pipeline` after `run()` has created the
    folder. No request is sent. The same pin given as a config name leaves no folder.
-   Found by the Cartographer; not fixed.
+   Found by the Cartographer. Fixed in `dd24413`: `run()` calls `check_prompts` on
+   whichever config it runs, a `RunConfig` included, before its caps check and the
+   folder. `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists`
+   pins it for a missing file and a missing stage, and the cap test runs on a
+   `RunConfig` too.
 7. **A program that times out holds the loop until it ends.** The vendored `timeout`
    runs the program inside `with ThreadPoolExecutor(...)`, whose exit waits for it. The
    model is told "Program timed out after 0.5s", but `time.sleep(2)` under a 0.5 s limit
@@ -326,8 +331,8 @@ Steps 1 and 2 raise before anything is sent or written. A caller's own `TaskLogg
 has already created its run folder by then. `run()` and the CLI create theirs only
 after their own `settings_snapshot()` call, which follows `load_config` and its R1.12
 check, so through them a refused cap or prompt leaves no folder (§3.1 item 3); the CLI
-prints `r3con: <message>` and exits 2. The exception is a `RunConfig` passed to `run()`
-whose prompt is refused: it leaves an empty folder (§3.3 item 6).
+prints `r3con: <message>` and exits 2. `run()` also calls `check_prompts` itself, so a
+`RunConfig` passed to it is refused before the folder too (§3.3 item 6).
 
 `write_manifest` gains one keyword:
 
@@ -1151,6 +1156,5 @@ Outside `src/`: `pyproject.toml` (version 0.2.0), `uv.lock`, `examples/options.i
 - **`_refuses_stop` misses a provider that words its refusal without quotes.** That run
   fails as today, with the provider's error in `reasoning/error.txt` (R1.9). The fix is
   one regex.
-- **An empty run folder** after a refused cap, only for a caller that builds its own
-  `TaskLogger` (§4.4), and after a refused prompt in a `RunConfig` passed to `run()`
-  (§3.3 item 6). It is cosmetic, and the error says what to change.
+- **An empty run folder** after a refused cap or prompt, only for a caller that builds
+  its own `TaskLogger` (§4.4). It is cosmetic, and the error says what to change.

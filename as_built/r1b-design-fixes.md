@@ -52,7 +52,8 @@ Nothing I ran reached a provider.
   to send one, put it in `params` (params: {seed: 7}). `` [run]
 - **A pinned prompt version with no file** raises `FileNotFoundError` on load, naming
   the stage, the version and both places looked [run]. A `RunConfig` passed to `run()`
-  is the exception (§3.2 item 1).
+  was the exception at `243f647`; it is refused before the folder since `dd24413`
+  (§3.2 item 1).
 - **A cap below its floor** raises `ValueError: DOC_WORKERS must be >= 1, got 0.`, and
   the CLI prints it and exits 2 [run]. `--doc-workers 0` and `R3CON_DOC_WORKERS=0`, which
   meant "one at a time", are refused; 1 now means that.
@@ -264,6 +265,12 @@ I did not verify §3.3 item 5 (notebook cell 5 run alone).
      leaves one empty folder. The same pin passed by config name leaves none.
    - A missing stage pin takes the same path [read]. No request is sent either way.
    - I added this to the design as §3.3 item 6.
+   - **Fixed after this reading, in `dd24413`** (the Implementer). `run()` calls
+     `check_prompts` on whichever config it runs, a `RunConfig` included, before its
+     caps check and the folder.
+     `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists` pins
+     it for a missing file and a missing stage: refused, no request, no run folder. It
+     fails without the fix [run].
 2. **A program that times out still holds the loop until it ends.**
    - **Why.** The vendored `timeout` runs the program inside
      `with ThreadPoolExecutor(...)`, whose exit waits for it.
