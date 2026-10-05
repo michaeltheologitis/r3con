@@ -49,6 +49,8 @@ dev = [
     "pyright>=1.1.414",
     "pytest>=9.0",
     "pytest-cov>=7.0",
+    "pytest-httpserver>=1.1",
+    "pytest-socket>=0.8",
     "ruff>=0.16",
 ]
 
@@ -75,6 +77,10 @@ exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = [
+    "--disable-socket",
+    "--allow-unix-socket",
+]
 
 [tool.coverage.run]
 omit = ["*/r3con/runtime/python_executor.py"]

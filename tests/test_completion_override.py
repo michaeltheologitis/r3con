@@ -6,8 +6,8 @@ pydantic-ai's ``OpenAIProvider(openai_client=…)``, the OpenAI Agents SDK's
 transport is a single litellm function rather than a client object, ours is the
 callable itself.
 
-These tests pin the two things that make it useful: that it reaches *every* stage, and
-that it never leaks into the provider request as an argument.
+These tests pin that it reaches *every* stage of a run, and that it stays out of the
+run's identity; tests/test_llm.py pins it at the call itself.
 """
 
 from __future__ import annotations
@@ -18,10 +18,6 @@ from types import SimpleNamespace
 from typing import Any
 
 from r3con.config import RunConfig
-from r3con.runtime.llm import (
-    litellm_chat_completion,
-    litellm_chat_completion_full,
-)
 
 
 def _reply(text: str = "ok") -> Any:
@@ -34,55 +30,6 @@ def _reply(text: str = "ok") -> Any:
         ],
         usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
     )
-
-
-def test_completion_callable_is_used_instead_of_litellm() -> None:
-    seen: dict[str, Any] = {}
-
-    def fake(**request: Any) -> Any:
-        seen.update(request)
-        return _reply("from my own connection")
-
-    out = litellm_chat_completion(
-        system_prompt="s",
-        user_prompt="u",
-        model="openai/whatever",
-        completion=fake,
-    )
-    assert out == "from my own connection"
-    assert seen["model"] == "openai/whatever"
-    assert seen["messages"][0]["role"] == "system"
-
-
-def test_completion_is_not_forwarded_into_the_provider_request() -> None:
-    """It must bind to the named parameter, not ride along in **kwargs — a stray
-    `completion=` in the request would be rejected by the provider."""
-    seen: dict[str, Any] = {}
-
-    def fake(**request: Any) -> Any:
-        seen.update(request)
-        return _reply()
-
-    litellm_chat_completion_full(
-        system_prompt="s", user_prompt="u", model="m", completion=fake
-    )
-    assert "completion" not in seen
-    # the things that SHOULD be there still are
-    assert seen["model"] == "m" and "messages" in seen and "num_retries" in seen
-
-
-def test_default_is_litellm_completion() -> None:
-    """Omitting it must not change behaviour: the default is litellm's own function."""
-    import litellm
-
-    calls: list[dict[str, Any]] = []
-    original = litellm.completion
-    litellm.completion = lambda **kw: (calls.append(kw), _reply())[1]  # type: ignore[assignment]
-    try:
-        litellm_chat_completion(system_prompt="s", user_prompt="u", model="m")
-    finally:
-        litellm.completion = original  # type: ignore[assignment]
-    assert len(calls) == 1 and calls[0]["model"] == "m"
 
 
 def test_it_reaches_every_stage_of_a_whole_run() -> None:
@@ -155,9 +102,6 @@ def test_completion_is_transport_and_stays_out_of_the_run_identity() -> None:
 
 if __name__ == "__main__":
     tests = [
-        test_completion_callable_is_used_instead_of_litellm,
-        test_completion_is_not_forwarded_into_the_provider_request,
-        test_default_is_litellm_completion,
         test_it_reaches_every_stage_of_a_whole_run,
         test_completion_is_transport_and_stays_out_of_the_run_identity,
     ]
