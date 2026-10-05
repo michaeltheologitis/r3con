@@ -57,9 +57,9 @@ LLM_NUM_RETRIES = 10
 # reasoning model that spent its budget on thinking).
 LLM_EMPTY_CONTENT_RETRIES = 3
 
-# Show the WHOLE parse in the reasoning system prompt below this many tokens (tiktoken
-# cl100k_base); above it (a record flood — e.g. a 1735-row catalog) fall back to one
-# sample per field + a prominent note, so the prompt can't blow up.
+# Show the WHOLE parse in the reasoning system prompt below this many cl100k_base
+# tokens; above it (a record flood — e.g. a 1735-row catalog) fall back to one sample
+# per field + a prominent note, so the prompt can't blow up.
 REASONING_PARSE_MAX_TOKS = 16000
 
 # The smallest value of each cap a run can execute under, keyed as in the snapshot.

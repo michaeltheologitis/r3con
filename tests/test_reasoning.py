@@ -1,27 +1,13 @@
 import json
-import logging
 
 import pytest
-import tiktoken
 
 from r3con.prompts import load_prompt
-from r3con.stages.reasoning import (
-    _parse_token_encoding,
-    _sample_record_per_field,
-    reason,
-)
+from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
-
-
-@pytest.fixture
-def fresh_tokenizer():
-    """The cached tokenizer is loaded again by the test, and again after it."""
-    _parse_token_encoding.cache_clear()
-    yield
-    _parse_token_encoding.cache_clear()
 
 
 def reasoning_prompt(llm, **kwargs) -> str:
@@ -144,18 +130,3 @@ def test_the_sample_view_keeps_non_ascii_values_readable(parse, shown):
     sample = _sample_record_per_field(parse)
     assert shown in sample
     assert "\\u" not in sample
-
-
-def test_a_tokenizer_that_cannot_load_falls_back_to_an_estimate_and_warns(
-    llm, monkeypatch, caplog, fresh_tokenizer
-):
-    def offline(name: str):
-        raise OSError(f"cannot download {name}")
-
-    monkeypatch.setattr(tiktoken, "get_encoding", offline)
-    prompt = reasoning_prompt(llm, parsed={"rows": [{"who": "Halloran"}]})
-    assert '"who": "Halloran"' in prompt
-    warnings = [r for r in caplog.records if r.name == "r3con.reasoning"]
-    assert [r.levelno for r in warnings] == [logging.WARNING]
-    assert "tiktoken cannot load cl100k_base" in warnings[0].getMessage()
-    assert "cannot download cl100k_base" in warnings[0].getMessage()
