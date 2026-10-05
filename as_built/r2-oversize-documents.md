@@ -229,9 +229,10 @@ The suite at the head: 393 passed, 10 deselected (the live test and E6) [run].
 - **A server failing 3 times.** Only "two 500s then a 200 recovers" is pinned.
 - **E4's relevance count, by refusal.** In
   `test_a_later_stage_splits_further_without_renumbering`,
-  `assert len(…) == 12 if measured else 13` parses as `assert (len(…) == 12) if measured
-  else 13`, so the by-refusal row asserts `13`, which is always true. The count is in
-  fact 13 [run], so the row holds, unpinned.
+  `assert len(…) == 12 if measured else 13` parsed as `assert (len(…) == 12) if measured
+  else 13`, so the by-refusal row asserted `13`, which is always true. The count is in
+  fact 13 [run]. Now `assert len(…) == (12 if measured else 13)`, and each row fails
+  when its count is wrong [run].
 
 ## 3 · Divergences from the design
 

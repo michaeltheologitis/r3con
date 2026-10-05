@@ -416,7 +416,7 @@ def test_a_later_stage_splits_further_without_renumbering(
     assert sorted(kind for kind in kinds if "-d3" in kind) == [
         f"parse-d3c{k}" for k in range(4)
     ]
-    assert len(llm.requests_for("relevance")) == 12 if measured else 13
+    assert len(llm.requests_for("relevance")) == (12 if measured else 13)
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
 
 
