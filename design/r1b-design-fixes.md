@@ -975,7 +975,7 @@ it passes before and after.
 | --- | --- | --- |
 | `test_settings.py` (new) | snapshot as set; floors table (R1.7) | — |
 | `test_pipeline.py` | turn cap from settings; explicit turn cap; attempt caps; refused cap sends nothing (R1.7, new) · failing stage ×4; midway calls kept; interrupt recorded; no note without a logger (R1.9, new) · prompts refused before any request (R1.12, new) · no seed unless `params` (R1.13, new) | `from r3con import settings`; `CONFIG` without seed; the reasoning-failure test folded into R1.9's |
-| `test_config.py` | misspelt override; `params` type; unread field; `RunConfig` extra (R1.10, new) · missing prompt on load (R1.12, new) | labels and override table without seed; `exp2`'s v9 overlay; the `params` row moves out of the ValueError table |
+| `test_config.py` | misspelt override; `params` type; unread field; `RunConfig` extra (R1.10, new) · missing prompt on load (R1.12, new) | `FULL`, the labels and the override table without seed; `exp2`'s v9 overlay; the `params` row moves out of the ValueError table |
 | `test_parsing.py` | cannot reach outside; decorators refused (R1.8, new) · rich and plain methods (R1.8, guard) | syntax row matches `SyntaxError`; `test_doc_ids_label_the_documents` removed |
 | `test_schema.py` | — | syntax row matches `SyntaxError` |
 | `test_codeact.py` | settings turn cap, direct (R1.7, new) · sub-second timeout (R1.14, new) · `stop` refused and retried (R1.15, new) · other refusals raised; caller's `stop` kept (R1.15, guard) | — |
@@ -983,7 +983,7 @@ it passes before and after.
 | `test_parallel.py` | not-yet-started calls never run (R1.11, new) · lowest-indexed failure raised (guard) | — |
 | `test_relevance.py` | — | render table without `doc_ids` |
 | `test_llm.py` | same-request re-roll; caller's seed resent unchanged (R1.13, new) | `from r3con import settings`; `seed=` arguments dropped |
-| `test_runs.py` | manifest records given settings (R1.7) | `StageRun` and manifest without seed |
+| `test_runs.py` | manifest records given settings (R1.7) | `StageRun`, the `config(...)` helper and the manifest without seed |
 | `test_r3con.py` | no-seed providers complete (R1.13, new) · namespace without leftovers (R1.11, new) · missing prompt before a run folder (R1.12, new) | — |
 | `test_cli.py` | `--seed` is not an option (R1.13) · missing prompt exits 2 (R1.12, new) | labels without seed; "partial artifacts" printed once (R1.9) |
 | `test_prompts.py` | — | `from r3con import settings` |
