@@ -1,12 +1,13 @@
 import json
 import re
 from collections import Counter
+from pathlib import Path
 
 import litellm
 import pytest
 import yaml
 
-from r3con import settings
+from r3con import read_documents, settings
 from r3con.config import PROMPT_STAGES, RunConfig
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
@@ -14,6 +15,7 @@ from r3con.stages.structuring.parsing import SchemaError
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
 NEVER_COMMITS = "<code>\nprint(1)\n</code>"
@@ -29,6 +31,10 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
 }
+V2 = {**CONFIG["prompts"], "reasoning": "v2"}
+READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
+REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
+ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
 
 
 def answer(
@@ -69,6 +75,44 @@ def notes_by_round():
 
 def system_prompts(llm, stage) -> list[str]:
     return [request["messages"][0]["content"] for request in llm.requests_for(stage)]
+
+
+def memos_with(registry: str) -> list[str]:
+    """The five memos, with the contractor registry (documents[3]) replaced."""
+    documents = read_documents(MEMOS)
+    documents[3] = registry
+    return documents
+
+
+def summary_headings(llm) -> list[str]:
+    """The headings of the reasoning prompt's summaries, without its examples'."""
+    [prompt, *_] = system_prompts(llm, "reasoning")
+    section = prompt.split("## Document summaries", 1)[1].split("## The parsed", 1)[0]
+    return re.findall(r"^### Document ([\d.]+)$", section, re.MULTILINE)
+
+
+def chars(request) -> int:
+    return sum(len(message["content"]) for message in request["messages"])
+
+
+def tokens(request) -> int:
+    return sum(len(litellm.encode(text=m["content"])) for m in request["messages"])
+
+
+def users(llm) -> list[str]:
+    return [request["messages"][1]["content"] for request in llm.requests]
+
+
+def long_notes_for(registry: str, size: int):
+    """A relevance reply: ``size`` characters for a part of ``registry``, and the
+    first line for any other document."""
+    note = "A long note on one part of the contractor registry. " * (size // 50 + 1)
+
+    def reply(request) -> str:
+        document = request["messages"][1]["content"]
+        return note[:size] if document in registry else f"Notes on {document[:20]}."
+
+    return reply
 
 
 def test_a_run_answers_and_leaves_every_stages_artifacts(answering_llm, tmp_path):
@@ -289,3 +333,148 @@ def test_a_cap_below_its_floor_sends_and_writes_nothing(llm, tmp_path, monkeypat
         answer(llm, logger)
     assert llm.requests == []
     assert not (logger.dir / "manifest.json").exists()
+
+
+def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
+    answering_llm, grown_registry, tmp_path
+):
+    registry = grown_registry(40_000)
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.refuses_over(16_000)
+    result = answer(llm, logger, documents=memos_with(registry), model=QWEN, prompts=V2)
+    assert len(result.relevant_context) == 5
+    assert summary_headings(llm) == REGISTRY_IN_4_PARTS
+    assert READ_IN_PARTS in system_prompts(llm, "reasoning")[0]
+    assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
+    stamps = [row["document"] for row in result.structured_context["rows"]]
+    assert stamps == [1, 2, 3, 4, 4, 4, 4, 5]
+    part_notes = read_json(logger, "relevance/result")["rounds"][0]["snippets"][3]
+    for request in llm.requests_for("relevance"):
+        part = request["messages"][1]["content"]
+        if part in registry and part != registry:
+            system = request["messages"][0]["content"]
+            assert not any(note in system for note in part_notes)
+    over = [request for request in llm.requests if chars(request) > 16_000]
+    assert len(over) == len({json.dumps(r["messages"]) for r in over}) == 2
+    record = read_json(logger, "splits")["documents"]["3"]
+    assert len(record["cuts"]) == 3
+    assert [(e["cause"], e["action"]) for e in record["events"]] == [
+        ("refusal", "split"),
+        ("refusal", "split"),
+    ]
+    assert record["parts"] == {"relevance-r1": 4, "relevance-r2": 4, "parse": 4}
+
+
+def test_a_document_over_the_line_is_split_before_sending(
+    answering_llm, grown_registry, window, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    documents = memos_with(grown_registry(40_000))
+    answer(answering_llm, logger, documents=documents, model=window(5_000), prompts=V2)
+    assert summary_headings(answering_llm) == REGISTRY_IN_4_PARTS
+    assert max(tokens(request) for request in answering_llm.requests) <= 4_250
+    events = read_json(logger, "splits")["documents"]["3"]["events"]
+    assert {event["cause"] for event in events} == {"estimate"}
+
+
+def test_an_unsplit_run_sends_what_a_v1_reasoning_run_sends(
+    answering_llm, window, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+    documents, model = read_documents(MEMOS), window(1_000_000)
+    sent = {}
+    for version in ("v1", "v2"):
+        answering_llm.requests.clear()
+        logger = TaskLogger(version, root=tmp_path)
+        prompts = {**CONFIG["prompts"], "reasoning": version}
+        answer(answering_llm, logger, documents=documents, model=model, prompts=prompts)
+        sent[version] = [
+            (r["messages"], r.get("response_format")) for r in answering_llm.requests
+        ]
+        assert not (logger.dir / "splits.json").exists()
+    assert len(sent["v2"]) == 17
+    assert sent["v2"] == sent["v1"]
+
+
+@pytest.mark.parametrize("measured", [False, True], ids=["by-refusal", "by-estimate"])
+def test_a_later_stage_splits_further_without_renumbering(
+    answering_llm, grown_registry, window, tmp_path, measured
+):
+    registry = grown_registry(40_000)
+    llm = answering_llm.answers(relevance=long_notes_for(registry, 2_000))
+    if not measured:
+        llm.refuses_over(25_000)
+    logger = TaskLogger("run", root=tmp_path)
+    model = window(6_000) if measured else QWEN
+    result = answer(
+        llm, logger, documents=memos_with(registry), model=model, prompts=V2
+    )
+    record = read_json(logger, "splits")["documents"]["3"]
+    assert record["parts"] == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}
+    assert summary_headings(llm) == ["1", "2", "3", "4.1", "4.2", "5"]
+    kinds = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
+    assert sorted(kind for kind in kinds if "-d3" in kind) == [
+        f"parse-d3c{k}" for k in range(4)
+    ]
+    assert len(llm.requests_for("relevance")) == 12 if measured else 13
+    assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
+
+
+@pytest.mark.parametrize(
+    ("measured", "clause"),
+    [
+        (False, "the part is about "),
+        (True, "over the 5,100-token line by themselves"),
+    ],
+    ids=["by-refusal", "by-estimate"],
+)
+def test_splitting_stops_at_the_relevant_contexts_line(
+    answering_llm, window, tmp_path, monkeypatch, measured, clause
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+    reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
+    llm = answering_llm.answers(relevance=(ROUTINE * 14)[:1_000])
+    if not measured:
+        llm.refuses_over(20_000)
+    logger = TaskLogger("run", root=tmp_path)
+    model = window(6_000) if measured else QWEN
+    with pytest.raises(litellm.ContextWindowExceededError) as stop:
+        answer(llm, logger, documents=reports, model=model, prompts=V2)
+    note, folder = stop.value.__notes__
+    assert note.startswith(
+        "r3con: reading documents[0] (Document 1) in more parts cannot help in "
+        "relevance-r2-d0: "
+    )
+    assert clause in note
+    assert note.endswith("The relevant context has outgrown the model's window.")
+    assert folder == f"r3con: partial artifacts in {logger.dir}"
+    assert "TASK-" not in note
+    assert [user for user in users(llm) if user in reports[0]] == [reports[0]] * (
+        1 if measured else 2
+    )
+    assert len(llm.requests) == (40 if measured else 41)
+    [(doc, record)] = read_json(logger, "splits")["documents"].items()
+    assert (doc, record["cuts"]) == ("0", [])
+    assert [event["action"] for event in record["events"]] == ["stop"]
+
+
+def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
+    # Relevance and the schema fit under the limit; a parse call, which carries every
+    # note and a whole document, does not, and its document is shorter than its rest.
+    documents = [f"{name} memo. " + ROUTINE * 66 for name in ("Halloran", "Merrow")]
+    llm = answering_llm.answers(relevance=(ROUTINE * 41)[:3_000]).refuses_over(13_500)
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(litellm.ContextWindowExceededError) as stop:
+        answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
+    assert "in more parts cannot help in parse-d0" in stop.value.__notes__[0]
+    written = {str(p.relative_to(logger.dir)) for p in logger.dir.rglob("*.*")}
+    assert {
+        "relevance/result.json",
+        "structuring/schema/result.json",
+        "structuring/parsing/calls.json",
+        "structuring/parsing/error.txt",
+        "splits.json",
+    } <= written
+    assert "structuring/parsing/result.json" not in written
+    events = read_json(logger, "splits")["documents"]["0"]["events"]
+    assert [(e["call"], e["action"]) for e in events] == [("parse-d0", "stop")]

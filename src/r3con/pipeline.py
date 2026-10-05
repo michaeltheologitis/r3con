@@ -9,13 +9,14 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    it is what every later stage reads.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
    from the task and the relevant context
-   (:mod:`r3con.stages.structuring.schema`), then **parse** every document, whole and
-   in parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
+   (:mod:`r3con.stages.structuring.schema`), then **parse** every document, in
+   parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context, in a multi-turn sandboxed Python loop.
 
-The document is the unit throughout: nothing is chunked, and the whole collection is
-never placed in one prompt.
+The document is the unit throughout: a document too long for the model's window is read
+in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
+prompt.
 
 With a ``task_logger``, each stage writes its artifacts into one flat run-folder as soon
 as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
@@ -39,6 +40,7 @@ from r3con.logging_setup import get_logger
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
+from r3con.splitting import Splits
 from r3con.stages import reasoning
 from r3con.stages.relevance import join_parts, surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
@@ -59,8 +61,9 @@ class Answer:
     - ``answer`` — the committed answer text.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
-      (``relevant_context[i]`` describes ``documents[i]``). A document that contributes nothing
-      is an empty string, which is a real result rather than a failure.
+      (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
+      its parts' notes joined. A document that contributes nothing is an empty string,
+      which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every document,
       as plain JSON-able data. Each record carries a ``document`` key naming the 1-based
       document it came from.
@@ -192,6 +195,14 @@ def run_pipeline(
             settings=caps,
         )
 
+    # Where each document is cut into parts, shared by every stage that reads one.
+    splits = Splits(
+        documents,
+        model=model,
+        margin_percent=caps["window_margin_percent"],
+        task_logger=task_logger,
+    )
+
     # --- Stage 1: surface relevance — the relevant context. ---
     _log.info(
         "stage 1/3 · surfacing relevance (%d round(s), %d doc(s))",
@@ -207,6 +218,7 @@ def run_pipeline(
             rounds=rounds,
             workers=caps["doc_workers"],
             run=record.run,
+            splits=splits,
             **llm_kwargs,
         )
         # Per-round, per-document — `round` is the refinement depth; the LAST round
@@ -245,7 +257,7 @@ def run_pipeline(
             ],
         }
 
-    # --- Stage 2b: structuring — parse every document, whole, in parallel. ---
+    # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     with _recorded_stage(
         task_logger, "structuring/parsing", model, transcript=False
@@ -261,6 +273,7 @@ def run_pipeline(
             max_attempts=caps["parsing_max_attempts"],
             run=record.run,
             workers=caps["doc_workers"],
+            splits=splits,
             **llm_kwargs,
         )
         record.result = {
