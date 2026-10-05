@@ -32,13 +32,13 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from r3con.config import RunConfig, check_prompts
 from r3con.logging_setup import get_logger
-from r3con.notes import Budget
+from r3con.notes import Budget, NotesTooLong
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
@@ -46,6 +46,7 @@ from r3con.splitting import Splits
 from r3con.stages import reasoning
 from r3con.stages.relevance import (
     RelevantContext,
+    Snippet,
     join_parts,
     surface_relevance,
     takes_word_budget,
@@ -54,6 +55,8 @@ from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
 _log = get_logger("pipeline")
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -104,7 +107,12 @@ class _StageRecord:
 
 @contextmanager
 def _recorded_stage(
-    task_logger: TaskLogger | None, stage: str, model: str, *, transcript: bool
+    task_logger: TaskLogger | None,
+    stage: str,
+    model: str,
+    *,
+    transcript: bool,
+    run: StageRun | None = None,
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
@@ -113,12 +121,15 @@ def _recorded_stage(
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token ``totals``. On any exception, an interrupt included, it writes the calls
     that completed and ``error.txt`` with the traceback, adds a note naming the run
-    folder to the exception, and re-raises. Without a logger it records nothing.
+    folder to the exception unless it carries one, and re-raises. With ``run``, the
+    stage's run from an earlier block, its calls are kept and this block's added.
+    Without a logger it records nothing.
     """
     if task_logger is None:
         yield _StageRecord(run=None)
         return
-    run = StageRun(stage=stage, task_logger=task_logger, model=model)
+    if run is None:
+        run = StageRun(stage=stage, task_logger=task_logger, model=model)
     record = _StageRecord(run=run)
     try:
         yield record
@@ -129,7 +140,9 @@ def _recorded_stage(
     except BaseException as error:
         run.flush(write_transcript=transcript)
         task_logger.write_text(f"{stage}/error", traceback.format_exc())
-        error.add_note(f"r3con: partial artifacts in {task_logger.dir}")
+        note = f"r3con: partial artifacts in {task_logger.dir}"
+        if note not in getattr(error, "__notes__", ()):
+            error.add_note(note)
         raise
 
 
@@ -154,6 +167,10 @@ def _relevance_result(
             )
         ],
     }
+
+
+def _calls(run: StageRun | None) -> int:
+    return 0 if run is None else len(run.steps)
 
 
 def _preview(text: str, n: int = 100) -> str:
@@ -198,6 +215,15 @@ def run_pipeline(
     after that stage succeeds, so a later failure still leaves earlier artifacts; a
     stage that raises writes its completed calls and ``error.txt``, and the exception
     carries a note naming the run folder.
+
+    The notes ride in every later stage's requests. When one does not fit because they
+    are the bigger part of it, the last relevance round is read again under the run's
+    word budget (:mod:`r3con.notes`, ``notes.json``) and the stage is sent again.
+
+    Raises:
+        litellm.ContextWindowExceededError: when the prompt sent beside a document
+            leaves it no room, or when the notes, even at 10 words each, do not fit
+            the model's window.
     """
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
@@ -269,22 +295,46 @@ def run_pipeline(
     with _recorded_stage(task_logger, "relevance", model, transcript=False) as record:
         relevance = read_relevance(run=record.run)
         record.result = _relevance_result(relevance, rounds, len(documents))
-    # the relevant context feeds every later stage
-    relevance_snippets = relevance.snippets
+    relevance_run = record.run
+
+    def fitting(send: Callable[[list[Snippet]], T], run: StageRun | None) -> T:
+        """``send`` the relevant context; when a request does not fit because its
+        notes are the bigger part of it, read their last round again shorter and send
+        again from the start. ``run`` is the stage's, whose calls a failed attempt
+        discards."""
+        nonlocal relevance
+        while True:
+            calls_before = _calls(run)
+            try:
+                return send(relevance.snippets)
+            except NotesTooLong as trouble:
+                budget.shorten(
+                    trouble, round_idx=rounds, discarded=_calls(run) - calls_before
+                )
+            with _recorded_stage(
+                task_logger, "relevance", model, transcript=False, run=relevance_run
+            ) as record:
+                relevance = read_relevance(run=record.run, reread=relevance)
+                record.result = _relevance_result(relevance, rounds, len(documents))
 
     # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
     with _recorded_stage(
         task_logger, "structuring/schema", model, transcript=True
     ) as record:
-        proposal = propose_schema(
-            task=task,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            prompt_version=config.prompts["structuring/schema"],
-            max_attempts=caps["schema_max_attempts"],
-            run=record.run,
-            **llm_kwargs,
+        schema_run = record.run
+        proposal = fitting(
+            lambda notes: propose_schema(
+                task=task,
+                relevance_snippets=notes,
+                model=model,
+                prompt_version=config.prompts["structuring/schema"],
+                max_attempts=caps["schema_max_attempts"],
+                run=schema_run,
+                budget=budget,
+                **llm_kwargs,
+            ),
+            schema_run,
         )
         record.result = {
             "schema_code": proposal.schema_code,
@@ -300,19 +350,24 @@ def run_pipeline(
     with _recorded_stage(
         task_logger, "structuring/parsing", model, transcript=False
     ) as record:
-        extraction = parse_documents(
-            documents=documents,
-            schema_code=proposal.schema_code,
-            parse_cls=proposal.parse_cls,
-            task=task,
-            prompt_version=config.prompts["structuring/parsing"],
-            relevance_snippets=relevance_snippets,
-            model=model,
-            max_attempts=caps["parsing_max_attempts"],
-            run=record.run,
-            workers=caps["doc_workers"],
-            splits=splits,
-            **llm_kwargs,
+        parsing_run = record.run
+        extraction = fitting(
+            lambda notes: parse_documents(
+                documents=documents,
+                schema_code=proposal.schema_code,
+                parse_cls=proposal.parse_cls,
+                task=task,
+                prompt_version=config.prompts["structuring/parsing"],
+                relevance_snippets=notes,
+                model=model,
+                max_attempts=caps["parsing_max_attempts"],
+                run=parsing_run,
+                workers=caps["doc_workers"],
+                splits=splits,
+                budget=budget,
+                **llm_kwargs,
+            ),
+            parsing_run,
         )
         record.result = {
             "parsed": extraction.parse,
@@ -323,19 +378,24 @@ def run_pipeline(
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
     with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
-        result = reasoning.reason(
-            task=task,
-            schema_code=proposal.schema_code,
-            parsed=parsed,
-            source_docs=extraction.source_docs,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            prompt_version=config.prompts["reasoning"],
-            max_turns=caps["reasoning_max_turns"],
-            timeout_s=reasoning_timeout_s,
-            run=record.run,
-            splits=splits,
-            **llm_kwargs,
+        reasoning_run = record.run
+        result = fitting(
+            lambda notes: reasoning.reason(
+                task=task,
+                schema_code=proposal.schema_code,
+                parsed=parsed,
+                source_docs=extraction.source_docs,
+                relevance_snippets=notes,
+                model=model,
+                prompt_version=config.prompts["reasoning"],
+                max_turns=caps["reasoning_max_turns"],
+                timeout_s=reasoning_timeout_s,
+                run=reasoning_run,
+                splits=splits,
+                budget=budget,
+                **llm_kwargs,
+            ),
+            reasoning_run,
         )
         _log.info(
             "reasoning done (%s, %d turn(s)): %s",
@@ -361,7 +421,7 @@ def run_pipeline(
         }
     return Answer(
         answer=result.answer,
-        relevant_context=[join_parts(s) for s in relevance_snippets],
+        relevant_context=[join_parts(s) for s in relevance.snippets],
         # the parse exactly as the agent saw it: plain data, each record stamped with the
         # 1-based document it came from
         structured_context=reasoning.tag_source_documents(
