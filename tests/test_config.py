@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import contextlib
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 import yaml
 
@@ -22,7 +22,9 @@ _FULL = {
     "seed": 42,
     "relevance_rounds": 3,
     "prompts": {
-        "relevance": "v1", "structuring/schema": "v1", "structuring/parsing": "v1",
+        "relevance": "v1",
+        "structuring/schema": "v1",
+        "structuring/parsing": "v1",
         "reasoning": "v1",
     },
 }
@@ -49,7 +51,6 @@ def _temp_configs(files: dict) -> Iterator[Path]:
 # ---------- available_* (real configs/) ----------
 
 
-
 def test_load_default_config() -> None:
     c = load_config("default")
     assert c.name == "default"
@@ -58,7 +59,10 @@ def test_load_default_config() -> None:
     assert c.params == {}
     assert c.prompts["relevance"] == "v1" and c.prompts["reasoning"] == "v1"
     assert c.prompts["reasoning"] == "v1"
-    assert c.label() == "default[model=gpt-5.6-luna,seed=42,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
+    assert (
+        c.label()
+        == "default[model=gpt-5.6-luna,seed=42,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
+    )
 
 
 # ---------- CLI overrides ----------
@@ -76,8 +80,12 @@ def test_label_sanitizes_model_override() -> None:
     """The label shows the bare model name (provider/route prefix dropped — it's transport),
     while the live config keeps the full string for LiteLLM routing."""
     c = load_config("default", model="hosted_vllm/Qwen/Qwen3.5-35B-A3B")
-    assert c.model == "hosted_vllm/Qwen/Qwen3.5-35B-A3B"  # live model unchanged (routing)
-    assert c.label().startswith("default[model=Qwen3.5-35B-A3B,seed=42,rounds=2,prompts=(")
+    assert (
+        c.model == "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+    )  # live model unchanged (routing)
+    assert c.label().startswith(
+        "default[model=Qwen3.5-35B-A3B,seed=42,rounds=2,prompts=("
+    )
 
 
 def test_none_overrides_are_ignored() -> None:
@@ -94,13 +102,19 @@ def test_label_is_full_resolved_identity() -> None:
         base = "exp[model=gpt-5.6-luna,seed=42,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
         assert load_config("exp").label() == base
         # seed and relevance_rounds are part of the identity (always, not just when overridden)
-        assert load_config("exp", seed=7).label() == \
-            "exp[model=gpt-5.6-luna,seed=7,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
-        assert load_config("exp", relevance_rounds=5).label() == \
-            "exp[model=gpt-5.6-luna,seed=42,rounds=5,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
+        assert (
+            load_config("exp", seed=7).label()
+            == "exp[model=gpt-5.6-luna,seed=7,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
+        )
+        assert (
+            load_config("exp", relevance_rounds=5).label()
+            == "exp[model=gpt-5.6-luna,seed=42,rounds=5,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]"
+        )
         # bumping ONE prompt stage changes the label too
-        assert load_config("exp2").label() == \
-            "exp2[model=gpt-5.6-luna,seed=42,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
+        assert (
+            load_config("exp2").label()
+            == "exp2[model=gpt-5.6-luna,seed=42,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
+        )
 
 
 def test_model_dump_round_trips_for_manifest() -> None:
@@ -119,7 +133,6 @@ def test_unknown_config_raises() -> None:
         assert "does-not-exist-xyz" in str(e)
     else:
         raise AssertionError("expected KeyError")
-
 
 
 def test_missing_model_raises() -> None:
@@ -146,9 +159,21 @@ def test_missing_prompt_stage_raises() -> None:
 def test_params_are_part_of_the_identity() -> None:
     """Generation params shape the output, so two runs differing only in temperature are
     different runs — but a provider-default run carries no `params=` noise."""
-    base = {"model": "openai/m", "prompts": {k: "v1" for k in
-            ("relevance", "structuring/schema", "structuring/parsing", "reasoning")}}
-    with _temp_configs({"plain": base, "warm": {**base, "params": {"temperature": 0.7}}}):
+    base = {
+        "model": "openai/m",
+        "prompts": {
+            k: "v1"
+            for k in (
+                "relevance",
+                "structuring/schema",
+                "structuring/parsing",
+                "reasoning",
+            )
+        },
+    }
+    with _temp_configs(
+        {"plain": base, "warm": {**base, "params": {"temperature": 0.7}}}
+    ):
         assert "params=" not in load_config("plain").label()
         assert "params={temperature=0.7}" in load_config("warm").label()
         assert load_config("warm").params == {"temperature": 0.7}
@@ -159,8 +184,22 @@ def test_params_are_part_of_the_identity() -> None:
 
 
 def test_available_configs_lists_what_load_config_accepts() -> None:
-    with _temp_configs({"one": {"model": "m", "prompts": {k: "v1" for k in
-                        ("relevance", "structuring/schema", "structuring/parsing", "reasoning")}}}):
+    with _temp_configs(
+        {
+            "one": {
+                "model": "m",
+                "prompts": {
+                    k: "v1"
+                    for k in (
+                        "relevance",
+                        "structuring/schema",
+                        "structuring/parsing",
+                        "reasoning",
+                    )
+                },
+            }
+        }
+    ):
         assert "one" in available_configs()
 
 

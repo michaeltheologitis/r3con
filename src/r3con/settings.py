@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 
-
 class Settings:
     # --- shipped package data (read-only, inside the wheel) ---
     PKG_DIR: Path = Path(__file__).resolve().parent

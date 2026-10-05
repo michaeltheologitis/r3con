@@ -78,8 +78,12 @@ def _sample_record_per_field(parse_dict: Any) -> str:
             if not value:
                 lines.append(f"`{key}` (empty list — no example to show)")
             else:
-                example = json.dumps(value[0], indent=2, default=repr, ensure_ascii=False)
-                lines.append(f"`{key}[0]` (1 of {len(value)} record(s)):\n```json\n{example}\n```")
+                example = json.dumps(
+                    value[0], indent=2, default=repr, ensure_ascii=False
+                )
+                lines.append(
+                    f"`{key}[0]` (1 of {len(value)} record(s)):\n```json\n{example}\n```"
+                )
         elif isinstance(value, dict):
             example = json.dumps(value, indent=2, default=repr, ensure_ascii=False)
             lines.append(f"`{key}` (dict):\n```json\n{example}\n```")
@@ -89,7 +93,9 @@ def _sample_record_per_field(parse_dict: Any) -> str:
     return "\n\n".join(lines)
 
 
-def tag_source_documents(parse_dict: Any, source_docs: dict[str, list[int]] | None) -> Any:
+def tag_source_documents(
+    parse_dict: Any, source_docs: dict[str, list[int]] | None
+) -> Any:
     """Stamp each list-field record with the 1-based document it was parsed from
     (``"document": N``), from the parsing step's ``source_docs`` provenance.
 
@@ -116,7 +122,7 @@ def tag_source_documents(parse_dict: Any, source_docs: dict[str, list[int]] | No
 
 
 @functools.lru_cache(maxsize=1)
-def _parse_token_encoding():  # noqa: ANN202 — returns a tiktoken Encoding, or None
+def _parse_token_encoding():
     """tiktoken encoding for the parse-size guard, cached. Returns ``None`` if tiktoken
     is unavailable — it downloads its vocabulary from the network on first use, and a
     size guard must never be what sinks a run that has already paid for stages 1 and 2."""
@@ -148,7 +154,11 @@ def _render_parse_for_codeact(parse_dict: Any) -> str:
     full = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
     if _count_tokens(full) <= settings.REASONING_PARSE_MAX_TOKS:
         return full
-    n = sum(len(v) for v in parse_dict.values() if isinstance(v, list)) if isinstance(parse_dict, dict) else 0
+    n = (
+        sum(len(v) for v in parse_dict.values() if isinstance(v, list))
+        if isinstance(parse_dict, dict)
+        else 0
+    )
     note = (
         "**IMPORTANT — the block below is only a SAMPLE of the parse, NOT the full data.** "
         f"The full parse is large ({n} record(s)), so only ONE example record per field is shown "
@@ -187,7 +197,9 @@ def reason(
     user message is the bare task. Loop mechanics live in
     :func:`r3con.runtime.codeact.run_codeact`.
     """
-    parse_dict = parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
+    parse_dict = (
+        parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
+    )
     parse_dict = tag_source_documents(parse_dict, source_docs)
 
     relevance_block = render_relevance(relevance_snippets)

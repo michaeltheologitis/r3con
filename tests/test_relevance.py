@@ -39,7 +39,9 @@ def _patched_relevance_state(
     calls: list[dict[str, Any]] = []
 
     def wrapper(**kwargs: Any) -> str:
-        calls.append({k: (list(v) if k == "other_snippets" else v) for k, v in kwargs.items()})
+        calls.append(
+            {k: (list(v) if k == "other_snippets" else v) for k, v in kwargs.items()}
+        )
         return fake(**kwargs)
 
     relevance.relevance_snippet = wrapper  # type: ignore[assignment]
@@ -74,7 +76,9 @@ def _tagged(**kwargs: Any) -> str:
 
 def _by_kind(calls: list[dict[str, Any]], kind: str) -> dict[str, Any]:
     matches = [c for c in calls if c["kind"] == kind]
-    assert len(matches) == 1, f"expected exactly one call with kind={kind!r}, got {len(matches)}"
+    assert len(matches) == 1, (
+        f"expected exactly one call with kind={kind!r}, got {len(matches)}"
+    )
     return matches[0]
 
 
@@ -87,7 +91,12 @@ def test_returns_final_round_summaries_aligned_to_docs() -> None:
     docs = ["DOC0", "DOC1", "DOC2"]
     with _patched_relevance_state(_tagged):
         result = relevance.surface_relevance(
-            task="q", documents=docs, model="m", prompt_version="v1", rounds=3, workers=4
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=3,
+            workers=4,
         )
     assert result.snippets == ["S(r=3,d=0)", "S(r=3,d=1)", "S(r=3,d=2)"]
     # Every round is kept for debugging; the last IS the returned relevance.
@@ -99,7 +108,14 @@ def test_returns_final_round_summaries_aligned_to_docs() -> None:
 def test_every_doc_summarized_each_round() -> None:
     docs = ["A", "B", "C"]
     with _patched_relevance_state(_tagged) as calls:
-        relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=3, workers=4)
+        relevance.surface_relevance(
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=3,
+            workers=4,
+        )
     # 3 rounds × 3 docs = 9 calls, one per (round, doc).
     kinds = sorted(c["kind"] for c in calls)
     assert kinds == sorted(f"relevance-r{r}-d{d}" for r in (1, 2, 3) for d in (0, 1, 2))
@@ -108,7 +124,14 @@ def test_every_doc_summarized_each_round() -> None:
 def test_round1_has_no_other_states() -> None:
     docs = ["A", "B", "C"]
     with _patched_relevance_state(_tagged) as calls:
-        relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=2, workers=4)
+        relevance.surface_relevance(
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=2,
+            workers=4,
+        )
     for d in range(3):
         assert _by_kind(calls, f"relevance-r1-d{d}")["other_snippets"] == []
 
@@ -117,19 +140,36 @@ def test_round2_conditions_on_others_only_frozen_prior() -> None:
     """Round 2, doc d sees exactly the OTHER docs' round-1 snippets — never its own."""
     docs = ["A", "B", "C"]
     with _patched_relevance_state(_tagged) as calls:
-        relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=2, workers=4)
+        relevance.surface_relevance(
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=2,
+            workers=4,
+        )
     # doc 1 in round 2 sees round-1 of docs 0 and 2, not its own (d=1).
     others_d1 = _by_kind(calls, "relevance-r2-d1")["other_snippets"]
     assert others_d1 == ["S(r=1,d=0)", "S(r=1,d=2)"]
     assert "S(r=1,d=1)" not in others_d1
     # doc 0 sees docs 1 and 2.
-    assert _by_kind(calls, "relevance-r2-d0")["other_snippets"] == ["S(r=1,d=1)", "S(r=1,d=2)"]
+    assert _by_kind(calls, "relevance-r2-d0")["other_snippets"] == [
+        "S(r=1,d=1)",
+        "S(r=1,d=2)",
+    ]
 
 
 def test_round3_conditions_on_round2_not_round1() -> None:
     docs = ["A", "B"]
     with _patched_relevance_state(_tagged) as calls:
-        relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=3, workers=4)
+        relevance.surface_relevance(
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=3,
+            workers=4,
+        )
     # round 3 doc 0 sees round-2 of doc 1 (the frozen previous round), not round 1.
     others = _by_kind(calls, "relevance-r3-d0")["other_snippets"]
     assert others == ["S(r=2,d=1)"]
@@ -138,7 +178,14 @@ def test_round3_conditions_on_round2_not_round1() -> None:
 def test_rounds_one_degenerates_to_independent() -> None:
     docs = ["A", "B"]
     with _patched_relevance_state(_tagged) as calls:
-        result = relevance.surface_relevance(task="q", documents=docs, model="m", prompt_version="v1", rounds=1, workers=4)
+        result = relevance.surface_relevance(
+            task="q",
+            documents=docs,
+            model="m",
+            prompt_version="v1",
+            rounds=1,
+            workers=4,
+        )
     assert result.snippets == ["S(r=1,d=0)", "S(r=1,d=1)"]
     assert len(result.rounds) == 1
     # No round produced an other-snippets context.
@@ -152,7 +199,9 @@ def test_rounds_one_degenerates_to_independent() -> None:
 
 def test_empty_documents() -> None:
     with _patched_relevance_state(_tagged) as calls:
-        result = relevance.surface_relevance(task="q", documents=[], model="m", prompt_version="v1", rounds=3)
+        result = relevance.surface_relevance(
+            task="q", documents=[], model="m", prompt_version="v1", rounds=3
+        )
     assert result.snippets == []
     assert result.rounds == []
     assert calls == []
@@ -160,7 +209,14 @@ def test_empty_documents() -> None:
 
 def test_single_document_has_empty_others_every_round() -> None:
     with _patched_relevance_state(_tagged) as calls:
-        result = relevance.surface_relevance(task="q", documents=["only"], model="m", prompt_version="v1", rounds=3, workers=4)
+        result = relevance.surface_relevance(
+            task="q",
+            documents=["only"],
+            model="m",
+            prompt_version="v1",
+            rounds=3,
+            workers=4,
+        )
     assert result.snippets == ["S(r=3,d=0)"]
     assert len(result.rounds) == 3
     # Only document → no others, ever.
@@ -171,7 +227,9 @@ def test_rounds_zero_means_no_relevance_states() -> None:
     # rounds=0 is a deliberate "no relevance" run: empty result AND not a single
     # relevance_snippet call — round 1 must be skipped, not merely the later rounds.
     with _patched_relevance_state(_tagged) as calls:
-        result = relevance.surface_relevance(task="q", documents=["a", "b"], model="m", prompt_version="v1", rounds=0)
+        result = relevance.surface_relevance(
+            task="q", documents=["a", "b"], model="m", prompt_version="v1", rounds=0
+        )
     assert result.snippets == []
     assert result.rounds == []
     assert calls == []
@@ -202,6 +260,7 @@ def test_render_relevance_doc_ids_label() -> None:
 def test_prompt_contract_task_and_document_placement() -> None:
     """System prompt carries the task + (round ≥ 2) the others block; the document
     is the user message; round 1 omits the others block."""
+
     def fake(*, system_prompt: str, user_prompt: str, **_: Any) -> str:
         return f"<summary of {user_prompt}>"
 

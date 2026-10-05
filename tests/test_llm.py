@@ -119,7 +119,11 @@ def test_num_retries_caller_override_wins() -> None:
     restore, captured = _capture_completion()
     try:
         litellm_chat_completion_full(
-            system_prompt="s", user_prompt="u", model="hosted_vllm/x", run=None, num_retries=2
+            system_prompt="s",
+            user_prompt="u",
+            model="hosted_vllm/x",
+            run=None,
+            num_retries=2,
         )
     finally:
         restore()
@@ -172,7 +176,11 @@ def test_empty_structured_output_rerolls_then_succeeds() -> None:
     restore, seen = _sequence_completion(["", "", '{"x": 7}'])
     try:
         out = litellm_chat_completion(
-            system_prompt="s", user_prompt="u", model="hosted_vllm/x", schema=_Out, seed=0
+            system_prompt="s",
+            user_prompt="u",
+            model="hosted_vllm/x",
+            schema=_Out,
+            seed=0,
         )
     finally:
         restore()
@@ -185,7 +193,12 @@ def test_empty_structured_output_raises_after_max_rerolls() -> None:
     restore, seen = _sequence_completion([""] * 20)
     try:
         litellm_chat_completion(
-            system_prompt="s", user_prompt="u", model="x", schema=_Out, seed=0, max_empty_retries=3
+            system_prompt="s",
+            user_prompt="u",
+            model="x",
+            schema=_Out,
+            seed=0,
+            max_empty_retries=3,
         )
     except ValueError as e:
         assert "empty" in str(e).lower()
@@ -201,7 +214,9 @@ def test_non_schema_empty_is_not_rerolled() -> None:
     decides) — only structured-output empties are re-rolled."""
     restore, seen = _sequence_completion([""])
     try:
-        out = litellm_chat_completion(system_prompt="s", user_prompt="u", model="x", schema=None)
+        out = litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model="x", schema=None
+        )
     finally:
         restore()
     assert out == "" and len(seen) == 1
@@ -210,7 +225,9 @@ def test_non_schema_empty_is_not_rerolled() -> None:
 def test_structured_success_first_try_does_not_reroll() -> None:
     restore, seen = _sequence_completion(['{"x": 1}'])
     try:
-        out = litellm_chat_completion(system_prompt="s", user_prompt="u", model="x", schema=_Out, seed=5)
+        out = litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model="x", schema=_Out, seed=5
+        )
     finally:
         restore()
     assert out.x == 1 and len(seen) == 1
@@ -225,9 +242,17 @@ def test_sampling_params_reach_completion_request() -> None:
     restore, captured = _capture_completion()
     try:
         litellm_chat_completion_full(
-            system_prompt="s", user_prompt="u", model="hosted_vllm/x", run=None,
-            temperature=0.7, top_p=0.8, presence_penalty=1.5,
-            extra_body={"top_k": 20, "chat_template_kwargs": {"enable_thinking": False}},
+            system_prompt="s",
+            user_prompt="u",
+            model="hosted_vllm/x",
+            run=None,
+            temperature=0.7,
+            top_p=0.8,
+            presence_penalty=1.5,
+            extra_body={
+                "top_k": 20,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
         )
     finally:
         restore()

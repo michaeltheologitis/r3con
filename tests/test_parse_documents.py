@@ -105,10 +105,11 @@ def _run(
 
 def test_one_call_per_document_whole_doc() -> None:
     """Each document is one call; the whole document is the input (no chunking)."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=document)])
 
-    result, calls = _run(fake, documents=[DOC_A, DOC_B, DOC_C])
+    _result, calls = _run(fake, documents=[DOC_A, DOC_B, DOC_C])
     assert len(calls) == 3
     seen_docs = sorted(c["document"] for c in calls)
     assert seen_docs == sorted([DOC_A, DOC_B, DOC_C])
@@ -119,6 +120,7 @@ def test_one_call_per_document_whole_doc() -> None:
 
 def test_each_call_carries_doc_index_kind() -> None:
     """The per-doc call kind encodes the source document index (for the cost ledger)."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[])
 
@@ -155,8 +157,14 @@ def test_summaries_rendered_into_system_prompt() -> None:
 
     with _patched_llm(fake) as calls:
         parsing_mod.parse_documents(
-            documents=[DOC_A], schema_code="SCHEMA", parse_cls=Parse,
-            task="What is discussed?", relevance_snippets=summ, model="m", prompt_version="v1", workers=1,
+            documents=[DOC_A],
+            schema_code="SCHEMA",
+            parse_cls=Parse,
+            task="What is discussed?",
+            relevance_snippets=summ,
+            model="m",
+            prompt_version="v1",
+            workers=1,
         )
     sys_msg = calls[0]["system_prompt"]
     # The injected block heading (distinct from the example's "Document summaries:" label).
@@ -173,8 +181,14 @@ def test_no_summaries_omits_block() -> None:
 
     with _patched_llm(fake) as calls:
         parsing_mod.parse_documents(
-            documents=[DOC_A], schema_code="SCHEMA", parse_cls=Parse,
-            task="q", relevance_snippets=None, model="m", prompt_version="v1", workers=1,
+            documents=[DOC_A],
+            schema_code="SCHEMA",
+            parse_cls=Parse,
+            task="q",
+            relevance_snippets=None,
+            model="m",
+            prompt_version="v1",
+            workers=1,
         )
     # The injected block (not the example's label) is omitted when there are no summaries.
     assert "## Task-conditioned document summaries" not in calls[0]["system_prompt"]
@@ -187,6 +201,7 @@ def test_no_summaries_omits_block() -> None:
 
 def test_merge_concatenates_list_fields_in_doc_order() -> None:
     """Records from each document concatenate in document order."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=f"{document}#a"), Item(text=f"{document}#b")])
 
@@ -197,6 +212,7 @@ def test_merge_concatenates_list_fields_in_doc_order() -> None:
 
 def test_source_docs_alignment_one_record_per_doc() -> None:
     """source_docs aligns 1:1 with the merged list, tagging each record's origin doc."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=document)])
 
@@ -206,6 +222,7 @@ def test_source_docs_alignment_one_record_per_doc() -> None:
 
 def test_source_docs_multi_record_per_doc_shares_tag() -> None:
     """Multiple records from one document all carry that document's index."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=f"{document}#a"), Item(text=f"{document}#b")])
 
@@ -215,6 +232,7 @@ def test_source_docs_multi_record_per_doc_shares_tag() -> None:
 
 def test_parallel_preserves_document_order() -> None:
     """Even with parallel workers, the merge stays in document order."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=document)])
 
@@ -241,6 +259,7 @@ def test_doc_ids_labels() -> None:
 
 def test_empty_corpus_no_calls() -> None:
     """An empty corpus returns an empty parse and makes no extraction calls."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[Item(text=document)])
 
@@ -252,6 +271,7 @@ def test_empty_corpus_no_calls() -> None:
 
 def test_exception_propagates() -> None:
     """An exception in any document's extraction surfaces out of parse_documents."""
+
     def fake(*, document: str, **_: Any) -> Parse:
         if document == DOC_B:
             raise RuntimeError("extract blew up")
@@ -275,7 +295,9 @@ def test_progress_logged_per_doc_at_info() -> None:
     def fake(*, document: str, **_: Any) -> Parse:
         return Parse(items=[])
 
-    logger = get_logger("structuring.parsing")  # the exact logger the parsing stage uses
+    logger = get_logger(
+        "structuring.parsing"
+    )  # the exact logger the parsing stage uses
     buf = io.StringIO()
     handler = logging.StreamHandler(buf)
     old_level = logger.level
@@ -284,8 +306,13 @@ def test_progress_logged_per_doc_at_info() -> None:
     try:
         with _patched_extract_one(fake):
             parsing_mod.parse_documents(
-                documents=[DOC_A, DOC_B], schema_code="SCHEMA", parse_cls=Parse,
-                task="q", model="m", prompt_version="v1", workers=1,
+                documents=[DOC_A, DOC_B],
+                schema_code="SCHEMA",
+                parse_cls=Parse,
+                task="q",
+                model="m",
+                prompt_version="v1",
+                workers=1,
             )
     finally:
         logger.removeHandler(handler)

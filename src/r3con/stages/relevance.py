@@ -57,7 +57,9 @@ class RelevantContext:
     rounds: list[list[str]]
 
 
-def render_relevance(relevance_snippets: list[str] | None, doc_ids: list[str] | None = None) -> str:
+def render_relevance(
+    relevance_snippets: list[str] | None, doc_ids: list[str] | None = None
+) -> str:
     """Render the final-round relevance snippets into the labeled block that stages 2
     and 3 embed as the relevant context.
 
@@ -71,7 +73,11 @@ def render_relevance(relevance_snippets: list[str] | None, doc_ids: list[str] | 
     for i, s in enumerate(relevance_snippets):
         text = (s or "").strip()
         label = doc_ids[i] if (doc_ids and i < len(doc_ids)) else f"Document {i + 1}"
-        parts.append(f"### {label}\n{text}" if text else f"### {label}\n(no relevant summary for this task)")
+        parts.append(
+            f"### {label}\n{text}"
+            if text
+            else f"### {label}\n(no relevant summary for this task)"
+        )
     return "\n\n".join(parts)
 
 
@@ -102,13 +108,20 @@ def relevance_snippet(
     string is allowed (the document contributes nothing relevant to the task).
     """
     system_prompt = load_prompt(
-        "relevance", version=prompt_version, task=task, other_snippets=_render_other_states(other_snippets)
+        "relevance",
+        version=prompt_version,
+        task=task,
+        other_snippets=_render_other_states(other_snippets),
     )
     return cast(
         str,
         litellm_chat_completion(
-            system_prompt=system_prompt, user_prompt=document,
-            model=model, run=run, kind=kind, **llm_kwargs,
+            system_prompt=system_prompt,
+            user_prompt=document,
+            model=model,
+            run=run,
+            kind=kind,
+            **llm_kwargs,
         ),
     ).strip()
 
@@ -144,25 +157,43 @@ def surface_relevance(
     def run_round(prev: list[str] | None, round_idx: int) -> list[str]:
         """Rewrite every document's relevance snippet in parallel. ``prev`` is the frozen
         previous-round state set (``None`` in round 1)."""
-        _log.info("round %d/%d · %d doc(s) (≤%d parallel)", round_idx, rounds, len(documents), max_workers)
+        _log.info(
+            "round %d/%d · %d doc(s) (≤%d parallel)",
+            round_idx,
+            rounds,
+            len(documents),
+            max_workers,
+        )
 
         def one(i: int, doc: str) -> str:
             # Others-only: document i sees the previous round's snippets of the OTHER
             # documents (j != i), never its own (the document itself is the user message).
             others = [] if prev is None else [s for j, s in enumerate(prev) if j != i]
             return relevance_snippet(
-                task=task, document=doc, other_snippets=others, model=model,
-                prompt_version=prompt_version, run=run, kind=f"relevance-r{round_idx}-d{i}", **llm_kwargs,
+                task=task,
+                document=doc,
+                other_snippets=others,
+                model=model,
+                prompt_version=prompt_version,
+                run=run,
+                kind=f"relevance-r{round_idx}-d{i}",
+                **llm_kwargs,
             )
 
         result = parallel_map(one, documents, max_workers=max_workers)
         n_nonempty = sum(1 for s in result if s and s.strip())
-        _log.info("round %d/%d done · %d/%d doc(s) had a relevant state",
-                  round_idx, rounds, n_nonempty, len(documents))
+        _log.info(
+            "round %d/%d done · %d/%d doc(s) had a relevant state",
+            round_idx,
+            rounds,
+            n_nonempty,
+            len(documents),
+        )
         return result
 
     all_rounds: list[list[str]] = [run_round(None, 1)]
     for r in range(2, rounds + 1):
-        all_rounds.append(run_round(all_rounds[-1], r))  # only the previous round feeds in
+        # only the previous round feeds in
+        all_rounds.append(run_round(all_rounds[-1], r))
 
     return RelevantContext(snippets=all_rounds[-1], rounds=all_rounds)

@@ -1,0 +1,2 @@
+# ruff check --fix and ruff format at ruff's defaults (TASK-34, R1.1)
+d05bece77110ceb759e9c55e39c617acd5318adf

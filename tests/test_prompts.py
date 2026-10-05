@@ -10,13 +10,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from r3con.config import PROMPT_STAGES, load_config  # noqa: E402
-from r3con.prompts import load_prompt, prompt_search_path  # noqa: E402
-from r3con.settings import settings  # noqa: E402
+from r3con.config import PROMPT_STAGES, load_config
+from r3con.prompts import load_prompt, prompt_search_path
+from r3con.settings import settings
 
 # Enough kwargs to render any stage's template; Jinja ignores the ones it doesn't use.
-CTX = dict(task="T", schema_code="S", relevance="", other_snippets="", parsed="{}",
-           parse_block="{}", samples_block="", parse_json="")
+CTX = {
+    "task": "T",
+    "schema_code": "S",
+    "relevance": "",
+    "other_snippets": "",
+    "parsed": "{}",
+    "parse_block": "{}",
+    "samples_block": "",
+    "parse_json": "",
+}
 
 
 def test_every_stage_pinned_by_the_default_config_actually_ships() -> None:
@@ -25,7 +33,9 @@ def test_every_stage_pinned_by_the_default_config_actually_ships() -> None:
     cfg = load_config("default")
     for stage in PROMPT_STAGES:
         version = cfg.prompts[stage]
-        assert (settings.PROMPTS_DIR / stage / f"{version}.yaml").is_file(), f"{stage}/{version}"
+        assert (settings.PROMPTS_DIR / stage / f"{version}.yaml").is_file(), (
+            f"{stage}/{version}"
+        )
         assert load_prompt(stage, version=version, **CTX).strip()
 
 
@@ -46,12 +56,18 @@ def test_an_overlay_version_is_found_and_the_packaged_one_still_is() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         stage_dir = Path(tmp) / "relevance"
         stage_dir.mkdir(parents=True)
-        (stage_dir / "v2.yaml").write_text('instructions: |-\n  MY OVERLAY PROMPT {{ task }}\n', encoding="utf-8")
+        (stage_dir / "v2.yaml").write_text(
+            "instructions: |-\n  MY OVERLAY PROMPT {{ task }}\n", encoding="utf-8"
+        )
         os.environ["R3CON_PROMPTS_DIR"] = tmp
         try:
-            assert "MY OVERLAY PROMPT T" in load_prompt("relevance", version="v2", **CTX)
+            assert "MY OVERLAY PROMPT T" in load_prompt(
+                "relevance", version="v2", **CTX
+            )
             # the packaged v1 is still reachable — the overlay adds, it doesn't replace
-            assert "MY OVERLAY PROMPT" not in load_prompt("relevance", version="v1", **CTX)
+            assert "MY OVERLAY PROMPT" not in load_prompt(
+                "relevance", version="v1", **CTX
+            )
         finally:
             del os.environ["R3CON_PROMPTS_DIR"]
 
@@ -60,7 +76,9 @@ def test_an_overlay_shadows_a_packaged_version_of_the_same_name() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         stage_dir = Path(tmp) / "relevance"
         stage_dir.mkdir(parents=True)
-        (stage_dir / "v1.yaml").write_text("instructions: |-\n  SHADOWED\n", encoding="utf-8")
+        (stage_dir / "v1.yaml").write_text(
+            "instructions: |-\n  SHADOWED\n", encoding="utf-8"
+        )
         os.environ["R3CON_PROMPTS_DIR"] = tmp
         try:
             assert load_prompt("relevance", version="v1", **CTX).strip() == "SHADOWED"
@@ -74,7 +92,9 @@ def test_a_missing_version_names_every_place_it_looked() -> None:
     except FileNotFoundError as e:
         msg = str(e)
         assert "v999" in msg and "relevance" in msg
-        assert str(settings.PROMPTS_DIR) in msg, "the error must name the packaged location too"
+        assert str(settings.PROMPTS_DIR) in msg, (
+            "the error must name the packaged location too"
+        )
         return
     raise AssertionError("expected FileNotFoundError")
 

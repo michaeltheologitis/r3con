@@ -23,8 +23,8 @@ from r3con.runtime.python_executor import (
     evaluate_python_code,
 )
 
-
 # ---------- core eval ----------
+
 
 def test_last_expression_value_is_returned() -> None:
     ex = LocalPythonExecutor(additional_authorized_imports=[])
@@ -65,6 +65,7 @@ def test_state_persists_across_calls() -> None:
 
 # ---------- authorized imports ----------
 
+
 def test_default_builtin_module_is_importable() -> None:
     """`math` is in BASE_BUILTIN_MODULES so it should import without being listed explicitly."""
     ex = LocalPythonExecutor(additional_authorized_imports=[])
@@ -86,11 +87,12 @@ def test_unauthorized_import_raises() -> None:
 def test_additional_authorized_imports_unblocks_module() -> None:
     """An additional_authorized_imports entry should let that module through."""
     ex = LocalPythonExecutor(additional_authorized_imports=["json"])
-    out = ex('import json\njson.loads(\'{"a": 1}\')')
+    out = ex("import json\njson.loads('{\"a\": 1}')")
     assert out.output == {"a": 1}
 
 
 # ---------- sandboxing ----------
+
 
 def test_dunder_attribute_access_is_blocked() -> None:
     """`__class__`/`__subclasses__` style escapes must be rejected."""
@@ -126,6 +128,7 @@ def test_exec_is_not_in_default_builtins() -> None:
 
 
 # ---------- failure modes ----------
+
 
 def test_syntax_error_raises_interpreter_error() -> None:
     ex = LocalPythonExecutor(additional_authorized_imports=[])
@@ -182,6 +185,7 @@ def test_undefined_name_raises_interpreter_error() -> None:
 
 
 # ---------- module-level convenience function ----------
+
 
 def test_evaluate_python_code_function_works_standalone() -> None:
     """The free function is the lower-level entry point — needs static_tools wired in by the caller."""

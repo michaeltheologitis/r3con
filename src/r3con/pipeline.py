@@ -38,9 +38,9 @@ from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings
 from r3con.stages import reasoning
+from r3con.stages.relevance import surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
-from r3con.stages.relevance import surface_relevance
 
 _log = get_logger("pipeline")
 
@@ -136,23 +136,38 @@ def run_pipeline(
     def _run(stage: str, model_for_log: str) -> StageRun | None:
         if task_logger is None:
             return None
-        return StageRun(stage=stage, task_logger=task_logger, model=model_for_log, seed=seed)
+        return StageRun(
+            stage=stage, task_logger=task_logger, model=model_for_log, seed=seed
+        )
 
     # The identity card first, so even a run that dies in stage 1 says what it was.
     if task_logger is not None:
         write_manifest(
-            task_logger, task=task, config=config,
-            n_docs=len(documents), context_chars=sum(len(d) for d in documents),
+            task_logger,
+            task=task,
+            config=config,
+            n_docs=len(documents),
+            context_chars=sum(len(d) for d in documents),
         )
 
     # --- Stage 1: surface relevance — the relevant context. ---
-    _log.info("stage 1/3 · surfacing relevance (%d round(s), %d doc(s))", rounds, len(documents))
+    _log.info(
+        "stage 1/3 · surfacing relevance (%d round(s), %d doc(s))",
+        rounds,
+        len(documents),
+    )
     relevance_run = _run("relevance", model)
     relevance = surface_relevance(
-        task=task, documents=documents, model=model, prompt_version=config.prompts["relevance"],
-        rounds=rounds, run=relevance_run, **llm_kwargs,
+        task=task,
+        documents=documents,
+        model=model,
+        prompt_version=config.prompts["relevance"],
+        rounds=rounds,
+        run=relevance_run,
+        **llm_kwargs,
     )
-    relevance_snippets = relevance.snippets  # the relevant context feeds every later stage
+    # the relevant context feeds every later stage
+    relevance_snippets = relevance.snippets
     if relevance_run is not None:
         relevance_run.flush(write_transcript=False)
     if task_logger is not None:
@@ -175,8 +190,12 @@ def run_pipeline(
     _log.info("stage 2/3 · structuring · proposing the schema")
     schema_run = _run("structuring/schema", model)
     proposal = propose_schema(
-        task=task, relevance_snippets=relevance_snippets, model=model, prompt_version=config.prompts["structuring/schema"],
-        run=schema_run, **llm_kwargs,
+        task=task,
+        relevance_snippets=relevance_snippets,
+        model=model,
+        prompt_version=config.prompts["structuring/schema"],
+        run=schema_run,
+        **llm_kwargs,
     )
     if schema_run is not None:
         schema_run.flush()
@@ -187,7 +206,11 @@ def run_pipeline(
                 "schema_code": proposal.schema_code,
                 "thought": proposal.attempts[-1].thought if proposal.attempts else None,
                 "attempts": [
-                    {"schema_code": a.schema_code, "error": a.error, "thought": a.thought}
+                    {
+                        "schema_code": a.schema_code,
+                        "error": a.error,
+                        "thought": a.thought,
+                    }
                     for a in proposal.attempts
                 ],
                 "totals": schema_run.compute_totals() if schema_run else None,
@@ -198,9 +221,15 @@ def run_pipeline(
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     parsing_run = _run("structuring/parsing", model)
     extraction = parse_documents(
-        documents=documents, schema_code=proposal.schema_code, parse_cls=proposal.parse_cls,
-        task=task, prompt_version=config.prompts["structuring/parsing"], relevance_snippets=relevance_snippets, model=model,
-        run=parsing_run, **llm_kwargs,
+        documents=documents,
+        schema_code=proposal.schema_code,
+        parse_cls=proposal.parse_cls,
+        task=task,
+        prompt_version=config.prompts["structuring/parsing"],
+        relevance_snippets=relevance_snippets,
+        model=model,
+        run=parsing_run,
+        **llm_kwargs,
     )
     parsed = extraction.parse
     if parsing_run is not None:
@@ -220,14 +249,24 @@ def run_pipeline(
     reasoning_run = _run("reasoning", model)
     try:
         result = reasoning.reason(
-            task=task, schema_code=proposal.schema_code, parsed=parsed,
-            source_docs=extraction.source_docs, relevance_snippets=relevance_snippets,
-            model=model, prompt_version=config.prompts["reasoning"],
-            max_turns=max_reasoning_turns, timeout_s=reasoning_timeout_s,
-            run=reasoning_run, **llm_kwargs,
+            task=task,
+            schema_code=proposal.schema_code,
+            parsed=parsed,
+            source_docs=extraction.source_docs,
+            relevance_snippets=relevance_snippets,
+            model=model,
+            prompt_version=config.prompts["reasoning"],
+            max_turns=max_reasoning_turns,
+            timeout_s=reasoning_timeout_s,
+            run=reasoning_run,
+            **llm_kwargs,
         )
-        _log.info("reasoning done (%s, %d turn(s)): %s",
-                  result.terminated_by, len(result.turns), _preview(result.answer))
+        _log.info(
+            "reasoning done (%s, %d turn(s)): %s",
+            result.terminated_by,
+            len(result.turns),
+            _preview(result.answer),
+        )
         if reasoning_run is not None:
             reasoning_run.flush()
         if task_logger is not None:
@@ -239,9 +278,12 @@ def run_pipeline(
                     "n_turns": len(result.turns),
                     "turns": [
                         {
-                            "response": t.response, "raw_response": t.raw_response,
-                            "code": t.code, "observation": t.observation,
-                            "error": t.error, "is_final_answer": t.is_final_answer,
+                            "response": t.response,
+                            "raw_response": t.raw_response,
+                            "code": t.code,
+                            "observation": t.observation,
+                            "error": t.error,
+                            "is_final_answer": t.is_final_answer,
                         }
                         for t in result.turns
                     ],

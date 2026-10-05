@@ -103,10 +103,10 @@ answer:
 built during the run:
 
 ```python
-result.answer             # str       — final answer
-result.relevant_context   # list[str] — final relevance snippets
-result.structured_context # dict      — structured representation
-result.run_dir            # Path      — directory containing run artifacts
+result.answer  # str       — final answer
+result.relevant_context  # list[str] — final relevance snippets
+result.structured_context  # dict      — structured representation
+result.run_dir  # Path      — directory containing run artifacts
 ```
 
 `str(result)` returns the same value as `result.answer`.
