@@ -26,12 +26,14 @@ document is read on its own, and information crosses document boundaries through
 relevance snippets.
 """
 
-from r3con import r3con  # noqa: F401 — `from r3con import r3con` namespace
-from r3con.r3con import read_documents, run
+from r3con import r3con
 from r3con.config import RunConfig, load_config
 from r3con.pipeline import Answer, run_pipeline
 from r3con.prompts import load_prompt
+from r3con.r3con import read_documents, run
 from r3con.runs import StageRun, TaskLogger
+from r3con.runtime.codeact import CodeActResult, CodeActTurn
+from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
 from r3con.settings import settings
 from r3con.stages.reasoning import reason
 from r3con.stages.relevance import (
@@ -47,9 +49,11 @@ from r3con.stages.structuring.parsing import (
     parse_documents,
     parse_one_document,
 )
-from r3con.stages.structuring.schema import ProposalAttempt, ProposalResult, propose_schema
-from r3con.runtime.codeact import CodeActResult, CodeActTurn
-from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
+from r3con.stages.structuring.schema import (
+    ProposalAttempt,
+    ProposalResult,
+    propose_schema,
+)
 
 try:  # the installed wheel's version is the truth; the literal is the checkout fallback
     from importlib.metadata import version as _pkg_version

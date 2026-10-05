@@ -36,7 +36,11 @@ _OK_COMPLETION = {
     "created": 0,
     "model": "mock-model",
     "choices": [
-        {"index": 0, "message": {"role": "assistant", "content": "OK"}, "finish_reason": "stop"}
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop",
+        }
     ],
     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
 }
@@ -81,12 +85,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _call(base_url: str, num_retries: int):
     return litellm.completion(
-        model="hosted_vllm/mock-model",          # same provider path as the real run
+        model="hosted_vllm/mock-model",  # same provider path as the real run
         messages=[{"role": "user", "content": "hi"}],
         api_base=base_url,
         api_key="sk-mock",
         num_retries=num_retries,
-        timeout=10,                              # test only: fail fast so it stays quick
+        timeout=10,  # test only: fail fast so it stays quick
     )
 
 
@@ -107,37 +111,68 @@ def main() -> int:
     STATE.update(fail_first=1, mode="500", count=0)
     try:
         _call(base, 0)
-        record("default (num_retries=0): 1×500 → aborts", False, f"unexpected SUCCESS, count={STATE['count']}")
+        record(
+            "default (num_retries=0): 1×500 → aborts",
+            False,
+            f"unexpected SUCCESS, count={STATE['count']}",
+        )
     except Exception as e:
-        record("default (num_retries=0): 1×500 → aborts", True, f"raised {type(e).__name__}, requests={STATE['count']}")
+        record(
+            "default (num_retries=0): 1×500 → aborts",
+            True,
+            f"raised {type(e).__name__}, requests={STATE['count']}",
+        )
 
     # 2) THE key one: transient — fail twice, then succeed. num_retries=3 should recover.
     STATE.update(fail_first=2, mode="500", count=0)
     try:
         r = _call(base, 3)
         ok = r.choices[0].message.content == "OK"
-        record("num_retries=3: 2×500 then 200 → RECOVERS", ok, f"success={ok}, requests={STATE['count']} (expect 3)")
+        record(
+            "num_retries=3: 2×500 then 200 → RECOVERS",
+            ok,
+            f"success={ok}, requests={STATE['count']} (expect 3)",
+        )
     except Exception as e:
-        record("num_retries=3: 2×500 then 200 → RECOVERS", False, f"raised {type(e).__name__}, requests={STATE['count']}")
+        record(
+            "num_retries=3: 2×500 then 200 → RECOVERS",
+            False,
+            f"raised {type(e).__name__}, requests={STATE['count']}",
+        )
 
     # 3) Sustained outage: always fail. Retries should NOT save it (but should retry N×).
     STATE.update(fail_first=999, mode="500", count=0)
     try:
         _call(base, 2)
-        record("num_retries=2: sustained 500 → still fails", False, f"unexpected SUCCESS, count={STATE['count']}")
+        record(
+            "num_retries=2: sustained 500 → still fails",
+            False,
+            f"unexpected SUCCESS, count={STATE['count']}",
+        )
     except Exception as e:
         retried = STATE["count"] >= 3  # 1 try + 2 retries
-        record("num_retries=2: sustained 500 → still fails", retried,
-               f"raised {type(e).__name__} after {STATE['count']} requests (expect ≥3)")
+        record(
+            "num_retries=2: sustained 500 → still fails",
+            retried,
+            f"raised {type(e).__name__} after {STATE['count']} requests (expect ≥3)",
+        )
 
     # 4) Connection-error family (socket close) — transient, num_retries=3 should recover.
     STATE.update(fail_first=2, mode="disconnect", count=0)
     try:
         r = _call(base, 3)
         ok = r.choices[0].message.content == "OK"
-        record("num_retries=3: 2×conn-drop then 200 → RECOVERS", ok, f"success={ok}, requests={STATE['count']}")
+        record(
+            "num_retries=3: 2×conn-drop then 200 → RECOVERS",
+            ok,
+            f"success={ok}, requests={STATE['count']}",
+        )
     except Exception as e:
-        record("num_retries=3: 2×conn-drop then 200 → RECOVERS", False, f"raised {type(e).__name__}, requests={STATE['count']}")
+        record(
+            "num_retries=3: 2×conn-drop then 200 → RECOVERS",
+            False,
+            f"raised {type(e).__name__}, requests={STATE['count']}",
+        )
 
     srv.shutdown()
 

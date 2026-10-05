@@ -51,11 +51,11 @@ import json
 import re
 import secrets
 import threading
-import yaml
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel
 
 # ``normalize_model_name`` lives in ``r3con.config`` — it's a model-identity helper
@@ -63,7 +63,6 @@ from pydantic import BaseModel
 # same normalized name the run label does.
 from r3con.config import normalize_model_name
 from r3con.settings import active_logs_dir
-
 
 # Pulls the source-document index (and an optional chunk index) out of a call kind so
 # calls.json carries per-call provenance. Matches ``parse-d0`` and ``relevance-r2-d3``;
@@ -103,7 +102,9 @@ class TaskLogger:
     any JSON-serializable value; non-serializable values fall back to ``repr``.
     """
 
-    def __init__(self, folder: str, *, task_id: str | None = None, root: Path | None = None) -> None:
+    def __init__(
+        self, folder: str, *, task_id: str | None = None, root: Path | None = None
+    ) -> None:
         self.folder = folder
         self.task_id = task_id if task_id is not None else folder
         base = root or active_logs_dir()
@@ -119,7 +120,10 @@ class TaskLogger:
         path = self._path(name, "json")
         # ensure_ascii=False keeps non-ASCII (e.g. CJK) readable in the logs rather than
         # as \uXXXX escapes; the explicit utf-8 write makes that safe on any host locale.
-        path.write_text(json.dumps(_jsonable(data), indent=2, default=repr, ensure_ascii=False), encoding="utf-8")
+        path.write_text(
+            json.dumps(_jsonable(data), indent=2, default=repr, ensure_ascii=False),
+            encoding="utf-8",
+        )
         return path
 
     def write_yaml(self, name: str, data: Any) -> Path:
@@ -134,7 +138,7 @@ class TaskLogger:
 
 
 def write_manifest(
-    task_logger: "TaskLogger",
+    task_logger: TaskLogger,
     *,
     task: str,
     config: Any,
@@ -157,7 +161,9 @@ def write_manifest(
     from r3con.prompts import resolve_prompt_path
     from r3con.settings import settings_snapshot
 
-    config_block = config.model_dump() if hasattr(config, "model_dump") else dict(config)
+    config_block = (
+        config.model_dump() if hasattr(config, "model_dump") else dict(config)
+    )
     if "model" in config_block:
         config_block["model"] = normalize_model_name(config_block["model"])
     overrides = config_block.get("overrides") or {}
@@ -176,23 +182,35 @@ def write_manifest(
             # --- where the config and each prompt actually came from ---
             # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
             # overlaid file is invisible in the run label — so record the winning path.
-            "sources": _sources(config_block.get("name"), config_block.get("prompts") or {},
-                                PROMPT_STAGES, resolve_config_path, resolve_prompt_path),
+            "sources": _sources(
+                config_block.get("name"),
+                config_block.get("prompts") or {},
+                PROMPT_STAGES,
+                resolve_config_path,
+                resolve_prompt_path,
+            ),
             # --- runtime knobs (parallelism / resilience) ---
             "settings": settings_snapshot(),
-            "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+            "created": datetime.datetime.now(datetime.UTC).isoformat(
+                timespec="seconds"
+            ),
         },
     )
 
 
-def _sources(config_name, prompts, stages, resolve_config, resolve_prompt) -> dict[str, Any]:
+def _sources(
+    config_name, prompts, stages, resolve_config, resolve_prompt
+) -> dict[str, Any]:
     """Which file on disk each of the run's inputs resolved to."""
     cfg = resolve_config(config_name) if config_name else None
     return {
         "config": str(cfg) if cfg else None,
         "prompts": {
-            stage: (str(path) if (path := resolve_prompt(stage, prompts[stage])) else None)
-            for stage in stages if stage in prompts
+            stage: (
+                str(path) if (path := resolve_prompt(stage, prompts[stage])) else None
+            )
+            for stage in stages
+            if stage in prompts
         },
     }
 
@@ -315,7 +333,10 @@ class StageRun:
                 }
             )
         path = self.dir / "calls.json"
-        path.write_text(json.dumps(calls, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
+        path.write_text(
+            json.dumps(calls, indent=2, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
         return path
 
     def compute_totals(self) -> dict[str, Any]:
@@ -330,7 +351,9 @@ class StageRun:
                 total += s.tokens.get("total", 0)
         return {
             "n_steps": len(self.steps),
-            "tokens": {"prompt": prompt, "completion": completion, "total": total} if any_tokens else None,
+            "tokens": {"prompt": prompt, "completion": completion, "total": total}
+            if any_tokens
+            else None,
         }
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:

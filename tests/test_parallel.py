@@ -33,6 +33,7 @@ def test_single_item_runs_without_pool() -> None:
 
 def test_order_preserved_under_out_of_order_completion() -> None:
     """Later items finish first (reverse sleep), yet results stay in input order."""
+
     def slow(i: int, x: int) -> int:
         time.sleep(0.01 * (3 - i))  # item 0 sleeps longest → completes last
         return x

@@ -14,7 +14,6 @@ from typing import Any
 from r3con.stages.structuring import schema as schema_mod
 from r3con.stages.structuring.parsing import SchemaError
 
-
 VALID_SCHEMA = """
 from pydantic import BaseModel, Field
 
@@ -63,7 +62,9 @@ def test_first_attempt_succeeds() -> None:
         return VALID_SCHEMA
 
     with _patched_llm(fake) as prompts:
-        result = schema_mod.propose_schema(task="Where is the cake?", model="x", prompt_version="v1")
+        result = schema_mod.propose_schema(
+            task="Where is the cake?", model="x", prompt_version="v1"
+        )
 
     assert result.schema_code == VALID_SCHEMA
     assert result.parse_cls.__name__ == "Parse"
@@ -82,7 +83,9 @@ def test_retries_after_invalid_attempt() -> None:
         return next(outputs)
 
     with _patched_llm(fake) as prompts:
-        result = schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1", max_attempts=3)
+        result = schema_mod.propose_schema(
+            task="Q?", model="x", prompt_version="v1", max_attempts=3
+        )
 
     assert result.schema_code == VALID_SCHEMA
     assert len(result.attempts) == 2
@@ -96,12 +99,15 @@ def test_retries_after_invalid_attempt() -> None:
 
 def test_exhausts_attempts_then_raises() -> None:
     """All max_attempts attempts invalid → SchemaError surfaces."""
+
     def fake(**_: Any) -> str:
         return INVALID_NO_PARSE
 
     with _patched_llm(fake):
         try:
-            schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1", max_attempts=3)
+            schema_mod.propose_schema(
+                task="Q?", model="x", prompt_version="v1", max_attempts=3
+            )
         except SchemaError as e:
             assert "exhausted 3 attempts" in str(e)
         else:
@@ -110,7 +116,9 @@ def test_exhausts_attempts_then_raises() -> None:
 
 def test_max_attempts_zero_rejected() -> None:
     try:
-        schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1", max_attempts=0)
+        schema_mod.propose_schema(
+            task="Q?", model="x", prompt_version="v1", max_attempts=0
+        )
     except ValueError as e:
         assert "max_attempts" in str(e)
     else:
@@ -120,6 +128,7 @@ def test_max_attempts_zero_rejected() -> None:
 def test_extracts_schema_tag_body() -> None:
     """Primary path: the prompts ask the model for ``<schema>...</schema>``."""
     wrapped = f"<schema>\n{VALID_SCHEMA}\n</schema>"
+
     def fake(**_: Any) -> str:
         return wrapped
 
@@ -138,6 +147,7 @@ def test_extracts_schema_tag_with_thought_preamble() -> None:
         "Thought: This is a quick rationale for the schema design.\n"
         f"\n<schema>\n{VALID_SCHEMA}\n</schema>"
     )
+
     def fake(**_: Any) -> str:
         return text
 
@@ -145,7 +155,10 @@ def test_extracts_schema_tag_with_thought_preamble() -> None:
         result = schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1")
 
     assert result.schema_code == VALID_SCHEMA
-    assert result.attempts[-1].thought == "This is a quick rationale for the schema design."
+    assert (
+        result.attempts[-1].thought
+        == "This is a quick rationale for the schema design."
+    )
 
 
 def test_thought_captured_after_thought_marker_before_fence() -> None:
@@ -156,6 +169,7 @@ def test_thought_captured_after_thought_marker_before_fence() -> None:
         "Thought: One row per occurrence; inference counts the list.\n\n"
         f"```python\n{VALID_SCHEMA}\n```\n"
     )
+
     def fake(**_: Any) -> str:
         return text
 
@@ -163,12 +177,16 @@ def test_thought_captured_after_thought_marker_before_fence() -> None:
         result = schema_mod.propose_schema(task="Q?", model="x", prompt_version="v1")
 
     assert result.schema_code == VALID_SCHEMA
-    assert result.attempts[-1].thought == "One row per occurrence; inference counts the list."
+    assert (
+        result.attempts[-1].thought
+        == "One row per occurrence; inference counts the list."
+    )
 
 
 def test_thought_is_none_when_marker_absent() -> None:
     """Bare schema with no Thought: marker — attempt.thought is None."""
     text = f"<schema>\n{VALID_SCHEMA}\n</schema>"
+
     def fake(**_: Any) -> str:
         return text
 
@@ -182,10 +200,8 @@ def test_schema_tag_takes_precedence_over_fence() -> None:
     """When both ``<schema>`` and ```` ```python ``` ```` are present, prefer the tag."""
     inner_python = VALID_SCHEMA
     inner_fenced = "from pydantic import BaseModel\nclass Other(BaseModel):\n    x: int\nclass Parse(BaseModel):\n    others: list[Other]"
-    text = (
-        f"```python\n{inner_fenced}\n```\n\n"
-        f"<schema>\n{inner_python}\n</schema>"
-    )
+    text = f"```python\n{inner_fenced}\n```\n\n<schema>\n{inner_python}\n</schema>"
+
     def fake(**_: Any) -> str:
         return text
 
@@ -199,6 +215,7 @@ def test_schema_tag_takes_precedence_over_fence() -> None:
 def test_strips_python_fence_as_fallback() -> None:
     """Fallback when no ``<schema>`` tag — markdown ``` ```python ``` ``` fence."""
     fenced = f"```python\n{VALID_SCHEMA}\n```"
+
     def fake(**_: Any) -> str:
         return fenced
 
@@ -218,6 +235,7 @@ def test_strips_python_fence_after_thought_preamble() -> None:
         "Thought: One row per occurrence; inference counts the list.\n\n"
         f"```python\n{VALID_SCHEMA}\n```\n"
     )
+
     def fake(**_: Any) -> str:
         return text
 
@@ -230,6 +248,7 @@ def test_strips_python_fence_after_thought_preamble() -> None:
 def test_strips_bare_fence_as_fallback() -> None:
     """Fallback when no ``<schema>`` tag — bare ``` ``` ``` fence (no language tag)."""
     fenced = f"```\n{VALID_SCHEMA}\n```"
+
     def fake(**_: Any) -> str:
         return fenced
 
@@ -241,6 +260,7 @@ def test_strips_bare_fence_as_fallback() -> None:
 
 def test_preserves_unfenced_output() -> None:
     """Final fallback: raw Python with no tags and no fences is returned unchanged."""
+
     def fake(**_: Any) -> str:
         return VALID_SCHEMA
 
@@ -279,7 +299,9 @@ def test_relevance_states_rendered_into_system_prompt() -> None:
     schema_mod.litellm_chat_completion = fake  # type: ignore[assignment]
     try:
         schema_mod.propose_schema(
-            task="Q?", model="x", prompt_version="v1",
+            task="Q?",
+            model="x",
+            prompt_version="v1",
             relevance_snippets=["Doc A is about whales.", "Doc B is about ships."],
         )
         # Distinctive prose of the injected block (the in-context examples contain a
@@ -303,7 +325,9 @@ def test_llm_kwargs_forwarded() -> None:
         return VALID_SCHEMA
 
     with _patched_llm(fake):
-        schema_mod.propose_schema(task="Q?", model="m", prompt_version="v1", seed=42, api_base="http://x")
+        schema_mod.propose_schema(
+            task="Q?", model="m", prompt_version="v1", seed=42, api_base="http://x"
+        )
 
     assert seen.get("seed") == 42
     assert seen.get("api_base") == "http://x"

@@ -31,12 +31,11 @@ self-hosted endpoint.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-from dotenv import find_dotenv, load_dotenv
 from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Any
 
+from dotenv import find_dotenv, load_dotenv
 from pypdf import PdfReader
 
 from r3con.config import DEFAULT_CONFIG, RunConfig, load_config
@@ -52,8 +51,21 @@ _log = get_logger("documents")
 # text — the text-ish ones, read directly, plus PDF, which is extracted. Pass explicit
 # paths for anything else.
 TEXT_SUFFIXES: frozenset[str] = frozenset(
-    {".txt", ".md", ".markdown", ".rst", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml",
-     ".html", ".xml", ".pdf"}
+    {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".json",
+        ".jsonl",
+        ".csv",
+        ".tsv",
+        ".yaml",
+        ".yml",
+        ".html",
+        ".xml",
+        ".pdf",
+    }
 )
 
 
@@ -68,12 +80,18 @@ def _read_one(path: Path) -> str:
     if path.suffix.lower() != ".pdf":
         return path.read_text(encoding="utf-8", errors="replace")
     try:
-        text = "\n\n".join(page.extract_text() or "" for page in PdfReader(str(path)).pages)
+        text = "\n\n".join(
+            page.extract_text() or "" for page in PdfReader(str(path)).pages
+        )
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
-        _log.warning("%s: not readable as a PDF (%s); skipping it", path, type(e).__name__)
+        _log.warning(
+            "%s: not readable as a PDF (%s); skipping it", path, type(e).__name__
+        )
         return ""
     if not text.strip():
-        _log.warning("%s: no extractable text — a scanned PDF needs OCR first; skipping it", path)
+        _log.warning(
+            "%s: no extractable text — a scanned PDF needs OCR first; skipping it", path
+        )
     return text
 
 
@@ -107,13 +125,22 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     for src in sources:
         path = Path(src)
         if path.is_dir():
-            files = sorted(p for p in path.rglob("*") if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES)
+            files = sorted(
+                p
+                for p in path.rglob("*")
+                if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES
+            )
         elif path.is_file():
             files = [path]
         else:  # treat it as a glob, anchored if it is absolute
             pattern, anchor = str(src), Path(src).anchor
             files = sorted(
-                p for p in (Path(anchor).glob(pattern[len(anchor):]) if anchor else Path().glob(pattern))
+                p
+                for p in (
+                    Path(anchor).glob(pattern[len(anchor) :])
+                    if anchor
+                    else Path().glob(pattern)
+                )
                 if p.is_file()
             )
         if not files:
@@ -146,7 +173,9 @@ def _check_documents(documents: Any) -> list[str]:
     try:
         docs = list(documents)
     except TypeError:
-        raise TypeError(f"`documents` must be a sequence of strings — got {type(documents).__name__}.") from None
+        raise TypeError(
+            f"`documents` must be a sequence of strings — got {type(documents).__name__}."
+        ) from None
     bad = next(((i, d) for i, d in enumerate(docs) if not isinstance(d, str)), None)
     if bad is not None:
         raise TypeError(
@@ -235,7 +264,12 @@ def run(
     # working directory) the way the CLI does. Importing r3con does not.
     load_dotenv(find_dotenv(usecwd=True))
 
-    overrides = {"model": model, "seed": seed, "relevance_rounds": relevance_rounds, "params": params}
+    overrides = {
+        "model": model,
+        "seed": seed,
+        "relevance_rounds": relevance_rounds,
+        "params": params,
+    }
     given = {k: v for k, v in overrides.items() if v is not None}
     if isinstance(config, RunConfig) and given:
         raise ValueError(
@@ -263,4 +297,4 @@ def run(
     )
 
 
-__all__ = ["Answer", "read_documents", "run", "TEXT_SUFFIXES"]
+__all__ = ["TEXT_SUFFIXES", "Answer", "read_documents", "run"]

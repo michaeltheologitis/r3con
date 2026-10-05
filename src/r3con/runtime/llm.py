@@ -80,7 +80,7 @@ def litellm_chat_completion_full(
     schema: type[BaseModel] | None = None,
     seed: int | None = None,
     completion: Callable[..., Any] | None = None,
-    run: "StageRun | None" = None,
+    run: StageRun | None = None,
     kind: str = "llm_call",
     **kwargs: Any,
 ) -> Any:
@@ -179,7 +179,7 @@ def litellm_chat_completion(
     schema: type[BaseModel] | None = None,
     seed: int | None = None,
     completion: Callable[..., Any] | None = None,
-    run: "StageRun | None" = None,
+    run: StageRun | None = None,
     kind: str = "llm_call",
     max_empty_retries: int | None = None,
     **kwargs: Any,
@@ -243,7 +243,9 @@ def litellm_chat_completion(
                 "no-thinking config, a higher max_tokens, or raising "
                 "settings.LLM_EMPTY_CONTENT_RETRIES."
             )
-        _log.warning("empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries)
+        _log.warning(
+            "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
+        )
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:

@@ -36,8 +36,8 @@ Config file shape (``configs/<name>.yaml``)::
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -116,7 +116,11 @@ class RunConfig(BaseModel):
         # Generation params are part of the identity only when set, so a provider-default
         # run carries no `params=` noise in its label.
         if self.params:
-            parts.append("params={" + ",".join(f"{k}={self.params[k]}" for k in sorted(self.params)) + "}")
+            parts.append(
+                "params={"
+                + ",".join(f"{k}={self.params[k]}" for k in sorted(self.params))
+                + "}"
+            )
         parts.append(f"prompts=({prompts})")
         return parts
 
@@ -142,7 +146,14 @@ def config_search_path() -> list[Path]:
 def available_configs() -> list[str]:
     """Run-config names available to :func:`load_config`, from every root on the search
     path (an overlay config shadows a packaged one of the same name)."""
-    return sorted({p.stem for root in config_search_path() if root.is_dir() for p in root.glob("*.yaml")})
+    return sorted(
+        {
+            p.stem
+            for root in config_search_path()
+            if root.is_dir()
+            for p in root.glob("*.yaml")
+        }
+    )
 
 
 def resolve_config_path(name: str) -> Path | None:
@@ -192,7 +203,9 @@ def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
     prompts = dict(raw.get("prompts") or {})
     missing = [s for s in PROMPT_STAGES if s not in prompts]
     if missing:
-        raise ValueError(f"config {name!r} is missing prompt versions for stage(s): {missing}")
+        raise ValueError(
+            f"config {name!r} is missing prompt versions for stage(s): {missing}"
+        )
 
     cfg = RunConfig(
         name=name,
@@ -206,7 +219,8 @@ def load_config(name: str = DEFAULT_CONFIG, **overrides: Any) -> RunConfig:
     # Overrides are recorded on the config as well as applied, so the manifest shows both
     # the resolved value and the fact that it was overridden.
     applied = {
-        k: v for k, v in overrides.items()
+        k: v
+        for k, v in overrides.items()
         if v is not None and k in {"model", "seed", "relevance_rounds", "params"}
     }
     if "params" in applied:

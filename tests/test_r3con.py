@@ -13,7 +13,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from r3con.r3con import TEXT_SUFFIXES, _check_documents, read_documents, run  # noqa: E402
+from r3con.r3con import (
+    TEXT_SUFFIXES,
+    _check_documents,
+    read_documents,
+    run,
+)
 
 
 def _tree(root: Path) -> None:
@@ -30,7 +35,7 @@ def _tree(root: Path) -> None:
 
 def test_documents_is_a_list_of_strings() -> None:
     assert _check_documents(["one", "two"]) == ["one", "two"]
-    assert _check_documents(("one", "two")) == ["one", "two"]      # any sequence
+    assert _check_documents(("one", "two")) == ["one", "two"]  # any sequence
     assert _check_documents(iter(["one", "two"])) == ["one", "two"]  # any iterable
 
 
@@ -41,7 +46,9 @@ def test_a_document_is_never_read_off_disk_behind_your_back() -> None:
         cwd = os.getcwd()
         os.chdir(tmp)
         try:
-            Path("Q3 was strong.").write_text("SOMETHING ELSE ENTIRELY", encoding="utf-8")
+            Path("Q3 was strong.").write_text(
+                "SOMETHING ELSE ENTIRELY", encoding="utf-8"
+            )
             assert _check_documents(["Q3 was strong."]) == ["Q3 was strong."]
         finally:
             os.chdir(cwd)
@@ -125,10 +132,12 @@ def _write_pdf(path: Path, text: str | None = None) -> None:
     objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>"]
     if text:
         stream = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET"
-        objs += ["<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R"
-                 "/Resources<</Font<</F1 5 0 R>>>>>>",
-                 f"<</Length {len(stream)}>>stream\n{stream}\nendstream",
-                 "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+        objs += [
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]/Contents 4 0 R"
+            "/Resources<</Font<</F1 5 0 R>>>>>>",
+            f"<</Length {len(stream)}>>stream\n{stream}\nendstream",
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+        ]
     else:
         objs.append("<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>")
     out, offsets = bytearray(b"%PDF-1.4\n"), []
@@ -184,7 +193,10 @@ def test_read_documents_accepts_several_sources_in_order() -> None:
         root = Path(tmp)
         (root / "second.txt").write_text("second", encoding="utf-8")
         (root / "first.txt").write_text("first", encoding="utf-8")
-        assert read_documents([root / "first.txt", root / "second.txt"]) == ["first", "second"]
+        assert read_documents([root / "first.txt", root / "second.txt"]) == [
+            "first",
+            "second",
+        ]
 
 
 def test_read_documents_raises_when_a_source_matches_nothing() -> None:
@@ -218,7 +230,9 @@ def test_the_two_compose() -> None:
         root = Path(tmp)
         _tree(root)
         assert _check_documents(read_documents(root)) == [
-            "alpha document", "beta document", "gamma document",
+            "alpha document",
+            "beta document",
+            "gamma document",
         ]
 
 
@@ -232,7 +246,9 @@ def test_the_namespace_import_shape_works() -> None:
     import r3con as pkg
 
     assert pkg.run is ns.run
-    from r3con import Answer, run as flat
+    from r3con import Answer
+    from r3con import run as flat
+
     assert flat is ns.run
     assert Answer is ns.Answer
 
@@ -240,8 +256,14 @@ def test_the_namespace_import_shape_works() -> None:
 def test_answer_object_exposes_the_intermediate_views() -> None:
     from r3con.pipeline import Answer
 
-    a = Answer(answer="42", relevant_context=["doc one's note", ""], structured_context={"rows": [{"document": 1}]},
-               schema_code="class Parse(BaseModel): ...", source_docs={"rows": [0]}, run_dir=None)
+    a = Answer(
+        answer="42",
+        relevant_context=["doc one's note", ""],
+        structured_context={"rows": [{"document": 1}]},
+        schema_code="class Parse(BaseModel): ...",
+        source_docs={"rows": [0]},
+        run_dir=None,
+    )
     assert a.answer == "42" and str(a) == "42"
     assert a.relevant_context == ["doc one's note", ""]
     assert a.structured_context["rows"][0]["document"] == 1
@@ -251,8 +273,18 @@ def test_answer_object_exposes_the_intermediate_views() -> None:
 def test_run_rejects_overrides_that_a_prebuilt_config_would_swallow() -> None:
     from r3con.config import RunConfig
 
-    cfg = RunConfig(model="openai/m", prompts={k: "v1" for k in
-                    ("relevance", "structuring/schema", "structuring/parsing", "reasoning")})
+    cfg = RunConfig(
+        model="openai/m",
+        prompts={
+            k: "v1"
+            for k in (
+                "relevance",
+                "structuring/schema",
+                "structuring/parsing",
+                "reasoning",
+            )
+        },
+    )
     try:
         run("q", ["a document"], config=cfg, model="openai/other")
     except ValueError as e:

@@ -42,6 +42,7 @@ from typing import Any, cast
 import litellm
 
 from r3con.logging_setup import get_logger
+from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
@@ -49,7 +50,6 @@ from r3con.runtime.python_executor import (
     LocalPythonExecutor,
     fix_final_answer_code,
 )
-from r3con.runs import StageRun
 from r3con.settings import settings
 
 _log = get_logger("codeact")
@@ -106,7 +106,7 @@ _MAX_TURNS_SYNTHESIS_PROMPT = (
 )
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _supports_stop_parameter(model: str) -> bool:
     """Whether ``model`` accepts the ``stop`` parameter, per litellm's param map.
 
@@ -434,7 +434,11 @@ def run_codeact(
                 if isinstance(e, ExecutionTimeoutError)
                 else str(e)
             )
-            _log.info("codeact turn %d: execution error — %s", turn_idx + 1, err.splitlines()[0][:100])
+            _log.info(
+                "codeact turn %d: execution error — %s",
+                turn_idx + 1,
+                err.splitlines()[0][:100],
+            )
             observation = _format_observation(err)
             turns.append(
                 CodeActTurn(
@@ -456,11 +460,11 @@ def run_codeact(
         if out.is_final_answer:
             # The model committed. ``out.output`` is the value handed to
             # final_answer (carried out via FinalAnswerException upstream).
-            _log.info("codeact: committed final_answer on turn %d/%d", turn_idx + 1, max_turns)
-            answer = _stringify_final_answer(out.output)
-            observation = _format_observation(
-                f"final_answer received: {answer}"
+            _log.info(
+                "codeact: committed final_answer on turn %d/%d", turn_idx + 1, max_turns
             )
+            answer = _stringify_final_answer(out.output)
+            observation = _format_observation(f"final_answer received: {answer}")
             turns.append(
                 CodeActTurn(
                     response=response,
@@ -503,7 +507,10 @@ def run_codeact(
     # non-empty observation only if the synthesis comes back empty, so we never
     # regress to nothing. The call is recorded in the transcript (it is not a
     # CodeActTurn — it has no code/observation).
-    _log.info("codeact: hit max_turns (%d) without a commit — synthesizing a final answer", max_turns)
+    _log.info(
+        "codeact: hit max_turns (%d) without a commit — synthesizing a final answer",
+        max_turns,
+    )
     messages.append({"role": "user", "content": _MAX_TURNS_SYNTHESIS_PROMPT})
     synthesis = cast(
         str,

@@ -20,13 +20,21 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from r3con.config import RunConfig  # noqa: E402
-from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full  # noqa: E402
+from r3con.config import RunConfig
+from r3con.runtime.llm import (
+    litellm_chat_completion,
+    litellm_chat_completion_full,
+)
 
 
 def _reply(text: str = "ok") -> Any:
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(role="assistant", content=text), finish_reason="stop")],
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(role="assistant", content=text),
+                finish_reason="stop",
+            )
+        ],
         usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, total_tokens=2),
     )
 
@@ -39,7 +47,10 @@ def test_completion_callable_is_used_instead_of_litellm() -> None:
         return _reply("from my own connection")
 
     out = litellm_chat_completion(
-        system_prompt="s", user_prompt="u", model="openai/whatever", completion=fake,
+        system_prompt="s",
+        user_prompt="u",
+        model="openai/whatever",
+        completion=fake,
     )
     assert out == "from my own connection"
     assert seen["model"] == "openai/whatever"
@@ -55,7 +66,9 @@ def test_completion_is_not_forwarded_into_the_provider_request() -> None:
         seen.update(request)
         return _reply()
 
-    litellm_chat_completion_full(system_prompt="s", user_prompt="u", model="m", completion=fake)
+    litellm_chat_completion_full(
+        system_prompt="s", user_prompt="u", model="m", completion=fake
+    )
     assert "completion" not in seen
     # the things that SHOULD be there still are
     assert seen["model"] == "m" and "messages" in seen and "num_retries" in seen
@@ -87,33 +100,57 @@ def test_it_reaches_every_stage_of_a_whole_run() -> None:
     def router_like(**request: Any) -> Any:
         """Stand-in for `litellm.Router.completion` — same (model, messages, **kwargs)."""
         models_seen.append(request["model"])
-        if request.get("response_format"):            # the parsing stage wants JSON
+        if request.get("response_format"):  # the parsing stage wants JSON
             return _reply('{"rows": []}')
-        if "<schema>" in str(request["messages"][0]["content"]).lower() or "Pydantic" in str(
+        if "<schema>" in str(
             request["messages"][0]["content"]
-        ):                                            # the schema stage wants a schema
+        ).lower() or "Pydantic" in str(
+            request["messages"][0]["content"]
+        ):  # the schema stage wants a schema
             return _reply(f"Thought: fine\n<schema>\n{schema_src}\n</schema>")
         return _reply("<code>\nfinal_answer('answered via my own connection')\n</code>")
 
     cfg = RunConfig(
-        model="my-router-group", relevance_rounds=1,
-        prompts={k: "v1" for k in ("relevance", "structuring/schema", "structuring/parsing", "reasoning")},
+        model="my-router-group",
+        relevance_rounds=1,
+        prompts={
+            k: "v1"
+            for k in (
+                "relevance",
+                "structuring/schema",
+                "structuring/parsing",
+                "reasoning",
+            )
+        },
     )
     with tempfile.TemporaryDirectory() as tmp:
         out = run_pipeline(
-            task="what happened?", documents=["a document", "another document"], config=cfg,
-            task_logger=TaskLogger("run", root=Path(tmp)), completion=router_like,
+            task="what happened?",
+            documents=["a document", "another document"],
+            config=cfg,
+            task_logger=TaskLogger("run", root=Path(tmp)),
+            completion=router_like,
         )
     assert out.answer == "answered via my own connection"
     # every stage went through the supplied callable, and none through litellm
-    assert len(models_seen) >= 5, models_seen          # 2 relevance + schema + 2 parsing + reasoning
+    assert len(models_seen) >= 5, (
+        models_seen
+    )  # 2 relevance + schema + 2 parsing + reasoning
     assert set(models_seen) == {"my-router-group"}
 
 
 def test_completion_is_transport_and_stays_out_of_the_run_identity() -> None:
     cfg = RunConfig(
         model="m",
-        prompts={k: "v1" for k in ("relevance", "structuring/schema", "structuring/parsing", "reasoning")},
+        prompts={
+            k: "v1"
+            for k in (
+                "relevance",
+                "structuring/schema",
+                "structuring/parsing",
+                "reasoning",
+            )
+        },
     )
     assert "completion" not in cfg.label()
     assert "completion" not in cfg.model_dump()

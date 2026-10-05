@@ -39,6 +39,8 @@ def configure_logging(level: str | int | None = None) -> None:
         # stderr, not stdout: the CLI writes the answer to stdout, so progress must not
         # pollute a pipe.
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(name)s: %(message)s", datefmt="%H:%M:%S")
+        )
         logger.addHandler(handler)
         logger.propagate = False

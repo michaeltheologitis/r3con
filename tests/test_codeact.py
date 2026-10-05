@@ -27,11 +27,11 @@ from typing import Any
 
 from r3con.runtime import codeact
 from r3con.runtime.codeact import (
+    DEFAULT_EXEC_TIMEOUT_S,
+    CodeActResult,
     CodeActTurn,
     CodeExecutionError,
     ExecutionResult,
-    CodeActResult,
-    DEFAULT_EXEC_TIMEOUT_S,
     _clip_assistant_response,
     _extract_code_from_response,
     _format_observation,
@@ -39,7 +39,6 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.settings import settings
-
 
 _SYS = "You are a CodeAct agent. The parse is bound as the variable `parse`."
 
@@ -142,7 +141,9 @@ def test_extract_falls_back_to_markdown_fence() -> None:
 def test_extract_markdown_fence_strips_code_language_label() -> None:
     """A ```code fence must not leak the literal word 'code' into the program."""
     response = "```code\nrecs = parse['x']\nprint(len(recs))\n```"
-    assert _extract_code_from_response(response) == "recs = parse['x']\nprint(len(recs))"
+    assert (
+        _extract_code_from_response(response) == "recs = parse['x']\nprint(len(recs))"
+    )
 
 
 def test_extract_missing_block_raises_with_actionable_message() -> None:
@@ -153,7 +154,9 @@ def test_extract_missing_block_raises_with_actionable_message() -> None:
         assert "<code>" in str(e) and "</code>" in str(e)
         assert not e.timed_out
     else:
-        raise AssertionError("expected CodeExecutionError when no code block is present")
+        raise AssertionError(
+            "expected CodeExecutionError when no code block is present"
+        )
 
 
 def test_extract_accepts_bare_code_without_tags_or_fence() -> None:
@@ -344,7 +347,9 @@ def test_run_executor_state_persists_across_turns() -> None:
 
 
 def test_run_recovers_when_first_response_has_no_code_block() -> None:
-    responses = iter(["I'm not sure, but I think the answer is 42.", _final("recovered")])
+    responses = iter(
+        ["I'm not sure, but I think the answer is 42.", _final("recovered")]
+    )
 
     def fake(**_: Any) -> str:
         return next(responses)
@@ -376,14 +381,17 @@ def test_run_reminds_when_response_is_bare_json_answer() -> None:
 
     assert r.answer == "done"
     assert r.turns[0].code is None and r.turns[0].error is not None
-    assert "(no output)" not in r.turns[0].observation        # NOT silently run to no-op
-    assert "final_answer(" in r.turns[0].observation           # the informative reminder
+    assert "(no output)" not in r.turns[0].observation  # NOT silently run to no-op
+    assert "final_answer(" in r.turns[0].observation  # the informative reminder
     assert "<code>" in r.turns[0].observation
 
 
 def test_run_recovers_from_runtime_error() -> None:
     responses = iter(
-        ["Thought: oops.\n<code>\nraise RuntimeError('boom')\n</code>", _final("recovered")]
+        [
+            "Thought: oops.\n<code>\nraise RuntimeError('boom')\n</code>",
+            _final("recovered"),
+        ]
     )
 
     def fake(**_: Any) -> str:
@@ -456,7 +464,9 @@ def test_run_max_turns_falls_back_to_last_observation_when_synthesis_empty() -> 
     assert all(not t.is_final_answer for t in r.turns)
 
 
-def test_run_max_turns_synthesis_empty_and_no_observations_says_cannot_determine() -> None:
+def test_run_max_turns_synthesis_empty_and_no_observations_says_cannot_determine() -> (
+    None
+):
     def fake(**kwargs: Any) -> str:
         if _is_synthesis_call(kwargs):
             return ""
@@ -638,41 +648,59 @@ def test_run_records_raw_response_before_clipping() -> None:
 
 KILL_EVENTS_PARSE = {
     "liz_kill_events": [
-        {"killer": "Liz", "victim": "Hashke", "victim_gender": "M",
-         "night_ordinal": "first night she lost control",
-         "quote": "Liz surges toward him with impossible speed..."},
-        {"killer": "Liz", "victim": "Granger", "victim_gender": "M",
-         "night_ordinal": "first night she lost control",
-         "quote": "WHAM, Granger tumbles backward..."},
-        {"killer": "Liz", "victim": "third man", "victim_gender": "M",
-         "night_ordinal": "first night she lost control",
-         "quote": "rip his lower jaw clean away."},
-        {"killer": "Granger", "victim": "unknown victim", "victim_gender": "",
-         "night_ordinal": "",
-         "quote": "Granger swings again..."},
+        {
+            "killer": "Liz",
+            "victim": "Hashke",
+            "victim_gender": "M",
+            "night_ordinal": "first night she lost control",
+            "quote": "Liz surges toward him with impossible speed...",
+        },
+        {
+            "killer": "Liz",
+            "victim": "Granger",
+            "victim_gender": "M",
+            "night_ordinal": "first night she lost control",
+            "quote": "WHAM, Granger tumbles backward...",
+        },
+        {
+            "killer": "Liz",
+            "victim": "third man",
+            "victim_gender": "M",
+            "night_ordinal": "first night she lost control",
+            "quote": "rip his lower jaw clean away.",
+        },
+        {
+            "killer": "Granger",
+            "victim": "unknown victim",
+            "victim_gender": "",
+            "night_ordinal": "",
+            "quote": "Granger swings again...",
+        },
     ]
 }
 
 
 def test_run_real_parse_explore_then_filter_then_commit() -> None:
-    responses = iter([
-        "Thought: peek at the schema before filtering.\n"
-        "<code>\n"
-        "print(sorted(parse.keys()))\n"
-        "print(parse['liz_kill_events'][0])\n"
-        "</code>",
-        "Thought: now filter to killer=Liz and night_ordinal contains 'first night'.\n"
-        "<code>\n"
-        "matches = [r for r in parse['liz_kill_events']\n"
-        "           if r['killer'].strip().lower() == 'liz'\n"
-        "           and 'first night' in r['night_ordinal'].lower()]\n"
-        "print(len(matches), 'matches')\n"
-        "</code>",
-        "Thought: 3 matches — commit.\n"
-        "<code>\n"
-        "final_answer(f'{len(matches)} men')\n"
-        "</code>",
-    ])
+    responses = iter(
+        [
+            "Thought: peek at the schema before filtering.\n"
+            "<code>\n"
+            "print(sorted(parse.keys()))\n"
+            "print(parse['liz_kill_events'][0])\n"
+            "</code>",
+            "Thought: now filter to killer=Liz and night_ordinal contains 'first night'.\n"
+            "<code>\n"
+            "matches = [r for r in parse['liz_kill_events']\n"
+            "           if r['killer'].strip().lower() == 'liz'\n"
+            "           and 'first night' in r['night_ordinal'].lower()]\n"
+            "print(len(matches), 'matches')\n"
+            "</code>",
+            "Thought: 3 matches — commit.\n"
+            "<code>\n"
+            "final_answer(f'{len(matches)} men')\n"
+            "</code>",
+        ]
+    )
 
     def fake(**_: Any) -> str:
         return next(responses)
@@ -693,22 +721,24 @@ def test_run_real_parse_explore_then_filter_then_commit() -> None:
 
 
 def test_run_real_parse_filter_too_strict_then_refine() -> None:
-    responses = iter([
-        "Thought: filter exactly on night_ordinal.\n"
-        "<code>\n"
-        "matches = [r for r in parse['liz_kill_events']\n"
-        "           if r['night_ordinal'] == 'first night she lost control'\n"
-        "           and r['killer'] == 'Liz']\n"
-        "print('exact:', len(matches))\n"
-        "</code>",
-        "Thought: empty — loosen the night_ordinal match.\n"
-        "<code>\n"
-        "matches = [r for r in parse['liz_kill_events']\n"
-        "           if 'first night' in r['night_ordinal'].lower()\n"
-        "           and r['killer'].lower() == 'liz']\n"
-        "final_answer(f'{len(matches)} men')\n"
-        "</code>",
-    ])
+    responses = iter(
+        [
+            "Thought: filter exactly on night_ordinal.\n"
+            "<code>\n"
+            "matches = [r for r in parse['liz_kill_events']\n"
+            "           if r['night_ordinal'] == 'first night she lost control'\n"
+            "           and r['killer'] == 'Liz']\n"
+            "print('exact:', len(matches))\n"
+            "</code>",
+            "Thought: empty — loosen the night_ordinal match.\n"
+            "<code>\n"
+            "matches = [r for r in parse['liz_kill_events']\n"
+            "           if 'first night' in r['night_ordinal'].lower()\n"
+            "           and r['killer'].lower() == 'liz']\n"
+            "final_answer(f'{len(matches)} men')\n"
+            "</code>",
+        ]
+    )
 
     def fake(**_: Any) -> str:
         return next(responses)
@@ -730,14 +760,18 @@ def test_run_real_parse_date_arithmetic_via_defensive_try_except() -> None:
     """Regression guard for the executor's return-in-except handling."""
     parse = {
         "israel_protests_eruption_events": [
-            {"event_description": "large-scale street protests across Israel",
-             "date_str": "11 February 2023",
-             "quote": "...145,000 people protested in Tel Aviv..."},
+            {
+                "event_description": "large-scale street protests across Israel",
+                "date_str": "11 February 2023",
+                "quote": "...145,000 people protested in Tel Aviv...",
+            },
         ],
         "shekel_four_year_low_events": [
-            {"event_description": "shekel dropped to a four-year low",
-             "date_str": "March 20, 2023",
-             "quote": "...the shekel dropped to a four-year low"},
+            {
+                "event_description": "shekel dropped to a four-year low",
+                "date_str": "March 20, 2023",
+                "quote": "...the shekel dropped to a four-year low",
+            },
         ],
     }
     code = (
@@ -776,10 +810,12 @@ def test_run_real_parse_date_arithmetic_via_defensive_try_except() -> None:
 
 
 def test_run_real_parse_loop_records_per_turn() -> None:
-    responses = iter([
-        "Thought: peek.\n<code>\nprint(len(parse['liz_kill_events']))\n</code>",
-        "Thought: commit.\n<code>\nfinal_answer(str(len(parse['liz_kill_events'])))\n</code>",
-    ])
+    responses = iter(
+        [
+            "Thought: peek.\n<code>\nprint(len(parse['liz_kill_events']))\n</code>",
+            "Thought: commit.\n<code>\nfinal_answer(str(len(parse['liz_kill_events'])))\n</code>",
+        ]
+    )
 
     def fake(**_: Any) -> str:
         return next(responses)
@@ -842,8 +878,11 @@ def test_run_tool_persists_and_composes_across_turns() -> None:
 
     with _patched_llm(fake):
         r = run_codeact(
-            system_prompt=_SYS, user_message="?", model="m",
-            tools={"add": add}, max_turns=4,
+            system_prompt=_SYS,
+            user_message="?",
+            model="m",
+            tools={"add": add},
+            max_turns=4,
         )
     assert r.answer == "15"
 

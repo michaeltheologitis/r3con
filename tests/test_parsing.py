@@ -13,7 +13,11 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from r3con.stages.structuring import parsing as parsing_mod
-from r3con.stages.structuring.parsing import SchemaError, check_schema, parse_one_document
+from r3con.stages.structuring.parsing import (
+    SchemaError,
+    check_schema,
+    parse_one_document,
+)
 
 
 def test_simple_schema() -> None:
@@ -96,7 +100,11 @@ class Parse(BaseModel):
     cls = check_schema(code)
     assert issubclass(cls, BaseModel)
     inst = cls(items=[{"kind": "a"}])
-    assert inst.items[0].kind == "a" and inst.items[0].notes is None and inst.items[0].tags == []
+    assert (
+        inst.items[0].kind == "a"
+        and inst.items[0].notes is None
+        and inst.items[0].tags == []
+    )
 
 
 def test_explicit_imports_still_override_the_seed() -> None:

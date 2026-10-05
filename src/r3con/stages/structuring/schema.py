@@ -17,12 +17,12 @@ from typing import Any, cast
 from pydantic import BaseModel
 
 from r3con.logging_setup import get_logger
-from r3con.runtime.llm import litellm_chat_completion
-from r3con.stages.structuring.parsing import SchemaError, check_schema
-from r3con.stages.relevance import render_relevance
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
+from r3con.runtime.llm import litellm_chat_completion
 from r3con.settings import settings
+from r3con.stages.relevance import render_relevance
+from r3con.stages.structuring.parsing import SchemaError, check_schema
 
 _log = get_logger("structuring.schema")
 
@@ -181,7 +181,11 @@ def propose_schema(
             f"{settings.SCHEMA_MAX_ATTEMPTS})."
         )
 
-    system_prompt = load_prompt("structuring/schema", version=prompt_version, relevance=render_relevance(relevance_snippets))
+    system_prompt = load_prompt(
+        "structuring/schema",
+        version=prompt_version,
+        relevance=render_relevance(relevance_snippets),
+    )
     user_prompt = f"Input:\n<task>\n{task}\n</task>\nOutput:"
 
     attempts: list[ProposalAttempt] = []
@@ -205,15 +209,26 @@ def propose_schema(
             parse_cls = check_schema(schema_code)
         except SchemaError as e:
             last_error = str(e)
-            _log.info("schema attempt %d rejected — %s", attempt_idx + 1, last_error.splitlines()[0][:120])
+            _log.info(
+                "schema attempt %d rejected — %s",
+                attempt_idx + 1,
+                last_error.splitlines()[0][:120],
+            )
             attempts.append(
-                ProposalAttempt(schema_code=schema_code, error=last_error, thought=thought)
+                ProposalAttempt(
+                    schema_code=schema_code, error=last_error, thought=thought
+                )
             )
             user_prompt = _retry_prompt(task, schema_code, last_error)
             continue
-        _log.info("schema accepted on attempt %d (fields: %s)",
-                  attempt_idx + 1, ", ".join(parse_cls.model_fields))
-        attempts.append(ProposalAttempt(schema_code=schema_code, error=None, thought=thought))
+        _log.info(
+            "schema accepted on attempt %d (fields: %s)",
+            attempt_idx + 1,
+            ", ".join(parse_cls.model_fields),
+        )
+        attempts.append(
+            ProposalAttempt(schema_code=schema_code, error=None, thought=thought)
+        )
         return ProposalResult(
             schema_code=schema_code,
             parse_cls=parse_cls,

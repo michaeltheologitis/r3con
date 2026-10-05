@@ -58,10 +58,10 @@ _SCHEMA_EXEC_GLOBALS: dict[str, Any] = {
     "Union": typing.Union,
     "Any": typing.Any,
     "Literal": typing.Literal,
-    "List": typing.List,
-    "Dict": typing.Dict,
-    "Tuple": typing.Tuple,
-    "Set": typing.Set,
+    "List": list,
+    "Dict": dict,
+    "Tuple": tuple,
+    "Set": set,
     "Annotated": typing.Annotated,
 }
 
@@ -104,7 +104,9 @@ def check_schema(schema_code: str) -> type[BaseModel]:
         raise SchemaError("Schema code did not define a class named `Parse`.")
 
     if not (isinstance(parse_cls, type) and issubclass(parse_cls, BaseModel)):
-        raise SchemaError(f"`Parse` must be a pydantic.BaseModel subclass, got {parse_cls!r}.")
+        raise SchemaError(
+            f"`Parse` must be a pydantic.BaseModel subclass, got {parse_cls!r}."
+        )
 
     try:
         # NOTE: classes defined via exec() into a bare dict can't resolve their nested
@@ -126,7 +128,11 @@ def check_schema(schema_code: str) -> type[BaseModel]:
             f"with named, typed fields for each object you want to capture."
         )
 
-    non_list = [n for n, fld in parse_cls.model_fields.items() if get_origin(fld.annotation) is not list]
+    non_list = [
+        n
+        for n, fld in parse_cls.model_fields.items()
+        if get_origin(fld.annotation) is not list
+    ]
     if non_list:
         raise SchemaError(
             f"Top-level `Parse` field(s) not declared as `list[...]`: {', '.join(non_list)}. "
@@ -316,11 +322,15 @@ def parse_documents(
     """
     if not documents:
         return ParseResult(
-            parse=_empty_parse(parse_cls), source_docs=_empty_source_docs(parse_cls), doc_ids=doc_ids
+            parse=_empty_parse(parse_cls),
+            source_docs=_empty_source_docs(parse_cls),
+            doc_ids=doc_ids,
         )
 
     max_workers = workers if workers is not None else active_doc_workers()
-    _log.info("parsing %d doc(s) (≤%d parallel, no chunking)", len(documents), max_workers)
+    _log.info(
+        "parsing %d doc(s) (≤%d parallel, no chunking)", len(documents), max_workers
+    )
 
     def one(i: int, doc: str) -> BaseModel:
         _log.info("parse doc %d/%d", i + 1, len(documents))
@@ -342,7 +352,9 @@ def parse_documents(
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(list(enumerate(per_doc)), parse_cls)
     counts = {f: len(v) for f, v in source_docs.items()}
-    _log.info("parsing complete · records per list field: %s", counts or "(no list fields)")
+    _log.info(
+        "parsing complete · records per list field: %s", counts or "(no list fields)"
+    )
     return ParseResult(parse=parse, source_docs=source_docs, doc_ids=doc_ids)
 
 

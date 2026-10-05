@@ -90,4 +90,6 @@ def load_prompt(name: str, *, version: str, **context: Any) -> str:
                 body += "\n\nExamples:\n\n" + "\n\n".join(ex["text"] for ex in examples)
             return jinja2.Template(body).render(**context)
     locations = " or ".join(str(t) for t in tried)
-    raise FileNotFoundError(f"No prompt for stage {name!r} version {version!r} (looked in {locations}).")
+    raise FileNotFoundError(
+        f"No prompt for stage {name!r} version {version!r} (looked in {locations})."
+    )
