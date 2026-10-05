@@ -188,6 +188,15 @@ def test_a_turn_that_fails_is_told_why_and_the_loop_goes_on(llm, first, told):
     assert told in observation_fed_back(llm, 1)
 
 
+def test_a_timeout_under_a_second_is_kept_as_given(llm):
+    sleeps = "<code>\nimport time\ntime.sleep(0.2)\nprint('done')\n</code>"
+    result = solve(llm, sleeps, final("ok"), timeout_s=0.5)
+    assert result.turns[0].error is None
+    assert result.turns[0].execution.stdout == "done\n"
+    assert observation_fed_back(llm, 1).startswith("<observation>\ndone")
+    assert result.answer == "ok"
+
+
 @pytest.mark.parametrize(
     ("turn", "synthesis", "answer"),
     [

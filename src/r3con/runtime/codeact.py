@@ -356,10 +356,10 @@ def run_codeact(
     # in early turns and read them in later turns. ``final_answer`` is
     # registered as a static tool; calling it raises FinalAnswerException
     # upstream, which surfaces here as ``CodeOutput.is_final_answer=True``.
-    timeout_int = int(timeout_s) if timeout_s is not None else None
     executor = LocalPythonExecutor(
         additional_authorized_imports=additional_authorized_imports or [],
-        timeout_seconds=timeout_int,
+        # Typed int upstream; it reaches Future.result(timeout=), which takes a float.
+        timeout_seconds=timeout_s,  # pyright: ignore[reportArgumentType]
         # final_answer is registered last so it can never be shadowed by a tool.
         additional_functions={**(tools or {}), "final_answer": _identity_final_answer},
     )
