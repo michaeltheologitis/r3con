@@ -320,3 +320,84 @@ def test_a_callers_own_stop_is_never_dropped(llm):
     with pytest.raises(litellm.BadRequestError, match="'stop'"):
         solve(llm, stop_refused(), model="openai/gpt-4o", stop=["END"])
     assert [request["stop"] for request in llm.requests] == [["END"]]
+
+
+def too_long() -> litellm.ContextWindowExceededError:
+    return refusal(
+        "This model's maximum context length is 4000 tokens.",
+        error=litellm.ContextWindowExceededError,
+    )
+
+
+FIRST_TURN_REFUSALS = {
+    "too-long-twice": (
+        [too_long, too_long],
+        [SYSTEM, "Shorter 1", "Shorter 2", "Shorter 2"],
+    ),
+    "stop-then-too-long": (
+        [stop_refused, too_long],
+        [SYSTEM, SYSTEM, "Shorter 1", "Shorter 1"],
+    ),
+    "too-long-then-stop": (
+        [too_long, stop_refused],
+        [SYSTEM, "Shorter 1", "Shorter 1", "Shorter 1"],
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("refusals", "prompts"), FIRST_TURN_REFUSALS.values(), ids=FIRST_TURN_REFUSALS
+)
+def test_a_refused_first_turn_is_sent_again_with_the_prompt_the_hook_gives(
+    llm, refusals, prompts
+):
+    errors = [make() for make in refusals]
+    handed: list[litellm.ContextWindowExceededError] = []
+
+    def shorter(error: litellm.ContextWindowExceededError) -> str:
+        handed.append(error)
+        return f"Shorter {len(handed)}"
+
+    result = solve(
+        llm,
+        *errors,
+        prints("1"),
+        final("ok"),
+        model="openai/gpt-4o",
+        on_first_turn_too_long=shorter,
+    )
+    assert [request["messages"][0]["content"] for request in llm.requests] == prompts
+    assert handed == [
+        e for e in errors if isinstance(e, litellm.ContextWindowExceededError)
+    ]
+    assert {request["messages"][1]["content"] for request in llm.requests} == {"?"}
+    assert (len(result.turns), result.answer) == (2, "ok")
+
+
+def test_the_hook_can_give_up_by_raising(llm):
+    refused = too_long()
+
+    def give_up(error: litellm.ContextWindowExceededError) -> str:
+        raise error
+
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        solve(llm, refused, final("ok"), on_first_turn_too_long=give_up)
+    assert failure.value is refused
+    assert len(llm.requests) == 1
+
+
+def test_without_a_hook_a_refused_first_turn_is_raised(llm):
+    refused = too_long()
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        solve(llm, refused, final("ok"))
+    assert failure.value is refused
+    assert len(llm.requests) == 1
+
+
+def test_the_hook_is_never_called_for_a_later_turn(llm):
+    refused, handed = too_long(), []
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        solve(llm, prints("1"), refused, on_first_turn_too_long=handed.append)
+    assert failure.value is refused
+    assert handed == []
+    assert len(llm.requests) == 2

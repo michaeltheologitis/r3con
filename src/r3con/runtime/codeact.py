@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 import litellm
-from litellm.exceptions import BadRequestError
+from litellm.exceptions import BadRequestError, ContextWindowExceededError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
@@ -294,6 +294,7 @@ def run_codeact(
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     additional_authorized_imports: list[str] | None = None,
     run: StageRun | None = None,
+    on_first_turn_too_long: Callable[[ContextWindowExceededError], str] | None = None,
     **llm_kwargs: Any,
 ) -> CodeActResult:
     """Run the multi-turn CodeAct loop and return the committed answer.
@@ -328,6 +329,12 @@ def run_codeact(
         additional_authorized_imports: extra modules the program is allowed
             to import beyond ``BASE_BUILTIN_MODULES``.
         run: optional :class:`r3con.runs.StageRun` to record each LLM call.
+        on_first_turn_too_long: called with the provider's
+            ``litellm.ContextWindowExceededError`` when it refuses the first turn as
+            too long; it returns the system prompt to send that turn, and every later
+            one, with instead, or raises to give up. It is called again if the new
+            request is refused too. Without it, the refusal is raised. A later turn's
+            refusal is always raised.
 
     Returns:
         :class:`CodeActResult` with the committed answer, the full turn
@@ -383,31 +390,43 @@ def run_codeact(
         else None
     )
 
-    def ask(kind: str) -> str:
-        with_stop: dict[str, Any] = {"stop": stop} if stop is not None else {}
-        return cast(
-            str,
-            litellm_chat_completion(
-                messages=messages,
-                model=model,
-                run=run,
-                kind=kind,
-                **llm_kwargs,
-                **with_stop,
-            ),
-        )
+    def ask(
+        kind: str,
+        on_too_long: Callable[[ContextWindowExceededError], str] | None = None,
+    ) -> str:
+        """The response to the conversation so far, asked again without `stop` when
+        the provider refuses it, and, with ``on_too_long``, under the system prompt it
+        gives when the provider refuses the request as too long."""
+        nonlocal stop
+        while True:
+            with_stop: dict[str, Any] = {"stop": stop} if stop is not None else {}
+            try:
+                return cast(
+                    str,
+                    litellm_chat_completion(
+                        messages=messages,
+                        model=model,
+                        run=run,
+                        kind=kind,
+                        **llm_kwargs,
+                        **with_stop,
+                    ),
+                )
+            except ContextWindowExceededError as refusal:
+                if on_too_long is None:
+                    raise
+                messages[0] = {"role": "system", "content": on_too_long(refusal)}
+            except BadRequestError as error:
+                if stop is None or not _refuses_stop(error):
+                    raise
+                _log.info("%s refused `stop`; this run's turns go without it", model)
+                stop = None
 
     for turn_idx in range(max_turns):
         _log.info("codeact turn %d/%d", turn_idx + 1, max_turns)
-        kind = f"turn-{turn_idx + 1}"
-        try:
-            raw_response = ask(kind)
-        except BadRequestError as error:
-            if stop is None or not _refuses_stop(error):
-                raise
-            _log.info("%s refused `stop`; this run's turns go without it", model)
-            stop = None
-            raw_response = ask(kind)
+        raw_response = ask(
+            f"turn-{turn_idx + 1}", on_first_turn_too_long if turn_idx == 0 else None
+        )
         # Cut any generation past the first stop sequence (the model tends to
         # hallucinate the <observation> + a final_answer after </code>, which
         # the runtime would otherwise discard while the model believes it
