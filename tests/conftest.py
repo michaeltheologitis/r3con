@@ -5,6 +5,7 @@ import os
 os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import copy
+import json
 import logging
 import threading
 from collections import deque
@@ -40,6 +41,18 @@ R3CON_VARIABLES = (
     "R3CON_LOG_LEVEL",
 )
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+ANSWERING_SCHEMA = """Thought: one row per person.
+<schema>
+class Row(BaseModel):
+    who: str
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+</schema>"""
+ANSWERING_CODE = (
+    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]))\n</code>'
+)
 
 
 class UnscriptedRequest(AssertionError):
@@ -131,9 +144,25 @@ class FakeLLM:
         return answer
 
 
+def _first_line(request: Request) -> str:
+    return request["messages"][1]["content"].splitlines()[0]
+
+
 @pytest.fixture
 def llm() -> FakeLLM:
     return FakeLLM()
+
+
+@pytest.fixture
+def answering_llm(llm: FakeLLM) -> FakeLLM:
+    """``llm``, answering every stage so that any run completes: each document's
+    first line is its note and its one parsed row, and the answer joins the rows."""
+    return llm.answers(
+        relevance=lambda request: f"Notes on {_first_line(request)}.",
+        schema=ANSWERING_SCHEMA,
+        parsing=lambda request: json.dumps({"rows": [{"who": _first_line(request)}]}),
+        reasoning=ANSWERING_CODE,
+    )
 
 
 @pytest.fixture(autouse=True)
