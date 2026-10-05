@@ -143,10 +143,11 @@ def default_model_window():
 
 
 def recording(requests: list[list[dict]]):
-    """``litellm.completion``, recording each request's messages first."""
+    """``litellm.completion``, recording each request's messages as sent, before the
+    reasoning loop appends its next turns to the same list."""
 
     def completion(**request):
-        requests.append(request["messages"])
+        requests.append(list(request["messages"]))
         return litellm.completion(**request)
 
     return completion
