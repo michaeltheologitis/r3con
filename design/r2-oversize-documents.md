@@ -18,7 +18,8 @@ merged as 0.2.0). Line numbers below are at `cfc17bc`.
   stop forms and its "names TASK-36". The prototype, re-run with the rulings, passes E2 to
   E5 and the new tests of §8 at 1.101 and 1.104.
 - 2026-10-05 · built (Implementer). §2.5 lists where the build departs from this design
-  and what it found; §4's 401 row is corrected; §9 gains E3's diff against `cfc17bc`, run.
+  and what it found; §4's 401 row is corrected; §9 gains E3's diff against `cfc17bc` and
+  E6's measured table, both run.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, and every place this design
 decides something the spec left open or departs from it. §4 is R2.1. §5 is the new module
@@ -989,6 +990,54 @@ schema has no such record fails the record assertion at 1 part as well. The as-b
 document reads that as "no mapping record in this schema", not as the null. It reports
 the 3 × 3 table from the run's artifact. If the null shows, the spec's fallback (telling relevance and
 parsing "part 2 of 4") is a new prompt version, and it goes back to the Conductor.
+
+**E6, run** (Implementer, once): CI run
+[37288918145](https://github.com/michaeltheologitis/r3con/actions/runs/37288918145),
+job `experiment`, at `5e716f2`, artifact `experiment-run`.
+
+- **The claim and the rule, as above, before the result.** A document read in 2 or 4
+  parts still answers: a seed right at 1 part is right at 2 and 4, with exactly one
+  CT-118 to Halloran record from Document 4. Any seed wrong at 2 or 4 parts while right
+  at 1, or a missing or doubled record, is the null.
+- **Conditions.** `openai/gpt-6-luna` (922,000-token mapped window, so the wrapper alone
+  sets the parts), litellm 1.104.0, Python 3.13, the default config (`reason=v2`), seeds
+  1, 2 and 3 through `params`, one run per cell, 9 runs in all. The registry is 40,081
+  characters (7,749 tokens), cut at 20,092 for 2 parts and at 10,068, 20,092 and 30,017
+  for 4; its code lines sit in part 2 of 2 and part 3 of 4. A refused request is refused
+  by the wrapper before it leaves the runner, so it costs no tokens. Cost at litellm's
+  mapped prices ($0.10 in, $0.50 out per million tokens): $0.061 for the 9 runs, 194
+  calls, 267 s of test time. The noise floor, from the three seeds at 1 part: 17 calls
+  each, prompt tokens 44,864 to 45,151 (0.6%), and a fourth reasoning turn in one
+  2-part seed moves a run by 3 calls and 11,000 prompt tokens.
+
+| Parts | Seed | Parts read (relevance r1, r2, parse) | Refusals | Answer: Halloran, 11 | CT-118 to Halloran records from Document 4 | Calls | Prompt tokens | Completion tokens | Seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | whole | 0 | yes, yes | 1 | 17 | 44,864 | 2,369 | 19 |
+| 1 | 2 | whole | 0 | yes, yes | 1 | 17 | 45,037 | 2,482 | 24 |
+| 1 | 3 | whole | 0 | yes, yes | 1 | 17 | 45,151 | 3,110 | 26 |
+| 2 | 1 | 2, 2, 2 | 1 | yes, yes | 1 | 20 | 49,322 | 3,003 | 24 |
+| 2 | 2 | 2, 2, 2 | 1 | yes, yes | 1 | 23 | 60,816 | 2,989 | 34 |
+| 2 | 3 | 2, 2, 2 | 1 | yes, yes | 1 | 20 | 50,032 | 3,293 | 28 |
+| 4 | 1 | 4, 4, 4 | 2 | yes, yes | 1 | 27 | 60,963 | 3,428 | 39 |
+| 4 | 2 | 4, 4, 4 | 2 | yes, yes | 1 | 26 | 57,927 | 3,477 | 40 |
+| 4 | 3 | 4, 4, 4 | 2 | yes, yes | 1 | 27 | 60,644 | 3,382 | 33 |
+
+| Parts | Mean calls | Mean prompt tokens | Mean seconds |
+| --- | --- | --- | --- |
+| 1 (baseline) | 17.0 (1x) | 45,017 (1x) | 23.0 (1x) |
+| 2 | 21.0 (1.24x) | 53,390 (1.19x) | 28.7 (1.25x) |
+| 4 | 26.7 (1.57x) | 59,845 (1.33x) | 37.3 (1.62x) |
+
+- **Result: the null does not show.** All 9 runs answer Halloran with 11 and hold exactly
+  one CT-118 to Halloran record from Document 4. Every split run's reasoning prompt has
+  headings 1, 2, 3, 4.1 to 4.K and 5 and v2's sentence; every unsplit run has neither.
+  Parsing read the parts relevance left (`parse-d3c0` to `c{K-1}`, never `parse-d3`).
+  Each schema was accepted on its first attempt and every one had a registry field
+  (`contractor_registry_entries`, `contractor_mappings` or `contractor_code_mappings`).
+  Reasoning took 1 turn in 6 runs, 2 in two 4-part runs, and 4 in one 2-part run.
+- **What it does not show.** One run per cell, one model, one question, and a registry
+  whose mapping lines sit whole inside one part. A fact cut across a part boundary is
+  not tested.
 
 **The CI wiring for E6:**
 
