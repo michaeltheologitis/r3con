@@ -230,10 +230,9 @@ def litellm_chat_completion(
         if attempt > max_empty_retries:
             raise ValueError(
                 "Structured output was requested, but the model returned empty text "
-                f"after {attempt} attempt(s). For a reasoning "
-                "model this usually means thinking consumed the response — try a "
-                "no-thinking config, a higher max_tokens, or raising "
-                "settings.LLM_EMPTY_CONTENT_RETRIES."
+                f"after {attempt} attempt(s). For a reasoning model this usually means "
+                "thinking consumed the response — try a no-thinking config, a higher "
+                "max_tokens, or raising settings.LLM_EMPTY_CONTENT_RETRIES."
             )
         _log.warning(
             "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
