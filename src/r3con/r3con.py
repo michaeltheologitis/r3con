@@ -42,7 +42,7 @@ from r3con.config import DEFAULT_CONFIG, RunConfig, load_config
 from r3con.logging_setup import get_logger
 from r3con.pipeline import Answer, run_pipeline
 from r3con.runs import TaskLogger, new_run_folder
-from r3con.settings import active_logs_dir
+from r3con.settings import active_logs_dir, settings_snapshot
 
 _log = get_logger("documents")
 
@@ -256,7 +256,8 @@ def run(
         ValueError: if ``documents`` is empty or any entry is blank (a blank is refused,
             not dropped — dropping it would renumber every index the run reports), or if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
-            given (which would be silently ignored).
+            given (which would be silently ignored), or if a setting in
+            :mod:`r3con.settings` is below its floor; both before any request.
         Anything the underlying stages raise — most usefully
         ``litellm.ContextWindowExceededError`` when a document does not fit.
     """
@@ -280,6 +281,8 @@ def run(
     docs = _check_documents(documents)
 
     cfg = config if isinstance(config, RunConfig) else load_config(config, **given)
+    # Refuse a cap below its floor before a run folder exists.
+    settings_snapshot()
 
     task_logger = None
     if save_artifacts:

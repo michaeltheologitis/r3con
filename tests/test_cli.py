@@ -120,6 +120,15 @@ def test_doc_workers_bounds_how_many_documents_are_read_at_once(answering, worke
     assert answering.peak_in_flight == workers
 
 
+def test_doc_workers_below_one_exits_2_before_a_run_folder_exists(
+    scripted, tmp_path, capsys
+):
+    assert r3con("run", "Who?", str(MEMOS), "--doc-workers", "0") == 2
+    assert capsys.readouterr().err == "r3con: DOC_WORKERS must be >= 1, got 0.\n"
+    assert scripted.requests == []
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_verbose_streams_stage_progress_to_stderr(answering, capsys):
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1", "-v") == 0
     out, err = capsys.readouterr()

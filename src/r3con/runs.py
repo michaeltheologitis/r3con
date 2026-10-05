@@ -51,6 +51,7 @@ import json
 import re
 import secrets
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -144,12 +145,14 @@ def write_manifest(
     config: Any,
     n_docs: int,
     context_chars: int | None = None,
+    settings: Mapping[str, int] | None = None,
 ) -> Path:
     """Write ``<run-folder>/manifest.json`` — the run's identity card.
 
     The folder name is opaque **by design**, so this file is the only thing that says
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
-    runtime knobs, and the package version. Written before the first stage, so even a
+    runtime caps it ran under (``settings``, else :func:`r3con.settings.settings_snapshot`
+    taken now), and the package version. Written before the first stage, so even a
     crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
@@ -190,7 +193,7 @@ def write_manifest(
                 resolve_prompt_path,
             ),
             # --- runtime knobs (parallelism / resilience) ---
-            "settings": settings_snapshot(),
+            "settings": dict(settings) if settings is not None else settings_snapshot(),
             "created": datetime.datetime.now(datetime.UTC).isoformat(
                 timespec="seconds"
             ),

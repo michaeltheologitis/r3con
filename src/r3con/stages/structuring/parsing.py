@@ -33,12 +33,13 @@ from typing import Any, cast, get_origin
 
 from pydantic import BaseModel, Field, ValidationError
 
+from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
-from r3con.settings import active_doc_workers, settings
+from r3con.settings import active_doc_workers
 from r3con.stages.relevance import render_relevance
 
 _log = get_logger("structuring.parsing")
@@ -205,7 +206,7 @@ def parse_one_document(
     prompt_version: str,
     relevance_snippets: list[str] | None = None,
     model: str,
-    max_attempts: int = settings.PARSING_MAX_ATTEMPTS,
+    max_attempts: int | None = None,
     run: StageRun | None = None,
     kind: str = "llm_call",
     **llm_kwargs: Any,
@@ -220,10 +221,12 @@ def parse_one_document(
     On Pydantic ``ValidationError`` (schema mismatch in the model's structured
     output), retries up to ``max_attempts`` times — each retry feeds the
     validator's error back to the model so it can fix the specific field that
-    broke (same pattern as the schema-proposal loop). Default comes from
-    ``settings.PARSING_MAX_ATTEMPTS``. Raises ``SchemaError`` if every attempt
-    fails. Non-validation exceptions bubble up immediately.
+    broke (same pattern as the schema-proposal loop); ``None`` reads
+    ``settings.PARSING_MAX_ATTEMPTS`` when the call runs. Raises ``SchemaError`` if
+    every attempt fails. Non-validation exceptions bubble up immediately.
     """
+    if max_attempts is None:
+        max_attempts = settings.PARSING_MAX_ATTEMPTS
     if max_attempts < 1:
         raise ValueError(
             f"max_attempts must be >= 1, got {max_attempts}. "
@@ -303,6 +306,7 @@ def parse_documents(
     relevance_snippets: list[str] | None = None,
     doc_ids: list[str] | None = None,
     model: str,
+    max_attempts: int | None = None,
     run: StageRun | None = None,
     workers: int | None = None,
     **llm_kwargs: Any,
@@ -318,7 +322,8 @@ def parse_documents(
 
     The per-document parses merge into one (list fields concatenated in document
     order), and each merged record is tagged with its source-document index in
-    :attr:`ParseResult.source_docs`. Returns a :class:`ParseResult`.
+    :attr:`ParseResult.source_docs`. ``max_attempts`` bounds each document's retries
+    (see :func:`parse_one_document`). Returns a :class:`ParseResult`.
     """
     if not documents:
         return ParseResult(
@@ -342,6 +347,7 @@ def parse_documents(
             prompt_version=prompt_version,
             relevance_snippets=relevance_snippets,
             model=model,
+            max_attempts=max_attempts,
             run=run,
             # ``kind`` encodes the doc so the per-call cost ledger (calls.json)
             # ties each call back to its source document.

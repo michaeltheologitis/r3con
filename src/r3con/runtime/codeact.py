@@ -41,6 +41,7 @@ from typing import Any, cast
 
 import litellm
 
+from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
@@ -50,7 +51,6 @@ from r3con.runtime.python_executor import (
     LocalPythonExecutor,
     fix_final_answer_code,
 )
-from r3con.settings import settings
 
 _log = get_logger("codeact")
 
@@ -293,7 +293,7 @@ def run_codeact(
     model: str,
     variables: dict[str, Any] | None = None,
     tools: dict[str, Callable[..., Any]] | None = None,
-    max_turns: int = settings.REASONING_MAX_TURNS,
+    max_turns: int | None = None,
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     additional_authorized_imports: list[str] | None = None,
     run: StageRun | None = None,
@@ -322,8 +322,9 @@ def run_codeact(
             via the executor's ``additional_functions``. ``final_answer`` is
             always registered as the terminator and is a reserved name —
             passing it here raises ``ValueError``.
-        max_turns: hard cap on the number of LLM calls. On exhaustion we make one
-            final plain-prose call to synthesize a best-effort answer from the work
+        max_turns: hard cap on the number of LLM calls; ``None`` reads
+            ``settings.REASONING_MAX_TURNS`` when the call runs. On exhaustion we make
+            one final plain-prose call to synthesize a best-effort answer from the work
             done (falling back to the last non-empty observation if it comes back empty).
         timeout_s: per-execution wall-clock cap (in seconds). ``None`` disables
             the cap.
@@ -336,6 +337,8 @@ def run_codeact(
         history (response / code / observation / is_final_answer per turn),
         and the termination reason.
     """
+    if max_turns is None:
+        max_turns = settings.REASONING_MAX_TURNS
     if max_turns < 1:
         raise ValueError(
             f"max_turns must be >= 1, got {max_turns}. "
