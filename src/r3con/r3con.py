@@ -38,7 +38,7 @@ from typing import Any
 from dotenv import find_dotenv, load_dotenv
 from pypdf import PdfReader
 
-from r3con.config import DEFAULT_CONFIG, RunConfig, load_config
+from r3con.config import DEFAULT_CONFIG, RunConfig, check_prompts, load_config
 from r3con.logging_setup import get_logger
 from r3con.pipeline import Answer, run_pipeline
 from r3con.runs import TaskLogger, new_run_folder
@@ -255,9 +255,11 @@ def run(
         ValueError: if ``documents`` is empty or any entry is blank (a blank is refused,
             not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
-            given (which would be silently ignored), or if a setting in
-            :mod:`r3con.settings` is below its floor.
-        FileNotFoundError: if the config pins a prompt version that has no file.
+            given (which would be silently ignored), if the config pins no prompt
+            version for a stage, or if a setting in :mod:`r3con.settings` is below its
+            floor.
+        FileNotFoundError: if the config, by name or as a :class:`RunConfig`, pins a
+            prompt version that has no file.
         Each of these is raised before any request and before a run folder exists, as
         is anything :func:`~r3con.config.load_config` refuses.
         Anything the underlying stages raise — most usefully
@@ -282,7 +284,9 @@ def run(
     docs = _check_documents(documents)
 
     cfg = config if isinstance(config, RunConfig) else load_config(config, **given)
-    # Refuse a cap below its floor before a run folder exists.
+    # Refuse what run_pipeline would refuse, a RunConfig's prompts included, before a
+    # run folder exists.
+    check_prompts(cfg)
     settings_snapshot()
 
     task_logger = None
