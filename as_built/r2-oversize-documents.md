@@ -1,15 +1,22 @@
 # TASK-35 · R2 as built: a document too long for the model's window is read in parts
 
-Cartographer, for TASK-35. This is what exists at `20b8b3c` on
-`claude/tender-shannon-eq4lq7-r2`, checked against `design/r2-oversize-documents.md` at
-that commit. The base is `main` at `cfc17bc`, r3context 0.2.0. The code is the same at
-`71ac060`, `5e716f2` and `20b8b3c`: the last two commits change only the design. So E3
-and E6, run at the earlier two, apply to the head.
+Cartographer, for TASK-35, brought to the refactored head by the Refactorer. This is
+what exists at `05440cb` on `claude/tender-shannon-eq4lq7-r2`, checked against
+`design/r2-oversize-documents.md`; the commits after `05440cb` change only these two
+documents. The base is `main` at `cfc17bc`, r3context 0.2.0.
 
-**Evidence.** *[run]* means I executed it: the suite, an offline probe (a fake
+**Which code the evidence ran on.** The Cartographer read and ran `20b8b3c`. Three
+commits then changed behaviour or tests (`4a601e4`, the window lookup prints nothing;
+`b9b2312` and `9569714`, two tests), each named where it applies (§1, §2.5, §3). The
+refactor from `273368e` to `05440cb` moves code and changes one error message (§3), and
+the Refactorer checked it against `9569714` with the suite and a probe of every split
+and stop. E3 and E6 ran at `71ac060` and `5e716f2`, whose code is `20b8b3c`'s. So the
+evidence below applies to `05440cb` unless an item names its commit.
+
+**Evidence.** *[run]* means it was executed: the suite, an offline probe (a fake
 completion, or litellm against a server on 127.0.0.1), or a CI run whose artifact or log
-I downloaded and read. *[read]* means I read it in the code and did not execute it.
-Nothing I ran reached a provider.
+was downloaded and read. *[read]* means read in the code and not executed. Nothing run
+reached a provider.
 
 **Reading it.** §1 is what a user of 0.2.0 sees differently. §2 is the map of the code.
 §3 is the divergences from the design. §4 is the measured results. §5 is what I could
@@ -76,9 +83,8 @@ not verify.
   170,000 for `claude-sonnet-5-5`.
 - **A Router alias prints nothing, as in 0.2.0.** For a model string litellm cannot
   place with a provider (`my-router-alias`), `get_model_info` prints its "Provider
-  List" banner twice per lookup. At `20b8b3c` that reached stdout once per run, from
-  r3con's one window lookup. Since the Conductor's ruling (§3), the lookup silences it
-  for its own call and restores litellm's setting [run].
+  List" banner twice per lookup. The window lookup silences it for its own call and
+  restores litellm's settings (§3) [run].
 
 **Breaks**
 
@@ -89,13 +95,15 @@ not verify.
 
 ## 2 · How it is built
 
-**Size.** `src/` changes by +800/−122 lines over 15 files, 178 of them the new prompt
-file. r3con's own Python goes from 3,765 to 4,265 lines, and the new `splitting.py` is
-395 of them. `tests/` changes by +989/−27 lines, with 39 new test functions [run].
+**Size.** `src/` changes by +857/−146 lines over 16 files, 178 of them the new prompt
+file. r3con's own Python goes from 3,765 to 4,298 lines, and the new `splitting.py` is
+395 of them. `tests/` changes by +1,035/−37 lines, with 40 new test functions [run].
 
 **Where the complexity is.** In one place: `Splits.read_in_parts` in
 `r3con/splitting.py`. The stages hand it two things and know nothing else.
-`runtime/llm.py` changes by one comment.
+`runtime/llm.py` changes by one comment and lends the splitter two helpers it shares
+with older code: `count_tokens`, which reasoning's parse cap also uses, and
+`quiet_litellm`, which `runtime/codeact.py`'s stop-parameter lookup also uses.
 
 ### 2.1 The seam: `r3con.splitting.Splits`
 
@@ -129,11 +137,11 @@ class Splits:
 - **One `Splits` per run**, built by `run_pipeline` after the manifest, and shared by
   every stage. A document's cuts persist, so parsing starts from the parts relevance
   left, and a later call may cut further but never merges parts back [run].
-- **The window** is `litellm.get_model_info(model)["max_input_tokens"]`, looked up once.
-  An unmapped model gets `None` and one INFO line, which a library user does not see by
-  default [run].
-- **The estimate** is cl100k_base tokens through `litellm.encode`, of the rest plus the
-  part. A request whose rest and part together are no larger than the line in UTF-8
+- **The window** is `litellm.get_model_info(model)["max_input_tokens"]`, looked up once
+  inside `quiet_litellm`. An unmapped model gets `None` and one INFO line, which a
+  library user does not see by default [run].
+- **The estimate** is cl100k_base tokens through `count_tokens` (`litellm.encode`), of
+  the rest plus the part. A request whose rest and part together are no larger than the line in UTF-8
   bytes is not counted at all, since every token is at least one byte. On the default
   model, that means nothing short of 783,700 bytes is counted [run].
 - **The cut** (`halve`) looks only in the middle half of a part, for a paragraph break,
@@ -182,7 +190,9 @@ class Splits:
   text byte for byte. A document that only parsing split leaves no `N.k` heading and no
   sentence [run]. The schema and parsing prompts show `N.k` headings unexplained [read].
 - **`settings.py`.** `LLM_NUM_RETRIES = 2`. `WINDOW_MARGIN_PERCENT = 15`, from 0 to 99,
-  is checked and recorded with the caps [run].
+  is checked and recorded with the caps. The per-cap check, `check_cap`, also checks
+  every `Splits` margin, so a bad one reads `WINDOW_MARGIN_PERCENT must be <= 99, got
+  100.` wherever it is caught [run].
 
 ### 2.3 Public surface, as the code has it
 
@@ -196,6 +206,9 @@ class Splits:
   `Snippet` and `join_parts` are in `r3con.stages.relevance`, not exported [read].
 - `r3con.settings.WINDOW_MARGIN_PERCENT`, and `read_in_parts` as a variable a user's
   reasoning prompt overlay may use [read].
+- New helpers in modules the top-level `r3con` does not export:
+  `r3con.runtime.llm.count_tokens`, `r3con.runtime.llm.quiet_litellm` and
+  `r3con.settings.check_cap` [read].
 - CLI: help text only [read].
 
 ### 2.4 CI
@@ -211,21 +224,22 @@ class Splits:
 
 | Item | Tests [run, all pass] |
 | --- | --- |
-| R2.1 retries | `test_llm.py`: 3 new, against a 127.0.0.1 server; the caller-override test now passes 7 |
+| R2.1 retries | `test_llm.py`: 4 new, 3 against a 127.0.0.1 server; the caller-override test now passes 7 |
 | `halve` | `test_splitting.py`: 3 |
-| Window, line, margin | `test_splitting.py`: 3; `test_settings.py`: 1; `test_pipeline.py`: the manifest |
+| Window, line, margin | `test_splitting.py`: 3, a lookup that prints nothing among them; `test_settings.py`: 1, a bad margin refused by the snapshot and by `Splits`; `test_pipeline.py`: the manifest |
 | The loop and the record | `test_splitting.py`: 14, both modes, every stop, the byte shortcut |
 | Stages | `test_relevance.py`: 3; `test_parsing.py`: 2; `test_reasoning.py`: 2 |
 | E2 to E5, and a stopped run's folder | `test_pipeline.py`: 6 functions, 8 cases |
 | E6 | `test_experiments.py`: 9 cases, live, dispatched once |
 
-The suite at the head: 393 passed, 10 deselected (the live test and E6) [run].
+The suite at `05440cb`: 395 passed, 10 deselected (the live test and E6), and the same
+at the lowest bounds (Python 3.11, litellm 1.101, pydantic 2.11) [run].
 
-**What the tests left unpinned at `20b8b3c`, and what pins it now.**
+**Gaps the Cartographer found in the tests at `20b8b3c`, each pinned since.**
 
 - **The stdout banner.** `conftest.py` sets `litellm.suppress_debug_info = True` for the
   whole suite. Now pinned by `test_looking_up_the_window_prints_nothing`, which turns it
-  off.
+  off and checks that the `LiteLLM` logger's level is restored too.
 - **A server failing 3 times.** Only "two 500s then a 200 recovers" was pinned. Now
   `test_a_server_failing_three_times_in_a_row_fails_the_call` pins R2.1's trade: three
   500s then a 200 fails after 3 requests [run].
@@ -247,19 +261,28 @@ design. One wording mismatch was inside the design: §11's last risk said the Ro
 banner prints "once per run", and §2.5 item 9 said twice. Twice is what prints, from one
 lookup per run. The gaps in the tests are in §2.5 above.
 
-**After this document: one change in behaviour.** The Conductor ruled that the window
-lookup must not print. `_max_input_tokens` now sets `litellm.suppress_debug_info` (and
-the `LiteLLM` logger's level) around its own call and restores both, as
-`_supports_stop_parameter` does, so a Router alias prints nothing, as in 0.2.0. The
-window it returns is unchanged. The design's §2.5 item 9 records it, and its §11 now
-names the cost instead: a litellm global set for the length of the lookup.
+**Two changes after the Cartographer's read, both in the design.**
+
+- **The window lookup prints nothing** (the Conductor's ruling, `4a601e4`).
+  `_max_input_tokens` calls litellm inside `runtime/llm.py`'s `quiet_litellm`, which
+  sets `litellm.suppress_debug_info` and the `LiteLLM` logger's level and restores
+  both; `_supports_stop_parameter` uses the same helper. A Router alias prints nothing,
+  as in 0.2.0, and the window is unchanged. The design's §2.5 item 9 records it, and its
+  §11 names the cost: a litellm global set for the length of the lookup.
+- **A bad margin reads the same wherever it is caught** (the refactor, `0282215`).
+  `Splits` refused a margin outside 0 to 99 with its own message, `margin_percent must
+  be from 0 to 99, got 100.`. It now calls the snapshot's `settings.check_cap`, so the
+  message is `WINDOW_MARGIN_PERCENT must be <= 99, got 100.`, and a margin that is not
+  an integer (`2.5`, `True`) is refused there too. A run's snapshot already refused
+  both before any request, so only a direct `Splits`, `surface_relevance` or
+  `parse_documents` caller sees the difference. The design's §5.1 and §6.6 say so.
 
 ## 4 · Measured results
 
 ### 4.1 E1 · R2.1: a refused request is sent 3 times
 
 One call through r3con's `litellm_chat_completion` to a 127.0.0.1 server answering in
-vLLM's words, litellm 1.104.0, at the head. The 0.2.0 column passes `num_retries=10`,
+vLLM's words, litellm 1.104.0, at `20b8b3c`. The 0.2.0 column passes `num_retries=10`,
 0.2.0's default, through the caller override [run]:
 
 | Server answers | 0.2.0 (`num_retries=10`) | Head (`num_retries=2`) |
@@ -305,7 +328,7 @@ then carries the whole rest [run]:
 
 The last row is the design's §5.4 example (64 parts). Counting took 0.3 s.
 
-### 4.4 The live tier at the head
+### 4.4 The live tier at `20b8b3c`
 
 CI run [37290154711](https://github.com/michaeltheologitis/r3con/actions/runs/37290154711)
 was dispatched at `20b8b3c` with `live: true` and `experiment: false`. Every job is
