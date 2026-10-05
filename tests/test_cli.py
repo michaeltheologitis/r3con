@@ -4,7 +4,6 @@ from pathlib import Path
 
 import litellm
 import pytest
-import yaml
 
 from r3con import settings
 from r3con.cli import main
@@ -98,13 +97,10 @@ def test_a_provider_failure_exits_1_and_points_at_the_partial_artifacts(
 
 
 def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
-    scripted, tmp_path, capsys
+    scripted, configs, tmp_path, capsys
 ):
     prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "exp.yaml").write_text(
-        yaml.safe_dump({"model": "openai/m", "prompts": prompts})
-    )
+    configs(exp={"model": "openai/m", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "exp") == 2
     err = capsys.readouterr().err
     assert err.startswith("r3con: No prompt for stage 'reasoning' version 'v9'")
