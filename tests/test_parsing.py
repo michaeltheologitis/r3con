@@ -8,6 +8,7 @@ import litellm
 import pytest
 from pydantic import ValidationError
 
+from r3con.notes import Budget, NotesTooLong
 from r3con.runs import StageRun, TaskLogger
 from r3con.splitting import Splits
 from r3con.stages.structuring.parsing import (
@@ -39,6 +40,11 @@ DOCS = [
     "Gamma memo about harbors.",
 ]
 NOTES = ["Doc A is about whales.", "Doc B is about ships."]
+# Twenty 60-word notes, about 1,220 tokens: beside them a parse request is about 2,160
+# tokens and a 300-token document's about 2,460, against the 2,295-token line of a
+# 2,700-token window.
+LONG_NOTES = [" ".join(["word"] * 60)] * 20
+SHORTER_THAN_THE_NOTES = LONG[:1_500]
 RELEVANCE_HEADING = "## Task-conditioned document summaries"
 RICH_SCHEMA = """
 from datetime import date
@@ -447,3 +453,55 @@ def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
     assert [step.kind for step in run.steps] == ["parse-d0c0", "parse-d0c1"]
     sent = [request["messages"][1]["content"] for request in llm.requests]
     assert sent == splits.parts(0)
+
+
+def test_parsing_measures_every_document_before_sending_any(llm, window):
+    model = window(2_700)
+    documents = [*DOCS[:2], SHORTER_THAN_THE_NOTES]
+    budget = Budget(Splits(documents, model=model))
+    with pytest.raises(NotesTooLong) as handed:
+        parse_all(
+            llm.answers(parsing=a_row_named_by_the_first_word),
+            documents,
+            model=model,
+            relevance_snippets=LONG_NOTES,
+            splits=budget.splits,
+            budget=budget,
+            workers=1,
+        )
+    assert (handed.value.call, handed.value.cause) == ("parse-d2", "estimate")
+    assert llm.requests == []
+
+
+def test_a_refused_parse_whose_notes_are_bigger_hands_them_over(llm):
+    llm.refuses_over(8_000).answers(parsing=a_row_named_by_the_first_word)
+    documents = [SHORTER_THAN_THE_NOTES]
+    budget = Budget(Splits(documents, model=QWEN))
+    with pytest.raises(NotesTooLong) as handed:
+        parse_all(
+            llm,
+            documents,
+            model=QWEN,
+            relevance_snippets=LONG_NOTES,
+            splits=budget.splits,
+            budget=budget,
+        )
+    assert (handed.value.call, handed.value.cause) == ("parse-d0", "refusal")
+    assert isinstance(handed.value.__cause__, litellm.ContextWindowExceededError)
+    assert budget.splits.parts(0) == documents
+
+
+def test_without_a_budget_a_document_shorter_than_its_notes_is_cut_as_r2_does(
+    llm, window
+):
+    model = window(2_700)
+    splits = Splits([SHORTER_THAN_THE_NOTES], model=model)
+    parse_all(
+        llm.answers(parsing=a_row_named_by_the_first_word),
+        [SHORTER_THAN_THE_NOTES],
+        model=model,
+        relevance_snippets=LONG_NOTES,
+        splits=splits,
+    )
+    assert len(splits.parts(0)) > 1
+    assert [r["messages"][1]["content"] for r in llm.requests] == splits.parts(0)

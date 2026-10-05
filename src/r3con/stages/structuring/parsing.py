@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.notes import Budget
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
@@ -52,7 +53,7 @@ from r3con.runtime.python_executor import (
 )
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, render_relevance
+from r3con.stages.relevance import Snippet, note_texts, render_relevance
 
 _log = get_logger("structuring.parsing")
 
@@ -339,6 +340,7 @@ def parse_documents(
     run: StageRun | None = None,
     workers: int | None = None,
     splits: Splits | None = None,
+    budget: Budget | None = None,
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
@@ -356,6 +358,17 @@ def parse_documents(
     source-document index in :attr:`ParseResult.source_docs`, a part's records with its
     document's. ``max_attempts`` bounds each call's retries (see
     :func:`parse_one_document`). Returns a :class:`ParseResult`.
+
+    With the run's notes ``budget`` (:mod:`r3con.notes`), every document's request is
+    measured before any is sent, and a request whose notes are bigger than its document
+    part hands them over instead of cutting the document.
+
+    Raises:
+        r3con.notes.NotesTooLong: only with a ``budget``, when a request does not fit
+            the model's window and its notes are the bigger part of it: before
+            anything is sent, or from the provider's refusal. The caller hands it to
+            ``budget.shorten``, reads the round that wrote the notes again under
+            ``budget.words``, and parses again, as ``r3con.run`` does.
     """
     if not documents:
         return ParseResult(
@@ -367,6 +380,11 @@ def parse_documents(
     rest = _system_prompt(
         task, schema_code, relevance_snippets, prompt_version
     ) + json.dumps(parse_cls.model_json_schema())
+    notes = note_texts(relevance_snippets or ()) if budget is not None else []
+    if budget is not None:
+        reader.measure(
+            range(len(documents)), call="parse", rests=lambda _: (rest, notes)
+        )
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
     def one(i: int, _document: str) -> list[BaseModel]:
@@ -375,6 +393,7 @@ def parse_documents(
             i,
             call="parse",
             rest=rest,
+            notes=notes,
             send=lambda part, kind: parse_one_document(
                 document=part,
                 schema_code=schema_code,

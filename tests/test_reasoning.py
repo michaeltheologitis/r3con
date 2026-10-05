@@ -240,18 +240,44 @@ def test_a_later_turn_refused_is_raised_as_it_is(llm):
 
 
 @pytest.mark.parametrize(
-    "snippets", [None, ["Northgate logged 5."]], ids=["no-notes", "no-budget"]
+    ("snippets", "budgeted"),
+    [(None, True), (["Northgate logged 5."], False), (["Northgate logged 5."], True)],
+    ids=["no-notes", "no-budget", "notes-and-budget"],
 )
-def test_a_first_turn_refused_with_samples_hands_over_its_notes(llm, snippets):
+def test_a_first_turn_refused_with_samples_hands_over_its_notes(
+    llm, snippets, budgeted
+):
     whole, samples = too_long(), too_long()
-    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+    budget = Budget(Splits([], model=MODEL)) if budgeted else None
+    with pytest.raises(Exception) as failure:
         reasoning_prompt(
             llm.replies(whole, samples, COMMIT),
             parsed=ROWS,
             relevance_snippets=snippets,
+            budget=budget,
         )
-    assert failure.value is samples
+    if snippets and budgeted:
+        assert isinstance(failure.value, NotesTooLong)
+        assert (failure.value.call, failure.value.cause) == ("reasoning", "refusal")
+        assert failure.value.__cause__ is samples
+    else:
+        assert failure.value is samples
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
+
+
+def test_a_samples_turn_over_the_line_hands_over_its_notes_before_sending(llm, window):
+    model = window(4_000)
+    notes = [" ".join(["word"] * 60)] * 40
+    with pytest.raises(NotesTooLong) as handed:
+        reasoning_prompt(
+            llm,
+            parsed=ROWS,
+            relevance_snippets=notes,
+            model=model,
+            budget=Budget(Splits([], model=model)),
+        )
+    assert (handed.value.call, handed.value.cause) == ("reasoning", "estimate")
+    assert llm.requests == []
 
 
 @pytest.mark.parametrize("n_notes", [40, 1])
