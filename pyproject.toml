@@ -17,6 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing",
     "Typing :: Typed",
@@ -40,13 +41,14 @@ dependencies = [
 # gives you an environment that can run examples/quickstart.ipynb as a notebook: pick
 # .venv as the kernel and go. `pip` is here because editors shell out to it when they
 # offer to fix a kernel themselves, and a uv-made venv has none. The rest are the
-# checks and the test runner.
+# checks and the test runner, the same ones CI runs.
 [dependency-groups]
 dev = [
     "ipykernel>=6.29",
     "pip>=24.0",
     "pyright>=1.1.414",
     "pytest>=9.0",
+    "pytest-cov>=7.0",
     "ruff>=0.16",
 ]
 
@@ -73,6 +75,9 @@ exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = ["*/r3con/runtime/python_executor.py"]
 
 [build-system]
 requires = ["uv_build>=0.9.17,<0.10.0"]

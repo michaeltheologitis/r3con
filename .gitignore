@@ -20,5 +20,8 @@ STATUS.md
 # Run artifacts
 logs/
 
+# Coverage
+.coverage
+
 # OS
 .DS_Store
