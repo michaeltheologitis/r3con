@@ -124,14 +124,14 @@ def _run(args: argparse.Namespace) -> int:
         print("r3con: no documents to read (every source was empty).", file=sys.stderr)
         return 2
 
-    config = load_config(
-        args.config,
-        model=args.model,
-        relevance_rounds=args.relevance_rounds,
-    )
     try:
+        config = load_config(
+            args.config,
+            model=args.model,
+            relevance_rounds=args.relevance_rounds,
+        )
         settings_snapshot()
-    except ValueError as e:
+    except (FileNotFoundError, ValueError) as e:
         print(f"r3con: {e}", file=sys.stderr)
         return 2
 

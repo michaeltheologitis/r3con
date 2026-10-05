@@ -59,6 +59,23 @@ def resolve_prompt_path(name: str, version: str) -> Path | None:
     return None
 
 
+def require_prompt_path(name: str, version: str) -> Path:
+    """The file a stage's prompt resolves to (:func:`resolve_prompt_path`).
+
+    Raises:
+        FileNotFoundError: naming the stage, the version and every place looked.
+    """
+    path = resolve_prompt_path(name, version)
+    if path is None:
+        tried = " or ".join(
+            str(root / name / f"{version}.yaml") for root in prompt_search_path()
+        )
+        raise FileNotFoundError(
+            f"No prompt for stage {name!r} version {version!r} (looked in {tried})."
+        )
+    return path
+
+
 def load_prompt(name: str, *, version: str, **context: Any) -> str:
     """Load and render a stage's prompt at the given ``version``.
 
@@ -79,17 +96,9 @@ def load_prompt(name: str, *, version: str, **context: Any) -> str:
               Input: ...
               Output: ...
     """
-    tried: list[Path] = []
-    for root in prompt_search_path():
-        path = root / name / f"{version}.yaml"
-        tried.append(path)
-        if path.is_file():
-            data = yaml.safe_load(path.read_text(encoding="utf-8"))
-            body: str = data["instructions"]
-            if examples := data.get("examples"):
-                body += "\n\nExamples:\n\n" + "\n\n".join(ex["text"] for ex in examples)
-            return jinja2.Template(body).render(**context)
-    locations = " or ".join(str(t) for t in tried)
-    raise FileNotFoundError(
-        f"No prompt for stage {name!r} version {version!r} (looked in {locations})."
-    )
+    path = require_prompt_path(name, version)
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    body: str = data["instructions"]
+    if examples := data.get("examples"):
+        body += "\n\nExamples:\n\n" + "\n\n".join(ex["text"] for ex in examples)
+    return jinja2.Template(body).render(**context)

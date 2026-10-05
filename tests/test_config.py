@@ -2,6 +2,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from r3con import settings
 from r3con.config import PROMPT_STAGES, RunConfig, available_configs, load_config
 
 PROMPTS = dict.fromkeys(PROMPT_STAGES, "v1")
@@ -66,8 +67,11 @@ def test_overrides_are_applied_recorded_and_shown_in_the_label(
     assert config.model == recorded.get("model", "openai/gpt-6-luna")
 
 
-def test_the_label_is_every_axis_of_the_resolved_identity(configs):
+def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     configs(exp=FULL, exp2={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
+    v9 = tmp_path / "prompts" / "reasoning" / "v9.yaml"
+    v9.parent.mkdir(parents=True)
+    v9.write_text("instructions: |-\n  V9\n")
     assert load_config("exp").label() == (
         f"exp[model=gpt-6-luna,rounds=3,{DEFAULT_PROMPTS}]"
     )
@@ -143,6 +147,16 @@ def test_a_config_field_r3con_does_not_read_is_refused(configs, field, message):
 def test_a_run_config_refuses_a_field_it_does_not_have():
     with pytest.raises(ValidationError, match="relevence_rounds"):
         RunConfig(model="openai/m", prompts=PROMPTS, relevence_rounds=3)
+
+
+def test_a_config_pinning_a_prompt_that_does_not_exist_is_refused_on_load(
+    configs, tmp_path
+):
+    configs(exp={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
+    with pytest.raises(FileNotFoundError, match="'reasoning' version 'v9'") as missing:
+        load_config("exp")
+    assert str(tmp_path / "prompts" / "reasoning" / "v9.yaml") in str(missing.value)
+    assert str(settings.PROMPTS_DIR / "reasoning" / "v9.yaml") in str(missing.value)
 
 
 def test_an_unknown_config_is_refused_by_name():

@@ -168,6 +168,24 @@ def test_a_reasoning_failure_is_raised_and_its_traceback_left_on_disk(
     assert (logger.dir / "structuring/parsing/result.json").is_file()
 
 
+@pytest.mark.parametrize(
+    ("prompts", "error"),
+    [
+        ({**CONFIG["prompts"], "reasoning": "v9"}, FileNotFoundError),
+        ({"relevance": "v1"}, ValueError),
+    ],
+    ids=["missing-file", "missing-stage"],
+)
+def test_a_config_that_cannot_render_its_prompts_is_refused_before_any_request(
+    answering_llm, tmp_path, prompts, error
+):
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(error):
+        answer(answering_llm, logger, prompts=prompts)
+    assert answering_llm.requests == []
+    assert not (logger.dir / "manifest.json").exists()
+
+
 def test_without_a_logger_nothing_is_written(answering_llm, tmp_path):
     result = answer(answering_llm)
     assert result.answer == "Halloran memo; Merrow memo"

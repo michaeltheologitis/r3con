@@ -43,6 +43,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
 from r3con import settings
+from r3con.prompts import require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PROMPT_STAGES: tuple[str, ...] = (
@@ -198,8 +199,10 @@ def load_config(
     label, because each of them shapes the output.
 
     Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
-    are not a mapping, and ``ValueError`` if the config sets a field r3con does not
-    read or omits a required field or a prompt version for any stage.
+    are not a mapping, ``ValueError`` if the config sets a field r3con does not read or
+    omits a required field or a prompt version for any stage, and
+    ``FileNotFoundError`` if a pinned prompt version has no file
+    (:func:`check_prompts`).
     """
     path = _find(f"{name}.yaml")
     if path is None:
@@ -220,18 +223,11 @@ def load_config(
     if "model" not in raw:
         raise ValueError(f"config {name!r} must define a `model`.")
 
-    prompts = dict(raw.get("prompts") or {})
-    missing = [s for s in PROMPT_STAGES if s not in prompts]
-    if missing:
-        raise ValueError(
-            f"config {name!r} is missing prompt versions for stage(s): {missing}"
-        )
-
     cfg = RunConfig(
         name=name,
         model=raw["model"],
         relevance_rounds=int(raw.get("relevance_rounds", 2)),
-        prompts=prompts,
+        prompts=dict(raw.get("prompts") or {}),
         params=_check_params(raw.get("params"), f"config {name!r}"),
     )
 
@@ -243,4 +239,21 @@ def load_config(
         applied["params"] = _check_params(applied["params"], "override")
     if applied:
         cfg = cfg.model_copy(update={**applied, "overrides": applied})
+    check_prompts(cfg)
     return cfg
+
+
+def check_prompts(config: RunConfig) -> None:
+    """Refuse a config that cannot render every stage's prompt, before any request.
+
+    Raises:
+        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned.
+        FileNotFoundError: if a pinned version has no file on the prompt search path.
+    """
+    missing = [s for s in PROMPT_STAGES if s not in config.prompts]
+    if missing:
+        raise ValueError(
+            f"config {config.name!r} is missing prompt versions for stage(s): {missing}"
+        )
+    for stage in PROMPT_STAGES:
+        require_prompt_path(stage, config.prompts[stage])

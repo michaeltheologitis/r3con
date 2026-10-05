@@ -4,8 +4,10 @@ from pathlib import Path
 
 import litellm
 import pytest
+import yaml
 
 from r3con.cli import main
+from r3con.config import PROMPT_STAGES
 from r3con.r3con import read_documents
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
@@ -90,6 +92,22 @@ def test_a_provider_failure_exits_1_and_points_at_the_partial_artifacts(
     partial = path_after("r3con: partial artifacts in ", err)
     assert partial == path_after("artifacts: ", err)
     assert (partial / "manifest.json").is_file()
+
+
+def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
+    scripted, tmp_path, capsys
+):
+    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "exp.yaml").write_text(
+        yaml.safe_dump({"model": "openai/m", "prompts": prompts})
+    )
+    assert r3con("run", "Who?", str(MEMOS), "--config", "exp") == 2
+    err = capsys.readouterr().err
+    assert err.startswith("r3con: No prompt for stage 'reasoning' version 'v9'")
+    assert err.count("\n") == 1
+    assert scripted.requests == []
+    assert not (tmp_path / "logs").exists()
 
 
 def test_an_interrupt_exits_130(scripted, capsys):
