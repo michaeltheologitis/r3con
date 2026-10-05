@@ -16,13 +16,16 @@ helper that feeds the prompt when the parse is too large to embed whole.
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Sequence
 from typing import Any
 
+from litellm.exceptions import ContextWindowExceededError
 from pydantic import BaseModel
 
 from r3con import settings
+from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -31,7 +34,10 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.runtime.llm import count_tokens
+from r3con.splitting import Splits
 from r3con.stages.relevance import Snippet, render_relevance
+
+_log = get_logger("reasoning")
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -104,14 +110,19 @@ def tag_source_documents(
 
 def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
     """The ``parse`` view embedded in the codeact system prompt: the WHOLE parse
-    (``parse_json``) when it fits (the common case), else a prominent "this is only a
-    sample" note + one sample record per field. Either way the full parse is also bound
-    as the ``parse`` variable for the agent to compute over, so the sample path costs
-    reach, not access. The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in
-    cl100k_base tokens from the vocabulary litellm ships (a flood guard for parses that
-    run to thousands of records)."""
+    (``parse_json``) when it fits (the common case), else the sample view
+    (:func:`_sample_view`). Either way the full parse is also bound as the ``parse``
+    variable for the agent to compute over, so the sample path costs reach, not access.
+    The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in cl100k_base tokens from
+    the vocabulary litellm ships (a flood guard for parses that run to thousands of
+    records)."""
     if count_tokens(parse_json) <= settings.REASONING_PARSE_MAX_TOKS:
         return parse_json
+    return _sample_view(parse_dict)
+
+
+def _sample_view(parse_dict: Any) -> str:
+    """A prominent "this is only a sample" note, then one sample record per field."""
     n = (
         sum(len(v) for v in parse_dict.values() if isinstance(v, list))
         if isinstance(parse_dict, dict)
@@ -124,6 +135,39 @@ def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
         "assume these samples are all the records; read the rest with `print(...)` before answering."
     )
     return note + "\n\n" + _sample_record_per_field(parse_dict)
+
+
+def _system_prompt(
+    *,
+    task: str,
+    schema_code: str,
+    relevance_snippets: Sequence[Snippet] | None,
+    prompt_version: str,
+    parse_json: str,
+    samples_block: str,
+    parse_block: str,
+) -> str:
+    """The reasoning system prompt, from the variables a reasoning prompt version may
+    use, a user's overlay included; Jinja renders only the ones its template references:
+
+    - ``task``, ``schema_code``, ``relevance``: the question, the schema source, the
+      summaries;
+    - ``parse_block``: the whole parse, or samples and a note;
+    - ``samples_block``: one sample record per field;
+    - ``parse_json``: the whole parse as JSON;
+    - ``read_in_parts``: whether a summary is one part of a document read in parts.
+    """
+    return load_prompt(
+        "reasoning",
+        version=prompt_version,
+        task=task,
+        schema_code=schema_code,
+        relevance=render_relevance(relevance_snippets),
+        parse_json=parse_json,
+        samples_block=samples_block,
+        parse_block=parse_block,
+        read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
+    )
 
 
 def reason(
@@ -139,17 +183,23 @@ def reason(
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     additional_authorized_imports: list[str] | None = None,
     run: StageRun | None = None,
+    splits: Splits | None = None,
     **llm_kwargs: Any,
 ) -> CodeActResult:
     """Answer ``task`` over ``parsed`` with the multi-turn CodeAct loop.
 
     The LLM never sees the long source text — only the task, the schema
-    source (so it knows the parse's shape), a view of the parse itself (the whole
-    thing when it fits, else one sample record per top-level field), and the
+    source (so it knows the parse's shape), a view of the parse itself, and the
     **relevant context** from stage 1.
     The full parse is bound as the Python variable ``parse`` in the sandbox; the
     agent inspects it via ``print(...)`` across turns and commits via
     ``final_answer(x)``.
+
+    The view of the parse is the whole parse when its first turn fits, else one sample
+    record per top-level field: when the parse is over
+    ``settings.REASONING_PARSE_MAX_TOKS``, when ``splits`` (``None`` builds one for
+    ``model``) estimates the first turn with it over the line, or when the provider
+    refuses that turn as too long, which sends it once more with the samples.
 
     The system prompt carries everything immutable across the loop's turns; the
     user message is the bare task. Loop mechanics live in
@@ -159,38 +209,57 @@ def reason(
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
     )
     parse_dict = tag_source_documents(parse_dict, source_docs)
-
-    relevance_block = render_relevance(relevance_snippets)
     parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
-    # The variables a reasoning prompt version may use, a user's overlay included;
-    # Jinja renders only the ones its template references:
-    #   task, schema_code, relevance: the question, the schema source, the summaries
-    #   parse_block  : the whole parse, or samples + a note if it is huge
-    #   samples_block: one sample record per field
-    #   parse_json   : the whole parse as JSON
-    #   read_in_parts: whether a summary is one part of a document read in parts
-    parse_block = _render_parse_for_codeact(parse_dict, parse_json)
-    samples_block = _sample_record_per_field(parse_dict)
-    system_prompt = load_prompt(
-        "reasoning",
-        version=prompt_version,
+    splits = splits if splits is not None else Splits([], model=model)
+    render = functools.partial(
+        _system_prompt,
         task=task,
         schema_code=schema_code,
-        relevance=relevance_block,
+        relevance_snippets=relevance_snippets,
+        prompt_version=prompt_version,
         parse_json=parse_json,
-        samples_block=samples_block,
-        parse_block=parse_block,
-        read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
+        samples_block=_sample_record_per_field(parse_dict),
     )
+    user_message = f"Input:\n<task>\n{task}\n</task>"
+
+    parse_block = _render_parse_for_codeact(parse_dict, parse_json)
+    whole = parse_block == parse_json
+    system_prompt = render(parse_block=parse_block)
+    if whole and (estimate := splits.over_line(system_prompt, user_message)):
+        _log.info(
+            "the whole parse (about %s tokens) would put reasoning's first turn at "
+            "about %s tokens, over the %s-token line; showing one sample record per "
+            "field",
+            f"{count_tokens(parse_json):,}",
+            f"{estimate:,}",
+            f"{splits.line:,}",
+        )
+        whole = False
+        system_prompt = render(parse_block=_sample_view(parse_dict))
+
+    def with_samples(refusal: ContextWindowExceededError) -> str:
+        """The first turn's prompt with samples, once, after a refusal of it with
+        the whole parse."""
+        nonlocal whole
+        if not whole:
+            raise refusal
+        _log.warning(
+            "reasoning's first turn was refused as too long with the whole parse "
+            "(about %s tokens); sending it again with one sample record per field",
+            f"{count_tokens(parse_json):,}",
+        )
+        whole = False
+        return render(parse_block=_sample_view(parse_dict))
 
     return run_codeact(
         system_prompt=system_prompt,
-        user_message=f"Input:\n<task>\n{task}\n</task>",
+        user_message=user_message,
         model=model,
         variables={"parse": parse_dict},
         max_turns=max_turns,
         timeout_s=timeout_s,
         additional_authorized_imports=additional_authorized_imports,
         run=run,
+        on_first_turn_too_long=with_samples,
         **llm_kwargs,
     )

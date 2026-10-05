@@ -1,5 +1,7 @@
 import json
+import logging
 
+import litellm
 import pytest
 
 from r3con.prompts import load_prompt
@@ -9,6 +11,12 @@ from r3con.stages.relevance import render_relevance
 MODEL = "openai/gpt-6-luna"
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
+PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
+SAMPLE = "only a SAMPLE"
+# 100 records, 1,609 tokens as JSON: the first turn takes about 3,900 tokens with
+# the whole parse and about 2,400 with one sample record per field.
+ROWS = {"rows": [{"who": f"Site {i:03d} logged nothing unusual"} for i in range(100)]}
+LAST_ROW = '"who": "Site 099 logged nothing unusual"'
 
 
 def reasoning_prompt(llm, version="v1", **kwargs) -> str:
@@ -16,10 +24,23 @@ def reasoning_prompt(llm, version="v1", **kwargs) -> str:
     kwargs.setdefault("task", "?")
     kwargs.setdefault("schema_code", "class Parse(BaseModel): rows: list[Row]")
     kwargs.setdefault("parsed", {"rows": [{"who": "Halloran"}]})
-    reason(
-        model=MODEL, prompt_version=version, completion=llm.replies(COMMIT), **kwargs
-    )
+    kwargs.setdefault("model", MODEL)
+    reason(prompt_version=version, completion=llm.replies(COMMIT), **kwargs)
     return llm.requests[-1]["messages"][0]["content"]
+
+
+def too_long() -> litellm.ContextWindowExceededError:
+    return litellm.ContextWindowExceededError(
+        message="This model's maximum context length is 4000 tokens.",
+        model=MODEL,
+        llm_provider="openai",
+    )
+
+
+def first_turn_prompts(llm) -> list[str]:
+    return [
+        r["messages"][0]["content"] for r in llm.requests if len(r["messages"]) == 2
+    ]
 
 
 def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
@@ -157,3 +178,74 @@ def test_v2_says_documents_were_read_in_parts_only_when_a_summary_is_a_part(
     prompt = reasoning_prompt(llm, version, relevance_snippets=snippets)
     assert (READ_IN_PARTS in prompt) is sentence
     assert ("### Document 1.1\npart one\n\n### Document 1.2" in prompt) is part_heading
+
+
+@pytest.mark.parametrize(("tokens", "whole"), [(4_000, False), (1_000_000, True)])
+def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
+    llm, window, caplog, tokens, whole
+):
+    caplog.set_level(logging.INFO, logger="r3con.reasoning")
+    prompt = reasoning_prompt(llm, parsed=ROWS, model=window(tokens))
+    assert (LAST_ROW in prompt) is whole
+    assert (SAMPLE in prompt) is not whole
+    if whole:
+        assert prompt == load_prompt(
+            "reasoning", version="v1", parse_block=json.dumps(ROWS, indent=2)
+        )
+        assert caplog.messages == []
+    else:
+        assert caplog.messages == [
+            (
+                "the whole parse (about 1,609 tokens) would put reasoning's first turn "
+                "at about 3,905 tokens, over the 3,400-token line; showing one sample "
+                "record per field"
+            )
+        ]
+
+
+def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_samples(
+    llm, caplog
+):
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    result = reason(
+        task="?",
+        schema_code="",
+        parsed=ROWS,
+        model=MODEL,
+        prompt_version="v1",
+        completion=llm.replies(too_long(), PRINTS, COMMIT),
+    )
+    assert result.answer == "ok"
+    whole, samples = first_turn_prompts(llm)
+    assert LAST_ROW in whole and SAMPLE not in whole
+    assert SAMPLE in samples and LAST_ROW not in samples
+    assert llm.requests[-1]["messages"][0]["content"] == samples
+    assert caplog.messages == [
+        (
+            "reasoning's first turn was refused as too long with the whole parse "
+            "(about 1,609 tokens); sending it again with one sample record per field"
+        )
+    ]
+
+
+def test_a_later_turn_refused_is_raised_as_it_is(llm):
+    refused = too_long()
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        reasoning_prompt(llm.replies(PRINTS, refused), parsed=ROWS)
+    assert failure.value is refused
+    assert len(llm.requests) == 2
+
+
+@pytest.mark.parametrize(
+    "snippets", [None, ["Northgate logged 5."]], ids=["no-notes", "no-budget"]
+)
+def test_a_first_turn_refused_with_samples_hands_over_its_notes(llm, snippets):
+    whole, samples = too_long(), too_long()
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        reasoning_prompt(
+            llm.replies(whole, samples, COMMIT),
+            parsed=ROWS,
+            relevance_snippets=snippets,
+        )
+    assert failure.value is samples
+    assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]

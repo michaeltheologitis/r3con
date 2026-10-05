@@ -296,6 +296,7 @@ def run_pipeline(
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=record.run,
+            splits=splits,
             **llm_kwargs,
         )
         _log.info(
