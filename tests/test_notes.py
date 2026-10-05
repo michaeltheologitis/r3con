@@ -152,7 +152,8 @@ def test_ten_word_notes_that_cannot_fit_stop_before_anything_is_read_again(
     assert stop.value.__notes__ == [note]
     assert stop.value.__cause__ is None and stop.value.__suppress_context__
     [event] = events(logger)
-    assert (event["action"], event["words"], event["room"]) == ("stop", None, room)
+    assert (event["action"], event["round"], event["words"]) == ("stop", 2, None)
+    assert event["room"] == room
     assert budget.words is None
 
 

@@ -165,18 +165,22 @@ class Budget:
             if w < mean and all(_tokens_at(r.notes, w) <= room for r, room in rooms)
         ]
         if not levels or not self._can_shorten:
-            self._stop(trouble, binding, discarded)
+            self._stop(trouble, binding, discarded, round_idx)
         self.words = levels[0]
         self._record_event(trouble, binding, discarded, "read again", round_idx)
         _log.warning(_read_again(trouble, self.splits.line, round_idx, self.words))
         return self.words
 
     def _stop(
-        self, trouble: NotesTooLong, binding: NotesTooLong, discarded: int
+        self,
+        trouble: NotesTooLong,
+        binding: NotesTooLong,
+        discarded: int,
+        round_idx: int,
     ) -> NoReturn:
         """Record the stop and raise the provider's refusal, or, when nothing was sent,
         r3con's own error, with a note that says why reading shorter cannot help."""
-        self._record_event(trouble, binding, discarded, "stop", None)
+        self._record_event(trouble, binding, discarded, "stop", round_idx)
         stop = trouble.refusal
         if stop is None:
             stop = ContextWindowExceededError(
@@ -228,7 +232,7 @@ class Budget:
         binding: NotesTooLong,
         discarded: int,
         action: str,
-        round_idx: int | None,
+        round_idx: int,
     ) -> None:
         self._record["events"].append(
             {
