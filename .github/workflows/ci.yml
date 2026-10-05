@@ -10,6 +10,11 @@ on:
         description: Also run the live tier (bills OPENAI_API_KEY)
         type: boolean
         default: true
+  workflow_call:
+    inputs:
+      live:
+        type: boolean
+        default: false
 
 permissions:
   contents: read

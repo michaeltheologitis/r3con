@@ -1,3 +1,4 @@
+import importlib.metadata
 from pathlib import Path
 
 import pytest
@@ -182,3 +183,7 @@ def test_run_is_reachable_from_the_package_and_from_its_module():
     assert r3con.run is namespace.run
     assert r3con.read_documents is namespace.read_documents
     assert Answer is namespace.Answer
+
+
+def test_the_version_is_the_installed_distributions():
+    assert r3con.__version__ == importlib.metadata.version("r3context")

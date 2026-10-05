@@ -26,6 +26,8 @@ document is read on its own, and information crosses document boundaries through
 relevance snippets.
 """
 
+from importlib.metadata import PackageNotFoundError, version
+
 from r3con import r3con
 from r3con.config import RunConfig, load_config
 from r3con.pipeline import Answer, run_pipeline
@@ -55,12 +57,10 @@ from r3con.stages.structuring.schema import (
     propose_schema,
 )
 
-try:  # the installed wheel's version is the truth; the literal is the checkout fallback
-    from importlib.metadata import version as _pkg_version
-
-    __version__ = _pkg_version("r3context")  # the DISTRIBUTION name, not the module
-except Exception:  # noqa: BLE001 — running from a source checkout
-    __version__ = "0.1.0"
+try:
+    __version__ = version("r3context")  # the distribution's name, not the module's
+except PackageNotFoundError:  # a source tree that was never installed
+    __version__ = "0+unknown"
 
 __all__ = [
     "Answer",
