@@ -1,127 +1,71 @@
-"""`r3con.prompts` — the packaged prompts, and the overlay that keeps versioning usable
-after the package is installed."""
-
-from __future__ import annotations
-
-import os
-import tempfile
-from pathlib import Path
+import pytest
 
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
 from r3con.settings import settings
 
-# Enough kwargs to render any stage's template; Jinja ignores the ones it doesn't use.
-CTX = {
+# Enough to render any stage's template; Jinja ignores the names it does not use.
+CONTEXT = {
     "task": "T",
     "schema_code": "S",
     "relevance": "",
     "other_snippets": "",
-    "parsed": "{}",
     "parse_block": "{}",
     "samples_block": "",
     "parse_json": "",
 }
 
 
-def test_every_stage_pinned_by_the_default_config_actually_ships() -> None:
-    """The shipped config must not pin a prompt version that isn't in the wheel — the
-    failure would land after the first LLM call, not at import."""
-    cfg = load_config("default")
-    for stage in PROMPT_STAGES:
-        version = cfg.prompts[stage]
-        assert (settings.PROMPTS_DIR / stage / f"{version}.yaml").is_file(), (
-            f"{stage}/{version}"
-        )
-        assert load_prompt(stage, version=version, **CTX).strip()
+@pytest.fixture
+def overlay(tmp_path, monkeypatch):
+    """Writes ``relevance/<version>.yaml`` files into a prompt overlay."""
+    monkeypatch.setenv("R3CON_PROMPTS_DIR", str(tmp_path / "overlay"))
+
+    def write(version: str, text: str) -> None:
+        path = tmp_path / "overlay" / "relevance" / f"{version}.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    return write
 
 
-def test_search_path_is_overlay_then_package() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        os.environ["R3CON_PROMPTS_DIR"] = tmp
-        try:
-            path = prompt_search_path()
-        finally:
-            del os.environ["R3CON_PROMPTS_DIR"]
-    assert path[0] == Path(tmp)
-    assert path[-1] == settings.PROMPTS_DIR
+@pytest.mark.parametrize("stage", PROMPT_STAGES)
+def test_every_prompt_the_default_config_pins_ships_and_renders(stage):
+    version = load_config("default").prompts[stage]
+    assert (settings.PROMPTS_DIR / stage / f"{version}.yaml").is_file()
+    assert load_prompt(stage, version=version, **CONTEXT).strip()
 
 
-def test_an_overlay_version_is_found_and_the_packaged_one_still_is() -> None:
-    """Adding a version means dropping one file in the overlay — you don't have to copy
-    the versions you didn't change."""
-    with tempfile.TemporaryDirectory() as tmp:
-        stage_dir = Path(tmp) / "relevance"
-        stage_dir.mkdir(parents=True)
-        (stage_dir / "v2.yaml").write_text(
-            "instructions: |-\n  MY OVERLAY PROMPT {{ task }}\n", encoding="utf-8"
-        )
-        os.environ["R3CON_PROMPTS_DIR"] = tmp
-        try:
-            assert "MY OVERLAY PROMPT T" in load_prompt(
-                "relevance", version="v2", **CTX
-            )
-            # the packaged v1 is still reachable — the overlay adds, it doesn't replace
-            assert "MY OVERLAY PROMPT" not in load_prompt(
-                "relevance", version="v1", **CTX
-            )
-        finally:
-            del os.environ["R3CON_PROMPTS_DIR"]
+def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):
+    monkeypatch.setenv("R3CON_PROMPTS_DIR", str(tmp_path))
+    assert prompt_search_path() == [tmp_path, settings.PROMPTS_DIR]
 
 
-def test_an_overlay_shadows_a_packaged_version_of_the_same_name() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        stage_dir = Path(tmp) / "relevance"
-        stage_dir.mkdir(parents=True)
-        (stage_dir / "v1.yaml").write_text(
-            "instructions: |-\n  SHADOWED\n", encoding="utf-8"
-        )
-        os.environ["R3CON_PROMPTS_DIR"] = tmp
-        try:
-            assert load_prompt("relevance", version="v1", **CTX).strip() == "SHADOWED"
-        finally:
-            del os.environ["R3CON_PROMPTS_DIR"]
+def test_an_overlay_adds_a_version_and_the_packaged_ones_stay(overlay):
+    overlay("v2", "instructions: |-\n  MY OVERLAY PROMPT {{ task }}\n")
+    assert "MY OVERLAY PROMPT T" in load_prompt("relevance", version="v2", **CONTEXT)
+    assert "MY OVERLAY PROMPT" not in load_prompt("relevance", version="v1", **CONTEXT)
 
 
-def test_a_missing_version_names_every_place_it_looked() -> None:
-    try:
-        load_prompt("relevance", version="v999", **CTX)
-    except FileNotFoundError as e:
-        msg = str(e)
-        assert "v999" in msg and "relevance" in msg
-        assert str(settings.PROMPTS_DIR) in msg, (
-            "the error must name the packaged location too"
-        )
-        return
-    raise AssertionError("expected FileNotFoundError")
+def test_an_overlay_shadows_the_packaged_version_of_the_same_name(overlay):
+    overlay("v1", "instructions: |-\n  SHADOWED\n")
+    assert load_prompt("relevance", version="v1", **CONTEXT) == "SHADOWED"
 
 
-def test_examples_are_appended_to_the_instructions() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        stage_dir = Path(tmp) / "relevance"
-        stage_dir.mkdir(parents=True)
-        (stage_dir / "v3.yaml").write_text(
-            "instructions: |-\n  BODY\nexamples:\n  - name: one\n    text: |-\n      EXAMPLE-ONE\n",
-            encoding="utf-8",
-        )
-        os.environ["R3CON_PROMPTS_DIR"] = tmp
-        try:
-            out = load_prompt("relevance", version="v3", **CTX)
-        finally:
-            del os.environ["R3CON_PROMPTS_DIR"]
-    assert "BODY" in out and "EXAMPLE-ONE" in out and "Examples:" in out
+def test_a_missing_version_names_every_place_it_looked(tmp_path):
+    with pytest.raises(
+        FileNotFoundError, match="'relevance' version 'v999'"
+    ) as missing:
+        load_prompt("relevance", version="v999", **CONTEXT)
+    assert str(tmp_path / "prompts") in str(missing.value)
+    assert str(settings.PROMPTS_DIR) in str(missing.value)
 
 
-if __name__ == "__main__":
-    tests = [
-        test_every_stage_pinned_by_the_default_config_actually_ships,
-        test_search_path_is_overlay_then_package,
-        test_an_overlay_version_is_found_and_the_packaged_one_still_is,
-        test_an_overlay_shadows_a_packaged_version_of_the_same_name,
-        test_a_missing_version_names_every_place_it_looked,
-        test_examples_are_appended_to_the_instructions,
-    ]
-    for t in tests:
-        t()
-        print(f"  PASS  {t.__name__}")
-    print(f"\nOK — {len(tests)} tests")
+def test_examples_are_appended_to_the_instructions(overlay):
+    overlay(
+        "v3",
+        "instructions: |-\n  BODY\nexamples:\n  - name: one\n    text: |-\n      ONE\n",
+    )
+    assert (
+        load_prompt("relevance", version="v3", **CONTEXT) == "BODY\n\nExamples:\n\nONE"
+    )
