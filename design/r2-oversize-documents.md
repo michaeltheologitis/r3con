@@ -338,7 +338,9 @@ in order, after splitting the document as far as it must. Its arguments:
   (0-based) once it is split. `runs._DOC_CHUNK_RE` already reads `c{k}` into
   `calls.json`'s `chunk` field.
 - `rest` is everything the stage sends beside a part: the rendered system prompt, plus
-  the response schema for a parse.
+  the response schema for a parse. It is never empty. With an empty `rest`, nothing is
+  shorter than it, so a part refused down to one character would reach `halve`'s
+  `ValueError`.
 - `send(part, kind)` sends one part and returns its result. It raises
   `litellm.ContextWindowExceededError` when the provider refuses it.
 
