@@ -25,6 +25,7 @@ os.environ.setdefault(
 
 # Its import-time IPv6 probe opens a socket: here, before sockets are blocked.
 import urllib3  # noqa: F401
+import yaml
 
 litellm.suppress_debug_info = True
 _completion = litellm.completion
@@ -163,6 +164,19 @@ def answering_llm(llm: FakeLLM) -> FakeLLM:
         parsing=lambda request: json.dumps({"rows": [{"who": _first_line(request)}]}),
         reasoning=ANSWERING_CODE,
     )
+
+
+@pytest.fixture
+def configs(tmp_path):
+    """Writes ``name -> fields`` into the working directory's config overlay."""
+    root = tmp_path / "configs"
+    root.mkdir()
+
+    def write(**by_name: dict) -> None:
+        for name, fields in by_name.items():
+            (root / f"{name}.yaml").write_text(yaml.safe_dump(fields))
+
+    return write
 
 
 @pytest.fixture(autouse=True)

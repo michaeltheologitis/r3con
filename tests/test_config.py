@@ -1,5 +1,4 @@
 import pytest
-import yaml
 from pydantic import ValidationError
 
 from r3con import settings
@@ -12,19 +11,6 @@ FULL = {
     "prompts": PROMPTS,
 }
 DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
-
-
-@pytest.fixture
-def configs(tmp_path):
-    """Writes ``name -> fields`` into the working directory's config overlay."""
-    root = tmp_path / "configs"
-    root.mkdir()
-
-    def write(**by_name: dict) -> None:
-        for name, fields in by_name.items():
-            (root / f"{name}.yaml").write_text(yaml.safe_dump(fields))
-
-    return write
 
 
 def test_the_default_config_loads_with_its_shipped_values():

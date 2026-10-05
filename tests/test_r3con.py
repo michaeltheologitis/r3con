@@ -2,7 +2,6 @@ import importlib.metadata
 from pathlib import Path
 
 import pytest
-import yaml
 
 import r3con
 from r3con import Answer, RunConfig
@@ -141,13 +140,10 @@ def test_a_run_on_a_provider_that_takes_no_seed_completes(answering_llm, model):
 
 
 def test_a_config_pinning_a_missing_prompt_is_refused_before_a_run_folder_exists(
-    llm, tmp_path
+    llm, configs, tmp_path
 ):
     prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "exp.yaml").write_text(
-        yaml.safe_dump({"model": "openai/m", "prompts": prompts})
-    )
+    configs(exp={"model": "openai/m", "prompts": prompts})
     with pytest.raises(FileNotFoundError, match="'reasoning' version 'v9'"):
         run("Who?", ["memo"], config="exp", completion=llm, logs_dir=tmp_path / "logs")
     assert not (tmp_path / "logs").exists()
