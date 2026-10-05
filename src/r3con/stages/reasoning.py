@@ -164,9 +164,11 @@ def reason(
     parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
     # The variables a reasoning prompt version may use, a user's overlay included;
     # Jinja renders only the ones its template references:
+    #   task, schema_code, relevance: the question, the schema source, the summaries
     #   parse_block  : the whole parse, or samples + a note if it is huge
     #   samples_block: one sample record per field
     #   parse_json   : the whole parse as JSON
+    #   read_in_parts: whether a summary is one part of a document read in parts
     parse_block = _render_parse_for_codeact(parse_dict, parse_json)
     samples_block = _sample_record_per_field(parse_dict)
     system_prompt = load_prompt(
@@ -178,6 +180,7 @@ def reason(
         parse_json=parse_json,
         samples_block=samples_block,
         parse_block=parse_block,
+        read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
     )
 
     return run_codeact(
