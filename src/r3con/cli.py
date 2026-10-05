@@ -157,8 +157,8 @@ def _run(args: argparse.Namespace) -> int:
         )
     except Exception as e:  # noqa: BLE001 — a CLI reports, it doesn't traceback at the user
         print(f"r3con: {type(e).__name__}: {e}", file=sys.stderr)
-        if task_logger is not None:
-            print(f"r3con: partial artifacts in {task_logger.dir}", file=sys.stderr)
+        for note in getattr(e, "__notes__", ()):
+            print(note, file=sys.stderr)
         return 1
     print(result.answer)
     return 0

@@ -34,3 +34,31 @@ def test_an_items_exception_is_raised_from_the_map():
 
     with pytest.raises(RuntimeError, match="kaboom"):
         parallel_map(boom, [1, 2, 3], max_workers=3)
+
+
+def test_calls_not_yet_started_when_one_fails_never_run():
+    started = []
+
+    def first_fails(i: int, x: int) -> int:
+        started.append(i)
+        if i == 0:
+            raise RuntimeError("first")
+        time.sleep(0.2)
+        return x
+
+    with pytest.raises(RuntimeError, match="first"):
+        parallel_map(first_fails, list(range(10)), max_workers=2)
+    assert len(started) < 10
+
+
+def test_the_lowest_indexed_failure_is_the_one_raised():
+    def fails(i: int, x: int) -> int:
+        if i == 1:
+            time.sleep(0.1)
+            raise RuntimeError("item 1")
+        if i == 3:
+            raise RuntimeError("item 3")
+        return x
+
+    with pytest.raises(RuntimeError, match="item 1"):
+        parallel_map(fails, list(range(5)), max_workers=5)

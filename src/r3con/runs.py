@@ -28,8 +28,11 @@ Layout per ``logs/<run-folder>/``:
   call).
 - ``reasoning/`` (stage 3) — ``result.json``
   (``{answer, terminated_by, n_turns, turns, totals}``) + ``calls.json`` +
-  ``transcript.yaml`` +
-  ``error.txt`` (when the stage raised).
+  ``transcript.yaml``.
+
+A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
+call that completed, plus ``transcript.yaml`` where the stage writes one) and
+``error.txt``, the traceback.
 
 Two layers in code:
 

@@ -91,7 +91,9 @@ def test_a_provider_failure_exits_1_and_points_at_the_partial_artifacts(
     assert "r3con: APIConnectionError: litellm.APIConnectionError: provider down" in err
     partial = path_after("r3con: partial artifacts in ", err)
     assert partial == path_after("artifacts: ", err)
+    assert err.count("partial artifacts") == 1
     assert (partial / "manifest.json").is_file()
+    assert "provider down" in (partial / "relevance" / "error.txt").read_text()
 
 
 def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
