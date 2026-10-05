@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import functools
 import itertools
-import logging
 import re
 import threading
 from collections.abc import Callable, Sequence
@@ -35,6 +34,7 @@ from litellm.exceptions import ContextWindowExceededError
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.runs import TaskLogger
+from r3con.runtime.llm import quiet_litellm
 
 _log = get_logger("splitting")
 
@@ -72,23 +72,12 @@ def halve(text: str) -> int:
 
 def _max_input_tokens(model: str) -> int | None:
     """``model``'s input window in litellm's model map, or ``None`` when the map does
-    not give one.
-
-    For a model string whose provider litellm does not recognise (a Router alias),
-    litellm prints a provider list to stdout; the lookup silences that, and only for
-    its own call.
-    """
-    logger = logging.getLogger("LiteLLM")
-    prev_suppress, prev_level = litellm.suppress_debug_info, logger.level
-    litellm.suppress_debug_info = True
-    logger.setLevel(logging.CRITICAL)
+    not give one. The lookup prints nothing, whatever the model string."""
     try:
-        window = litellm.get_model_info(model).get("max_input_tokens")
+        with quiet_litellm():
+            window = litellm.get_model_info(model).get("max_input_tokens")
     except Exception:  # noqa: BLE001 — litellm before 1.104 raises a bare Exception for a model its map lacks
         window = None
-    finally:
-        litellm.suppress_debug_info = prev_suppress
-        logger.setLevel(prev_level)
     if window is None:
         _log.info(
             "litellm's model map gives no input window for %s; a document is split "

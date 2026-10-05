@@ -126,11 +126,13 @@ def test_looking_up_the_window_prints_nothing(
     window, capsys, monkeypatch, model, window_tokens
 ):
     monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    level = logging.getLogger("LiteLLM").level
     if window_tokens:
         model = window(window_tokens)
     assert Splits(["text"], model=model).max_input_tokens == window_tokens
     assert capsys.readouterr().out == ""
     assert litellm.suppress_debug_info is False
+    assert logging.getLogger("LiteLLM").level == level
 
 
 @pytest.mark.parametrize("margin", [-1, 100])

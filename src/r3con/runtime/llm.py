@@ -19,6 +19,9 @@ content (a 200 with no JSON, which transport retries never see).
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
 
+Asking litellm about a model rather than calling it goes through :func:`quiet_litellm`,
+which keeps litellm from printing while it looks the model up.
+
 ``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
 though nothing in this package imports it** — litellm imports it lazily, on the retry path
 only. Drop it and every call that hits a transient error fails instead of retrying, on the
@@ -27,7 +30,9 @@ one path you are least likely to exercise before shipping.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import contextlib
+import logging
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import litellm
@@ -230,6 +235,27 @@ def litellm_chat_completion(
         _log.warning(
             "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
         )
+
+
+@contextlib.contextmanager
+def quiet_litellm() -> Iterator[None]:
+    """Keep litellm from printing for the length of the block, then restore its settings.
+
+    Asked about a model string it cannot place with a provider (a Router alias),
+    litellm prints its provider list to stdout. The block sets
+    ``litellm.suppress_debug_info`` and raises the ``LiteLLM`` logger to CRITICAL, and
+    puts both back as they were. Both are litellm globals, so a litellm call another
+    thread makes during the block is silenced too.
+    """
+    logger = logging.getLogger("LiteLLM")
+    suppress, level = litellm.suppress_debug_info, logger.level
+    litellm.suppress_debug_info = True
+    logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        litellm.suppress_debug_info = suppress
+        logger.setLevel(level)
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
