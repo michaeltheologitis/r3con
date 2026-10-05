@@ -241,5 +241,10 @@ def test_run_is_reachable_from_the_package_and_from_its_module():
     assert Answer is namespace.Answer
 
 
+def test_the_version_lookup_leaves_nothing_in_the_package_namespace():
+    assert not hasattr(r3con, "version")
+    assert not hasattr(r3con, "PackageNotFoundError")
+
+
 def test_the_version_is_the_installed_distributions():
     assert r3con.__version__ == importlib.metadata.version("r3context")

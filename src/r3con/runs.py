@@ -163,6 +163,7 @@ def write_manifest(
     relative to a release. Without the version recorded here, "which prompt actually
     ran?" is unanswerable after an upgrade.
     """
+    from r3con import __version__
     from r3con.config import PROMPT_STAGES, resolve_config_path
     from r3con.prompts import resolve_prompt_path
     from r3con.settings import settings_snapshot
@@ -178,7 +179,7 @@ def write_manifest(
     return task_logger.write_json(
         "manifest",
         {
-            "r3con_version": _version(),
+            "r3con_version": __version__,
             "task": task,
             "n_docs": n_docs,
             "context_chars": context_chars,
@@ -219,19 +220,6 @@ def _sources(
             if stage in prompts
         },
     }
-
-
-def _version() -> str:
-    """The installed package version, read from metadata so it cannot drift from the
-    wheel; falls back to the in-source literal when running from a checkout."""
-    try:
-        from importlib.metadata import version
-
-        return version("r3context")  # the DISTRIBUTION name, not the module
-    except Exception:  # noqa: BLE001 — not installed (a source checkout); the literal is fine
-        from r3con import __version__
-
-        return __version__
 
 
 @dataclass

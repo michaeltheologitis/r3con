@@ -26,7 +26,7 @@ document is read on its own, and information crosses document boundaries through
 relevance snippets.
 """
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib import metadata as _metadata
 
 from r3con import r3con, settings
 from r3con.config import RunConfig, load_config
@@ -57,8 +57,8 @@ from r3con.stages.structuring.schema import (
 )
 
 try:
-    __version__ = version("r3context")  # the distribution's name, not the module's
-except PackageNotFoundError:  # a source tree that was never installed
+    __version__ = _metadata.version("r3context")  # the distribution, not the module
+except _metadata.PackageNotFoundError:  # a source tree that was never installed
     __version__ = "0+unknown"
 
 __all__ = [
