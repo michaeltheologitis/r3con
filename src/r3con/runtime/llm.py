@@ -140,9 +140,8 @@ def litellm_chat_completion_full(
             },
         }
 
-    # Transport-level retries (exponential backoff via tenacity) on transient
-    # vLLM/API errors — connection refused/reset, timeout, 5xx — so one blip
-    # doesn't abort the whole task. setdefault so a caller can still override.
+    # litellm resends a failed call `num_retries` times, whatever the error; setdefault
+    # so a caller can still override.
     request.setdefault("num_retries", settings.LLM_NUM_RETRIES)
 
     response = (completion or litellm.completion)(**request)
