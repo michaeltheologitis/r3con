@@ -180,6 +180,8 @@ class Splits:
                 unknown window, a refused part is shorter than the rest; or a part of
                 one character still does not fit.
         """
+        # The rest's tokens: counted once, and only when its size in bytes cannot settle
+        # whether a request fits.
         count_rest = functools.cache(functools.partial(count_tokens, rest))
         while True:
             if self.line is not None:
@@ -190,8 +192,8 @@ class Splits:
                 kind = _kind(call, doc, k, len(parts))
                 try:
                     results.append(send(part, kind))
-                except ContextWindowExceededError as error:
-                    self._split_on_refusal(doc, kind, k, part, count_rest, error)
+                except ContextWindowExceededError as refusal:
+                    self._split_on_refusal(doc, kind, k, part, count_rest, refusal)
                     break
             else:
                 self._record_parts(doc, call, len(parts))
@@ -214,13 +216,9 @@ class Splits:
             estimate = count_rest() + count_tokens(parts[0])
             self._stop(
                 doc,
-                self._not_sent(kind, estimate),
                 self._event(kind, "estimate", estimate, count_rest(), 0),
-                error=None,
-                clause=(
-                    f"the prompt and notes sent with it are about {count_rest():,} "
-                    f"tokens, over the {line:,}-token line by themselves"
-                ),
+                f"the prompt and notes sent with it are about {count_rest():,} tokens, "
+                f"over the {line:,}-token line by themselves",
             )
         while (over := self._first_over(doc, rest_size, count_rest, line)) is not None:
             k, estimate = over
@@ -228,9 +226,8 @@ class Splits:
             kind = _kind(call, doc, k, len(parts))
             event = self._event(kind, "estimate", estimate, count_rest(), 0)
             if len(parts[k]) == 1:
-                stop = self._not_sent(kind, estimate)
-                self._stop(doc, stop, event, error=None, clause=_no_room(count_rest()))
-            n_parts = self._split(doc, event, error=None)
+                self._stop(doc, event, _no_room(count_rest()))
+            n_parts = self._split(doc, event)
             _log.warning(
                 "%s: documents[%d] (Document %d) is estimated at %s tokens, over the "
                 "%s-token line; reading it in %d parts",
@@ -263,7 +260,7 @@ class Splits:
         k: int,
         part: str,
         count_rest: Callable[[], int],
-        error: ContextWindowExceededError,
+        refusal: ContextWindowExceededError,
     ) -> None:
         """Halve after the provider refused part ``k``, or stop where more parts cannot
         help: a part of one character, or, with an unknown window, a part shorter than
@@ -275,19 +272,14 @@ class Splits:
         if self.line is None and part_tokens < count_rest():
             self._stop(
                 doc,
-                error,
                 event,
-                error=str(error),
-                clause=(
-                    f"the part is about {part_tokens:,} tokens and the prompt and "
-                    f"notes sent with it about {count_rest():,}"
-                ),
+                f"the part is about {part_tokens:,} tokens and the prompt and notes "
+                f"sent with it about {count_rest():,}",
+                refusal,
             )
         if len(part) == 1:
-            self._stop(
-                doc, error, event, error=str(error), clause=_no_room(count_rest())
-            )
-        n_parts = self._split(doc, event, error=str(error))
+            self._stop(doc, event, _no_room(count_rest()), refusal)
+        n_parts = self._split(doc, event, refusal)
         _log.warning(
             "%s: documents[%d] (Document %d) was refused as too long; reading it in %d "
             "parts",
@@ -297,10 +289,14 @@ class Splits:
             n_parts,
         )
 
-    def _split(self, doc: int, event: dict[str, Any], *, error: str | None) -> int:
+    def _split(
+        self,
+        doc: int,
+        event: dict[str, Any],
+        refusal: ContextWindowExceededError | None = None,
+    ) -> int:
         """Halve every part of ``documents[doc]`` longer than one character, record the
-        split with the provider's ``error`` message, if any, and return the number of
-        parts."""
+        split, and return the number of parts."""
         starts = [0, *self._cuts[doc]]
         cuts = [
             start + halve(part)
@@ -308,27 +304,21 @@ class Splits:
             if len(part) > 1
         ]
         self._cuts[doc] = sorted([*self._cuts[doc], *cuts])
-        n_parts = len(self._cuts[doc]) + 1
-        self._record_event(
-            doc, {**event, "action": "split", "parts": n_parts, "error": error}
-        )
-        return n_parts
+        self._record_event(doc, event, "split", refusal)
+        return len(self._cuts[doc]) + 1
 
     def _stop(
         self,
         doc: int,
-        stop: ContextWindowExceededError,
         event: dict[str, Any],
-        *,
-        error: str | None,
         clause: str,
+        refusal: ContextWindowExceededError | None = None,
     ) -> NoReturn:
-        """Record the stop with the provider's ``error`` message, if any, add the note
-        that says why more parts cannot help (``clause``), and raise ``stop``."""
-        n_parts = len(self.parts(doc))
-        self._record_event(
-            doc, {**event, "action": "stop", "parts": n_parts, "error": error}
-        )
+        """Record the stop and raise the provider's ``refusal``, or, when nothing was
+        sent, r3con's own error, with a note that says why more parts cannot help
+        (``clause``)."""
+        self._record_event(doc, event, "stop", refusal)
+        stop = self._not_sent(event) if refusal is None else refusal
         stop.add_note(
             f"r3con: reading documents[{doc}] (Document {doc + 1}) in more parts cannot "
             f"help in {event['call']}: {clause}. The relevant context has outgrown the "
@@ -336,14 +326,14 @@ class Splits:
         )
         raise stop
 
-    def _not_sent(self, kind: str, estimate: int) -> ContextWindowExceededError:
-        """The error for a request r3con stops before sending it."""
+    def _not_sent(self, event: dict[str, Any]) -> ContextWindowExceededError:
+        """The error for ``event``'s request, which r3con stopped before sending."""
         return ContextWindowExceededError(
             message=(
-                f"r3con estimated {kind} at {estimate:,} tokens, over the "
-                f"{self.line:,}-token line (the {self.max_input_tokens:,}-token input "
-                f"window litellm's model map gives {self._model}, less "
-                f"{self.margin_percent}%); it was not sent."
+                f"r3con estimated {event['call']} at {event['estimate']:,} tokens, "
+                f"over the {self.line:,}-token line (the "
+                f"{self.max_input_tokens:,}-token input window litellm's model map "
+                f"gives {self._model}, less {self.margin_percent}%); it was not sent."
             ),
             model=self._model,
             llm_provider="r3con",
@@ -361,13 +351,25 @@ class Splits:
             "discarded": discarded,
         }
 
-    def _record_event(self, doc: int, event: dict[str, Any]) -> None:
+    def _record_event(
+        self,
+        doc: int,
+        event: dict[str, Any],
+        action: str,
+        refusal: ContextWindowExceededError | None,
+    ) -> None:
+        """Record a split or stop with the parts it leaves and the provider's message,
+        if a refusal caused it."""
+        n_parts = len(self._cuts[doc]) + 1
+        error = None if refusal is None else str(refusal)
         with self._lock:
             entry = self._record["documents"].setdefault(
                 str(doc), {"cuts": [], "parts": {}, "events": []}
             )
             entry["cuts"] = list(self._cuts[doc])
-            entry["events"].append(event)
+            entry["events"].append(
+                {**event, "action": action, "parts": n_parts, "error": error}
+            )
             self._write()
 
     def _record_parts(self, doc: int, call: str, n_parts: int) -> None:
