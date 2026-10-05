@@ -24,6 +24,10 @@ the bigger of what it carries. Branch `claude/tender-shannon-eq4lq7-r3`, cut at 
 - 2026-10-05 · E7, run once (run 37352518283): **its null shows at 8,192 tokens for one
   seed of three** (§10.1, §2.5 item 9). By §10's rule R3.2 as designed goes back to the
   Conductor.
+- 2026-10-05 · E7 again, six seeds, at the Conductor's call (run 37358511251): 17 of 18
+  right; the null shows again at 8,192 (seed 3). In both runs every wrong answer is a
+  parse that kept sub-counts as records of their own, seen by reasoning as samples
+  (§10.1, §2.5 item 9).
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, what was measured, and every
 place this design decides something the spec left open or departs from it, with the
@@ -333,7 +337,12 @@ said, what the build found, what it does, and what it costs.
    at Riverside) included. On the shipped window it saw the whole parse. So the failure
    sits where R3.1's sample view meets a schema that keeps sub-counts as records, at
    least as much as in the shorter notes; one seed in three cannot separate the two.
-   Nothing was changed for it.
+   Nothing was changed for it. **A second run, six seeds** (§10.1): 17 of 18 right, the
+   null again at 8,192 (seed 3, 16 incidents). Across both runs' 27 cases, every wrong
+   answer is a parse that kept sub-counts as records beside their totals, seen by
+   reasoning as samples; the 16-word notes kept the facts in all nine runs at 8,192, and
+   the shipped window was right 9 of 9. The evidence points at R3.1's sample view, not at
+   the notes losing facts or at noise the shipped window shares.
 10. **E7's harness recorded the reasoning loop's live message list**, so a first turn
     that went on to a second no longer had two messages when the test looked, and 8 of
     the 9 cases raised `IndexError` before printing their line. The nine runs had
@@ -1318,6 +1327,44 @@ of them without a code block, against 2 for every other case but 16,384 seed 1 (
 
 **The result:** the null shows, at 8,192 for seed 2 (§2.5 item 9). R3.2 as designed
 goes back to the Conductor.
+
+**E7 again, six seeds** (at the Conductor's call; dispatched at `b337d30` with
+`e7_seeds` `1,2,3,4,5,6`; run 37358511251, `experiment` job 111927777393; 46 minutes for
+R2's E6 and E7's 18 runs; about $3.64 for E7 at the mapped prices, $0.06 for R2's E6,
+which was right 9 of 9). The conditions are the first run's. Before the dispatch the
+harness was dry-run offline, the network blocked, through reasoning that commits at
+once, looks first, or answers a turn without a code block first: 18 of 18. In the job
+every case printed its line, and each row below matches it.
+
+| Window (line) | Seeds right | Read again (round, W, cause, sized for) | Notes over W, of 120 | Reasoning saw | Largest two-message request | Calls (vs shipped, same seed) | Prompt tokens (vs shipped) | Completion tokens | Mapping records |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| shipped, 922,000 (783,700) | 6 of 6 | none | — | the whole parse | 15,038 to 17,653 | 362 to 363 | 1,642,210 to 1,704,603 | 34,962 to 39,812 | 1 in each |
+| 16,384 (13,926) | 6 of 6 | none | — | samples | 8,463 to 8,835 | 362 to 365 (1.00 to 1.01x) | 1,653,966 to 1,698,651 (0.97 to 1.02x) | 37,770 to 39,407 | 1 in each |
+| 8,192 (6,963) | **5 of 6** (seed 3: 16) | (2, 16 or 17, estimate, reasoning), once in each | 38 to 54 | samples | 6,132 to 6,343 | 482 to 484 (1.33 to 1.34x) | 2,031,706 to 2,063,052 (1.20 to 1.24x) | 52,424 to 61,867 | 1 in each |
+
+W is 16 or 17 as the notes' first mean was 32 to 35 words. Both runs, by window: the
+shipped window 9 of 9, 16,384 9 of 9, 8,192 7 of 9.
+
+**Every wrong answer** (two in 27 runs), from its run folder:
+
+| Run | Window, seed | Answer | Did the notes keep the facts? | Was the parse right? | Reasoning saw | What it summed |
+| --- | --- | --- | --- | --- | --- | --- |
+| first | 8,192, 2 | 22 | yes: Northgate "five equipment incidents under contractor code CT-118", Riverside "6 equipment incidents under CT-118", the registry's mapping | each record is true to its memo, but Northgate's total (5) sits beside its breakdown (3 conveyor stoppages, 2 HVAC trips), and Riverside's (6) beside 4 + 2, in one list | samples | every CT-118 record, 5 + 3 + 2 + 6 + 4 + 2, after five turns without a code block |
+| second | 8,192, 3 | 16 | yes: "5 equipment incidents under contractor code CT-118", "six equipment incidents at a CT-118 site", the mapping | the same, Northgate's breakdown only (5, 3, 2; then 6) | samples | every Q3 CT-118 record, 5 + 3 + 2 + 6, on its first turn |
+
+**What the evidence points at.** The parse kept a site's sub-counts as records beside
+its total in 5 of the 27 runs (2 on the shipped window, 1 at 16,384, 2 at 8,192), a
+property of the schema the run proposes, not of the window. Without such records, 22 of
+22 runs answered 11, at every window. With them, the 2 runs shown the whole parse
+answered 11 without summing; of the 3 shown samples, the one at 16,384 answered 11 from
+the notes after four turns, and both at 8,192 summed every record. The shipped window
+was right 9 of 9, so there is no noise there that the other windows merely share, and
+the 16-word notes kept the facts in all nine runs at 8,192. So the evidence points at
+R3.1's sample view, which hides from reasoning that the parse keeps sub-counts as
+records of their own; not at the shorter notes losing facts. It cannot exclude that
+full-length notes make reasoning less likely to sum the records: the one run shown
+samples beside such records that answered right had them, one case. By §10's rule the
+null shows again (8,192, seed 3, right on the shipped window).
 
 ## 11 · Changes to `src/` by module, and the version
 
