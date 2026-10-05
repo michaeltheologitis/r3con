@@ -294,8 +294,8 @@ def parse_one_document(
 class ParseResult:
     """Output of :func:`parse_documents`: the merged parse + per-record source-doc tags.
 
-    - ``parse`` — the single merged ``Parse`` (list fields concatenated across
-      documents in document order; non-list fields take the first non-None value).
+    - ``parse`` — the single merged ``Parse`` (its list fields concatenated across
+      documents in document order).
     - ``source_docs`` maps each top-level *list* field of ``parse`` to a list of
       source-document indices aligned 1:1 (and in order) with that field's merged
       records — so ``source_docs[f][i]`` is the document ``getattr(parse, f)[i]``
@@ -304,19 +304,10 @@ class ParseResult:
       see ``r3con.stages.reasoning.tag_source_documents``). Without it the
       merged parse is origin-blind: records from every document sit in one flat
       list and the model cannot say which document a fact came from.
-    - ``doc_ids`` is the optional human-readable label per document index (e.g. a
-      filename/title); ``None`` means use the bare integer index.
     """
 
     parse: BaseModel
     source_docs: dict[str, list[int]] = field(default_factory=dict)
-    doc_ids: list[str] | None = None
-
-    def doc_label(self, doc_idx: int) -> str:
-        """Human-readable label for a doc index (its ``doc_ids`` entry, else the int)."""
-        if self.doc_ids is not None and 0 <= doc_idx < len(self.doc_ids):
-            return self.doc_ids[doc_idx]
-        return str(doc_idx)
 
 
 def parse_documents(
@@ -327,7 +318,6 @@ def parse_documents(
     task: str,
     prompt_version: str,
     relevance_snippets: list[str] | None = None,
-    doc_ids: list[str] | None = None,
     model: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
@@ -350,9 +340,7 @@ def parse_documents(
     """
     if not documents:
         return ParseResult(
-            parse=_empty_parse(parse_cls),
-            source_docs=_empty_source_docs(parse_cls),
-            doc_ids=doc_ids,
+            parse=_empty_parse(parse_cls), source_docs=_empty_source_docs(parse_cls)
         )
 
     max_workers = workers if workers is not None else active_doc_workers()
@@ -384,7 +372,7 @@ def parse_documents(
     _log.info(
         "parsing complete · records per list field: %s", counts or "(no list fields)"
     )
-    return ParseResult(parse=parse, source_docs=source_docs, doc_ids=doc_ids)
+    return ParseResult(parse=parse, source_docs=source_docs)
 
 
 def _empty_parse(parse_cls: type[BaseModel]) -> BaseModel:
@@ -407,32 +395,18 @@ def _merge_with_source_docs(
     per_doc: list[tuple[int, BaseModel]],
     parse_cls: type[BaseModel],
 ) -> tuple[BaseModel, dict[str, list[int]]]:
-    """Concatenate list-valued fields across per-document Parse instances and, in
-    lockstep, tag each merged record with its source-document index.
+    """Concatenate each field's records across the ``(document index, parse)`` pairs, in
+    pair order, and tag each merged record with its pair's document index.
 
-    List fields are concatenated in document order; non-list fields take the first
-    non-None value across documents. ``source_docs[field]`` is aligned 1:1 with the
-    merged list *by construction* — for each document we append its index once per
-    record it contributed, in the same order the records are appended. Only list
-    fields get source tags (scalars have no per-record origin).
+    ``source_docs[field]`` is aligned 1:1 with the merged list *by construction*: each
+    pair contributes its index once per record, in the order its records are appended.
+    Every field of ``Parse`` is a list (:func:`check_schema` refuses any other).
     """
-    parsed_objs = [p for _, p in per_doc]
-    if not parsed_objs:
-        return _empty_parse(parse_cls), _empty_source_docs(parse_cls)
-
-    merged: dict[str, Any] = {}
-    source_docs: dict[str, list[int]] = {}
-    for field_name in parse_cls.model_fields:
-        values = [getattr(p, field_name) for p in parsed_objs]
-        if isinstance(values[0], list):
-            merged_list: list[Any] = []
-            src_list: list[int] = []
-            for doc_idx, p in per_doc:
-                records = getattr(p, field_name)
-                merged_list.extend(records)
-                src_list.extend([doc_idx] * len(records))
-            merged[field_name] = merged_list
-            source_docs[field_name] = src_list
-        else:
-            merged[field_name] = next((v for v in values if v is not None), values[0])
-    return parse_cls.model_validate(merged), source_docs
+    fields = parse_cls.model_fields
+    merged = {
+        name: [r for _, p in per_doc for r in getattr(p, name)] for name in fields
+    }
+    sources = {
+        name: [i for i, p in per_doc for _ in getattr(p, name)] for name in fields
+    }
+    return parse_cls.model_validate(merged), sources
