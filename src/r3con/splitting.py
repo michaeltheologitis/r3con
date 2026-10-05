@@ -40,62 +40,6 @@ _log = get_logger("splitting")
 
 T = TypeVar("T")
 
-_BREAKS = (
-    re.compile(r"\n\s*\n\s*"),  # paragraph break
-    re.compile(r"\n"),  # line break
-    re.compile(r"(?<=[.!?])\s+|(?<=[。！？])"),  # sentence end
-    re.compile(r"\s+"),  # any space
-)
-
-
-def halve(text: str) -> int:
-    """The offset at which ``text`` is cut in two: after the break nearest its middle.
-
-    Each kind of break in ``_BREAKS`` is looked for, in order, in the middle half of
-    ``text`` only, so each half is at least a quarter of it; the first kind found wins,
-    and the break nearest the middle (the earlier on a tie) is the cut. With no break
-    at all in the middle half, the cut is the middle.
-
-    Raises:
-        ValueError: for a text of fewer than 2 characters, which cannot be cut.
-    """
-    n = len(text)
-    if n < 2:
-        raise ValueError(f"a text of {n} character(s) cannot be cut in two")
-    low, high, middle = max(1, n // 4), min(n - 1, n - n // 4), n // 2
-    for pattern in _BREAKS:
-        cuts = [m.end() for m in pattern.finditer(text) if low <= m.end() <= high]
-        if cuts:
-            return min(cuts, key=lambda cut: (abs(cut - middle), cut))
-    return middle
-
-
-def _max_input_tokens(model: str) -> int | None:
-    """``model``'s input window in litellm's model map, or ``None`` when the map does
-    not give one. The lookup prints nothing, whatever the model string."""
-    try:
-        with quiet_litellm():
-            window = litellm.get_model_info(model).get("max_input_tokens")
-    except Exception:  # noqa: BLE001 — litellm before 1.104 raises a bare Exception for a model its map lacks
-        window = None
-    if window is None:
-        _log.info(
-            "litellm's model map gives no input window for %s; a document is split "
-            "only when the model refuses it",
-            model,
-        )
-    return window
-
-
-def _utf8_size(text: str) -> int:
-    """``text``'s size in UTF-8 bytes, which no count of its tokens exceeds."""
-    return len(text.encode("utf-8"))
-
-
-def _kind(call: str, doc: int, k: int, n_parts: int) -> str:
-    """The kind a call records for part ``k`` of ``n_parts`` of document ``doc``."""
-    return f"{call}-d{doc}" if n_parts == 1 else f"{call}-d{doc}c{k}"
-
 
 class Splits:
     """Where each document of one run is cut into parts, kept for the rest of the run.
@@ -384,6 +328,63 @@ class Splits:
     def _write(self) -> None:
         if self._task_logger is not None:
             self._task_logger.write_json("splits", self._record)
+
+
+_BREAKS = (
+    re.compile(r"\n\s*\n\s*"),  # paragraph break
+    re.compile(r"\n"),  # line break
+    re.compile(r"(?<=[.!?])\s+|(?<=[。！？])"),  # sentence end
+    re.compile(r"\s+"),  # any space
+)
+
+
+def halve(text: str) -> int:
+    """The offset at which ``text`` is cut in two: after the break nearest its middle.
+
+    Each kind of break in ``_BREAKS`` is looked for, in order, in the middle half of
+    ``text`` only, so each half is at least a quarter of it; the first kind found wins,
+    and the break nearest the middle (the earlier on a tie) is the cut. With no break
+    at all in the middle half, the cut is the middle.
+
+    Raises:
+        ValueError: for a text of fewer than 2 characters, which cannot be cut.
+    """
+    n = len(text)
+    if n < 2:
+        raise ValueError(f"a text of {n} character(s) cannot be cut in two")
+    low, high, middle = max(1, n // 4), min(n - 1, n - n // 4), n // 2
+    for pattern in _BREAKS:
+        cuts = [m.end() for m in pattern.finditer(text) if low <= m.end() <= high]
+        if cuts:
+            return min(cuts, key=lambda cut: (abs(cut - middle), cut))
+    return middle
+
+
+def _max_input_tokens(model: str) -> int | None:
+    """``model``'s input window in litellm's model map, or ``None`` when the map does
+    not give one. The lookup prints nothing, whatever the model string."""
+    try:
+        with quiet_litellm():
+            window = litellm.get_model_info(model).get("max_input_tokens")
+    except Exception:  # noqa: BLE001 — litellm before 1.104 raises a bare Exception for a model its map lacks
+        window = None
+    if window is None:
+        _log.info(
+            "litellm's model map gives no input window for %s; a document is split "
+            "only when the model refuses it",
+            model,
+        )
+    return window
+
+
+def _utf8_size(text: str) -> int:
+    """``text``'s size in UTF-8 bytes, which no count of its tokens exceeds."""
+    return len(text.encode("utf-8"))
+
+
+def _kind(call: str, doc: int, k: int, n_parts: int) -> str:
+    """The kind a call records for part ``k`` of ``n_parts`` of document ``doc``."""
+    return f"{call}-d{doc}" if n_parts == 1 else f"{call}-d{doc}c{k}"
 
 
 def _no_room(rest_tokens: int) -> str:
