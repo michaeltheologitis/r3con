@@ -83,7 +83,10 @@ addopts = [
     "--allow-unix-socket",
     "--strict-markers",
 ]
-markers = ["live: calls a real provider; runs only under `pytest -m live`"]
+markers = [
+    "live: calls a real provider; runs only under `pytest -m live`",
+    "experiment: a measured run against a real provider, dispatched once; also marked live",
+]
 
 [tool.coverage.run]
 omit = ["*/r3con/runtime/python_executor.py"]
