@@ -1,6 +1,6 @@
 [project]
 name = "r3context"
-version = "0.2.0"
+version = "0.3.0"
 description = "Just-in-time reasoning over a collection of documents: surface relevance, structure it, reason over it."
 readme = "README.md"
 authors = [
