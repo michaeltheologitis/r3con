@@ -49,9 +49,9 @@ SCHEMA_MAX_ATTEMPTS = 5
 # Cap on the parsing structured-output retry loop (one document).
 PARSING_MAX_ATTEMPTS = 5
 
-# Transport-level retries passed to every litellm call on transient errors: connection
-# refused/reset, timeouts, 5xx.
-LLM_NUM_RETRIES = 10
+# How many times litellm resends a failed call. It resends any error, a refused request
+# (400) included, so each refusal costs this many extra requests.
+LLM_NUM_RETRIES = 2
 
 # Re-rolls of an empty structured-output response (a 200 with no JSON, e.g. a
 # reasoning model that spent its budget on thinking).
