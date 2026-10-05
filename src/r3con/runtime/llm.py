@@ -12,9 +12,9 @@ The one escape hatch is ``completion=``, the callable that makes each request (d
 wrapper with the same shape. It is **transport**, so it never enters a run's identity.
 
 Two entry points. :func:`litellm_chat_completion_full` returns the raw response object;
-:func:`litellm_chat_completion` — what the stages actually call — returns the text, or a
-validated Pydantic instance when a ``schema`` is given, re-rolling the same request if the
-model answers with empty content (a 200 with no JSON, which transport retries never see).
+:func:`litellm_chat_completion` returns the text, or a validated Pydantic instance when a
+``schema`` is given, re-rolling the same request if the model answers with empty content
+(a 200 with no JSON, which transport retries never see).
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
@@ -103,12 +103,6 @@ def litellm_chat_completion_full(
     to it with the request messages, response content, tokens, and ``kind``
     label. Pass ``kind="retry"`` (or another custom label) on retry attempts
     so the transcript renders them as a labeled block.
-
-    This is where ``num_retries`` is set, which pulls in a dependency that is
-    invisible to every import in this package: litellm imports ``tenacity``
-    *lazily*, on the retry path only. ``tenacity`` is therefore **required** —
-    without it the first transient error raises a "tenacity import failed"
-    error instead of being retried (empirically confirmed).
     """
 
     if messages is not None:

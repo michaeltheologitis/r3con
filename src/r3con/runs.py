@@ -10,8 +10,8 @@ fact by reading each manifest (e.g. by the config's run label,
 
 Layout per ``logs/<run-folder>/``:
 
-- ``manifest.json`` — written by the caller, if it wants one: the identity card + the
-  full parameter snapshot — the task, a ``config`` block (the resolved
+- ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
+  snapshot — the task, a ``config`` block (the resolved
   :class:`RunConfig` — model, relevance_rounds, prompts, params, …), and a
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
@@ -238,10 +238,9 @@ class StepRecord:
 class StageRun:
     """Accumulates per-LLM-call records for one stage; flushes calls.json (+ transcript).
 
-    Each stage constructs one of these, calls ``add_step`` per LLM call (and per
-    loop turn for the CodeAct loop), and ``flush`` at the end. ``add_step`` is
-    thread-safe so a stage that fans calls out across documents in parallel
-    (the relevance rounds, per-document parsing) can share one run.
+    ``add_step`` records one LLM call (or one turn of a multi-turn loop), and
+    ``flush`` writes them. ``add_step`` is thread-safe, so calls fanned out across
+    documents in parallel can share one run.
     """
 
     def __init__(

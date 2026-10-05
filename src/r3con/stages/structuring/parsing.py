@@ -298,11 +298,10 @@ class ParseResult:
     - ``source_docs`` maps each top-level *list* field of ``parse`` to a list of
       source-document indices aligned 1:1 (and in order) with that field's merged
       records — so ``source_docs[f][i]`` is the document ``getattr(parse, f)[i]``
-      was parsed from. Built during the merge; the reasoning stage threads it in
-      and stamps each record with ``"document": N`` (1-based — the id-injection,
-      see ``r3con.stages.reasoning.tag_source_documents``). Without it the
-      merged parse is origin-blind: records from every document sit in one flat
-      list and the model cannot say which document a fact came from.
+      was parsed from (see ``r3con.stages.reasoning.tag_source_documents``, which
+      stamps it onto each record). Without it the merged parse is origin-blind:
+      records from every document sit in one flat list and the model cannot say
+      which document a fact came from.
     """
 
     parse: BaseModel

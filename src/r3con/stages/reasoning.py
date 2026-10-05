@@ -84,10 +84,8 @@ def tag_source_documents(
     """Stamp each list-field record with the 1-based document it was parsed from
     (``"document": N``), from the parsing step's ``source_docs`` provenance.
 
-    The pipeline computes this mapping at merge time (each record aligns 1:1 with
-    ``source_docs[field]`` by construction) but otherwise drops it at the reasoning
-    boundary, leaving the model unable to say *which* document a fact came from. The label
-    matches :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
+    Each record aligns 1:1 with ``source_docs[field]``; without the stamp the model
+    cannot say *which* document a fact came from. The label matches :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
     and the relevant context share **one** document-id space and the agent can
     cross-reference a record against the note its document contributed. That identity rests
     on both views being built over the documents in the same order — reorder the collection
