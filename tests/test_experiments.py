@@ -21,6 +21,10 @@ QUESTION = (
 # 20,000) at 12,000; the model's own mapped window never splits these sizes.
 LIMITS = {1: None, 2: 24_000, 4: 12_000}
 STAGES = ("relevance", "structuring/schema", "structuring/parsing", "reasoning")
+# E7's seeds, comma-separated: 1 to 3 unless the experiment job is dispatched with others.
+E7_SEEDS = [
+    int(seed) for seed in (os.environ.get("R3CON_E7_SEEDS") or "1,2,3").split(",")
+]
 
 pytestmark = [
     pytest.mark.live,
@@ -165,7 +169,7 @@ def over_their_budget(relevance: dict) -> int:
 
 
 @pytest.mark.parametrize(
-    ("window", "seed"), list(itertools.product((None, 16_384, 8_192), (1, 2, 3)))
+    ("window", "seed"), list(itertools.product((None, 16_384, 8_192), E7_SEEDS))
 )
 def test_shortened_notes_still_answer(
     tmp_path, monkeypatch, quiet_sites, default_model_window, window, seed
