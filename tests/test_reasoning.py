@@ -2,7 +2,7 @@ import pytest
 
 from r3con.stages.reasoning import _sample_record_per_field, reason
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
 
 

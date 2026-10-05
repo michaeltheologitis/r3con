@@ -21,7 +21,7 @@ package data, resolved from the package directory.
 
 Config file shape (``configs/<name>.yaml``)::
 
-    model: openai/gpt-5.6-luna
+    model: openai/gpt-6-luna
     seed: 42
     relevance_rounds: 2
     prompts:
@@ -68,9 +68,9 @@ def normalize_model_name(model: str | None) -> str | None:
     """Reduce a LiteLLM model string to the bare model name — drop the provider/route
     prefix, which is *transport*, not identity::
 
-        openai/gpt-5.6-luna             -> gpt-5.6-luna
+        openai/gpt-6-luna             -> gpt-6-luna
         hosted_vllm/Qwen/Qwen3.5-35B-A3B -> Qwen3.5-35B-A3B
-        gpt-5.6-luna                    -> gpt-5.6-luna   (no prefix → unchanged)
+        gpt-6-luna                    -> gpt-6-luna   (no prefix → unchanged)
         None                            -> None
 
     Used wherever the model is **persisted or shown** (the run label, the manifest's
@@ -127,7 +127,7 @@ class RunConfig(BaseModel):
     def label(self) -> str:
         """Readable run label — the board's grouping key and the eval's resume key. The config
         name plus the run-identity components (:meth:`_identity_parts`), e.g.
-        ``default[model=gpt-5.6-luna,seed=42,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]``.
+        ``default[model=gpt-6-luna,seed=42,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v1)]``.
         Two runs are the same run iff their labels match, so **every** output-shaping axis must
         appear in ``_identity_parts``."""
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"

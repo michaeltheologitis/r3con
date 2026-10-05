@@ -222,8 +222,8 @@ def run(
             them off disk instead, call :func:`read_documents` and pass its result. Each
             document must fit in the model's context: there is no chunking, and one that
             doesn't fit raises ``litellm.ContextWindowExceededError``.
-        model: a litellm model string (e.g. ``"openai/gpt-5.6-luna"``,
-            ``"anthropic/claude-sonnet-4"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
+        model: a litellm model string (e.g. ``"openai/gpt-6-luna"``,
+            ``"anthropic/claude-sonnet-5-5"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
             Defaults to the config's.
         config: a bundled config name, or a :class:`RunConfig` you built yourself.
         seed, relevance_rounds: override single config fields.

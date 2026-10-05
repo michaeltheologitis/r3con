@@ -43,7 +43,7 @@ def test_a_run_prints_the_answer_alone_on_stdout(answering, capsys):
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
     out, err = capsys.readouterr()
     assert out == f"{ANSWER}\n"
-    assert "5 document(s) · default[model=gpt-5.6-luna,seed=42,rounds=1," in err
+    assert "5 document(s) · default[model=gpt-6-luna,seed=42,rounds=1," in err
     assert (path_after("artifacts: ", err) / "manifest.json").is_file()
 
 

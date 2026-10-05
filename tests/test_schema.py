@@ -3,7 +3,7 @@ import pytest
 from r3con.stages.structuring.parsing import SchemaError
 from r3con.stages.structuring.schema import propose_schema
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 SCHEMA = """from pydantic import BaseModel, Field
 
 class Move(BaseModel):

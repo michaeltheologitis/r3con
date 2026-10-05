@@ -11,7 +11,7 @@ from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.settings import settings
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")

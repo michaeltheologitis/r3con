@@ -5,7 +5,7 @@ import pytest
 
 from r3con.stages.relevance import render_relevance, surface_relevance
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 NOTE = re.compile(r"N\(DOC\d,r\d\)")
 
 
