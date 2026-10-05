@@ -1,3 +1,5 @@
+import re
+
 import pytest
 
 from r3con import settings
@@ -36,6 +38,14 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
 def test_a_cap_below_its_floor_is_refused(monkeypatch, name, value, floor):
     monkeypatch.setattr(settings, name, value)
     with pytest.raises(ValueError, match=f"^{name} must be >= {floor}, got {value}.$"):
+        settings_snapshot()
+
+
+@pytest.mark.parametrize("value", [2.5, True, "3"], ids=["float", "bool", "str"])
+def test_a_cap_that_is_not_an_integer_is_refused(monkeypatch, value):
+    monkeypatch.setattr(settings, "SCHEMA_MAX_ATTEMPTS", value)
+    message = f"SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got {value!r}."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         settings_snapshot()
 
 
