@@ -16,6 +16,12 @@ MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
+STAGE_FOLDERS = {
+    "relevance": "relevance",
+    "schema": "structuring/schema",
+    "parsing": "structuring/parsing",
+    "reasoning": "reasoning",
+}
 CONFIG = {
     "name": "test",
     "model": MODEL,
@@ -36,6 +42,12 @@ def answer(
         max_reasoning_turns=max_reasoning_turns,
         task_logger=task_logger,
         completion=llm,
+    )
+
+
+def provider_down() -> litellm.APIConnectionError:
+    return litellm.APIConnectionError(
+        "provider down", llm_provider="openai", model=MODEL
     )
 
 
@@ -150,40 +162,50 @@ def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tm
             assert set(re.findall(r"MARKER-v\w", prompt)) == {f"MARKER-{version}"}
 
 
-def test_a_reasoning_failure_is_raised_and_its_traceback_left_on_disk(
+@pytest.mark.parametrize("stage", list(STAGE_FOLDERS))
+def test_a_failing_stage_leaves_its_calls_and_traceback_and_names_the_run_folder(
+    answering_llm, tmp_path, stage
+):
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(litellm.APIConnectionError, match="provider down") as failure:
+        answer(answering_llm.answers(**{stage: provider_down()}), logger)
+    assert failure.value.__notes__ == [f"r3con: partial artifacts in {logger.dir}"]
+    folder = logger.dir / STAGE_FOLDERS[stage]
+    error = (folder / "error.txt").read_text()
+    assert "APIConnectionError: litellm.APIConnectionError: provider down" in error
+    assert (folder / "calls.json").is_file()
+    assert not (folder / "result.json").exists()
+    earlier = list(STAGE_FOLDERS.values())[: list(STAGE_FOLDERS).index(stage)]
+    assert all((logger.dir / name / "result.json").is_file() for name in earlier)
+
+
+def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(
     answering_llm, tmp_path
 ):
-    too_long = litellm.ContextWindowExceededError(
-        "ctx too long", model=MODEL, llm_provider="openai"
-    )
-    answering_llm.answers(reasoning=too_long)
     logger = TaskLogger("run", root=tmp_path)
-    with pytest.raises(litellm.ContextWindowExceededError, match="ctx too long"):
-        answer(answering_llm, logger)
-    assert (
-        "ContextWindowExceededError" in (logger.dir / "reasoning/error.txt").read_text()
-    )
-    assert not (logger.dir / "reasoning/result.json").exists()
-    assert (logger.dir / "manifest.json").is_file()
-    assert (logger.dir / "structuring/parsing/result.json").is_file()
+    down = provider_down()
+    with pytest.raises(litellm.APIConnectionError):
+        answer(answering_llm.answers(relevance=["one", "two", down, down]), logger)
+    calls = read_json(logger, "relevance/calls")
+    assert sorted(call["kind"] for call in calls) == [
+        "relevance-r1-d0",
+        "relevance-r1-d1",
+    ]
 
 
-@pytest.mark.parametrize(
-    ("prompts", "error"),
-    [
-        ({**CONFIG["prompts"], "reasoning": "v9"}, FileNotFoundError),
-        ({"relevance": "v1"}, ValueError),
-    ],
-    ids=["missing-file", "missing-stage"],
-)
-def test_a_config_that_cannot_render_its_prompts_is_refused_before_any_request(
-    answering_llm, tmp_path, prompts, error
-):
+def test_an_interrupted_stage_is_recorded_like_a_failure(answering_llm, tmp_path):
     logger = TaskLogger("run", root=tmp_path)
-    with pytest.raises(error):
-        answer(answering_llm, logger, prompts=prompts)
-    assert answering_llm.requests == []
-    assert not (logger.dir / "manifest.json").exists()
+    answering_llm.answers(relevance=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        answer(answering_llm, logger, documents=DOCS[:1])
+    assert "KeyboardInterrupt" in (logger.dir / "relevance" / "error.txt").read_text()
+
+
+def test_without_a_logger_a_failure_carries_no_note(answering_llm, tmp_path):
+    with pytest.raises(litellm.APIConnectionError) as failure:
+        answer(answering_llm.answers(schema=provider_down()))
+    assert not hasattr(failure.value, "__notes__")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_without_a_logger_nothing_is_written(answering_llm, tmp_path):

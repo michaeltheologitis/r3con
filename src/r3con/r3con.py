@@ -258,7 +258,9 @@ def run(
             given (which would be silently ignored), or if a setting in
             :mod:`r3con.settings` is below its floor; both before any request.
         Anything the underlying stages raise — most usefully
-        ``litellm.ContextWindowExceededError`` when a document does not fit.
+        ``litellm.ContextWindowExceededError`` when a document does not fit. With
+        artifacts on, an exception from a stage carries a note naming the run folder,
+        where the stage left its completed calls and ``error.txt``.
     """
     # `run` is the batteries-included path, so it loads the caller's .env (from THEIR
     # working directory) the way the CLI does. Importing r3con does not.
