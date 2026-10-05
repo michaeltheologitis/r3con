@@ -21,6 +21,9 @@ the bigger of what it carries. Branch `claude/tender-shannon-eq4lq7-r3`, cut at 
 - 2026-10-05 · the build (Implementer, `a17196b` to `56f7389`): §2.5 lists where the
   code departs from this design and why; §5.3 and §5.4 say what the code does; §10.1
   holds E6's diff against `f4dae00` and E7's measured result.
+- 2026-10-05 · E7, run once (run 37352518283): **its null shows at 8,192 tokens for one
+  seed of three** (§10.1, §2.5 item 9). By §10's rule R3.2 as designed goes back to the
+  Conductor.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, what was measured, and every
 place this design decides something the spec left open or departs from it, with the
@@ -318,6 +321,27 @@ said, what the build found, what it does, and what it costs.
 8. **litellm 1.101 does not map `openai/gpt-6-luna`.** The lowest-bounds suite is offline
    and passes; E7 registers its windows on the model's mapped entry, so it needs the
    locked litellm (1.104), which the experiment job uses.
+9. **E7's null shows at 8,192 tokens, for seed 2** (§10.1). The answer was 22 incidents
+   where the same seed answered 11 on the shipped window; 16,384 was right for every seed,
+   and 8,192 for seeds 1 and 3. §10's rule: R3.2 as designed ends there and goes back to
+   the Conductor, with Q1's (c) or a higher floor. The run folder says more than the
+   rule does: the 16-word notes kept every fact the answer needs (Northgate's "five
+   equipment incidents under contractor code CT-118", Riverside's "6 equipment incidents
+   under CT-118", the registry's mapping), and the parse was right; reasoning, shown one
+   sample record per field (as at 16,384), sent five turns without a code block, then
+   summed every CT-118 record, the parse's breakdown records (3 + 2 at Northgate, 4 + 2
+   at Riverside) included. On the shipped window it saw the whole parse. So the failure
+   sits where R3.1's sample view meets a schema that keeps sub-counts as records, at
+   least as much as in the shorter notes; one seed in three cannot separate the two.
+   Nothing was changed for it.
+10. **E7's harness recorded the reasoning loop's live message list**, so a first turn
+    that went on to a second no longer had two messages when the test looked, and 8 of
+    the 9 cases raised `IndexError` before printing their line. The nine runs had
+    completed; their lines are recomputed from the run folders the job uploaded, with
+    the test module's own helpers, and the one case that printed its own line (16,384,
+    seed 1) matches its recomputed row exactly. The harness now records a copy of each
+    request's messages (`tests/test_experiments.py`, `recording`); an offline dry run
+    with a fake that takes two reasoning turns failed before the fix and passes after.
 
 ## 3 · Order of work
 
@@ -1254,6 +1278,46 @@ estimate (round 1 read again under 44 words, sized for reasoning) and 247 by ref
 `window(1_000_000)`, each `src/` on `PYTHONPATH`): 17 requests on each side, every
 `messages` and `response_format` byte-identical, the same answer. The labels differ in
 `rel=` only.
+
+**E7, live, once** (dispatched at `1d8e0a3`, run 37352518283, `experiment` job
+111908028043; 24 minutes for R2's E6 and E7 together).
+
+- *The claim and the rule, from above, before the result:* shortened notes still answer.
+  The null is a seed right at the shipped window and wrong at 16,384 or 8,192, or the
+  CT-118 to Halloran record from Document 4 missing or doubled; the precondition is a
+  read again at 8,192 and none elsewhere. The null at 8,192 with 16,384 right ends R3.2
+  as designed.
+- *Conditions:* `openai/gpt-6-luna` through litellm 1.104.0 (the lock), its window
+  registered in-process; the default config (`rel=v2`, `reason=v2`); the five memos and
+  115 quiet site memos; seeds 1 to 3 in `params`; eight documents at a time; the live
+  tier's question. About $1.81 for the nine runs at litellm's mapped prices ($0.10 and
+  $0.50 a million input and output tokens), and $0.06 for R2's E6 beside them. *Noise
+  floor:* R2's E6 in the same job, 9 of 9 right; the shipped window here, 3 of 3.
+- *How it was read:* the test raised before printing in 8 cases (§2.5 item 10); each row
+  below is recomputed from that case's run folder, and its seconds are from the run
+  folders' start times, so they are approximate.
+
+| Window (line) | Seed | Read again (round, W, cause) | Notes over W | Reasoning saw | Largest two-message request | Calls | Prompt tokens | Completion tokens | ≈ s | Mapping records | Answer |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| shipped, 922,000 (783,700) | 1 | none | — | the whole parse | 13,817 | 363 | 1,677,501 | 34,813 | 112 | 1 | 11, Halloran ✓ |
+| shipped | 2 | none | — | the whole parse | 15,435 | 363 | 1,684,086 | 36,361 | 110 | 1 | 11, Halloran ✓ |
+| shipped | 3 | none | — | the whole parse | 16,250 | 363 | 1,694,140 | 41,367 | 130 | 1 | 11, Halloran ✓ |
+| 16,384 (13,926) | 1 | none | — | samples | 8,424 | 362 (1.00x) | 1,647,137 (0.98x) | 38,096 | 120 | 1 | 11, Halloran ✓ |
+| 16,384 | 2 | none | — | samples | 8,651 | 363 (1.00x) | 1,684,364 (1.00x) | 38,962 | 122 | 1 | 11, Halloran ✓ |
+| 16,384 | 3 | none | — | samples | 8,405 | 363 (1.00x) | 1,648,642 (0.97x) | 36,422 | 115 | 1 | 11, Halloran ✓ |
+| 8,192 (6,963) | 1 | (2, 16, estimate) | 34 of 120 | samples | 6,118 | 483 (1.33x) | 2,019,451 (1.20x) | 53,638 | 148 | 1 | 11, Halloran ✓ |
+| 8,192 | 2 | (2, 16, estimate) | 40 of 120 | samples | 6,150 | 488 (1.34x) | 2,072,644 (1.23x) | 56,954 | 161 | 1 | **22**, Halloran ✗ |
+| 8,192 | 3 | (2, 16, estimate) | 42 of 120 | samples | 6,203 | 483 (1.33x) | 2,043,985 (1.21x) | 58,398 | 156 | 1 | 11, Halloran ✓ |
+
+Multiples are against the same seed on the shipped window. At 8,192 every event is
+the one E3 predicts: after round 2, reasoning's first turn as known then leaves the notes
+3,971 tokens, and round 2 is read again once, each note under 16 words. A third of the
+notes came back over 16 words, and no request then went over the line (6,203 at most
+against 6,963), so nothing was read a second time. Seed 2's reasoning took 7 turns, five
+of them without a code block, against 2 for every other case but 16,384 seed 1 (1).
+
+**The result:** the null shows, at 8,192 for seed 2 (§2.5 item 9). R3.2 as designed
+goes back to the Conductor.
 
 ## 11 · Changes to `src/` by module, and the version
 
