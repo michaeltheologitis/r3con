@@ -36,7 +36,7 @@ The PR split leaves `design/` out of the stack.
 | Item | The change | What a user sees | What breaks | Model-facing text |
 | --- | --- | --- | --- | --- |
 | R2.1 | `settings.LLM_NUM_RETRIES` goes from 10 to 2. litellm keeps its own retries. | A refused request (400, 401, context window) is sent 3 times, not 11. A server that fails 3 times in a row now fails the call; it used to get 10 retries. | nothing in the API | none |
-| R2.2 | A new module, `r3con/splitting.py`. Before a relevance or parse call, a document whose request is estimated over 85% of the model's mapped window is cut in 2, then 4, … at paragraph breaks. Any document the provider refuses with `ContextWindowExceededError` is cut the same way. Parts are numbered N.1, N.2, … in the summaries only. | A document too long for the model is read in parts instead of failing the run. `splits.json` in the run folder says how. When the relevant context itself fills the window, the run stops with a note naming the document and TASK-36. | nothing that worked before. `RelevantContext.snippets` entries can now be lists, which only happens in a run that used to fail. | `prompts/reasoning/v2.yaml`: v1 plus one sentence, shown only when a summary is a part. `configs/default.yaml` pins it, so the default label reads `reason=v2`. |
+| R2.2 | A new module, `r3con/splitting.py`. Before a relevance or parse call, a document whose request is estimated over 85% of the model's mapped window is cut in 2, then 4, … at paragraph breaks. Any document the provider refuses with `ContextWindowExceededError` is cut the same way. Parts are numbered N.1, N.2, … in the summaries only. | A document too long for the model is read in parts instead of failing the run. `splits.json` in the run folder says how. When the relevant context itself fills the window, the run stops with a note naming the document and TASK-36. | nothing in the API. A document estimated between 85% and 100% of a mapped window, which was sent whole before, is now read in 2 parts. `RelevantContext.snippets` entries can be lists for a document read in parts. | `prompts/reasoning/v2.yaml`: v1 plus one sentence, shown only when a summary is a part. `configs/default.yaml` pins it, so the default label reads `reason=v2`. |
 
 Three rules shape R2.2:
 
@@ -298,9 +298,6 @@ format's own encoding are left out: closeness is enough, and the margin absorbs 
 | characters per token (memos) | 4.63 | 4.63 |
 | tokens per character (random CJK) | — | 2.35 |
 
-Every cl100k token is at least one byte (*run*: all 100,261 tokens), so the estimate is
-never above the request's UTF-8 size.
-
 ### 5.3 `halve`: where a part is cut
 
 ```python
@@ -431,7 +428,7 @@ and (c) raise
 this message:
 
 ```text
-r3con estimated relevance-r2-d0 at 25,601 tokens, over the 3,400-token line (the 4,000-token input window litellm's model map gives hosted_vllm/tiny, less 15%); it was not sent.
+r3con estimated relevance-r2-d0 at 25,601 tokens, over the 3,400-token line (the 4,000-token input window litellm's model map gives hosted_vllm/window-4000, less 15%); it was not sent.
 ```
 
 **The note**, added with `error.add_note` before raising. `_recorded_stage` then adds
@@ -496,7 +493,8 @@ class RelevantContext:
   "(no relevant summary for this task)" for an empty note. A list always means parts,
   even of length 1, which the loop never produces.
 - **`surface_relevance`.** `splits=None` builds `Splits(documents, model=model)` (no
-  record). In round `r`, document `i`'s worker computes
+  record). A `splits` passed in must be built over the same `documents`: the parts are
+  read from it. In round `r`, document `i`'s worker computes
   `others = [join_parts(s) for j, s in enumerate(prev) if j != i]`, then
   `rest = _system_prompt(task, others, prompt_version)`, and calls
   `splits.read_in_parts(i, call=f"relevance-r{r}", rest=rest, send=…)`, where `send`
@@ -607,11 +605,10 @@ It passes `splits=splits` to `surface_relevance` and `parse_documents`, and
 `relevance.snippets` (a `list[Snippet]`) to the schema, parsing and reasoning stages, as
 today. `Answer.relevant_context` becomes `[join_parts(s) for s in relevance.snippets]`:
 one string per document passed in, a split document's notes joined (spec item 5), and
-`Answer`'s docstring says so. The
-module docstring's "nothing is chunked" becomes "a document too long for the model's
-window is read in parts (`r3con.splitting`)". A stop raises from the stage through
-`_recorded_stage` like any failure: `<stage>/calls.json`, `<stage>/error.txt`, and the
-run-folder note after R2's note.
+`Answer`'s docstring says so. The module docstring's "nothing is chunked" becomes "a
+document too long for the model's window is read in parts (`r3con.splitting`)". A stop
+raises from the stage through `_recorded_stage` like any failure: `<stage>/calls.json`,
+`<stage>/error.txt`, and the run-folder note after R2's note.
 
 ### 6.6 `settings.py`
 
@@ -675,9 +672,16 @@ _CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 - With a known window, each document call's request is counted. That costs about 50 ms
   per million characters (§11).
 
-**Breaks**: nothing that worked before. `RelevantContext.snippets`, `.rounds` and
-`relevance/result.json` can hold a list for a document read in parts, which only happens
-in a run that used to raise. `render_relevance` accepts lists as well as strings.
+**Breaks**
+
+- **A document estimated between 85% and 100% of a mapped window** was sent whole, and is
+  now read in 2 parts. Those runs change. That is the margin's purpose, and
+  `WINDOW_MARGIN_PERCENT = 0` restores sending whole up to the full window.
+- **`RelevantContext.snippets`, `.rounds` and `relevance/result.json`** can hold a list
+  for a document read in parts. A run that reads one in parts raised before R2, unless
+  the document was in the 85% to 100% band above. `render_relevance` accepts lists as
+  well as strings.
+- Nothing is removed from the API.
 
 ## 8 · Tests, by file
 
@@ -702,8 +706,8 @@ fails at `cfc17bc`. "Guard" means it passes before and after.
   `register_model` clears the cache). So one name always means one window, across tests.
 - Fixture `grown_registry`, a function `grow(chars: int, at: float = 0.6) -> str`. It
   returns `examples/memos/04_contractor_registry.txt` grown to about `chars` characters
-  by deterministic filler paragraphs (procurement and insurance boilerplate, no codes,
-  no names, no counts). The registry's three code lines and its footer sit at fraction
+  by deterministic filler paragraphs (procurement and insurance boilerplate, with no
+  contractor codes or names and no incident counts). The registry's three code lines and its footer sit at fraction
   `at`, and its heading stays first. E2, E4 and E6 use it.
 - Unknown-window tests use `QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"`, which is unmapped
   at both bounds.
@@ -759,8 +763,8 @@ parameter:
 - `test_splits_json_is_written_as_each_split_happens`, with a `TaskLogger`: the file
   exists after a stop.
 
-**E2 to E5 in `test_pipeline.py`.** Each runs `run_pipeline` with a `TaskLogger`. Sizes
-are what the prototype passed with. The relevance prompt is about 3,300 characters in
+**E2 to E5 in `test_pipeline.py`.** Each runs `run_pipeline` with a `TaskLogger`, on
+`CONFIG` with `reasoning: v2`. Sizes are what the prototype passed with. The relevance prompt is about 3,300 characters in
 round 1 and 3,900 in round 2, and the parse prompt about 3,800.
 
 - **E2 · `test_a_refused_document_is_read_in_parts_and_keeps_its_number`.** `QWEN`, the
@@ -788,9 +792,10 @@ round 1 and 3,900 in round 2, and the parse prompt about 3,800.
   relevance's. It asserts `parts == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}`
   and the headings 4.1 and 4.2 only. The parse kinds in `structuring/parsing/calls.json`
   are `parse-d3c0` to `c3` (plus the other documents'), with no second relevance run,
-  and every registry record is stamped 4. A measured row needs
-  `rest_relevance + R/2 <= line < rest_parse + R/2` and `R/2 > rest_parse`, in tokens;
-  the Implementer sizes it with the same long notes.
+  and every registry record is stamped 4. A measured row needs, in tokens, with `R` the
+  registry: `rest_relevance + R/2 <= line < rest_parse + R/2`, `rest_parse + R/4 <= line`
+  and `R/2 > rest_parse` (else the stop rule fires). The Implementer sizes it with the
+  same long notes.
 - **E5 · `test_splitting_stops_at_the_relevant_contexts_line`.** `QWEN`, 40 reports of
   about 400 characters, relevance notes of 1,000 characters, `refuses_over(20_000)`, and
   `R3CON_DOC_WORKERS=1`, so the order is fixed. It asserts:
@@ -817,7 +822,8 @@ every request without `num_retries`, and diffs. The as-built document reports it
 prototype gave 17 requests, all identical; the labels differ in `reason=` only.
 
 **E6 · a document read in parts still answers.** `tests/test_experiments.py` holds one
-test, marked `live` and `experiment`:
+test, marked like `test_live.py` (`live`, `enable_socket`, skipped without
+`OPENAI_API_KEY`) and also `experiment`:
 `test_a_document_read_in_parts_still_answers[parts-seed]`, parametrized over
 `parts in (1, 2, 4)` × `seed in (1, 2, 3)`. Each case:
 
@@ -837,8 +843,8 @@ test, marked `live` and `experiment`:
 The null is that a seed right at 1 part is wrong at 2 or 4, or that the CT-118 to
 Halloran record is missing or doubled. The schema is the model's own, so a seed whose
 schema has no such record fails the record assertion at 1 part as well. The as-built
-document reads that as "no mapping record in this schema", not as the null. The as-built document reports the 3 × 3 table
-from the run's artifact. If the null shows, the spec's fallback (telling relevance and
+document reads that as "no mapping record in this schema", not as the null. It reports
+the 3 × 3 table from the run's artifact. If the null shows, the spec's fallback (telling relevance and
 parsing "part 2 of 4") is a new prompt version, and it goes back to the Conductor.
 
 **The CI wiring for E6:**
@@ -919,8 +925,8 @@ would be 0.3.0: new behaviour, a setting and a prompt version, and nothing remov
 - **Counting costs O(N²) characters per relevance round on a mapped model.** Round 2's
   rest holds every other note. At 1,000 documents with 500-character notes, that is
   about 25 s of CPU per round, at a size where R3's line is near anyway. If it shows, a
-  request whose UTF-8 size is at most the line can skip counting, because a cl100k
-  token is at least one byte. I left that out: write less until it is needed.
+  request whose UTF-8 size is at most the line can skip counting, because every cl100k
+  token is at least one byte (*run*: all 100,261 of them). I left that out: write less until it is needed.
 - **A `CUSTOM_TIKTOKEN_CACHE_DIR` that is empty and offline** makes `litellm.encode`
   raise at the first document call on a mapped model, as it already does in reasoning's
   parse guard (R1b removed that fallback). It is not handled.
