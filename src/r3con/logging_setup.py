@@ -1,6 +1,6 @@
 """Standard `logging` for the pipeline.
 
-Library modules log through ``get_logger(...)``; the CLI (``r3con.cli``) calls
+Library modules log through ``get_logger(...)``; an application calls
 ``configure_logging()`` once at startup. Enabling per-stage progress output is
 one knob:
 

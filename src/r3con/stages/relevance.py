@@ -57,28 +57,19 @@ class RelevantContext:
     rounds: list[list[str]]
 
 
-def render_relevance(
-    relevance_snippets: list[str] | None, doc_ids: list[str] | None = None
-) -> str:
-    """Render the final-round relevance snippets into the labeled block that stages 2
-    and 3 embed as the relevant context.
+def render_relevance(relevance_snippets: list[str] | None) -> str:
+    """Render the final-round relevance snippets into the labeled block a prompt embeds
+    as the relevant context.
 
-    Each document gets a ``### Document N`` (or its ``doc_ids`` label) heading. A
-    document with nothing relevant renders as ``(no relevant summary for this task)``.
-    An empty / ``None`` list renders to ``""`` so the consuming prompt omits the block.
+    Each document gets a ``### Document N`` heading. A document with nothing relevant
+    renders as ``(no relevant summary for this task)``. An empty / ``None`` list renders
+    to ``""`` so the consuming prompt omits the block.
     """
-    if not relevance_snippets:
-        return ""
-    parts: list[str] = []
-    for i, s in enumerate(relevance_snippets):
-        text = (s or "").strip()
-        label = doc_ids[i] if (doc_ids and i < len(doc_ids)) else f"Document {i + 1}"
-        parts.append(
-            f"### {label}\n{text}"
-            if text
-            else f"### {label}\n(no relevant summary for this task)"
-        )
-    return "\n\n".join(parts)
+    nothing = "(no relevant summary for this task)"
+    return "\n\n".join(
+        f"### Document {n}\n{(s or '').strip() or nothing}"
+        for n, s in enumerate(relevance_snippets or [], start=1)
+    )
 
 
 def _render_other_states(other_snippets: list[str]) -> str:

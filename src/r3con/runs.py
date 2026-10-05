@@ -10,8 +10,8 @@ fact by reading each manifest (e.g. by the config's run label,
 
 Layout per ``logs/<run-folder>/``:
 
-- ``manifest.json`` — written by the caller, if it wants one: the identity card + the
-  full parameter snapshot — the task, a ``config`` block (the resolved
+- ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
+  snapshot — the task, a ``config`` block (the resolved
   :class:`RunConfig` — model, relevance_rounds, prompts, params, …), and a
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
@@ -163,6 +163,7 @@ def write_manifest(
     relative to a release. Without the version recorded here, "which prompt actually
     ran?" is unanswerable after an upgrade.
     """
+    from r3con import __version__
     from r3con.config import PROMPT_STAGES, resolve_config_path
     from r3con.prompts import resolve_prompt_path
     from r3con.settings import settings_snapshot
@@ -178,7 +179,7 @@ def write_manifest(
     return task_logger.write_json(
         "manifest",
         {
-            "r3con_version": _version(),
+            "r3con_version": __version__,
             "task": task,
             "n_docs": n_docs,
             "context_chars": context_chars,
@@ -221,19 +222,6 @@ def _sources(
     }
 
 
-def _version() -> str:
-    """The installed package version, read from metadata so it cannot drift from the
-    wheel; falls back to the in-source literal when running from a checkout."""
-    try:
-        from importlib.metadata import version
-
-        return version("r3context")  # the DISTRIBUTION name, not the module
-    except Exception:  # noqa: BLE001 — not installed (a source checkout); the literal is fine
-        from r3con import __version__
-
-        return __version__
-
-
 @dataclass
 class StepRecord:
     """One step in a stage run — typically one LLM call (or retry, or loop turn)."""
@@ -250,10 +238,9 @@ class StepRecord:
 class StageRun:
     """Accumulates per-LLM-call records for one stage; flushes calls.json (+ transcript).
 
-    Each stage constructs one of these, calls ``add_step`` per LLM call (and per
-    loop turn for the CodeAct loop), and ``flush`` at the end. ``add_step`` is
-    thread-safe so a stage that fans calls out across documents in parallel
-    (the relevance rounds, per-document parsing) can share one run.
+    ``add_step`` records one LLM call (or one turn of a multi-turn loop), and
+    ``flush`` writes them. ``add_step`` is thread-safe, so calls fanned out across
+    documents in parallel can share one run.
     """
 
     def __init__(

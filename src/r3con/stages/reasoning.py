@@ -16,11 +16,10 @@ helper that feeds the prompt when the parse is too large to embed whole.
 
 from __future__ import annotations
 
-import functools
 import json
-from collections.abc import Callable
 from typing import Any
 
+import litellm
 from pydantic import BaseModel
 
 from r3con import settings
@@ -32,24 +31,6 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.stages.relevance import render_relevance
-
-
-class _LazyStr:
-    """A value that defers an expensive string render until something ``str()``s it.
-
-    Jinja only stringifies a template variable it actually references, so passing
-    one of these as a prompt kwarg means the work runs only for prompt versions
-    that use that variable. Used for the full-parse JSON dump (``parse_json``),
-    which the CodeAct prompt versions in use never reference.
-    """
-
-    __slots__ = ("_render",)
-
-    def __init__(self, render: Callable[[], str]) -> None:
-        self._render = render
-
-    def __str__(self) -> str:
-        return self._render()
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -99,10 +80,9 @@ def tag_source_documents(
     """Stamp each list-field record with the 1-based document it was parsed from
     (``"document": N``), from the parsing step's ``source_docs`` provenance.
 
-    The pipeline computes this mapping at merge time (each record aligns 1:1 with
-    ``source_docs[field]`` by construction) but otherwise drops it at the reasoning
-    boundary, leaving the model unable to say *which* document a fact came from. The label
-    matches :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
+    Each record aligns 1:1 with ``source_docs[field]``; without the stamp the model
+    cannot say *which* document a fact came from. The label matches
+    :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
     and the relevant context share **one** document-id space and the agent can
     cross-reference a record against the note its document contributed. That identity rests
     on both views being built over the documents in the same order — reorder the collection
@@ -121,39 +101,16 @@ def tag_source_documents(
     return parse_dict
 
 
-@functools.lru_cache(maxsize=1)
-def _parse_token_encoding():
-    """tiktoken encoding for the parse-size guard, cached. Returns ``None`` if tiktoken
-    is unavailable — it downloads its vocabulary from the network on first use, and a
-    size guard must never be what sinks a run that has already paid for stages 1 and 2."""
-    try:
-        import tiktoken
-
-        return tiktoken.get_encoding("cl100k_base")
-    except Exception:  # noqa: BLE001 — no tiktoken, or no network on first use
-        return None
-
-
-def _count_tokens(text: str) -> int:
-    """Approximate token count of ``text``. It is only a size guard, so the exact
-    tokenizer doesn't matter; without tiktoken, fall back to the standard ~4-chars-per-
-    token estimate. ``disallowed_special=()`` so arbitrary text never errors."""
-    encoding = _parse_token_encoding()
-    if encoding is None:
-        return len(text) // 4
-    return len(encoding.encode(text, disallowed_special=()))
-
-
-def _render_parse_for_codeact(parse_dict: Any) -> str:
-    """The ``parse`` view embedded in the codeact system prompt: the WHOLE parse as JSON when it
-    fits (the common case), else a prominent "this is only a sample" note + one sample record
-    per field. Either way the full parse is also bound as the ``parse`` variable for the agent to
-    compute over, so the sample path costs reach, not access. The cap is
-    ``settings.REASONING_PARSE_MAX_TOKS`` (tiktoken token count; a flood guard for parses that run
-    to thousands of records)."""
-    full = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
-    if _count_tokens(full) <= settings.REASONING_PARSE_MAX_TOKS:
-        return full
+def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
+    """The ``parse`` view embedded in the codeact system prompt: the WHOLE parse
+    (``parse_json``) when it fits (the common case), else a prominent "this is only a
+    sample" note + one sample record per field. Either way the full parse is also bound
+    as the ``parse`` variable for the agent to compute over, so the sample path costs
+    reach, not access. The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in
+    cl100k_base tokens from the vocabulary litellm ships (a flood guard for parses that
+    run to thousands of records)."""
+    if len(litellm.encode(text=parse_json)) <= settings.REASONING_PARSE_MAX_TOKS:
+        return parse_json
     n = (
         sum(len(v) for v in parse_dict.values() if isinstance(v, list))
         if isinstance(parse_dict, dict)
@@ -203,13 +160,14 @@ def reason(
     parse_dict = tag_source_documents(parse_dict, source_docs)
 
     relevance_block = render_relevance(relevance_snippets)
-    # The codeact prompt variables — Jinja renders only what the active template references:
-    #   parse_block  : the whole parse (or samples + a note if huge) — what current prompts use
-    #   samples_block: one sample record per field — kept for older prompt versions
-    #   parse_json   : the full parse dump, lazy so the huge case is computed only on demand
-    parse_block = _render_parse_for_codeact(parse_dict)
+    parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
+    # The variables a reasoning prompt version may use, a user's overlay included;
+    # Jinja renders only the ones its template references:
+    #   parse_block  : the whole parse, or samples + a note if it is huge
+    #   samples_block: one sample record per field
+    #   parse_json   : the whole parse as JSON
+    parse_block = _render_parse_for_codeact(parse_dict, parse_json)
     samples_block = _sample_record_per_field(parse_dict)
-    parse_json = _LazyStr(lambda: json.dumps(parse_dict, indent=2, ensure_ascii=False))
     system_prompt = load_prompt(
         "reasoning",
         version=prompt_version,

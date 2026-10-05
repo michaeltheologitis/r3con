@@ -387,13 +387,6 @@ def test_the_merge_keeps_document_order_and_each_records_source(llm):
     assert result.source_docs == {"rows": [0, 0, 1, 1, 2, 2]}
 
 
-def test_doc_ids_label_the_documents(llm):
-    llm.answers(parsing=rows_named_after_the_document)
-    result = parse_all(llm, DOCS[:2], doc_ids=["fileA", "fileB"])
-    assert result.doc_ids == ["fileA", "fileB"]
-    assert [result.doc_label(i) for i in (0, 1, 9)] == ["fileA", "fileB", "9"]
-
-
 def test_no_documents_parse_to_empty_lists_without_a_request(llm):
     result = parse_all(llm, [])
     assert result.parse == Parse(rows=[])

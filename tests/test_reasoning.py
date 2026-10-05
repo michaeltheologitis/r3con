@@ -1,6 +1,10 @@
+import json
+
 import pytest
 
+from r3con.prompts import load_prompt
 from r3con.stages.reasoning import _sample_record_per_field, reason
+from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
@@ -73,6 +77,25 @@ def test_a_small_parse_is_shown_whole_and_the_schema_source_is_not(llm):
     assert "UNIQUE_SCHEMA_MARKER" not in prompt
     assert "## Schema used to extract" not in prompt
     assert "If the parse was too large" not in prompt
+
+
+def test_a_small_parses_prompt_is_the_v1_template_with_the_parse_as_json(llm):
+    notes = ["Northgate logged 5.", "Riverside logged 6."]
+    prompt = reasoning_prompt(
+        llm,
+        parsed={"rows": [{"who": "Halloran"}, {"who": "Merrow"}]},
+        source_docs={"rows": [0, 1]},
+        relevance_snippets=notes,
+    )
+    stamped = {
+        "rows": [{"document": 1, "who": "Halloran"}, {"document": 2, "who": "Merrow"}]
+    }
+    assert prompt == load_prompt(
+        "reasoning",
+        version="v1",
+        relevance=render_relevance(notes),
+        parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
+    )
 
 
 def test_a_huge_parse_is_shown_as_one_sample_per_field_and_says_so(llm):

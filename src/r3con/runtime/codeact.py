@@ -19,10 +19,8 @@ sandbox. This module owns that loop and nothing task-specific:
   observation only if that synthesis is empty), rather than refusing.
 
 Callers supply the rendered ``system_prompt`` + ``user_message``, the variables
-to bind in the sandbox (e.g. ``{"parse": ...}``), and the usual knobs. The
-stage-3 reasoning agent (``r3con.stages.reasoning.reason``) is the
-only consumer; the loop itself knows nothing about parses, schemas, or
-relevance snippets.
+to bind in the sandbox (e.g. ``{"parse": ...}``), and the usual knobs. The loop
+itself knows nothing about parses, schemas, or relevance snippets.
 
 Execution errors (runtime, timeout, unauthorized import, missing ``<code>``
 block) do **not** end the loop — they are fed back as observations so the
@@ -111,8 +109,8 @@ def _supports_stop_parameter(model: str) -> bool:
     """Whether ``model`` accepts the ``stop`` parameter, per litellm's param map.
 
     Delegating to litellm (rather than hardcoding a model list) keeps this
-    current as new models ship. An unrecognized model string makes litellm log
-    a provider-list warning and return an empty list; we silence that and treat
+    current as new models ship. An unrecognized model string makes litellm print
+    a provider-list message and return ``None``; we silence that and treat
     'unknown' as unsupported — then skip ``stop`` and rely on the client-side
     truncation in :func:`_clip_assistant_response` (the correctness-bearing
     path) instead.
@@ -124,8 +122,6 @@ def _supports_stop_parameter(model: str) -> bool:
     logger.setLevel(logging.CRITICAL)
     try:
         params = litellm.get_supported_openai_params(model=model) or []
-    except Exception:  # noqa: BLE001
-        return False
     finally:
         litellm.suppress_debug_info = prev_suppress
         logger.setLevel(prev_level)

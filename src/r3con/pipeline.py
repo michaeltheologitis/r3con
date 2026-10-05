@@ -156,7 +156,6 @@ def run_pipeline(
     call this run makes — hand it a configured ``litellm.Router``'s ``.completion``, or any
     wrapper with the same ``(model, messages, **kwargs)`` shape.
 
-
     Before the first request, every stage's prompt is checked to exist
     (:func:`r3con.config.check_prompts`), and every runtime cap is read once, checked
     and recorded (:func:`r3con.settings.settings_snapshot`); ``max_reasoning_turns``
