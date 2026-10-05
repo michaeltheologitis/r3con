@@ -19,9 +19,8 @@ content (a 200 with no JSON, which transport retries never see).
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
 
-Two helpers ask litellm something without calling a provider: :func:`count_tokens`
-measures a text, and :func:`quiet_litellm` keeps litellm from printing while it looks a
-model up.
+Two helpers ask litellm something without calling a provider: :func:`count_tokens` and
+:func:`quiet_litellm`.
 
 ``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
 though nothing in this package imports it** — litellm imports it lazily, on the retry path
@@ -248,11 +247,9 @@ def count_tokens(text: str) -> int:
 def quiet_litellm() -> Iterator[None]:
     """Keep litellm from printing during the block, then restore its settings.
 
-    Asked about a model string it cannot place with a provider (a Router alias),
-    litellm prints its provider list to stdout. The block sets
-    ``litellm.suppress_debug_info`` and raises the ``LiteLLM`` logger to CRITICAL, and
-    puts both back as they were. Both are litellm globals, so a litellm call another
-    thread makes during the block is silenced too.
+    litellm prints its provider list to stdout when asked about a model string it cannot
+    place (a Router alias). Its settings are globals, so the block silences another
+    thread's litellm calls too.
     """
     logger = logging.getLogger("LiteLLM")
     suppress, level = litellm.suppress_debug_info, logger.level

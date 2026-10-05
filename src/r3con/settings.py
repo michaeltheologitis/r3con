@@ -126,13 +126,8 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
 
 
 def check_cap(key: str, value: object) -> None:
-    """Refuse ``value`` for the cap ``key``, keyed as in the snapshot, unless it is an
-    integer from the cap's floor to its ceiling, if it has one.
-
-    Raises:
-        ValueError: naming the cap and the bound it breaks, e.g.
-            ``WINDOW_MARGIN_PERCENT must be <= 99, got 100.``
-    """
+    """Raise ``ValueError``, naming the cap, unless ``value`` is an integer from the
+    floor of the cap ``key`` (keyed as in the snapshot) to its ceiling, if it has one."""
     floor, ceiling = _FLOORS[key], _CEILINGS.get(key)
     if type(value) is not int:  # a bool is not a cap
         raise ValueError(f"{key.upper()} must be an integer >= {floor}, got {value!r}.")
