@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
 from r3con.settings import settings
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 
 
 class Flat(BaseModel):

@@ -7,7 +7,7 @@
 # another configs/<name>.yaml (yours are picked up from ./configs) and select it by name.
 
 # Any litellm model string: openai/…, anthropic/…, gemini/…, hosted_vllm/…, ollama/…
-model: openai/gpt-5.6-luna
+model: openai/gpt-6-luna
 seed: 42
 
 # How many times each document is read. 1 = each read against the question alone;

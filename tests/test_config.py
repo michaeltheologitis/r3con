@@ -5,7 +5,7 @@ from r3con.config import PROMPT_STAGES, available_configs, load_config
 
 PROMPTS = dict.fromkeys(PROMPT_STAGES, "v1")
 FULL = {
-    "model": "openai/gpt-5.6-luna",
+    "model": "openai/gpt-6-luna",
     "seed": 42,
     "relevance_rounds": 3,
     "prompts": PROMPTS,
@@ -29,12 +29,12 @@ def configs(tmp_path):
 def test_the_default_config_loads_with_its_shipped_values():
     config = load_config("default")
     assert config.name == "default"
-    assert config.model == "openai/gpt-5.6-luna"
+    assert config.model == "openai/gpt-6-luna"
     assert (config.seed, config.relevance_rounds, config.params) == (42, 2, {})
     assert config.prompts == PROMPTS
     assert (
         config.label()
-        == f"default[model=gpt-5.6-luna,seed=42,rounds=2,{DEFAULT_PROMPTS}]"
+        == f"default[model=gpt-6-luna,seed=42,rounds=2,{DEFAULT_PROMPTS}]"
     )
 
 
@@ -54,7 +54,7 @@ def test_the_default_config_loads_with_its_shipped_values():
         (
             {"seed": None, "model": None, "relevance_rounds": None},
             {},
-            "default[model=gpt-5.6-luna,seed=42,rounds=2,",
+            "default[model=gpt-6-luna,seed=42,rounds=2,",
         ),
     ],
 )
@@ -65,22 +65,22 @@ def test_overrides_are_applied_recorded_and_shown_in_the_label(
     assert config.overrides == recorded
     assert config.model_dump()["overrides"] == recorded
     assert config.label().startswith(label)
-    assert config.model == recorded.get("model", "openai/gpt-5.6-luna")
+    assert config.model == recorded.get("model", "openai/gpt-6-luna")
 
 
 def test_the_label_is_every_axis_of_the_resolved_identity(configs):
     configs(exp=FULL, exp2={**FULL, "prompts": {**PROMPTS, "reasoning": "v9"}})
     assert load_config("exp").label() == (
-        f"exp[model=gpt-5.6-luna,seed=42,rounds=3,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,seed=42,rounds=3,{DEFAULT_PROMPTS}]"
     )
     assert load_config("exp", seed=7).label() == (
-        f"exp[model=gpt-5.6-luna,seed=7,rounds=3,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,seed=7,rounds=3,{DEFAULT_PROMPTS}]"
     )
     assert load_config("exp", relevance_rounds=5).label() == (
-        f"exp[model=gpt-5.6-luna,seed=42,rounds=5,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,seed=42,rounds=5,{DEFAULT_PROMPTS}]"
     )
     assert load_config("exp2").label() == (
-        "exp2[model=gpt-5.6-luna,seed=42,rounds=3,"
+        "exp2[model=gpt-6-luna,seed=42,rounds=3,"
         "prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
     )
 

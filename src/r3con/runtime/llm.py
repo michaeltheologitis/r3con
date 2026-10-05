@@ -88,7 +88,7 @@ def litellm_chat_completion_full(
 
     ``model`` uses LiteLLM's provider-prefixed form, e.g.
     ``"hosted_vllm/Qwen/Qwen3-8B"`` against a vLLM endpoint,
-    or ``"anthropic/claude-sonnet-4"`` against Anthropic.
+    or ``"anthropic/claude-sonnet-5-5"`` against Anthropic.
 
     Two mutually-exclusive ways to supply the conversation:
 

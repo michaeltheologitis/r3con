@@ -13,7 +13,7 @@ from r3con.stages.structuring.parsing import (
     parse_one_document,
 )
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 SCHEMA = """from pydantic import BaseModel
 
 
