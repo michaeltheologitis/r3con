@@ -34,7 +34,7 @@ from litellm.exceptions import ContextWindowExceededError
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.runs import TaskLogger
-from r3con.runtime.llm import quiet_litellm
+from r3con.runtime.llm import count_tokens, quiet_litellm
 
 _log = get_logger("splitting")
 
@@ -85,11 +85,6 @@ def _max_input_tokens(model: str) -> int | None:
             model,
         )
     return window
-
-
-def _count_tokens(text: str) -> int:
-    """The cl100k_base tokens in ``text``."""
-    return len(litellm.encode(text=text))
 
 
 def _utf8_size(text: str) -> int:
@@ -187,7 +182,7 @@ class Splits:
                 unknown window, a refused part is shorter than the rest; or a part of
                 one character still does not fit.
         """
-        count_rest = functools.cache(functools.partial(_count_tokens, rest))
+        count_rest = functools.cache(functools.partial(count_tokens, rest))
         while True:
             if self.line is not None:
                 self._split_to_fit(doc, call, rest, count_rest, self.line)
@@ -218,7 +213,7 @@ class Splits:
         if rest_size > line and count_rest() > line:
             parts = self.parts(doc)
             kind = _kind(call, doc, 0, len(parts))
-            estimate = count_rest() + _count_tokens(parts[0])
+            estimate = count_rest() + count_tokens(parts[0])
             self._stop(
                 doc,
                 self._not_sent(kind, estimate),
@@ -258,7 +253,7 @@ class Splits:
         for k, part in enumerate(self.parts(doc)):
             if rest_size + _utf8_size(part) <= line:
                 continue
-            estimate = count_rest() + _count_tokens(part)
+            estimate = count_rest() + count_tokens(part)
             if estimate > line:
                 return k, estimate
         return None
@@ -275,7 +270,7 @@ class Splits:
         """Halve after the provider refused part ``k``, or stop where more parts cannot
         help: a part of one character, or, with an unknown window, a part shorter than
         the rest."""
-        part_tokens = _count_tokens(part)
+        part_tokens = count_tokens(part)
         event = self._event(
             kind, "refusal", count_rest() + part_tokens, count_rest(), k
         )

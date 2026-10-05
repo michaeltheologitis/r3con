@@ -20,7 +20,6 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
-import litellm
 from pydantic import BaseModel
 
 from r3con import settings
@@ -31,6 +30,7 @@ from r3con.runtime.codeact import (
     CodeActResult,
     run_codeact,
 )
+from r3con.runtime.llm import count_tokens
 from r3con.stages.relevance import Snippet, render_relevance
 
 
@@ -110,7 +110,7 @@ def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
     reach, not access. The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in
     cl100k_base tokens from the vocabulary litellm ships (a flood guard for parses that
     run to thousands of records)."""
-    if len(litellm.encode(text=parse_json)) <= settings.REASONING_PARSE_MAX_TOKS:
+    if count_tokens(parse_json) <= settings.REASONING_PARSE_MAX_TOKS:
         return parse_json
     n = (
         sum(len(v) for v in parse_dict.values() if isinstance(v, list))

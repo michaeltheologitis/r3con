@@ -19,8 +19,9 @@ content (a 200 with no JSON, which transport retries never see).
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
 
-Asking litellm about a model rather than calling it goes through :func:`quiet_litellm`,
-which keeps litellm from printing while it looks the model up.
+Two helpers ask litellm something without calling a provider: :func:`count_tokens`
+measures a text, and :func:`quiet_litellm` keeps litellm from printing while it looks a
+model up.
 
 ``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
 though nothing in this package imports it** — litellm imports it lazily, on the retry path
@@ -235,6 +236,12 @@ def litellm_chat_completion(
         _log.warning(
             "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
         )
+
+
+def count_tokens(text: str) -> int:
+    """The cl100k_base tokens in ``text``, from the vocabulary litellm ships: the same
+    count whatever the model, and offline."""
+    return len(litellm.encode(text=text))
 
 
 @contextlib.contextmanager
