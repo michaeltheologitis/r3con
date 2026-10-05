@@ -194,13 +194,16 @@ Three rules shape R2.2:
    carries every note under a prompt about 3,600 characters longer than parsing's, and it
    is never split, so the test sizes the run to keep the schema under the limit: two
    5,000-character documents, 3,000-character notes, a 13,500-character limit.
-9. **A Router alias makes litellm print to stdout.** For a model string whose provider
+9. **The window lookup silences litellm's provider banner, for its own call only**
+   (the Conductor's ruling, after the as-built). For a model string whose provider
    litellm does not recognise (`my-router-alias`), `get_model_info` prints litellm's
-   "Provider List" banner to stdout, twice, unless `litellm.suppress_debug_info` is set.
-   Before R2, a run on a Router alias never asked litellm about the model string. The CLI
-   is not affected, since it takes no `completion=`. Silencing it means changing
-   litellm's global setting or redirecting stdout around the lookup, so it is left as it
-   is, for the Conductor.
+   "Provider List" banner to stdout, twice per lookup, unless
+   `litellm.suppress_debug_info` is set. 0.2.0 never asked litellm about the model
+   string, and printed nothing. `_max_input_tokens` now sets `suppress_debug_info` and
+   the `LiteLLM` logger's level around its call and restores both, as
+   `runtime/codeact.py`'s `_supports_stop_parameter` does. The window it returns is
+   unchanged, mapped or not. `test_looking_up_the_window_prints_nothing` pins it with the
+   suite's global setting turned off.
 10. **Tests §8 did not name**: `test_a_text_of_one_character_cannot_be_halved`,
     `test_the_measured_stop_says_what_was_estimated_against_which_window` (§5.6's
     message, exactly) and `test_a_split_documents_notes_join_in_order_without_the_empty_ones`
@@ -1135,4 +1138,8 @@ would be 0.3.0: new behaviour, a setting and a prompt version, and nothing remov
 - **A server that truncates** (Ollama's default) never refuses. A mapped window still
   measures (§2.3 item 4).
 - **E6's null** ends R2.2 as designed (spec §4), and it comes back to the Conductor.
-- **A Router alias prints litellm's banner to stdout** once per run (§2.5 item 9).
+- **The window lookup sets a litellm global for the length of its call** (§2.5 item 9).
+  A litellm call another thread makes during that lookup also runs with
+  `suppress_debug_info` on. r3con builds its `Splits` before any stage's workers start,
+  so only a caller's own concurrent litellm calls can meet it, and the setting only
+  silences litellm's debug banners.

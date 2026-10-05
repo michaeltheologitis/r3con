@@ -119,6 +119,20 @@ def test_a_model_litellm_does_not_map_has_no_window_and_no_line(model, caplog):
     assert "gives no input window" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("model", "window_tokens"), [("my-router-alias", None), ("mapped", 10_000)]
+)
+def test_looking_up_the_window_prints_nothing(
+    window, capsys, monkeypatch, model, window_tokens
+):
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    if window_tokens:
+        model = window(window_tokens)
+    assert Splits(["text"], model=model).max_input_tokens == window_tokens
+    assert capsys.readouterr().out == ""
+    assert litellm.suppress_debug_info is False
+
+
 @pytest.mark.parametrize("margin", [-1, 100])
 def test_a_margin_outside_0_to_99_is_refused(margin):
     message = f"margin_percent must be from 0 to 99, got {margin}."

@@ -74,11 +74,11 @@ not verify.
   read in 2 parts. Setting `r3con.settings.WINDOW_MARGIN_PERCENT = 0` sends it whole
   again [run, §4.3]. On the lock's map, the line is 783,700 tokens for `gpt-6-luna` and
   170,000 for `claude-sonnet-5-5`.
-- **A Router alias makes litellm print to stdout.** For a model string litellm cannot
-  place with a provider (`my-router-alias`), it prints its "Provider List" banner
-  twice per run, from r3con's one window lookup. 0.2.0 printed nothing. An unmapped
-  `hosted_vllm/…` string prints nothing. `litellm.suppress_debug_info = True` silences
-  it [run].
+- **A Router alias prints nothing, as in 0.2.0.** For a model string litellm cannot
+  place with a provider (`my-router-alias`), `get_model_info` prints its "Provider
+  List" banner twice per lookup. At `20b8b3c` that reached stdout once per run, from
+  r3con's one window lookup. Since the Conductor's ruling (§3), the lookup silences it
+  for its own call and restores litellm's setting [run].
 
 **Breaks**
 
@@ -221,10 +221,11 @@ class Splits:
 
 The suite at the head: 393 passed, 10 deselected (the live test and E6) [run].
 
-**What the tests leave unpinned.**
+**What the tests left unpinned at `20b8b3c`, and what pins it now.**
 
 - **The stdout banner.** `conftest.py` sets `litellm.suppress_debug_info = True` for the
-  whole suite.
+  whole suite. Now pinned by `test_looking_up_the_window_prints_nothing`, which turns it
+  off.
 - **A server failing 3 times.** Only "two 500s then a 200 recovers" is pinned.
 - **E4's relevance count, by refusal.** In
   `test_a_later_stage_splits_further_without_renumbering`,
@@ -239,10 +240,16 @@ checked each against the code; none is stale. The 401's class, the measured stop
 part 0, the E4 and stopped-run sizes, and the banner I ran; the rest I read.
 
 **No new divergence in behaviour.** I found no place where the build contradicts the
-design. One wording mismatch is inside the design: §11's last risk says the Router alias
-banner prints "once per run", and §2.5 item 9 says twice. Twice is what prints, from one
-lookup per run, so the build matches §2.5. I did not edit the design. The gaps in the
-tests are in §2.5 above.
+design. One wording mismatch was inside the design: §11's last risk said the Router alias
+banner prints "once per run", and §2.5 item 9 said twice. Twice is what prints, from one
+lookup per run. The gaps in the tests are in §2.5 above.
+
+**After this document: one change in behaviour.** The Conductor ruled that the window
+lookup must not print. `_max_input_tokens` now sets `litellm.suppress_debug_info` (and
+the `LiteLLM` logger's level) around its own call and restores both, as
+`_supports_stop_parameter` does, so a Router alias prints nothing, as in 0.2.0. The
+window it returns is unchanged. The design's §2.5 item 9 records it, and its §11 now
+names the cost instead: a litellm global set for the length of the lookup.
 
 ## 4 · Measured results
 
