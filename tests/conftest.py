@@ -160,6 +160,21 @@ def answering_llm(llm: FakeLLM) -> FakeLLM:
 
 
 @pytest.fixture
+def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
+    """Maps a model with an input window of ``tokens`` in litellm's model map and
+    returns its name. litellm caches its lookup per name, so the name carries the
+    window: one name always means one window, across tests."""
+
+    def register(tokens: int) -> str:
+        model = f"hosted_vllm/window-{tokens}"
+        entry = {"max_input_tokens": tokens, "litellm_provider": "hosted_vllm"}
+        monkeypatch.setitem(litellm.model_cost, model, {**entry, "mode": "chat"})
+        return model
+
+    return register
+
+
+@pytest.fixture
 def configs(tmp_path):
     """Writes ``name -> fields`` into the working directory's config overlay."""
     root = tmp_path / "configs"

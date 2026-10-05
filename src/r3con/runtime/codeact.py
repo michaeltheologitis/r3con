@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import ast
 import functools
-import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,7 +42,7 @@ from litellm.exceptions import BadRequestError
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.runs import StageRun
-from r3con.runtime.llm import litellm_chat_completion
+from r3con.runtime.llm import litellm_chat_completion, quiet_litellm
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
     InterpreterError,
@@ -120,16 +119,8 @@ def _supports_stop_parameter(model: str) -> bool:
     truncation in :func:`_clip_assistant_response` (the correctness-bearing
     path) instead.
     """
-    logger = logging.getLogger("LiteLLM")
-    prev_suppress = litellm.suppress_debug_info
-    prev_level = logger.level
-    litellm.suppress_debug_info = True
-    logger.setLevel(logging.CRITICAL)
-    try:
+    with quiet_litellm():
         params = litellm.get_supported_openai_params(model=model) or []
-    finally:
-        litellm.suppress_debug_info = prev_suppress
-        logger.setLevel(prev_level)
     return "stop" in params
 
 

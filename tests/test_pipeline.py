@@ -275,6 +275,13 @@ def test_an_attempt_cap_set_in_settings_bounds_its_stage(
     assert len(answering_llm.requests_for(stage)) == 2
 
 
+def test_the_manifest_records_the_margin(answering_llm, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "WINDOW_MARGIN_PERCENT", 20)
+    logger = TaskLogger("run", root=tmp_path)
+    answer(answering_llm, logger)
+    assert read_json(logger, "manifest")["settings"]["window_margin_percent"] == 20
+
+
 def test_a_cap_below_its_floor_sends_and_writes_nothing(llm, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "REASONING_MAX_TURNS", 0)
     logger = TaskLogger("run", root=tmp_path)

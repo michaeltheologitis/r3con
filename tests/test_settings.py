@@ -4,6 +4,7 @@ import pytest
 
 from r3con import settings
 from r3con.settings import settings_snapshot
+from r3con.splitting import Splits
 
 
 def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
@@ -20,6 +21,7 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
         "llm_num_retries",
         "llm_empty_content_retries",
         "reasoning_parse_max_toks",
+        "window_margin_percent",
     ]
 
 
@@ -33,12 +35,28 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
         ("LLM_NUM_RETRIES", -1, 0),
         ("LLM_EMPTY_CONTENT_RETRIES", -1, 0),
         ("REASONING_PARSE_MAX_TOKS", -1, 0),
+        ("WINDOW_MARGIN_PERCENT", -1, 0),
     ],
 )
 def test_a_cap_below_its_floor_is_refused(monkeypatch, name, value, floor):
     monkeypatch.setattr(settings, name, value)
     with pytest.raises(ValueError, match=f"^{name} must be >= {floor}, got {value}.$"):
         settings_snapshot()
+
+
+@pytest.mark.parametrize(("value", "bound"), [(-1, ">= 0"), (100, "<= 99")])
+def test_a_margin_outside_0_to_99_is_refused_wherever_it_is_read(
+    monkeypatch, value, bound
+):
+    message = f"WINDOW_MARGIN_PERCENT must be {bound}, got {value}."
+    refused = f"^{re.escape(message)}$"
+    with pytest.raises(ValueError, match=refused):
+        Splits([], model="openai/gpt-6-luna", margin_percent=value)
+    monkeypatch.setattr(settings, "WINDOW_MARGIN_PERCENT", value)
+    with pytest.raises(ValueError, match=refused):
+        settings_snapshot()
+    with pytest.raises(ValueError, match=refused):
+        Splits([], model="openai/gpt-6-luna")
 
 
 @pytest.mark.parametrize("value", [2.5, True, "3"], ids=["float", "bool", "str"])
