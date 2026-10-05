@@ -19,6 +19,8 @@ with `main` merged in at `623d21b` (PR #13: default model `openai/gpt-6-luna`, l
 - 2026-10-05 · the Implementer: §3.3 item 6 fixed in `dd24413`; §4.4 and §18 say so.
 - 2026-10-05 · the Implementer, from the Scout's report: §3.3 items 8 and 9. §4.3, §7,
   §9 and §16 follow them and item 6.
+- 2026-10-05 · the Refactorer: §3.3 items 10 and 11, the Scout's adoption and the tests
+  it merged. §3.2 item 2, §3.3 items 2 and 6, §4.5, §8 b, §9, §14 and §18 follow them.
 
 **Reading it.** §1 to §3 cover what R1b changes and where the design departs from the
 spec; that is the Gate B read. §4 to §12 take one item each: why it is needed, the
@@ -130,7 +132,7 @@ one of the four overrides that R1.10 makes keyword-only.
    user's own empty `TIKTOKEN_CACHE_DIR` and no network, litellm 1.104 leaves the
    variable alone and `get_encoding` raises `requests.ConnectionError` (*run*).
    `except (OSError, ValueError)` covers that failure and tiktoken's hash check, with a
-   warning. §8 item b.
+   warning. §8 item b. Superseded by §3.3 item 10.
 3. **R1.11's `_supports_stop_parameter` except is removed, not logged.** litellm's
    `get_supported_openai_params` catches an unmapped model itself and returns `None`
    (*read*, 1.101 and 1.104). It returns `None` for an alias, an empty string and a bare
@@ -189,7 +191,7 @@ one of the four overrides that R1.10 makes keyword-only.
 2. **`reasoning.py` imports tiktoken at module level.** The import sat inside the
    guarded function because the old `except Exception` also covered a missing tiktoken.
    tiktoken is a declared dependency, so only `get_encoding` stays inside the narrowed
-   `except (OSError, ValueError)`.
+   `except (OSError, ValueError)`. Superseded by item 10.
 3. **Three tests §6.4 and §10.3 call new pass at `623d21b`, as guards.**
    `test_an_empty_structured_reply_is_rerolled_with_the_same_request`: a direct call
    without a seed never carried one; the change is pinned by
@@ -214,8 +216,8 @@ one of the four overrides that R1.10 makes keyword-only.
    folder. No request is sent. The same pin given as a config name leaves no folder.
    Found by the Cartographer. Fixed in `dd24413`: `run()` calls `check_prompts` on
    whichever config it runs, a `RunConfig` included, before its caps check and the
-   folder. `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists`
-   pins it for a missing file and a missing stage, and the cap test runs on a
+   folder. `test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists`
+   pins it for a missing file and a missing stage (item 11), and the cap test runs on a
    `RunConfig` too.
 7. **A program that times out holds the loop until it ends.** The vendored `timeout`
    runs the program inside `with ThreadPoolExecutor(...)`, whose exit waits for it. The
@@ -241,6 +243,33 @@ one of the four overrides that R1.10 makes keyword-only.
    floor keeps the §4.3 message. Pinned by `test_a_cap_that_is_not_an_integer_is_refused`
    (2.5, `True`, `"3"`) and
    `test_a_cap_that_is_not_an_integer_exits_2_without_a_traceback`.
+10. **The parse guard counts with `litellm.encode`, and tiktoken is no longer a direct
+    dependency.** `len(litellm.encode(text=parse_json))` counts the same cl100k_base
+    tokens, with `disallowed_special=()`, from the vocabulary litellm ships: litellm
+    points `TIKTOKEN_CACHE_DIR` at it on import (1.101) or on the first `encode`
+    (1.104), before loading it. `_parse_token_encoding`, `_count_tokens`, their cache
+    and the warning of §8 item b go, and so does
+    `test_a_tokenizer_that_cannot_load_falls_back_to_an_estimate_and_warns` with its
+    `fresh_tokenizer` fixture: the Conductor ruled that it pinned the replaced code.
+    `tests/conftest.py`'s `TIKTOKEN_CACHE_DIR` default goes too; only r3con's own
+    `get_encoding` read it. Two offline cases now differ (*run*, litellm 1.104, the
+    network refused). With a user's own empty `TIKTOKEN_CACHE_DIR` (§3.2 item 2), the
+    old guard warned and estimated; the new one counts exactly. With litellm's
+    `CUSTOM_TIKTOKEN_CACHE_DIR` pointing at an empty directory, the new guard raises
+    and the reasoning stage fails; at 1.101 `import litellm` already fails there.
+    Found by the Scout; `9e548ab`.
+11. **Three pairs of tests become tables.** The `configs` fixture moves from
+    `test_config.py` to `conftest.py`, and the R1.12 tests in `test_cli.py` and
+    `test_r3con.py` write their overlay with it (`af2cc36`).
+    `test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists`
+    (`test_r3con.py`) replaces
+    `test_a_config_pinning_a_missing_prompt_is_refused_before_a_run_folder_exists` and
+    `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists`: three
+    rows, by name and as a `RunConfig` with a missing file or stage, each now matching
+    its message (`19525e0`). `test_a_turn_cap_bounds_the_run_and_is_recorded`
+    (`test_pipeline.py`) replaces the settings and explicit turn-cap tests of §4.5: two
+    rows with a cap of 2, the explicit one over `REASONING_MAX_TURNS = 5`, so it also
+    shows the argument replaces the setting (`a4cfa03`).
 
 ## 4 · R1.7 · Settings honoured
 
@@ -386,14 +415,12 @@ All of these fail at `623d21b` except the snapshot's first row.
   - `test_a_cap_below_its_floor_is_refused`, one row per key, each one below its floor:
     `ValueError` matching `"<KEY> must be >= <floor>, got <value>."`.
 - `test_pipeline.py`:
-  - `test_a_turn_cap_set_in_settings_bounds_the_run_and_is_recorded`:
-    `r3con.settings.REASONING_MAX_TURNS = 3`, with reasoning that never commits
-    (`answering_llm.answers(reasoning="<code>\nprint(1)\n</code>")`). It asserts 4
-    reasoning requests (3 turns and the synthesis call), `n_turns == 3` in
-    `reasoning/result.json`, and `3` in the manifest. Today: 31 requests.
-  - `test_an_explicit_turn_cap_bounds_the_run_and_is_recorded`:
-    `max_reasoning_turns=2` gives 3 reasoning requests and `2` in the manifest. Today
-    the manifest records 30.
+  - `test_a_turn_cap_bounds_the_run_and_is_recorded` (§3.3 item 11), with reasoning
+    that never commits (`answering_llm.answers(reasoning="<code>\nprint(1)\n</code>")`).
+    A cap of 2, set as `r3con.settings.REASONING_MAX_TURNS` or passed as
+    `max_reasoning_turns=2` over a setting of 5, gives 3 reasoning requests (2 turns and
+    the synthesis call), `n_turns == 2` in `reasoning/result.json`, and `2` in the
+    manifest. Today: 31 requests, and the manifest records 30.
   - `test_an_attempt_cap_set_in_settings_bounds_its_stage`, parametrized over
     `SCHEMA_MAX_ATTEMPTS` with a schema reply that never validates, and
     `PARSING_MAX_ATTEMPTS` with `'{"rows": [{"who": 7}]}'`. Set to 2, over one document,
@@ -692,6 +719,7 @@ cl100k_base (%s); estimating the parse's size at 4 characters per token", error)
 monkeypatches `tiktoken.get_encoding` to raise `OSError` (the outside world's boundary),
 calls `_parse_token_encoding.cache_clear()` before and after, checks that `reason`
 answers, and checks for one warning in `caplog`. It fails today, which has no warning.
+Superseded by §3.3 item 10: the guard counts with `litellm.encode`, and this test goes.
 
 **c. The version.** `__init__.py` uses `from importlib import metadata as _metadata`,
 `_metadata.version("r3context")` and `except _metadata.PackageNotFoundError`, so
@@ -833,7 +861,8 @@ Tests, all failing at `623d21b`:
 - `test_pipeline.py`: `test_a_config_that_cannot_render_its_prompts_is_refused_before_any_request`,
   parametrized over a missing file (`FileNotFoundError`) and a missing stage
   (`ValueError`). Both leave `llm.requests == []` and no manifest.
-- `test_r3con.py`: `test_a_config_pinning_a_missing_prompt_is_refused_before_a_run_folder_exists`.
+- `test_r3con.py`: `test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists`
+  (§3.3 item 11).
 - `test_cli.py`: `test_a_config_pinning_a_missing_prompt_exits_2_before_any_request`, with
   an overlay `configs/exp.yaml` in the working directory and `--config exp`.
 
@@ -1058,18 +1087,19 @@ What 0.2.0 breaks, for whoever writes the release note:
 
 The R1 machinery stays as it is: `tests/conftest.py` (`FakeLLM`, `llm`, `answering_llm`,
 `_isolated`), pytest-socket, pytest-httpserver on 127.0.0.1, `ci.yml` and `release.yml`.
-No fixture changes. "New" means the test fails at `623d21b`, which is E1. "Guard" means
-it passes before and after.
+One fixture moves: `configs`, from `test_config.py` to `conftest.py` (§3.3 item 11).
+"New" means the test fails at `623d21b`, which is E1. "Guard" means it passes before
+and after.
 
 | File | Added | Changed or removed |
 | --- | --- | --- |
 | `test_settings.py` (new) | snapshot as set; floors table (R1.7) | — |
-| `test_pipeline.py` | turn cap from settings; explicit turn cap; attempt caps; refused cap sends nothing (R1.7, new) · failing stage ×4; midway calls kept; interrupt recorded; no note without a logger (R1.9, new) · prompts refused before any request (R1.12, new) · no seed unless `params` (R1.13, new) | `from r3con import settings`; `CONFIG` without seed; the reasoning-failure test folded into R1.9's |
+| `test_pipeline.py` | turn cap, from settings or passed in; attempt caps; refused cap sends nothing (R1.7, new) · failing stage ×4; midway calls kept; interrupt recorded; no note without a logger (R1.9, new) · prompts refused before any request (R1.12, new) · no seed unless `params` (R1.13, new) | `from r3con import settings`; `CONFIG` without seed; the reasoning-failure test folded into R1.9's |
 | `test_config.py` | misspelt override; `params` type; unread field; `RunConfig` extra (R1.10, new) · missing prompt on load (R1.12, new) | `FULL`, the labels and the override table without seed; `exp2`'s v9 overlay; the `params` row moves out of the ValueError table |
 | `test_parsing.py` | cannot reach outside; decorators refused (R1.8, new) · rich and plain methods (R1.8, guard) | syntax row matches `SyntaxError`; `test_doc_ids_label_the_documents` removed |
 | `test_schema.py` | — | syntax row matches `SyntaxError` |
 | `test_codeact.py` | settings turn cap, direct (R1.7, new) · sub-second timeout (R1.14, new) · `stop` refused and retried (R1.15, new) · other refusals raised; caller's `stop` kept (R1.15, guard) | — |
-| `test_reasoning.py` | tokenizer fallback warns (R1.11, new) · prompt is v1 with the parse as JSON (R1.11, guard) | — |
+| `test_reasoning.py` | prompt is v1 with the parse as JSON (R1.11, guard) | the tokenizer-fallback test, added by R1.11 and removed by §3.3 item 10 |
 | `test_parallel.py` | not-yet-started calls never run (R1.11, new) · lowest-indexed failure raised (guard) | — |
 | `test_relevance.py` | — | render table without `doc_ids` |
 | `test_llm.py` | same-request re-roll; caller's seed resent unchanged (R1.13, new) | `from r3con import settings`; `seed=` arguments dropped |
@@ -1122,8 +1152,8 @@ it passes before and after.
 | `runtime/python_executor.py` | unchanged (vendored) |
 | `logging_setup.py` | R1.11 h |
 
-Outside `src/`: `pyproject.toml` (version 0.2.0), `uv.lock`, `examples/options.ipynb`
-(R1.13), `tests/` (§14), and this file.
+Outside `src/`: `pyproject.toml` (version 0.2.0; tiktoken out, §3.3 item 10),
+`uv.lock`, `examples/options.ipynb` (R1.13), `tests/` (§14), and this file.
 
 ## 17 · What R2 inherits
 
@@ -1155,8 +1185,8 @@ Outside `src/`: `pyproject.toml` (version 0.2.0), `uv.lock`, `examples/options.i
   - A provider 400 maps to `litellm.BadRequestError` carrying the provider's message.
   - `ContextWindowExceededError` is a subclass of `BadRequestError`.
   - `num_retries` re-sends a 400.
-- **tiktoken:** an unavailable vocabulary raises `OSError` subclasses (`requests`
-  errors), and a corrupt one raises `ValueError`.
+  - `litellm.encode(text=)` counts cl100k_base tokens with `disallowed_special=()`, from
+    the vocabulary litellm ships (§3.3 item 10).
 - **Python 3.11 to 3.14:** `Executor.map` cancels unstarted calls on the first exception
   in order, and `BaseException.add_note` exists.
 - **pydantic 2.11 to 2.13:** `ConfigDict(extra="forbid")` and

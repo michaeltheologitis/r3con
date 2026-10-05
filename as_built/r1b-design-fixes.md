@@ -228,7 +228,8 @@ ignore on the vendored `int` annotation [read; run by tests and the local-server
   - It dumps the parse to JSON once, and that string serves both `parse_block` and
     `parse_json`.
   - A tokenizer that cannot load (`OSError` or `ValueError`) falls back to a
-    4-characters-per-token estimate, with one warning.
+    4-characters-per-token estimate, with one warning. Since `9e548ab` the guard counts
+    with `litellm.encode` and has no fallback (§3.6 item 1).
 - **`_merge_with_source_docs`** concatenates every field, since `check_schema` admits
   only list fields.
 - **The manifest** reads `r3con.__version__`.
@@ -249,7 +250,8 @@ The design's §3.1 items 3 and 4 (the Conductor's rulings) and §3.3 items 1 to 
 - **The seed message** [run].
 - **`_refuses_stop`** is the regex alone, and the loop catches
   `litellm.exceptions.BadRequestError` [read].
-- **tiktoken** is imported at module level, so `import r3con` loads it [read].
+- **tiktoken** is imported at module level, so `import r3con` loads it [read]. Since
+  `9e548ab` r3con does not import it (§3.6 item 1).
 - **The three guard tests** pass before their fix [run, §4.2].
 - **The added tests** exist and pass [run].
 
@@ -274,7 +276,9 @@ I did not verify §3.3 item 5 (notebook cell 5 run alone).
      caps check and the folder.
      `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists` pins
      it for a missing file and a missing stage: refused, no request, no run folder. It
-     fails without the fix [run].
+     fails without the fix [run]. Its rows are now in
+     `test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists` (§3.6
+     item 2).
 2. **A program that times out still holds the loop until it ends.**
    - **Why.** The vendored `timeout` runs the program inside
      `with ThreadPoolExecutor(...)`, whose exit waits for it.
@@ -333,6 +337,41 @@ Both are in the design as §3.3 items 8 and 9.
    is unchanged. `test_a_cap_that_is_not_an_integer_is_refused` (2.5, `True`, `"3"`)
    and `test_a_cap_that_is_not_an_integer_exits_2_without_a_traceback` pin it; each
    failed before the fix [run].
+
+### 3.6 Changed by the Refactorer, after this reading
+
+Both are in the design as §3.3 items 10 and 11. Nothing else in `src/` changes what a
+caller sees.
+
+1. **The parse guard counts with `litellm.encode`, and tiktoken is no longer a direct
+   dependency** (`9e548ab`, the Scout's adoption).
+   - **What goes.** `_parse_token_encoding`, `_count_tokens`, their cache, the warning
+     and the 4-characters-per-token fallback; `tiktoken>=0.7.0` from `pyproject.toml`,
+     and r3con's two lines from `uv.lock` (tiktoken stays as litellm's dependency).
+   - **A test goes.**
+     `test_a_tokenizer_that_cannot_load_falls_back_to_an_estimate_and_warns`, with its
+     `fresh_tokenizer` fixture. It patched `tiktoken.get_encoding` to fail, so it pinned
+     the replaced code; the Conductor ruled it goes. `conftest.py`'s
+     `TIKTOKEN_CACHE_DIR` default goes too.
+   - **Measured** [run, litellm 1.104, the network refused]. The count is the same as
+     tiktoken's with `disallowed_special=()`: 11 and 59,009 tokens on the Scout's two
+     probes. litellm points `TIKTOKEN_CACHE_DIR` at its bundled vocabulary before
+     loading it: on import at 1.101, on the first `encode` at 1.104. So with a user's
+     own empty `TIKTOKEN_CACHE_DIR`, the old guard warned and estimated, and the new one
+     counts. With litellm's `CUSTOM_TIKTOKEN_CACHE_DIR` set to an empty directory, the
+     new guard raises and the reasoning stage fails; at 1.101 `import litellm` already
+     fails there.
+2. **Three pairs of tests become tables** (`af2cc36`, `19525e0`, `a4cfa03`).
+   - The `configs` fixture moves to `conftest.py`, and the R1.12 CLI and `run()` tests
+     use it.
+   - `test_a_config_missing_a_prompt_is_refused_before_a_run_folder_exists` holds the
+     rows of
+     `test_a_config_pinning_a_missing_prompt_is_refused_before_a_run_folder_exists` and
+     `test_a_run_config_missing_a_prompt_is_refused_before_a_run_folder_exists`, each
+     row now matching its message.
+   - `test_a_turn_cap_bounds_the_run_and_is_recorded` holds the settings and explicit
+     turn-cap tests; the explicit row runs over a setting of 5, so it also shows the
+     argument replaces the setting.
 
 ## 4 · Measured results
 
