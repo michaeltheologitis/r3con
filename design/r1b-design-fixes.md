@@ -17,6 +17,8 @@ with `main` merged in at `623d21b` (PR #13: default model `openai/gpt-6-luna`, l
 - 2026-10-05 · the Cartographer, reading the build at `243f647`: §3.3 items 6 and 7,
   two claims the build contradicts. §4.4 and §18 follow item 6.
 - 2026-10-05 · the Implementer: §3.3 item 6 fixed in `dd24413`; §4.4 and §18 say so.
+- 2026-10-05 · the Implementer, from the Scout's report: §3.3 items 8 and 9. §4.3, §7,
+  §9 and §16 follow them and item 6.
 
 **Reading it.** §1 to §3 cover what R1b changes and where the design departs from the
 spec; that is the Gate B read. §4 to §12 take one item each: why it is needed, the
@@ -221,6 +223,24 @@ one of the four overrides that R1.10 makes keyword-only.
    returns after 2.00 s (*run*). So `timeout_s` (§1, §11) bounds what the model is told,
    not the wall-clock time; the same holds for the schema check's 30 s (§5.2). It
    predates R1b. Found by the Cartographer; not fixed.
+8. **A config file that sets `overrides:` or `name:` is refused, and now a test says
+   so.** Both are `RunConfig` fields a file must not set: a file's `overrides:` would be
+   recorded as real overrides, and its `name:` would be ignored. `load_config` has
+   refused them since `082ed76`, because neither is in `_CONFIG_FIELDS`, but no test
+   pinned it, and a variant that let them through passed every test. Found by the
+   Scout. `eb90208` adds both as rows of
+   `test_a_config_field_r3con_does_not_read_is_refused`, with the same message as any
+   other unread field; the rows fail when the check lets them through (*run*).
+9. **A cap must be an `int`.** §4.3 checked only the floor, so
+   `SCHEMA_MAX_ATTEMPTS = 2.5` or `True` was accepted and recorded as given, and a
+   string raised `TypeError` from the comparison, which the CLI does not catch: the
+   user got a traceback. Found by the Scout. Fixed in `4293c2c`: a value whose type is
+   not exactly `int` (a `bool` included) raises
+   `ValueError("SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got 2.5.")`, with the
+   value's `repr`, so the CLI prints `r3con: <message>` and exits 2. An `int` below its
+   floor keeps the §4.3 message. Pinned by `test_a_cap_that_is_not_an_integer_is_refused`
+   (2.5, `True`, `"3"`) and
+   `test_a_cap_that_is_not_an_integer_exits_2_without_a_traceback`.
 
 ## 4 · R1.7 · Settings honoured
 
@@ -284,7 +304,10 @@ These are the manifest's keys, unchanged from 0.1. Each value is read when the f
 is called, and an explicit `reasoning_max_turns` replaces the setting when it is not
 `None`. A value below its floor raises
 `ValueError(f"{KEY.upper()} must be >= {floor}, got {value}.")`, naming the first failing
-key in this order. For example: `REASONING_MAX_TURNS must be >= 1, got 0.`
+key in this order. For example: `REASONING_MAX_TURNS must be >= 1, got 0.` A value that
+is not an `int`, a `bool` included, raises
+`ValueError(f"{KEY.upper()} must be an integer >= {floor}, got {value!r}.")` (§3.3
+item 9).
 
 | Key | Read from | Floor | Passed to a stage by `run_pipeline` |
 | --- | --- | --- | --- |
@@ -633,7 +656,7 @@ def load_config(
   field(s) r3con does not read: {unknown}. A config sets {sorted(_CONFIG_FIELDS)}.")`,
   with `_CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})`.
   This catches `seed: 42` from a 0.1 config and a misspelt `relevence_rounds:` (§3.2
-  item 5). When `seed` is among them, the message adds that it was removed in 0.2.0
+  item 5), and `overrides:` or `name:`, which only `load_config` sets (§3.3 item 8). When `seed` is among them, the message adds that it was removed in 0.2.0
   and goes in `params` (§3.1 item 4).
 - **`RunConfig` refuses fields it does not have**, through
   `model_config = ConfigDict(extra="forbid")`. So `RunConfig(..., seed=42)` raises
@@ -791,7 +814,9 @@ def check_prompts(config: RunConfig) -> None: ...
   moves here from `load_config`. Then it calls `require_prompt_path` for each stage.
 - **Called twice, one function.** `load_config` calls it last, so `run()` and the CLI
   refuse before creating a run folder. `run_pipeline` calls it first (§4.4), so a
-  hand-built `RunConfig` is refused before the manifest and the first call. The second
+  hand-built `RunConfig` is refused before the manifest and the first call. `run()`
+  also calls it on the config it runs, so a `RunConfig` passed to `run()` is refused
+  before its run folder too (§3.3 item 6). The second
   call also catches a working directory that changed between load and run, since the
   overlay is `./prompts`.
 - **The CLI** loads the config inside a `try` that turns `FileNotFoundError` and
@@ -1086,7 +1111,7 @@ it passes before and after.
 | `pipeline.py` | R1.7 (caps), R1.9 (`_StageRecord`, `_recorded_stage`), R1.12 (`check_prompts`), R1.13, R1.11 h |
 | `runs.py` | R1.7 (`write_manifest(settings=)`), R1.11 c (`_version` out), R1.13 (`StageRun.seed` out), R1.11 h |
 | `parallel.py` | R1.11 d |
-| `r3con.py` | R1.13 (`run(seed=)` out), R1.9 (docstring) |
+| `r3con.py` | R1.13 (`run(seed=)` out), R1.9 (docstring), R1.7 and R1.12 (caps and prompts checked before the run folder) |
 | `cli.py` | R1.13 (`--seed` out), R1.9 (notes), R1.12 (exit 2) |
 | `runtime/llm.py` | R1.7 (import), R1.13 (`seed` out, re-roll), R1.11 h |
 | `runtime/codeact.py` | R1.7 (`max_turns=None`), R1.11 a, R1.14, R1.15 (`_STOP_REFUSED`, `_refuses_stop`, the loop), R1.11 h |

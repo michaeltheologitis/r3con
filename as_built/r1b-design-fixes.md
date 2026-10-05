@@ -49,13 +49,15 @@ Nothing I ran reached a provider.
 - **A misspelt override** raises a `TypeError` that names it [run].
 - **A config file field r3con does not read** raises a `ValueError` that lists the
   allowed fields. For `seed: 7` the message adds: `` `seed` was removed in r3con 0.2.0;
-  to send one, put it in `params` (params: {seed: 7}). `` [run]
+  to send one, put it in `params` (params: {seed: 7}). `` [run] `overrides:` and `name:`
+  are among them; tests pin that since `eb90208` (§3.5 item 1).
 - **A pinned prompt version with no file** raises `FileNotFoundError` on load, naming
   the stage, the version and both places looked [run]. A `RunConfig` passed to `run()`
   was the exception at `243f647`; it is refused before the folder since `dd24413`
   (§3.2 item 1).
 - **A cap below its floor** raises `ValueError: DOC_WORKERS must be >= 1, got 0.`, and
-  the CLI prints it and exits 2 [run]. `--doc-workers 0` and `R3CON_DOC_WORKERS=0`, which
+  the CLI prints it and exits 2 [run]. Since `4293c2c` so does a cap that is not an
+  integer: `SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got 2.5.` (§3.5 item 2). `--doc-workers 0` and `R3CON_DOC_WORKERS=0`, which
   meant "one at a time", are refused; 1 now means that.
 - **A bad config in the CLI** gives `r3con: <message>` and exit 2, not a traceback
   [read; the missing-prompt case run by its test].
@@ -123,7 +125,8 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
 
 It reads the seven caps when it is called. An explicit turn cap replaces the setting. It
 raises naming the first cap below its floor, using `_FLOORS`: 1 for the worker, turn and
-attempt caps, 0 for the other three.
+attempt caps, 0 for the other three. Since `4293c2c` it also refuses a cap whose type is
+not exactly `int`, a `bool` included (§3.5 item 2).
 
 - **`run()` and the CLI** call it before creating their `TaskLogger`, and discard the
   result.
@@ -160,9 +163,10 @@ It then applies the overrides, and calls `config.check_prompts` last.
 
 `check_prompts` refuses a stage with no pin, then calls `prompts.require_prompt_path` for
 each stage. `load_prompt` uses that same function, so the message has one source.
-`run_pipeline` calls `check_prompts` first. `run()` given a `RunConfig` object never calls
-`load_config`, so for it the only check is the one in `run_pipeline` [read; run by
-probe].
+`run_pipeline` calls `check_prompts` first. At `243f647`, `run()` given a `RunConfig`
+object never called `load_config`, so for it the only check was the one in
+`run_pipeline` [read; run by probe]. Since `dd24413`, `run()` calls `check_prompts` on
+the config it runs (§3.2 item 1).
 
 ### 2.3 Stage records: `pipeline._recorded_stage`
 
@@ -309,6 +313,26 @@ I did not verify §3.3 item 5 (notebook cell 5 run alone).
 - **The R1.9 commit `8814eb9` dropped a test.** It dropped R1.12's
   `test_a_config_that_cannot_render_its_prompts_is_refused_before_any_request`, and
   `ac4f3ba` restores it unchanged. In a PR split, that test lands after R1.9.
+
+### 3.5 Found by the Scout, after this reading
+
+Both are in the design as §3.3 items 8 and 9.
+
+1. **A config file that sets `overrides:` or `name:` was refused, but no test said so.**
+   `load_config` refuses both, because neither is in `_CONFIG_FIELDS`; a variant that let
+   them through passed every test, and would have recorded a file's `overrides:` as real
+   overrides and ignored its `name:`. `eb90208` adds both as rows of
+   `test_a_config_field_r3con_does_not_read_is_refused`. They fail when the check lets
+   them through [run].
+2. **A cap that is not an integer was accepted, or crashed the CLI.**
+   `SCHEMA_MAX_ATTEMPTS = 2.5` or `True` was recorded as given, and `"3"` raised
+   `TypeError` from the floor comparison, so the CLI printed a traceback [run].
+   `4293c2c` refuses every cap whose type is not exactly `int` with
+   `ValueError: SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got 2.5.` (the value's
+   `repr`), and the CLI exits 2 with `r3con: <message>`. The floor message for an `int`
+   is unchanged. `test_a_cap_that_is_not_an_integer_is_refused` (2.5, `True`, `"3"`)
+   and `test_a_cap_that_is_not_an_integer_exits_2_without_a_traceback` pin it; each
+   failed before the fix [run].
 
 ## 4 · Measured results
 
