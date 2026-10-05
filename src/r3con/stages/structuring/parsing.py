@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import typing
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast, get_origin
 
@@ -47,7 +48,7 @@ from r3con.runtime.python_executor import (
     LocalPythonExecutor,
 )
 from r3con.settings import active_doc_workers
-from r3con.stages.relevance import render_relevance
+from r3con.stages.relevance import Snippet, render_relevance
 
 _log = get_logger("structuring.parsing")
 
@@ -227,7 +228,7 @@ def parse_one_document(
     parse_cls: type[BaseModel],
     task: str,
     prompt_version: str,
-    relevance_snippets: list[str] | None = None,
+    relevance_snippets: Sequence[Snippet] | None = None,
     model: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
@@ -316,7 +317,7 @@ def parse_documents(
     parse_cls: type[BaseModel],
     task: str,
     prompt_version: str,
-    relevance_snippets: list[str] | None = None,
+    relevance_snippets: Sequence[Snippet] | None = None,
     model: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
