@@ -18,15 +18,17 @@ The document is the unit throughout: nothing is chunked, and the whole collectio
 never placed in one prompt.
 
 With a ``task_logger``, each stage writes its artifacts into one flat run-folder as soon
-as that stage succeeds, so a later failure still leaves the earlier work on disk (see
+as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
+stage that fails leaves the calls it completed and its traceback (see
 :mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
 """
 
 from __future__ import annotations
 
 import traceback
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -82,6 +84,45 @@ class Answer:
         return self.answer
 
 
+@dataclass
+class _StageRecord:
+    """What one stage leaves in the run folder: its calls, and its ``result.json``."""
+
+    run: StageRun | None
+    result: dict[str, Any] = field(default_factory=dict)
+
+
+@contextmanager
+def _recorded_stage(
+    task_logger: TaskLogger | None, stage: str, model: str, *, transcript: bool
+) -> Iterator[_StageRecord]:
+    """Record one stage's artifacts under ``<run-folder>/<stage>/``.
+
+    The body passes ``record.run`` to the stage and sets ``record.result`` to the
+    fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
+    with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
+    token ``totals``. On any exception, an interrupt included, it writes the calls
+    that completed and ``error.txt`` with the traceback, adds a note naming the run
+    folder to the exception, and re-raises. Without a logger it records nothing.
+    """
+    if task_logger is None:
+        yield _StageRecord(run=None)
+        return
+    run = StageRun(stage=stage, task_logger=task_logger, model=model)
+    record = _StageRecord(run=run)
+    try:
+        yield record
+        run.flush(write_transcript=transcript)
+        task_logger.write_json(
+            f"{stage}/result", {**record.result, "totals": run.compute_totals()}
+        )
+    except BaseException as error:
+        run.flush(write_transcript=transcript)
+        task_logger.write_text(f"{stage}/error", traceback.format_exc())
+        error.add_note(f"r3con: partial artifacts in {task_logger.dir}")
+        raise
+
+
 def _preview(text: str, n: int = 100) -> str:
     """One-line, truncated preview of an answer for the progress log."""
     s = " ".join((text or "").split())
@@ -122,7 +163,9 @@ def run_pipeline(
     replaces ``settings.REASONING_MAX_TURNS`` when it is not ``None``.
 
     If ``task_logger`` is provided, each stage's artifacts are written immediately
-    after that stage succeeds, so a later failure still leaves earlier artifacts.
+    after that stage succeeds, so a later failure still leaves earlier artifacts; a
+    stage that raises writes its completed calls and ``error.txt``, and the exception
+    carries a note naming the run folder.
     """
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
@@ -138,11 +181,6 @@ def run_pipeline(
         # A named parameter of `litellm_chat_completion`, so it binds there rather than
         # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
-
-    def _run(stage: str, model_for_log: str) -> StageRun | None:
-        if task_logger is None:
-            return None
-        return StageRun(stage=stage, task_logger=task_logger, model=model_for_log)
 
     # The identity card first, so even a run that dies in stage 1 says what it was.
     if task_logger is not None:
@@ -161,102 +199,80 @@ def run_pipeline(
         rounds,
         len(documents),
     )
-    relevance_run = _run("relevance", model)
-    relevance = surface_relevance(
-        task=task,
-        documents=documents,
-        model=model,
-        prompt_version=config.prompts["relevance"],
-        rounds=rounds,
-        workers=caps["doc_workers"],
-        run=relevance_run,
-        **llm_kwargs,
-    )
-    # the relevant context feeds every later stage
-    relevance_snippets = relevance.snippets
-    if relevance_run is not None:
-        relevance_run.flush(write_transcript=False)
-    if task_logger is not None:
+    with _recorded_stage(task_logger, "relevance", model, transcript=False) as record:
+        relevance = surface_relevance(
+            task=task,
+            documents=documents,
+            model=model,
+            prompt_version=config.prompts["relevance"],
+            rounds=rounds,
+            workers=caps["doc_workers"],
+            run=record.run,
+            **llm_kwargs,
+        )
         # Per-round, per-document — `round` is the refinement depth; the LAST round
         # is what downstream stages consume. snippets[doc_i] aligns to documents[i].
-        task_logger.write_json(
-            "relevance/result",
-            {
-                "n_rounds": rounds,
-                "n_docs": len(documents),
-                "rounds": [
-                    {"round": k + 1, "snippets": per_doc}
-                    for k, per_doc in enumerate(relevance.rounds)
-                ],
-                "totals": relevance_run.compute_totals() if relevance_run else None,
-            },
-        )
+        record.result = {
+            "n_rounds": rounds,
+            "n_docs": len(documents),
+            "rounds": [
+                {"round": k + 1, "snippets": per_doc}
+                for k, per_doc in enumerate(relevance.rounds)
+            ],
+        }
+    # the relevant context feeds every later stage
+    relevance_snippets = relevance.snippets
 
     # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
-    schema_run = _run("structuring/schema", model)
-    proposal = propose_schema(
-        task=task,
-        relevance_snippets=relevance_snippets,
-        model=model,
-        prompt_version=config.prompts["structuring/schema"],
-        max_attempts=caps["schema_max_attempts"],
-        run=schema_run,
-        **llm_kwargs,
-    )
-    if schema_run is not None:
-        schema_run.flush()
-    if task_logger is not None:
-        task_logger.write_json(
-            "structuring/schema/result",
-            {
-                "schema_code": proposal.schema_code,
-                "thought": proposal.attempts[-1].thought if proposal.attempts else None,
-                "attempts": [
-                    {
-                        "schema_code": a.schema_code,
-                        "error": a.error,
-                        "thought": a.thought,
-                    }
-                    for a in proposal.attempts
-                ],
-                "totals": schema_run.compute_totals() if schema_run else None,
-            },
+    with _recorded_stage(
+        task_logger, "structuring/schema", model, transcript=True
+    ) as record:
+        proposal = propose_schema(
+            task=task,
+            relevance_snippets=relevance_snippets,
+            model=model,
+            prompt_version=config.prompts["structuring/schema"],
+            max_attempts=caps["schema_max_attempts"],
+            run=record.run,
+            **llm_kwargs,
         )
+        record.result = {
+            "schema_code": proposal.schema_code,
+            "thought": proposal.attempts[-1].thought if proposal.attempts else None,
+            "attempts": [
+                {"schema_code": a.schema_code, "error": a.error, "thought": a.thought}
+                for a in proposal.attempts
+            ],
+        }
 
     # --- Stage 2b: structuring — parse every document, whole, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
-    parsing_run = _run("structuring/parsing", model)
-    extraction = parse_documents(
-        documents=documents,
-        schema_code=proposal.schema_code,
-        parse_cls=proposal.parse_cls,
-        task=task,
-        prompt_version=config.prompts["structuring/parsing"],
-        relevance_snippets=relevance_snippets,
-        model=model,
-        max_attempts=caps["parsing_max_attempts"],
-        run=parsing_run,
-        workers=caps["doc_workers"],
-        **llm_kwargs,
-    )
-    parsed = extraction.parse
-    if parsing_run is not None:
-        parsing_run.flush(write_transcript=False)
-    if task_logger is not None:
-        task_logger.write_json(
-            "structuring/parsing/result",
-            {
-                "parsed": parsed,
-                "source_docs": extraction.source_docs,
-                "totals": parsing_run.compute_totals() if parsing_run else None,
-            },
+    with _recorded_stage(
+        task_logger, "structuring/parsing", model, transcript=False
+    ) as record:
+        extraction = parse_documents(
+            documents=documents,
+            schema_code=proposal.schema_code,
+            parse_cls=proposal.parse_cls,
+            task=task,
+            prompt_version=config.prompts["structuring/parsing"],
+            relevance_snippets=relevance_snippets,
+            model=model,
+            max_attempts=caps["parsing_max_attempts"],
+            run=record.run,
+            workers=caps["doc_workers"],
+            **llm_kwargs,
         )
+        record.result = {
+            "parsed": extraction.parse,
+            "source_docs": extraction.source_docs,
+        }
+    parsed = extraction.parse
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
-    reasoning_run = _run("reasoning", model)
-    try:
+    with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
         result = reasoning.reason(
             task=task,
             schema_code=proposal.schema_code,
@@ -267,7 +283,7 @@ def run_pipeline(
             prompt_version=config.prompts["reasoning"],
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
-            run=reasoning_run,
+            run=record.run,
             **llm_kwargs,
         )
         _log.info(
@@ -276,40 +292,22 @@ def run_pipeline(
             len(result.turns),
             _preview(result.answer),
         )
-        if reasoning_run is not None:
-            reasoning_run.flush()
-        if task_logger is not None:
-            task_logger.write_json(
-                "reasoning/result",
+        record.result = {
+            "answer": result.answer,
+            "terminated_by": result.terminated_by,
+            "n_turns": len(result.turns),
+            "turns": [
                 {
-                    "answer": result.answer,
-                    "terminated_by": result.terminated_by,
-                    "n_turns": len(result.turns),
-                    "turns": [
-                        {
-                            "response": t.response,
-                            "raw_response": t.raw_response,
-                            "code": t.code,
-                            "observation": t.observation,
-                            "error": t.error,
-                            "is_final_answer": t.is_final_answer,
-                        }
-                        for t in result.turns
-                    ],
-                    "totals": reasoning_run.compute_totals() if reasoning_run else None,
-                },
-            )
-    except Exception:
-        # Re-raise, but leave the traceback on disk first: the earlier stages' artifacts
-        # are already written, so the run folder should also say why the run ended. The
-        # whole block is guarded, not just the LLM call — a failure while flushing the
-        # transcript or writing result.json is exactly as worth recording. Written from
-        # inside the `except` so format_exc() sees the active exception.
-        if task_logger is not None:
-            err_dir = task_logger.dir / "reasoning"
-            err_dir.mkdir(parents=True, exist_ok=True)
-            (err_dir / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
-        raise
+                    "response": t.response,
+                    "raw_response": t.raw_response,
+                    "code": t.code,
+                    "observation": t.observation,
+                    "error": t.error,
+                    "is_final_answer": t.is_final_answer,
+                }
+                for t in result.turns
+            ],
+        }
     return Answer(
         answer=result.answer,
         relevant_context=list(relevance_snippets),
