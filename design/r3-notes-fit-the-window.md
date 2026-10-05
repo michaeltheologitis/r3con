@@ -18,6 +18,9 @@ the bigger of what it carries. Branch `claude/tender-shannon-eq4lq7-r3`, cut at 
   (§5.1), `propose_schema(splits=)` (now `budget=`), `surface_relevance` building a
   default budget, and the hazard text in §7.3. §3, §4.2, §5, §6, §7, §8, §9, §11 and §12
   follow; §12 gains the known limits.
+- 2026-10-05 · the build (Implementer, `a17196b` to `56f7389`): §2.5 lists where the
+  code departs from this design and why; §5.3 and §5.4 say what the code does; §10.1
+  holds E6's diff against `f4dae00` and E7's measured result.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, what was measured, and every
 place this design decides something the spec left open or departs from it, with the
@@ -266,6 +269,55 @@ What follows from it here:
   the cost case of §2.3 item 2 (Q2 (a) as approved); 0.3.0 as the last step; E7's 8
   workers and 90-minute job. Notes in languages written without spaces join the known
   limits (§12).
+
+### 2.5 Divergences found in the build (Implementer, 2026-10-05)
+
+Built test-first in §3's order, `a17196b` to `56f7389`. Where the code departs from the
+sections above, the sections now say what the code does; each item names what the design
+said, what the build found, what it does, and what it costs.
+
+1. **The relevance-v1 stop names the request that did not fit** (§5.3, first row). The
+   design said every stop note names the binding request, the one with the least room
+   among `trouble` and `also`, while §9.2 expected `relevance-r2-d0` and 39 documents. In
+   a run, `also` holds reasoning's first-turn check, whose room is smaller, so the binding
+   request would be reasoning's, which never asked for a shorter prompt. The first row
+   names `trouble`; the others still name the binding request. Cost: none; it is what
+   §9.2 and the prototype did.
+2. **A fifth stop: notes asked for 10 words that still overshoot them** (§5.3). With W
+   already 10 and a model that wrote longer notes, a request over the line by estimate has
+   no level left, and none of the four rows is true of it (its notes cut at 10 words would
+   fit; nothing was refused). Its note names the floor: `r3con: reasoning is estimated
+   over the line, and the notes of 20 documents it carries are already about 14 words
+   each, with 10 the fewest a note is asked for, so reading them shorter cannot help. …`
+   (`test_notes_asked_for_ten_words_that_still_overshoot_stop_with_the_floor_named`).
+3. **Every W is under the last W, in the code as in the claim** (§5.2 item 3). The levels
+   are kept below `start` as well as below the notes' mean: `start // 2` raised to 10 is
+   `start` itself when `start` is 10, and a model that overshoots at 10 words would
+   otherwise be asked for 10 again, without end. §5.2's "How it bounds itself" assumed it.
+4. **A stop event keeps its round** (§5.4): the round the stop would have read again (E5:
+   round 1), with `words` null.
+5. **E5's room is 2,599 tokens in the suite, 2,571 in §5.2's example** (§9.4). The
+   design's numbers come from the harness, which asks the live question; the suite asks
+   "Who?", 28 tokens shorter across reasoning's prompt and user message. The 6,733 tokens
+   the notes take at 10 words are the same.
+6. **Tests the design did not name**, each pinning a line no named test reaches:
+   `test_a_samples_turn_over_the_line_hands_over_its_notes_before_sending` (§4.2 step 3,
+   `reason`'s own check); `test_a_failure_while_reading_again_is_recorded_by_both_stages_named_once`
+   (§7.5, the run-folder note once; a provider failure inside the read again takes the
+   path a stop does); a third row of `test_notes_that_do_not_fit_are_read_again_shorter`,
+   `by-refusal-of-the-schema` (17,000 characters, so the schema call is the one refused;
+   246 requests), since neither designed row sent the schema's hand-over through the
+   pipeline. `test_the_relevant_context_is_the_notes_reasoning_saw` runs on a refused
+   parse, where the pipeline's loop, not relevance's, reads the notes again. The fake
+   records its refusals (`FakeLLM.refused`, for E4), and `quiet_sites` and
+   `within_budget` are fixtures, as `grown_registry` is.
+7. **Size** (§2.3 item 1). `src/`: +1,074 −175 lines in 12 files, docstrings included
+   (`notes.py` 291); tests: +1,640 −34 in 13 files, against a forecast of about 600. The
+   default suite takes about 70 s locally, from 27 s (E5 alone 14 s), against a forecast
+   of about 35 s more. 478 tests, from 395: 85 new, and §9.2's renamed one.
+8. **litellm 1.101 does not map `openai/gpt-6-luna`.** The lowest-bounds suite is offline
+   and passes; E7 registers its windows on the model's mapped entry, so it needs the
+   locked litellm (1.104), which the experiment job uses.
 
 ## 3 · Order of work
 
@@ -574,6 +626,12 @@ otherwise with a known window, the fourth with an unknown one. The numbers are t
 | by estimate, no room at all (`room <= 0`) | `r3con: what relevance-r2-d0 sends beside its notes fills the 6,963-token line by itself, so reading them shorter cannot help. The relevant context has outgrown the model's window.` |
 | by refusal, at the floor | `r3con: reasoning was refused as too long, and the notes of 120 documents it carries are already about 9 words each, with 10 the fewest a note is asked for, so reading them shorter cannot help. The relevant context has outgrown the model's window.` |
 
+The first row names `trouble`, the request that did not fit, not the binding one
+(§2.5 item 1). A fifth case has a note of its own: by estimate, with W already 10 and
+notes still over it, `r3con: reasoning is estimated over the line, and the notes of 20
+documents it carries are already about 14 words each, with 10 the fewest a note is asked
+for, so reading them shorter cannot help. …` (§2.5 item 2).
+
 No task ID, and the closing sentence is R2's, so a caller that matched it keeps matching.
 
 ### 5.4 `notes.json` and the logs
@@ -599,8 +657,9 @@ A run that never reads notes again or stops for them has none. E3, *run*:
 - An event: the request that did not fit (`call`), why (`cause`), its estimate and its
   notes' tokens, the room W was sized for and the request it belongs to (`sized_for`:
   `call` itself, or reasoning's first turn, §7.2; `room` is `null` after a refusal), the
-  calls discarded, the action (`"read again"` or `"stop"`), the round read again and W
-  (`null` at a stop), and the provider's message after a refusal.
+  calls discarded, the action (`"read again"` or `"stop"`), the round read again (at a
+  stop, the round it would have read again) and W (`null` at a stop), and the provider's
+  message after a refusal.
 
 **Logs.** A read again logs WARNING on `r3con.notes`; the CLI shows it, and a library user
 gets it on stderr, as with R2's splits:
@@ -1179,6 +1238,22 @@ with `live: false` and `experiment: true`, once.
 
 **The live tier is unchanged.** `tests/test_live.py` is not edited. Its label reads
 `rel=v2`; it sends 0.2.0's requests, since nothing is shortened on 922,000 tokens.
+
+### 10.1 Measured (Implementer, 2026-10-05)
+
+**E1 to E6 in the suite** match §9.4's numbers: E1 182 requests and a 5,512-token first
+turn with samples; E2 183, the whole parse refused at 9,635 tokens, then samples; E3
+482, one event `("reasoning", "estimate", "read again", 2, 16)`; E4 485, every event a
+refusal; E5 400 requests, all of round 1, and the floor's note (§2.5 item 5); E6 17
+requests, identical between `rel=v1` and `rel=v2`. §9.2's 40 reports: 162 requests by
+estimate (round 1 read again under 44 words, sized for reasoning) and 247 by refusal
+(88, 44, then 22 for reasoning's refused samples turn).
+
+**E6 against `f4dae00`** (*run* once, by a script outside the repo: the suite's
+`answering_llm` replies, the five memos, the default config, one worker,
+`window(1_000_000)`, each `src/` on `PYTHONPATH`): 17 requests on each side, every
+`messages` and `response_format` byte-identical, the same answer. The labels differ in
+`rel=` only.
 
 ## 11 · Changes to `src/` by module, and the version
 
