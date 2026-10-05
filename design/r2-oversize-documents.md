@@ -20,6 +20,11 @@ merged as 0.2.0). Line numbers below are at `cfc17bc`.
 - 2026-10-05 · built (Implementer). §2.5 lists where the build departs from this design
   and what it found; §4's 401 row is corrected; §9 gains E3's diff against `cfc17bc` and
   E6's measured table, both run.
+- 2026-10-05 · refactored (Refactorer). The estimate counts with `runtime/llm.py`'s
+  `count_tokens`, which reasoning's parse cap also uses (§5.2). The window lookup is
+  silenced by `runtime/llm.py`'s `quiet_litellm`, which the stop-parameter lookup also
+  uses (§2.5 item 9). `Splits` checks its margin with the snapshot's own
+  `settings.check_cap`, so its message is the snapshot's (§5.1, §6.6, §8). §10 follows.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, and every place this design
 decides something the spec left open or departs from it. §4 is R2.1. §5 is the new module
@@ -199,11 +204,12 @@ Three rules shape R2.2:
    litellm does not recognise (`my-router-alias`), `get_model_info` prints litellm's
    "Provider List" banner to stdout, twice per lookup, unless
    `litellm.suppress_debug_info` is set. 0.2.0 never asked litellm about the model
-   string, and printed nothing. `_max_input_tokens` now sets `suppress_debug_info` and
-   the `LiteLLM` logger's level around its call and restores both, as
-   `runtime/codeact.py`'s `_supports_stop_parameter` does. The window it returns is
-   unchanged, mapped or not. `test_looking_up_the_window_prints_nothing` pins it with the
-   suite's global setting turned off.
+   string, and printed nothing. `_max_input_tokens` now makes its call inside
+   `runtime/llm.py`'s `quiet_litellm`, which sets `suppress_debug_info` and the `LiteLLM`
+   logger's level and restores both; `runtime/codeact.py`'s `_supports_stop_parameter`
+   uses the same helper. The window it returns is unchanged, mapped or not.
+   `test_looking_up_the_window_prints_nothing` pins it with the suite's global setting
+   turned off.
 10. **Tests §8 did not name**: `test_a_text_of_one_character_cannot_be_halved`,
     `test_the_measured_stop_says_what_was_estimated_against_which_window` (§5.6's
     message, exactly) and `test_a_split_documents_notes_join_in_order_without_the_empty_ones`
@@ -267,8 +273,9 @@ One new module, `src/r3con/splitting.py`, owns everything R2.2 adds. It holds th
 halving rule, the window lookup and estimate, the loop that sends a document's parts and
 re-cuts them, the stop rule, and the record. The stages know none of it. Each stage
 gives the loop two things, `rest` (the text it sends beside the document) and `send`
-(how to send one part), and gets one result per part back. `runtime/llm.py` is untouched
-by R2.2.
+(how to send one part), and gets one result per part back. `runtime/llm.py` holds none of
+R2.2's logic; it lends the module two helpers, `count_tokens` (§5.2) and `quiet_litellm`
+(§2.5 item 9).
 
 ```python
 T = TypeVar("T")
@@ -312,9 +319,10 @@ of a stage run in parallel. Each document's cuts are touched only by its own wor
 the record and its file are written under a lock.
 
 - **`__init__`.** It copies `documents`. `margin_percent=None` reads
-  `settings.WINDOW_MARGIN_PERCENT` now. A value outside 0 to 99 raises
-  `ValueError(f"margin_percent must be from 0 to 99, got {value}.")`. Then it looks up the
-  window (§5.2) and computes `line = max_input_tokens * (100 - margin_percent) // 100`.
+  `settings.WINDOW_MARGIN_PERCENT` now. A margin that is not an integer from 0 to 99 is
+  refused by `settings.check_cap`, the snapshot's own check (§6.6), with the snapshot's
+  message, for example `WINDOW_MARGIN_PERCENT must be <= 99, got 100.`. Then it looks up
+  the window (§5.2) and computes `line = max_input_tokens * (100 - margin_percent) // 100`.
 - **`parts(doc)`** returns `documents[doc]` cut at its current cuts:
   `[text[a:b] for a, b in itertools.pairwise([0, *cuts, len(text)])]`, which is
   `[text]` until it is split. The parts never overlap and always rejoin to the document.
@@ -359,11 +367,11 @@ the record and its file are written under a lock.
   which is how the suite and CI run. Otherwise it downloads its map on import. A user's
   window can be newer than CI's.
 
-**The estimate** is a private `_count_tokens(text) -> int`, which is
+**The estimate** is `runtime/llm.py`'s `count_tokens(text) -> int`, which is
 `len(litellm.encode(text=text))`. With no `model`, `litellm.encode` always takes
-cl100k_base and never a Hugging Face tokenizer (*read*: `_select_tokenizer_helper`). It
-counts the same tokens as `stages/reasoning.py:112`. The request's estimate is
-`_count_tokens(rest) + _count_tokens(part)`. Per-message overhead and the response
+cl100k_base and never a Hugging Face tokenizer (*read*: `_select_tokenizer_helper`). The
+reasoning stage's parse cap counts with the same function. The request's estimate is
+`count_tokens(rest) + count_tokens(part)`. Per-message overhead and the response
 format's own encoding are left out: closeness is enough, and the margin absorbs them.
 
 **The shortcut (ruling 3).** `_utf8_size(text)` is `len(text.encode("utf-8"))`. Every
@@ -739,7 +747,8 @@ _CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 - `_FLOORS` gains `"window_margin_percent": 0`.
 - `settings_snapshot` gains the key `window_margin_percent`, last.
 - After the floor check, a value above its ceiling raises
-  `ValueError(f"{KEY} must be <= {ceiling}, got {value}.")`.
+  `ValueError(f"{KEY} must be <= {ceiling}, got {value}.")`. The per-cap check is
+  `check_cap(key, value)`, which `Splits` also calls for its margin (§5.1).
 - So the manifest's `settings` block records the margin with the caps. The CLI's exit 2
   covers a bad margin, as it does a bad cap.
 
@@ -832,7 +841,7 @@ fails at `cfc17bc`. "Guard" means it passes before and after.
 | File | Added | Changed |
 | --- | --- | --- |
 | `test_llm.py` | `test_every_call_asks_litellm_for_two_retries` (new: 10 today) · `test_a_request_refused_as_too_long_is_sent_three_times`, httpserver answering vLLM's 400, raises `ContextWindowExceededError`, `len(httpserver.log) == 3` (new: 11) · `test_a_refused_key_is_sent_three_times`, a 401 (new: 11) | `test_a_transient_server_error_is_retried` (500, 500, 200, 3 requests) stays, as E1's recovery guard |
-| `test_settings.py` | `test_a_margin_above_its_ceiling_is_refused` (100 gives `WINDOW_MARGIN_PERCENT must be <= 99, got 100.`) | the snapshot's key list ends with `window_margin_percent`; the floor table gains `("WINDOW_MARGIN_PERCENT", -1, 0)` |
+| `test_settings.py` | `test_a_margin_outside_0_to_99_is_refused_wherever_it_is_read` (-1 and 100, each refused with the snapshot's message by an explicit `Splits` margin, by the snapshot and by a `Splits` reading the setting) | the snapshot's key list ends with `window_margin_percent`; the floor table gains `("WINDOW_MARGIN_PERCENT", -1, 0)` |
 | `test_splitting.py` (new file) | see the list below | — |
 | `test_relevance.py` | render rows: `[["a", ""], "c"]` gives `### Document 1.1\na\n\n### Document 1.2\n(no relevant summary …)\n\n### Document 2\nc` · `test_a_refused_document_is_read_in_parts_and_keeps_one_note_per_part` · `test_a_parts_later_round_sees_the_other_documents_notes_but_never_its_own_parts` | — |
 | `test_parsing.py` | `test_a_refused_document_is_parsed_in_parts_and_every_record_keeps_its_index` (`source_docs` repeats the index, records in part order) · `test_parsing_starts_from_the_parts_it_is_given` (a pre-split `Splits`: kinds `parse-d0c0`, `parse-d0c1`, no whole request) | `test_progress_is_logged_per_document_at_info` stays as written (guard) |
@@ -858,7 +867,6 @@ parameter:
   at 0 gives 10,000.
 - `test_a_model_litellm_does_not_map_has_no_window_and_no_line`: rows `QWEN`,
   `"my-router-alias"`, `""`.
-- `test_a_margin_outside_0_to_99_is_refused`.
 - `test_a_document_that_fits_is_sent_whole_under_its_plain_kind`: kinds
   `["parse-d0"]`, no `splits.json`.
 - `test_a_refused_document_is_read_in_2_then_4_parts_in_order`: the sent kinds are
@@ -1073,13 +1081,14 @@ four ways that do not touch the assertion:
 
 | Module | Item |
 | --- | --- |
-| `settings.py` | R2.1 (`LLM_NUM_RETRIES = 2`, comment), R2.2 (`WINDOW_MARGIN_PERCENT`, `_FLOORS`, `_CEILINGS`, snapshot key) |
-| `runtime/llm.py` | R2.1 (the retry comment) |
-| `splitting.py` (new) | R2.2 (`Splits`, `halve`, `_max_input_tokens`, `_count_tokens`, `_utf8_size`, the stop, the record) |
+| `settings.py` | R2.1 (`LLM_NUM_RETRIES = 2`, comment), R2.2 (`WINDOW_MARGIN_PERCENT`, `_FLOORS`, `_CEILINGS`, snapshot key, `check_cap`) |
+| `runtime/llm.py` | R2.1 (the retry comment), R2.2 (`count_tokens`, `quiet_litellm`) |
+| `runtime/codeact.py` | R2.2 (`_supports_stop_parameter` uses `quiet_litellm`) |
+| `splitting.py` (new) | R2.2 (`Splits`, `halve`, `_max_input_tokens`, `_utf8_size`, the stop, the record) |
 | `stages/relevance.py` | R2.2 (`Snippet`, `join_parts`, `render_relevance`, `_system_prompt`, `surface_relevance(splits=)`, docstring) |
 | `stages/structuring/schema.py` | R2.2 (type) |
 | `stages/structuring/parsing.py` | R2.2 (`parse_documents(splits=)`, `_system_prompt`, types, docstrings, log) |
-| `stages/reasoning.py` | R2.2 (type, `read_in_parts`, variables comment) |
+| `stages/reasoning.py` | R2.2 (type, `read_in_parts`, variables comment, `count_tokens`) |
 | `prompts/reasoning/v2.yaml` (new) | R2.2 |
 | `configs/default.yaml` | R2.2 (`reasoning: v2`) |
 | `pipeline.py` | R2.2 (one `Splits` per run, `Answer.relevant_context`, docstring) |
