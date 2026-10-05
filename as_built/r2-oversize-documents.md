@@ -226,7 +226,9 @@ The suite at the head: 393 passed, 10 deselected (the live test and E6) [run].
 - **The stdout banner.** `conftest.py` sets `litellm.suppress_debug_info = True` for the
   whole suite. Now pinned by `test_looking_up_the_window_prints_nothing`, which turns it
   off.
-- **A server failing 3 times.** Only "two 500s then a 200 recovers" is pinned.
+- **A server failing 3 times.** Only "two 500s then a 200 recovers" was pinned. Now
+  `test_a_server_failing_three_times_in_a_row_fails_the_call` pins R2.1's trade: three
+  500s then a 200 fails after 3 requests [run].
 - **E4's relevance count, by refusal.** In
   `test_a_later_stage_splits_further_without_renumbering`,
   `assert len(…) == 12 if measured else 13` parsed as `assert (len(…) == 12) if measured

@@ -62,6 +62,17 @@ def ask_vllm(httpserver):
     )
 
 
+def fails_then_answers(httpserver, *, failures: int) -> None:
+    """Script the local server to answer ``failures`` 500s, then a 200 saying OK."""
+    error = {"error": {"message": "scripted 500", "type": "server_error"}}
+    message = {"role": "assistant", "content": "OK"}
+    answer = {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
+    for status, body in [(500, error)] * failures + [(200, answer)]:
+        httpserver.expect_ordered_request("/v1/chat/completions").respond_with_json(
+            body, status=status
+        )
+
+
 def sent_schema(llm, schema: type[BaseModel]) -> dict:
     llm.replies("{}")
     litellm_chat_completion_full(
@@ -177,17 +188,16 @@ def test_without_a_completion_the_request_goes_to_litellm(llm, monkeypatch):
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_a_transient_server_error_is_retried(httpserver):
-    error = {"error": {"message": "scripted 500", "type": "server_error"}}
-    message = {"role": "assistant", "content": "OK"}
-    for status, body in [
-        (500, error),
-        (500, error),
-        (200, {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}),
-    ]:
-        httpserver.expect_ordered_request("/v1/chat/completions").respond_with_json(
-            body, status=status
-        )
+    fails_then_answers(httpserver, failures=2)
     assert ask_vllm(httpserver) == "OK"
+    assert len(httpserver.log) == 3
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_server_failing_three_times_in_a_row_fails_the_call(httpserver):
+    fails_then_answers(httpserver, failures=3)
+    with pytest.raises(litellm.InternalServerError, match="scripted 500"):
+        ask_vllm(httpserver)
     assert len(httpserver.log) == 3
 
 
