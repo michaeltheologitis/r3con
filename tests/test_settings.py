@@ -20,6 +20,7 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
         "llm_num_retries",
         "llm_empty_content_retries",
         "reasoning_parse_max_toks",
+        "window_margin_percent",
     ]
 
 
@@ -33,11 +34,19 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
         ("LLM_NUM_RETRIES", -1, 0),
         ("LLM_EMPTY_CONTENT_RETRIES", -1, 0),
         ("REASONING_PARSE_MAX_TOKS", -1, 0),
+        ("WINDOW_MARGIN_PERCENT", -1, 0),
     ],
 )
 def test_a_cap_below_its_floor_is_refused(monkeypatch, name, value, floor):
     monkeypatch.setattr(settings, name, value)
     with pytest.raises(ValueError, match=f"^{name} must be >= {floor}, got {value}.$"):
+        settings_snapshot()
+
+
+def test_a_margin_above_its_ceiling_is_refused(monkeypatch):
+    monkeypatch.setattr(settings, "WINDOW_MARGIN_PERCENT", 100)
+    message = "WINDOW_MARGIN_PERCENT must be <= 99, got 100."
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         settings_snapshot()
 
 
