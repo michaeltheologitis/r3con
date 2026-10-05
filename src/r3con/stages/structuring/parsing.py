@@ -13,10 +13,11 @@ document read in parts), all documents in parallel (bounded by
 - The **user message** is the document being parsed, or one part of it.
 
 Each document (or part) yields one populated ``Parse``; the parses merge into one
-(list fields concatenated in document order, a document's parts in order). Every merged record is tagged
-with its **source-document index** (``ParseResult.source_docs``), which the
-reasoning stage stamps onto each record as ``"document": N`` (the id-injection) so
-the model can name the document a fact came from.
+(list fields concatenated in document order, a document's parts in order). Every
+merged record is tagged with its **source-document index**
+(``ParseResult.source_docs``), which the reasoning stage stamps onto each record as
+``"document": N`` (the id-injection) so the model can name the document a fact came
+from.
 
 This module also owns :func:`check_schema`, stage 2's schema validator. It lives
 here, with the code that *uses* a schema rather than with the code that proposes
@@ -349,7 +350,7 @@ def parse_documents(
     read with the cross-document context even though the calls are independent.
 
     The parts come from ``splits`` (built over ``documents``; ``None`` builds one), so
-    parsing starts from the parts relevance left and may cut them further; it never
+    parsing starts from any parts it already holds and may cut them further; it never
     renumbers. The parses merge into one (list fields concatenated in document order, a
     document's parts in order), and each merged record is tagged with its
     source-document index in :attr:`ParseResult.source_docs`, a part's records with its

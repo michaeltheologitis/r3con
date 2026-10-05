@@ -3,8 +3,8 @@
 A stage sends each document whole, as the user message of one call. When that request
 does not fit the model's input window, the document is cut in 2 at the break nearest its
 middle, then every part in 2 again, and so on, until every part's request fits. The parts
-never overlap and always rejoin to the document, and the caller's numbering never moves:
-only the relevant context's headings say ``Document N.1``, ``N.2``.
+never overlap and always rejoin to the document, and a part keeps its document's index,
+so the caller's numbering never moves.
 
 Two things say a request does not fit:
 
@@ -49,8 +49,9 @@ class Splits:
     map does not know the model. With a ``task_logger``, every split and stop is
     written to ``splits.json`` in the run folder as it happens.
 
-    The documents of a stage are read in parallel: each document's cuts are touched
-    only by its own worker, and the record and its file are written under a lock.
+    Different documents may be read at once, from different threads, but one document
+    by one thread at a time: a document's cuts are not locked, and the record and its
+    file are written under a lock.
     """
 
     max_input_tokens: int | None

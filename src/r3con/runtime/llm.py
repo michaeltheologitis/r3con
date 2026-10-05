@@ -246,7 +246,7 @@ def count_tokens(text: str) -> int:
 
 @contextlib.contextmanager
 def quiet_litellm() -> Iterator[None]:
-    """Keep litellm from printing for the length of the block, then restore its settings.
+    """Keep litellm from printing during the block, then restore its settings.
 
     Asked about a model string it cannot place with a provider (a Router alias),
     litellm prints its provider list to stdout. The block sets
