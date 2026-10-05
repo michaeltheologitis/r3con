@@ -4,11 +4,8 @@ after the package is installed."""
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path

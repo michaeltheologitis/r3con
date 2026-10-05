@@ -12,13 +12,10 @@ that it never leaks into the provider request as an argument.
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from r3con.config import RunConfig
 from r3con.runtime.llm import (
