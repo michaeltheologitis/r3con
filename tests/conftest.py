@@ -25,6 +25,7 @@ _completion = litellm.completion
 
 Stage = Literal["relevance", "schema", "parsing", "reasoning"]
 Request = dict[str, Any]
+MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 Reply = str | BaseException | Callable[[Request], str]
 
 R3CON_VARIABLES = (
@@ -165,6 +166,70 @@ def too_long(limit: int, size: int, model: str) -> litellm.ContextWindowExceeded
     )
 
 
+def grow_registry(chars: int, at: float = 0.6) -> str:
+    """The contractor registry memo grown to about ``chars`` characters by filler
+    paragraphs, with its heading first and its code lines and footer at fraction
+    ``at``. The filler names no contractor and counts nothing."""
+    heading, body = (MEMOS / "04_contractor_registry.txt").read_text().split("\n\n", 1)
+    room = chars - len(heading) - len(body)
+    before = _filler(0, round(room * at))
+    after = _filler(len(before), room - _size(before))
+    return _PARAGRAPH.join([heading, *before, body.strip(), *after])
+
+
+def _filler(start: int, chars: int) -> list[str]:
+    """Paragraphs of procurement and insurance boilerplate, each tagged uniquely from
+    ``start`` on, about ``chars`` characters with their breaks."""
+    paragraphs: list[str] = []
+    while _size(paragraphs) < chars:
+        i = start + len(paragraphs)
+        tag = "".join(chr(ord("a") + int(digit)) for digit in str(i))
+        paragraphs.append(_BOILERPLATE[i % len(_BOILERPLATE)].format(tag=tag))
+    return paragraphs
+
+
+def _size(paragraphs: list[str]) -> int:
+    return sum(len(paragraph) + len(_PARAGRAPH) for paragraph in paragraphs)
+
+
+_PARAGRAPH = "\n\n"
+_BOILERPLATE = (
+    (
+        "Procurement note, {tag}. Purchase orders above the delegated limit need a second "
+        "signature from the regional office before a contractor is engaged. Quotations are "
+        "kept on file for the period the finance policy sets, and a contractor that "
+        "declines to quote is recorded as such rather than left out."
+    ),
+    (
+        "Insurance note, {tag}. Each approved contractor holds public liability and "
+        "employer's liability cover at the levels the framework agreement sets. "
+        "Certificates are renewed every year and checked by the compliance team; a lapsed "
+        "certificate suspends new work orders until a current one arrives."
+    ),
+    (
+        "Onboarding note, {tag}. A new contractor completes the site induction, the "
+        "permit-to-work briefing and the lone-working assessment before a first visit. "
+        "Induction records are held by the site office and are not reproduced in this "
+        "extract."
+    ),
+    (
+        "Payment note, {tag}. Invoices are matched against the work order and the "
+        "completion sheet signed on site. A disputed line is held, not rejected, and the "
+        "contractor is told in writing which line is held and why."
+    ),
+    (
+        "Review note, {tag}. The facilities board reviews this registry every quarter. "
+        "Changes to scope, rates or contact details take effect from the first day of the "
+        "following month and are sent to every site manager."
+    ),
+    (
+        "Records note, {tag}. This extract leaves out rates, bank details and named "
+        "contacts, which are held in the procurement system. Requests for the full record "
+        "go to the facilities administrator."
+    ),
+)
+
+
 def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
@@ -199,6 +264,11 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
         return model
 
     return register
+
+
+@pytest.fixture
+def grown_registry() -> Callable[..., str]:
+    return grow_registry
 
 
 @pytest.fixture
