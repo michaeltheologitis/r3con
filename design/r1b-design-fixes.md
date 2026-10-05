@@ -12,6 +12,8 @@ with `main` merged in at `623d21b` (PR #13: default model `openai/gpt-6-luna`, l
 **Revisions**
 
 - 2026-10-05 · first version.
+- 2026-10-05 · as built by the Implementer: the Conductor's two rulings (§3.1 items 3
+  and 4), and what the build found (§3.3). §4.4, §7, §13 and §18 follow them.
 
 **Reading it.** §1 to §3 cover what R1b changes and where the design departs from the
 spec; that is the Gate B read. §4 to §12 take one item each: why it is needed, the
@@ -93,6 +95,17 @@ one of the four overrides that R1.10 makes keyword-only.
    'stop' is not supported with this model." (the Conductor, asked directly). A model
    newer than the installed litellm's map gets the same answer: litellm 1.104 reports
    `stop` as supported for `openai/unknown-xyz` (*run*). §12.
+3. **A cap below its floor is refused before the run folder exists.** This design let
+   `run()` and the CLI leave an empty run folder for a refused cap (§4.4 as first
+   written). The Conductor ruled that it is refused before the folder is created, as
+   R1.12's missing prompt is. `run()` and the CLI call `settings_snapshot()` after
+   loading the config and before creating their `TaskLogger`; the CLI prints
+   `r3con: <message>` and exits 2. Only a caller that builds its own `TaskLogger` has
+   made a folder by then.
+4. **A config file that still sets `seed:` is told where the seed went.** It is refused
+   by R1.10's unknown-field rule, and the message adds that `seed` was removed in
+   r3con 0.2.0 and goes in `params`, with the file's own value:
+   `` `seed` was removed in r3con 0.2.0; to send one, put it in `params` (params: {seed: 42}). ``
 
 ### 3.2 From the spec, in the design
 
@@ -160,6 +173,36 @@ one of the four overrides that R1.10 makes keyword-only.
     r3con-evaluation not calling it. At `2159d83` it does not depend on r3context at
     all: it vendors its own copy of the pipeline under `evals/r3con/pipeline/` (*read*:
     its `pyproject.toml`, and no `import r3con` anywhere).
+
+### 3.3 From the build
+
+1. **`_refuses_stop` takes a `BadRequestError`, and the loop catches that class.**
+   §12.3 shows `_refuses_stop(error: Exception)` with an `isinstance` check. The loop
+   catches `litellm.exceptions.BadRequestError` instead and passes it in, so the check
+   is the regex alone. pyright refuses `litellm.BadRequestError` (litellm does not
+   re-export it), so the import is from `litellm.exceptions`.
+2. **`reasoning.py` imports tiktoken at module level.** The import sat inside the
+   guarded function because the old `except Exception` also covered a missing tiktoken.
+   tiktoken is a declared dependency, so only `get_encoding` stays inside the narrowed
+   `except (OSError, ValueError)`.
+3. **Three tests §6.4 and §10.3 call new pass at `623d21b`, as guards.**
+   `test_an_empty_structured_reply_is_rerolled_with_the_same_request`: a direct call
+   without a seed never carried one; the change is pinned by
+   `test_a_seed_the_caller_sends_is_resent_unchanged_on_a_reroll` (`[5, 6, 7]` at
+   `623d21b`). `test_without_a_logger_a_failure_carries_no_note`: nothing added notes
+   at `623d21b`. The CLI's "partial artifacts printed once" assertion: the CLI printed
+   its own line once; the test fails at `623d21b` on its other new assertion, that
+   `relevance/error.txt` exists.
+4. **The tests the rulings add.** `test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists`
+   (`test_r3con.py`), `test_doc_workers_below_one_exits_2_before_a_run_folder_exists`
+   (`test_cli.py`) and the `seed` row of
+   `test_a_config_field_r3con_does_not_read_is_refused`, which matches the 0.2.0
+   message. Also added: `test_an_explicit_turn_cap_below_its_floor_is_refused`
+   (`test_settings.py`), and a third row of
+   `test_a_refusal_that_is_not_about_stop_is_raised` for a 400 that contains the word
+   stop without quotes.
+5. **Notebook cell 5 was run alone.** Its code reads `MODEL`, which cell 1 defines, so
+   it ran with `MODEL` bound to cell 1's literal and no other cell executed.
 
 ## 4 · R1.7 · Settings honoured
 
@@ -266,10 +309,11 @@ message, which is now accurate: "Override via settings.X".
 3. With a logger, `write_manifest(..., settings=caps)`.
 4. The four stages, each given its cap from the table in §4.3.
 
-Steps 1 and 2 raise before anything is sent or written. The caller's `TaskLogger` has
-already created the run folder by then, so with the CLI or `run()` a refused cap leaves
-an empty folder. That is acceptable for a refused run. R1.12's config check runs before
-that folder exists.
+Steps 1 and 2 raise before anything is sent or written. A caller's own `TaskLogger`
+has already created its run folder by then. `run()` and the CLI create theirs only
+after their own `settings_snapshot()` call, which follows `load_config` and its R1.12
+check, so through them a refused cap or prompt leaves no folder (§3.1 item 3); the CLI
+prints `r3con: <message>` and exits 2.
 
 `write_manifest` gains one keyword:
 
@@ -570,7 +614,8 @@ def load_config(
   field(s) r3con does not read: {unknown}. A config sets {sorted(_CONFIG_FIELDS)}.")`,
   with `_CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})`.
   This catches `seed: 42` from a 0.1 config and a misspelt `relevence_rounds:` (§3.2
-  item 5).
+  item 5). When `seed` is among them, the message adds that it was removed in 0.2.0
+  and goes in `params` (§3.1 item 4).
 - **`RunConfig` refuses fields it does not have**, through
   `model_config = ConfigDict(extra="forbid")`. So `RunConfig(..., seed=42)` raises
   pydantic's `ValidationError`, a `ValueError`. `load_config` builds it from named
@@ -945,7 +990,8 @@ What 0.2.0 breaks, for whoever writes the release note:
 
 - **Seed (R1.13):** `run(seed=)`, `load_config(seed=)`, `r3con run --seed`,
   `RunConfig(seed=)` and `RunConfig.seed`, `StageRun(seed=)`, and a config file with
-  `seed:`. Each now raises. Pass `params={"seed": N}` instead. Run labels lose `seed=42`,
+  `seed:`, whose message says where the seed goes. Each now raises. Pass
+  `params={"seed": N}` instead. Run labels lose `seed=42`,
   so a 0.1 label and a 0.2 label never match.
 - **Settings (R1.7):** `from r3con.settings import settings` raises. Use
   `from r3con import settings` or `import r3con` and `r3con.settings`.
@@ -1091,5 +1137,5 @@ Outside `src/`: `pyproject.toml` (version 0.2.0), `uv.lock`, `examples/options.i
 - **`_refuses_stop` misses a provider that words its refusal without quotes.** That run
   fails as today, with the provider's error in `reasoning/error.txt` (R1.9). The fix is
   one regex.
-- **An empty run folder** after a refused cap through the CLI or `run()` (§4.4). It is
-  cosmetic, and the error says what to change.
+- **An empty run folder** after a refused cap, only for a caller that builds its own
+  `TaskLogger` (§4.4). It is cosmetic, and the error says what to change.
