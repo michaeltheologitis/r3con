@@ -11,6 +11,12 @@ merged as 0.2.0). Line numbers below are at `cfc17bc`.
 **Revisions**
 
 - 2026-10-05 · first version.
+- 2026-10-05 · the Conductor's three rulings (§2.4). With a known window, the run stops
+  only when the rest alone is over the line (§5.4). The stop note names no task ID
+  (§5.6). A request under the line in UTF-8 bytes is not counted (§5.2). §1, §2.1
+  item 5, §2.3, §7, §8, §9 and §11 follow them. Stop trusting the first version's three
+  stop forms and its "names TASK-36". The prototype, re-run with the rulings, passes E2 to
+  E5 and the new tests of §8 at 1.101 and 1.104.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, and every place this design
 decides something the spec left open or departs from it. §4 is R2.1. §5 is the new module
@@ -36,7 +42,7 @@ The PR split leaves `design/` out of the stack.
 | Item | The change | What a user sees | What breaks | Model-facing text |
 | --- | --- | --- | --- | --- |
 | R2.1 | `settings.LLM_NUM_RETRIES` goes from 10 to 2. litellm keeps its own retries. | A refused request (400, 401, context window) is sent 3 times, not 11. A server that fails 3 times in a row now fails the call; it used to get 10 retries. | nothing in the API | none |
-| R2.2 | A new module, `r3con/splitting.py`. Before a relevance or parse call, a document whose request is estimated over 85% of the model's mapped window is cut in 2, then 4, … at paragraph breaks. Any document the provider refuses with `ContextWindowExceededError` is cut the same way. Parts are numbered N.1, N.2, … in the summaries only. | A document too long for the model is read in parts instead of failing the run. `splits.json` in the run folder says how. When the relevant context itself fills the window, the run stops with a note naming the document and TASK-36. | nothing in the API. A document estimated between 85% and 100% of a mapped window, which was sent whole before, is now read in 2 parts. `RelevantContext.snippets` entries can be lists for a document read in parts. | `prompts/reasoning/v2.yaml`: v1 plus one sentence, shown only when a summary is a part. `configs/default.yaml` pins it, so the default label reads `reason=v2`. |
+| R2.2 | A new module, `r3con/splitting.py`. Before a relevance or parse call, a document whose request is estimated over 85% of the model's mapped window is cut in 2, then 4, … at paragraph breaks. Any document the provider refuses with `ContextWindowExceededError` is cut the same way. Parts are numbered N.1, N.2, … in the summaries only. | A document too long for the model is read in parts instead of failing the run. `splits.json` in the run folder says how. When the relevant context itself fills the window, the run stops with a note naming the document and saying so. | nothing in the API. A document estimated between 85% and 100% of a mapped window, which was sent whole before, is now read in 2 parts. `RelevantContext.snippets` entries can be lists for a document read in parts. | `prompts/reasoning/v2.yaml`: v1 plus one sentence, shown only when a summary is a part. `configs/default.yaml` pins it, so the default label reads `reason=v2`. |
 
 Three rules shape R2.2:
 
@@ -70,10 +76,12 @@ Three rules shape R2.2:
    document's entry in `relevance/result.json` is the list of its part notes, and an
    unsplit run's file is unchanged.
 5. **The stop threshold.** It is measured in tokens, by the same counter as the estimate,
-   in three forms (§5.4, step 4). The spec's form, a refused part shorter than the rest of
-   its request, applies to a refusal. The amendment's measured form, the rest alone over
-   the line, applies before sending. A third form is needed so that measuring always
-   ends: a part over the line that is already shorter than the rest also stops.
+   and depends on whether the window is known (§5.4). With a known window, the run stops
+   only when the rest alone is over the line, the amendment's measured form. With an
+   unknown window, it stops when a refused part is shorter than the rest, the spec's
+   form. In both, a part of one character that still does not fit stops the run (the
+   cut floor). That is how the loop bounds itself. This is the Conductor's ruling 1
+   (§2.4); the first version had a third form.
 6. **Does r3con's retry loop wrap a caller's `completion=`?** The question is moot: the
    2026-10-04 amendment removed r3con's own loop. `num_retries=2` reaches whatever
    `completion` is, as `num_retries=10` does today. A Router gets it as a keyword.
@@ -92,7 +100,8 @@ Three rules shape R2.2:
 
 1. **The stop rule counts tokens, not characters.** The spec's mock-up compares
    characters. Tokens are what the window is made of, and the counter is already
-   needed. The rule is unchanged: a part shorter than everything sent with it.
+   needed. The rule is unchanged where it applies, with an unknown window (ruling 1): a
+   refused part shorter than everything sent with it.
 2. **A sentence longer than half the part can be cut inside, not only one longer than
    the whole part.** This follows from the middle-half window (§2.1 item 1). A split
    that kept every sentence whole could land 1% from one end, and halving would then no
@@ -125,14 +134,31 @@ Three rules shape R2.2:
    Raising the floor is not R2's call.
 2. **The approved stop rule can stop a run that more parts would have saved.** Take a
    window of 10,000 tokens, a rest of 6,000 and a refused part of 5,000. The part is
-   shorter than the rest, so the run stops, yet a 2,500-token half would have fit. The
-   rule fires only when the rest is more than half the window, which is where R3 begins.
-   I kept it as approved.
-3. **The stop note names TASK-36 in a message every user reads.** E5's null requires it.
-   When R3 ships, the note should name what to do instead of a task ID.
+   shorter than the rest, so the run stops, yet a 2,500-token half would have fit. With a
+   known window, ruling 1 removed this rule (§2.4). With an unknown window, it stays as
+   approved, because nothing else bounds the refused requests there.
+3. **The stop note named TASK-36 in a message every user reads.** Ruling 2 removed it.
 4. **`ollama/*` is mapped (`ollama/llama3`: 8,192 tokens), but Ollama truncates instead
    of refusing.** Measuring now splits such a document before Ollama would have
    truncated it silently. That is better than today, and still out of R2's scope.
+
+### 2.4 Conductor rulings (2026-10-05, under Michael's waiver)
+
+1. **With a known window, the run stops only on the measured form**: the rest alone is
+   over the line. When the rest is under the line, halving always ends, so a part
+   shorter than the rest, or over the line, is cut again rather than stopping the run.
+   The first version's form (c) and its use of the spec's rule with a known window would
+   only stop runs that more splits would save (§2.3 item 2). With an unknown window, the
+   spec's rule stays as approved: a refused part shorter than the rest stops. The loop
+   bounds itself by halving down to the cut floor (§5.4). E5 keeps both forms.
+2. **No internal task ID in user-facing text.** r3con is a public library. The stop note
+   names the document and says that the relevant context has outgrown the model's
+   window, with no "TASK-36" (§5.6). E5 asserts that wording.
+3. **The counting shortcut is adopted.** Every cl100k token is at least one byte, so a
+   text's tokens are at most `len(text.encode("utf-8"))`. A request whose rest and part
+   together are at most the line in UTF-8 bytes is under the line without calling
+   `litellm.encode` (§5.2). Characters are not a bound, because one CJK character can be
+   several tokens. Tests pin both sides (§8).
 
 ## 3 · Order of work
 
@@ -290,6 +316,16 @@ counts the same tokens as `stages/reasoning.py:112`. The request's estimate is
 `_count_tokens(rest) + _count_tokens(part)`. Per-message overhead and the response
 format's own encoding are left out: closeness is enough, and the margin absorbs them.
 
+**The shortcut (ruling 3).** `_utf8_size(text)` is `len(text.encode("utf-8"))`. Every
+cl100k token is at least one byte (*run*: all 100,261 of them), so a text's tokens never
+exceed its UTF-8 size. Before counting, the loop compares sizes: a rest whose UTF-8 size is
+at most the line is not over it, and a part whose `_utf8_size(rest) + _utf8_size(part)`
+is at most the line fits. Either is decided without `litellm.encode`. Only a request
+larger than the line in bytes is counted. The rest is counted at most once per call. On
+`gpt-6-luna`'s 783,700-token line, nothing short of 783,700 bytes is ever counted.
+Characters would be wrong: Japanese contract text runs at 1.29 tokens per character, and
+emoji at 2 (*run*). A single character is at most 4 bytes, so at most 4 tokens.
+
 | Measured (*run*) | 1.101 | 1.104 |
 | --- | --- | --- |
 | loads with no network (`unshare -rn`) | yes | yes |
@@ -312,8 +348,8 @@ _BREAKS = (
 `halve(text)` returns the offset `c` at which `text` is cut into `text[:c]` and
 `text[c:]`:
 
-1. Let `n = len(text)`. If `n < 2`, raise `ValueError` (the stop rule ends splitting long
-   before this).
+1. Let `n = len(text)`. If `n < 2`, raise `ValueError`. The loop never calls it on one
+   character: that is the cut floor (§5.4).
 2. The window is `max(1, n // 4) <= c <= min(n - 1, n - n // 4)`, and the middle is
    `n // 2`.
 3. For each pattern in `_BREAKS`, in order, the candidates are the `m.end()` of its
@@ -338,49 +374,69 @@ in order, after splitting the document as far as it must. Its arguments:
   (0-based) once it is split. `runs._DOC_CHUNK_RE` already reads `c{k}` into
   `calls.json`'s `chunk` field.
 - `rest` is everything the stage sends beside a part: the rendered system prompt, plus
-  the response schema for a parse. It is never empty. With an empty `rest`, nothing is
-  shorter than it, so a part refused down to one character would reach `halve`'s
-  `ValueError`.
+  the response schema for a parse.
 - `send(part, kind)` sends one part and returns its result. It raises
   `litellm.ContextWindowExceededError` when the provider refuses it.
 
-The loop:
+**Halving a level** halves every part of two characters or more and leaves a
+one-character part as it is (§5.3). **The cut floor**: a part of one character cannot be
+cut, so when such a part is over the line or refused, the run stops.
 
-1. **Measure (only when `line` is known).** Count the rest once per call. If the rest
-   alone is over the line, stop (form b below). Otherwise find the first part whose
-   `rest + part` is over the line. If that part is shorter than the rest, stop (form
-   c). Otherwise halve every part, record a split with cause `"estimate"`, and measure
-   again. Nothing has been sent yet.
-2. **Send.** Send the parts in order, through `send`.
-3. **On `ContextWindowExceededError` for part `k`,** count the part and the rest. If the
-   part is shorter than the rest, stop (form a). Otherwise halve every part and record a
-   split with cause `"refusal"`, the provider's message, and `discarded = k` (the
-   accepted parts of this level, now thrown away). Then go back to step 1, so the new
-   level is measured before it is sent.
-4. **The stop rule**, in three forms, in tokens:
-   - (a) a refused part is shorter than the rest (the spec's rule);
-   - (b) the rest alone is over the line (the amendment's measured form), checked
-     before any part is sent;
-   - (c) a part over the line is shorter than the rest. This is (a) predicted, and it is
-     what makes measuring end when the rest is just under the line.
+The loop, **with a known window** (`line` is not `None`), the measured mode:
 
-   A stop records a `"stop"` event, adds the note of §5.6 to the error, and raises it.
-   For (a) the error is the provider's own. For (b) and (c) it is one r3con builds.
-5. **When every part is accepted,** record `parts[call] = len(parts)` for a document
-   already in the record, and return the results.
+1. **Measure.** If the rest alone is over the line, stop: the measured form (ruling 1).
+   Otherwise find the first part whose request is over the line, using the shortcut of
+   §5.2 before counting. If there is none, go to step 2. If that part has one character,
+   stop at the cut floor. Otherwise halve the level, record a split with cause
+   `"estimate"`, and measure again. Nothing has been sent yet.
+2. **Send** the parts in order, through `send`.
+3. **On `ContextWindowExceededError` for part `k`**, a refusal the estimate did not
+   predict: if the part has one character, stop at the cut floor with the provider's
+   error. Otherwise halve the level, and record a split with cause `"refusal"`, the
+   provider's message, and `discarded = k` (the accepted parts of this level, now thrown
+   away). Then go back to step 1. There is no other stop with a known window: a part
+   shorter than the rest is cut again.
 
-Any other exception from `send` passes through untouched. It is never split.
+The loop, **with an unknown window**, the refusal mode:
 
-**Why it ends.** Every halving leaves each part at most ¾ of its parent (§5.3), while
-the rest stays the same. Within a bounded number of levels, either every part fits or
-one is shorter than the rest, which is a stop. The rest is never empty, because every
-stage's prompt has text.
+1. **Send** the parts in order, through `send`. Nothing is counted.
+2. **On `ContextWindowExceededError` for part `k`**, count the part and the rest. If the
+   part is shorter than the rest, stop: the spec's rule. If the part has one character,
+   stop at the cut floor. Otherwise halve the level, record a split with cause
+   `"refusal"` and `discarded = k`, and send again.
+
+In both modes:
+
+- **A stop** records a `"stop"` event, adds the note of §5.6 to the error, and raises
+  it. After a refusal, the error is the provider's own. Before sending, r3con builds one.
+- **When every part is accepted,** the loop records `parts[call] = len(parts)` for a
+  document already in the record, and returns the results.
+- **Any other exception** from `send` passes through untouched. It is never split.
+
+**How it bounds itself.** Every halving leaves each part at most ¾ of its parent (§5.3).
+So after at most ⌈log₄⁄₃ n⌉ levels every part of an `n`-character document has one
+character: 49 levels for a million characters.
+
+- **With a known window**, the rest is under the line once step 1 passes its first
+  check. A one-character part is at most 4 tokens, so every part fits by then, unless
+  the rest leaves less than 4 tokens of room. That case is the cut floor's stop.
+  Measuring sends nothing, so those levels cost only counting.
+- **A refusal with a known window** comes when the provider counts more than the
+  estimate. It moves the loop down one level, so a document meets at most one refusal
+  per level: at most 49 refusals, 3 requests each through litellm, for a million
+  characters, before the cut floor.
+- **With an unknown window**, the spec's rule stops the loop once a refused part is
+  shorter than the rest. Every stage's prompt is far longer than one character, so the
+  cut floor is not reached in practice.
 
 **What it costs.** A refusal through litellm is 3 requests (R2.1). A refused part at
 level K also discards the parts accepted before it at that level. They stay in
 `calls.json` (they were sent), and the event's `discarded` count says how many. A
 document read in K parts costs K calls per relevance round and K parse calls, one after
-another. Each of its K notes then rides in every later call's prompt.
+another. Each of its K notes then rides in every later call's prompt. With a known window
+and a rest close to the line, K can be large. Take a rest of 90,000 tokens under a
+100,000-token line and a 500,000-token document: that is 64 parts, each sent with the
+whole rest. Ruling 1 accepts that cost rather than stopping such a run.
 
 ### 5.5 `splits.json`
 
@@ -424,8 +480,9 @@ never splits or stops has no `splits.json`. *Prototype*, E2 by refusal:
 
 ### 5.6 The stop's error, the note, the logs
 
-**The error.** Form (a) re-raises the provider's `ContextWindowExceededError`. Forms (b)
-and (c) raise
+**The error.** A stop after a refusal re-raises the provider's
+`ContextWindowExceededError`. A stop before sending (the measured form, or the cut floor
+in step 1) raises
 `litellm.ContextWindowExceededError(message=…, model=model, llm_provider="r3con")`, with
 this message:
 
@@ -437,11 +494,18 @@ r3con estimated relevance-r2-d0 at 25,601 tokens, over the 3,400-token line (the
 the run-folder note after it, and the CLI and tracebacks print both:
 
 ```text
-r3con: reading documents[0] (Document 1) in more parts cannot help in relevance-r2-d0: the part is about 120 tokens and the prompt and notes sent with it about 20,359. The relevant context has outgrown the model's window; r3con does not shrink it yet (TASK-36).
+r3con: reading documents[0] (Document 1) in more parts cannot help in relevance-r2-d0: the part is about 120 tokens and the prompt and notes sent with it about 20,359. The relevant context has outgrown the model's window.
 ```
 
-For form (b), the clause after the colon is "the prompt and notes sent with it are about
-20,359 tokens, over the 3,400-token line by themselves".
+The clause after the colon depends on the stop:
+
+| Stop | Clause |
+| --- | --- |
+| the spec's rule (unknown window) | "the part is about 120 tokens and the prompt and notes sent with it about 20,359" |
+| the measured form | "the prompt and notes sent with it are about 20,359 tokens, over the 3,400-token line by themselves" |
+| the cut floor | "the part is one character, and the prompt and notes sent with it (about 3,398 tokens) leave it no room" |
+
+The note names no task ID and no internal plan (ruling 2).
 
 **Logs.** A split logs a WARNING on `r3con.splitting`. The CLI shows WARNING by default,
 and a library user gets it on stderr through logging's last-resort handler:
@@ -662,8 +726,9 @@ _CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 
 - **A server that fails 3 times in a row fails the call.** It used to get 10 retries.
 - **When the relevant context fills the window, the run stops** with
-  `litellm.ContextWindowExceededError` and a note naming the document and TASK-36. That
-  happens before sending when the window is known. The run folder keeps `splits.json`,
+  `litellm.ContextWindowExceededError` and a note naming the document and saying that
+  the relevant context has outgrown the model's window. That happens before sending
+  when the window is known. The run folder keeps `splits.json`,
   the stage's `calls.json` and `error.txt`.
 
 **Changes in every run**
@@ -671,8 +736,8 @@ _CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 - The default label reads `reason=v2`. A run that split nothing sends v1's reasoning text
   byte for byte.
 - The manifest's `settings` gain `window_margin_percent: 15`.
-- With a known window, each document call's request is counted. That costs about 50 ms
-  per million characters (§11).
+- With a known window, a document call is counted only when its request is larger than
+  the line in UTF-8 bytes, which on a large window means never (§5.2).
 
 **Breaks**
 
@@ -756,11 +821,34 @@ parameter:
   of the whole, and `"estimate"` events.
 - `test_a_refusal_splits_even_when_the_estimate_said_it_fits` (a large `window`):
   `"refusal"` event.
-- `test_splitting_stops_where_more_parts_cannot_help`, one row per form (a), (b), (c):
-  - the error is a `ContextWindowExceededError`, the provider's own for (a);
-  - its first note names `documents[0] (Document 1)` and `TASK-36`;
-  - for (b) and (c) nothing was sent;
+- `test_splitting_stops_where_more_parts_cannot_help`, one row per stop:
+  - the spec's rule (unknown window, a refused part shorter than the rest);
+  - the measured form (`window`, a rest alone over the line);
+  - the cut floor (unknown window, `rest="s"`, `send` refusing everything, document
+    `"abcd"`).
+
+  Each row asserts:
+  - the error is a `ContextWindowExceededError`, the provider's own after a refusal;
+  - its first note names `documents[0] (Document 1)`, says "the relevant context has
+    outgrown the model's window", and contains no `TASK-`;
+  - for the measured form, nothing was sent;
   - the record's last event is a `"stop"`.
+- `test_with_a_known_window_a_part_shorter_than_the_rest_is_cut_again` (ruling 1): a rest
+  at about 90% of the line and a document three times the room left. The loop splits by
+  estimate until every part fits, sends them all, and raises nothing.
+- `test_with_a_known_window_a_refused_part_shorter_than_the_rest_is_cut_again`
+  (ruling 1): `send` refuses parts over N characters, with N under the estimate's room.
+  The loop splits on the refusals and ends with every part accepted.
+- `test_a_request_under_the_line_in_bytes_is_not_counted` (ruling 3): `litellm.encode`
+  wrapped to record its calls (the outside world's boundary), a memo under
+  `window(1_000_000)`. No `encode` call, sent whole.
+- `test_a_request_over_the_line_in_bytes_is_counted`, with two rows:
+  - ASCII text whose UTF-8 size is over the line but whose tokens are under it.
+    `encode` is called, and the text is sent whole, with no split.
+  - Japanese text (`"契約書の第三条に基づき、当事者は誠実に協議する。" * k`, 1.29
+    tokens per character), sized so that the characters of rest and part are under the
+    line and their tokens over it. `encode` is called and the text is split by estimate,
+    which a character bound would have missed.
 - `test_another_error_passes_through_and_never_splits`: a `BadRequestError` from `send`.
 - `test_splits_json_is_written_as_each_split_happens`, with a `TaskLogger`: the file
   exists after a stop.
@@ -794,17 +882,20 @@ round 1 and 3,900 in round 2, and the parse prompt about 3,800.
   relevance's. It asserts `parts == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}`
   and the headings 4.1 and 4.2 only. The parse kinds in `structuring/parsing/calls.json`
   are `parse-d3c0` to `c3` (plus the other documents'), with no second relevance run,
-  and every registry record is stamped 4. A measured row needs, in tokens, with `R` the
-  registry: `rest_relevance + R/2 <= line < rest_parse + R/2`, `rest_parse + R/4 <= line`
-  and `R/2 > rest_parse` (else the stop rule fires). The Implementer sizes it with the
+  and every registry record is stamped 4. This refusal row also needs, in tokens, the
+  half the parser is refused larger than parsing's rest (the spec's rule). The prototype
+  had about 3,700 tokens against 1,500. A measured row needs, with `R` the registry,
+  `rest_relevance + R/2 <= line < rest_parse + R/2` and `rest_parse + R/4 <= line`. With
+  a known window, nothing else stops it (ruling 1). The Implementer sizes it with the
   same long notes.
 - **E5 · `test_splitting_stops_at_the_relevant_contexts_line`.** `QWEN`, 40 reports of
   about 400 characters, relevance notes of 1,000 characters, `refuses_over(20_000)`, and
   `R3CON_DOC_WORKERS=1`, so the order is fixed. It asserts:
-  - `ContextWindowExceededError`, with notes `[<R2's note naming documents[0] (Document 1) and TASK-36>, "r3con: partial artifacts in …"]`;
+  - `ContextWindowExceededError`, with notes `[<R2's note naming documents[0] (Document 1) and saying "the relevant context has outgrown the model's window">, "r3con: partial artifacts in …"]`, and no `TASK-` in either;
   - no request carries a part of document 0;
   - `splits.json` holds one `"stop"` event and no cuts.
-- **E5, measured.** `window(6_000)`: 40 requests (round 1 only). Round 2 is never sent.
+- **E5, measured.** `window(6_000)`: 40 requests (round 1 only). Round 2 is never sent,
+  and the note has the same wording, with the measured clause.
 
 ## 9 · Experiments and the live tier
 
@@ -814,7 +905,7 @@ round 1 and 3,900 in round 2, and the parse prompt about 3,800.
 | E2 | `test_pipeline.py`, by refusal and by estimate | §8 E2's assertions |
 | E3 | `test_pipeline.py` (v1 against v2), plus one diff against `cfc17bc` | any byte of any request's `messages` or `response_format` differs (`num_retries` aside) |
 | E4 | `test_pipeline.py` | relevance runs again; headings other than 4.1 and 4.2; parse kinds other than `parse-d3c0` to `c3`; a record not stamped 4 |
-| E5 | `test_pipeline.py`, both forms | a part shorter than its rest is cut again; the run ends in anything but `ContextWindowExceededError` with a note naming the document and TASK-36 |
+| E5 | `test_pipeline.py`, both forms | (unknown window) a refused part shorter than its rest is cut again; (known window) a round-2 request is sent; either run ends in anything but `ContextWindowExceededError` with a note naming the document and saying the relevant context has outgrown the model's window |
 | E6 | `test_experiments.py`, dispatched once | below |
 
 **E3 against `cfc17bc`.** The Implementer runs a script once with the suite's
@@ -882,7 +973,7 @@ four ways that do not touch the assertion:
 | --- | --- |
 | `settings.py` | R2.1 (`LLM_NUM_RETRIES = 2`, comment), R2.2 (`WINDOW_MARGIN_PERCENT`, `_FLOORS`, `_CEILINGS`, snapshot key) |
 | `runtime/llm.py` | R2.1 (the retry comment) |
-| `splitting.py` (new) | R2.2 (`Splits`, `halve`, `_max_input_tokens`, `_count_tokens`, the stop, the record) |
+| `splitting.py` (new) | R2.2 (`Splits`, `halve`, `_max_input_tokens`, `_count_tokens`, `_utf8_size`, the stop, the record) |
 | `stages/relevance.py` | R2.2 (`Snippet`, `join_parts`, `render_relevance`, `_system_prompt`, `surface_relevance(splits=)`, docstring) |
 | `stages/structuring/schema.py` | R2.2 (type) |
 | `stages/structuring/parsing.py` | R2.2 (`parse_documents(splits=)`, `_system_prompt`, types, docstrings, log) |
@@ -924,11 +1015,19 @@ would be 0.3.0: new behaviour, a setting and a prompt version, and nothing remov
   shows it as a `"refusal"` event on a model with a known window. CJK text is
   over-counted (2.35 cl100k tokens per character on random CJK), so it splits early,
   which is safe.
-- **Counting costs O(N²) characters per relevance round on a mapped model.** Round 2's
-  rest holds every other note. At 1,000 documents with 500-character notes, that is
-  about 25 s of CPU per round, at a size where R3's line is near anyway. If it shows, a
-  request whose UTF-8 size is at most the line can skip counting, because every cl100k
-  token is at least one byte (*run*: all 100,261 of them). I left that out: write less until it is needed.
+- **Counting near the line.** The shortcut leaves only requests larger than the line in
+  UTF-8 bytes to count. When round 2's rest (every other note) is itself near the line,
+  every call is counted, which is O(N²) characters per round. At 1,000 documents with
+  500-character notes, that is about 25 s of CPU per round, at a size where the
+  relevant context is near the window anyway.
+- **Many parts near the line (ruling 1).** With a known window and a rest just under
+  the line, a document is cut into as many parts as the remaining room needs, each a
+  call carrying the whole rest (§5.4). `splits.json`'s `parts` shows it.
+- **Refusals with a known window** mean the provider counts more than the map's window
+  less the margin allows. Each such refusal moves the loop down a level, so there is at
+  most one per level, at 3 requests each. That is at most 49 for a million characters,
+  before the cut floor. `splits.json` shows them as `"refusal"` events on a known
+  window.
 - **A `CUSTOM_TIKTOKEN_CACHE_DIR` that is empty and offline** makes `litellm.encode`
   raise at the first document call on a mapped model, as it already does in reasoning's
   parse guard (R1b removed that fallback). It is not handled.
