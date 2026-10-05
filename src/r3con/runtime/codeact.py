@@ -111,8 +111,8 @@ def _supports_stop_parameter(model: str) -> bool:
     """Whether ``model`` accepts the ``stop`` parameter, per litellm's param map.
 
     Delegating to litellm (rather than hardcoding a model list) keeps this
-    current as new models ship. An unrecognized model string makes litellm log
-    a provider-list warning and return an empty list; we silence that and treat
+    current as new models ship. An unrecognized model string makes litellm print
+    a provider-list message and return ``None``; we silence that and treat
     'unknown' as unsupported — then skip ``stop`` and rely on the client-side
     truncation in :func:`_clip_assistant_response` (the correctness-bearing
     path) instead.
@@ -124,8 +124,6 @@ def _supports_stop_parameter(model: str) -> bool:
     logger.setLevel(logging.CRITICAL)
     try:
         params = litellm.get_supported_openai_params(model=model) or []
-    except Exception:  # noqa: BLE001
-        return False
     finally:
         litellm.suppress_debug_info = prev_suppress
         logger.setLevel(prev_level)

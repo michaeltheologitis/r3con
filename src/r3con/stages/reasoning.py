@@ -21,9 +21,11 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+import tiktoken
 from pydantic import BaseModel
 
 from r3con import settings
+from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -32,6 +34,8 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.stages.relevance import render_relevance
+
+_log = get_logger("reasoning")
 
 
 class _LazyStr:
@@ -122,22 +126,26 @@ def tag_source_documents(
 
 
 @functools.lru_cache(maxsize=1)
-def _parse_token_encoding():
-    """tiktoken encoding for the parse-size guard, cached. Returns ``None`` if tiktoken
-    is unavailable — it downloads its vocabulary from the network on first use, and a
-    size guard must never be what sinks a run that has already paid for stages 1 and 2."""
+def _parse_token_encoding() -> tiktoken.Encoding | None:
+    """tiktoken encoding for the parse-size guard, cached. ``None``, with a warning, if
+    its vocabulary cannot be loaded — tiktoken downloads it on first use, and a size
+    guard must never be what sinks a run that has already paid for stages 1 and 2."""
     try:
-        import tiktoken
-
         return tiktoken.get_encoding("cl100k_base")
-    except Exception:  # noqa: BLE001 — no tiktoken, or no network on first use
+    except (OSError, ValueError) as error:
+        _log.warning(
+            "tiktoken cannot load cl100k_base (%s); estimating the parse's size at 4 "
+            "characters per token",
+            error,
+        )
         return None
 
 
 def _count_tokens(text: str) -> int:
     """Approximate token count of ``text``. It is only a size guard, so the exact
-    tokenizer doesn't matter; without tiktoken, fall back to the standard ~4-chars-per-
-    token estimate. ``disallowed_special=()`` so arbitrary text never errors."""
+    tokenizer doesn't matter; without its vocabulary, fall back to the standard
+    ~4-chars-per-token estimate. ``disallowed_special=()`` so arbitrary text never
+    errors."""
     encoding = _parse_token_encoding()
     if encoding is None:
         return len(text) // 4
