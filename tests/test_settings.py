@@ -44,26 +44,18 @@ def test_a_cap_below_its_floor_is_refused(monkeypatch, name, value, floor):
         settings_snapshot()
 
 
-@pytest.mark.parametrize(
-    ("value", "message"),
-    [
-        (-1, "WINDOW_MARGIN_PERCENT must be >= 0, got -1."),
-        (100, "WINDOW_MARGIN_PERCENT must be <= 99, got 100."),
-    ],
-    ids=["below-0", "above-99"],
-)
+@pytest.mark.parametrize(("value", "bound"), [(-1, ">= 0"), (100, "<= 99")])
 def test_a_margin_outside_0_to_99_is_refused_wherever_it_is_read(
-    monkeypatch, value, message
+    monkeypatch, value, bound
 ):
-    def refused():
-        return pytest.raises(ValueError, match=f"^{re.escape(message)}$")
-
-    with refused():
+    message = f"WINDOW_MARGIN_PERCENT must be {bound}, got {value}."
+    refused = f"^{re.escape(message)}$"
+    with pytest.raises(ValueError, match=refused):
         Splits([], model="openai/gpt-6-luna", margin_percent=value)
     monkeypatch.setattr(settings, "WINDOW_MARGIN_PERCENT", value)
-    with refused():
+    with pytest.raises(ValueError, match=refused):
         settings_snapshot()
-    with refused():
+    with pytest.raises(ValueError, match=refused):
         Splits([], model="openai/gpt-6-luna")
 
 
