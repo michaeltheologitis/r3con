@@ -10,6 +10,10 @@ on:
         description: Also run the live tier (bills OPENAI_API_KEY)
         type: boolean
         default: true
+      experiment:
+        description: Also run the experiments, once (bills OPENAI_API_KEY)
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       live:
@@ -104,10 +108,39 @@ jobs:
       - name: The live tier
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: uv run --locked pytest -m live -rA --basetemp="$RUNNER_TEMP/live"
+        run: uv run --locked pytest -m "live and not experiment" -rA --basetemp="$RUNNER_TEMP/live"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: live-run
           path: ${{ runner.temp }}/live
+          if-no-files-found: warn
+
+  experiment:
+    if: inputs.experiment
+    needs: [checks, test, lowest, wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Require the key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY is not set; the experiments must run, not skip."
+            exit 1
+          fi
+      - name: The experiments
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: uv run --locked pytest -m experiment -rA --basetemp="$RUNNER_TEMP/experiment"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: experiment-run
+          path: ${{ runner.temp }}/experiment
           if-no-files-found: warn
