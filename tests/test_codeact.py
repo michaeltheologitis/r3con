@@ -8,7 +8,7 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 SYSTEM = "You are a CodeAct agent. The parse is bound as the variable `parse`."
 ITEMS = {"items": [{"n": 1}, {"n": 2}, {"n": 3}]}
 CANNOT_DETERMINE = (

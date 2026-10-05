@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_cmd.add_argument(
         "--model",
         default=None,
-        help="Override the config's model, e.g. openai/gpt-5.6-luna.",
+        help="Override the config's model, e.g. openai/gpt-6-luna.",
     )
     run_cmd.add_argument(
         "--seed", type=int, default=None, help="Override the config's seed."

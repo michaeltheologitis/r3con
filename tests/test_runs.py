@@ -18,7 +18,7 @@ from r3con.runs import (
 )
 from r3con.settings import settings
 
-MODEL = "openai/gpt-5.6-luna"
+MODEL = "openai/gpt-6-luna"
 
 
 class Sample(BaseModel):
@@ -115,7 +115,7 @@ def test_a_stage_run_flushes_its_calls_and_its_transcript_into_its_folder(logger
     )
     transcript = flushed_transcript(run)
     assert transcript["stage"] == "structuring/schema"
-    assert transcript["model"] == "gpt-5.6-luna"
+    assert transcript["model"] == "gpt-6-luna"
     assert transcript["seed"] == 0
     assert [m["content"] for m in transcript["messages"]] == ["s", "u", "a"]
     assert (run.dir / "calls.json").is_file()
@@ -232,9 +232,9 @@ def test_steps_added_from_many_threads_are_all_kept_and_numbered_once(logger):
 @pytest.mark.parametrize(
     ("model", "name"),
     [
-        ("openai/gpt-5.6-luna", "gpt-5.6-luna"),
+        ("openai/gpt-6-luna", "gpt-6-luna"),
         ("hosted_vllm/Qwen/Qwen3-8B", "Qwen3-8B"),
-        ("gpt-5.6-luna", "gpt-5.6-luna"),
+        ("gpt-6-luna", "gpt-6-luna"),
         (None, None),
     ],
 )

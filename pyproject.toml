@@ -23,9 +23,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "litellm>=1.83,<2",
+    "litellm>=1.101,<2",
     "jinja2>=3.1.0",
-    "pydantic>=2.0",
+    "pydantic>=2.11",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
     "tiktoken>=0.7.0",

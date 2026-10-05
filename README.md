@@ -34,19 +34,19 @@ Pass a directory, glob, or list of files:
 
 ```bash
 r3con run "Which supplier missed the most delivery windows?" ./reports \
-  --model openai/gpt-5.6-luna
+  --model openai/gpt-6-luna
 ```
 
 `--model` accepts any [LiteLLM](https://docs.litellm.ai/docs/providers) model string, for
 example:
 
 ```
-anthropic/claude-sonnet-5
+anthropic/claude-sonnet-5-5
 gemini/gemini-3.8-flash
 hosted_vllm/Qwen/Qwen3.5-35B-A3B
 ```
 
-The default is `openai/gpt-5.6-luna`.
+The default is `openai/gpt-6-luna`.
 
 Directories are searched recursively. You can also use glob patterns or pass files directly:
 

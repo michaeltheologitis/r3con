@@ -371,7 +371,8 @@ def run_codeact(
     last_nonempty_observation: str | None = None
 
     # Send `</code>`/`<observation>` as a server-side `stop` only when the
-    # model accepts it (reasoning models like the gpt-5 family reject it).
+    # model accepts it (reasoning models like the gpt-5 and gpt-6 families
+    # reject it).
     # Either way `_clip_assistant_response` truncates client-side below — that
     # is the correctness-bearing step; the server-side `stop` is just a
     # token/latency optimization. A caller-supplied `stop` (via llm_kwargs)
