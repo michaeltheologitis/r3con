@@ -1,496 +1,295 @@
-"""Tests for `r3con.stages.structuring.parsing.check_schema` and
-`r3con.stages.structuring.parsing.parse_one_document` retry behavior.
+import json
+import logging
+import textwrap
+import time
 
-Run with:  uv run python tests/test_parsing.py
-"""
+import litellm
+import pytest
 
-from __future__ import annotations
-
-import contextlib
-from collections.abc import Iterator
-from typing import Any
-
-from pydantic import BaseModel, ValidationError
-
-from r3con.stages.structuring import parsing as parsing_mod
 from r3con.stages.structuring.parsing import (
     SchemaError,
     check_schema,
+    parse_documents,
     parse_one_document,
 )
 
+MODEL = "openai/gpt-5.6-luna"
+SCHEMA = """from pydantic import BaseModel
 
-def test_simple_schema() -> None:
-    code = """
-from pydantic import BaseModel, Field
+
+class Row(BaseModel):
+    who: str
+
 
 class Parse(BaseModel):
-    answers: list[str] = Field(description="the answers")
+    rows: list[Row]
 """
-    cls = check_schema(code)
-    assert issubclass(cls, BaseModel)
-    assert cls.__name__ == "Parse"
-    instance = cls(answers=["42"])
-    assert instance.answers == ["42"]
+Parse = check_schema(SCHEMA)
+DOCS = [
+    "Alpha memo about whales.",
+    "Beta memo about ships.",
+    "Gamma memo about harbors.",
+]
+NOTES = ["Doc A is about whales.", "Doc B is about ships."]
+RELEVANCE_HEADING = "## Task-conditioned document summaries"
 
 
-def test_nested_schema_resolves_forward_types() -> None:
-    """Regression: classes from exec'd code couldn't resolve nested types by module lookup."""
-    code = """
-from pydantic import BaseModel, Field
-
-class DocumentMove(BaseModel):
-    time: int = Field(description="Sentence number")
-    new_location: str
-
-class Parse(BaseModel):
-    document_moves: list[DocumentMove]
-"""
-    cls = check_schema(code)
-    schema = cls.model_json_schema()
-    assert "document_moves" in schema["properties"]
-    assert "DocumentMove" in schema.get("$defs", {})
+def rows_named_after_the_document(request) -> str:
+    """Two rows per document, each naming it, so a merge's order shows."""
+    document = request["messages"][1]["content"].splitlines()[0]
+    # Later documents answer first, so the merge cannot rely on arrival order.
+    time.sleep(0.02 * (len(DOCS) - DOCS.index(document)))
+    return json.dumps({"rows": [{"who": f"{document}#a"}, {"who": f"{document}#b"}]})
 
 
-def test_schema_with_literal() -> None:
-    """Schemas commonly use `Literal[...]` for entities derivable from the question."""
-    code = """
-from typing import Literal
-from pydantic import BaseModel, Field
-
-class CakeMove(BaseModel):
-    time: int
-    actor: Literal["Maya", "Carlos"]
-
-class Parse(BaseModel):
-    cake_moves: list[CakeMove]
-"""
-    cls = check_schema(code)
-    instance = cls(cake_moves=[{"time": 1, "actor": "Maya"}])
-    assert instance.cake_moves[0].actor == "Maya"
-
-
-def test_schema_without_pydantic_import_still_loads() -> None:
-    """Leniency: a schema that forgets `from pydantic import BaseModel, Field`
-    still loads — the exec namespace is pre-seeded with those names."""
-    code = """
-class Item(BaseModel):
-    name: str = Field(description="a name")
-
-class Parse(BaseModel):
-    items: list[Item]
-"""
-    cls = check_schema(code)
-    assert issubclass(cls, BaseModel)
-    assert cls.__name__ == "Parse"
-    assert "items" in cls.model_json_schema()["properties"]
-
-
-def test_schema_without_typing_imports_still_loads() -> None:
-    """Leniency: Optional / Literal / List used without importing typing."""
-    code = """
-class Item(BaseModel):
-    kind: Literal["a", "b"]
-    notes: Optional[str] = None
-    tags: List[str] = Field(default_factory=list)
-
-class Parse(BaseModel):
-    items: list[Item]
-"""
-    cls = check_schema(code)
-    assert issubclass(cls, BaseModel)
-    inst = cls(items=[{"kind": "a"}])
-    assert (
-        inst.items[0].kind == "a"
-        and inst.items[0].notes is None
-        and inst.items[0].tags == []
+def parse_one(llm, **kwargs):
+    return parse_one_document(
+        document="memo",
+        schema_code=SCHEMA,
+        parse_cls=Parse,
+        task="Who?",
+        prompt_version="v1",
+        model=MODEL,
+        completion=llm,
+        **kwargs,
     )
 
 
-def test_explicit_imports_still_override_the_seed() -> None:
-    """A schema that *does* import re-binds the same names — no breakage."""
-    code = """
-from pydantic import BaseModel, Field
-from typing import Optional
-
-class Item(BaseModel):
-    note: Optional[str] = Field(default=None, description="n")
-
-class Parse(BaseModel):
-    items: list[Item]
-"""
-    cls = check_schema(code)
-    assert issubclass(cls, BaseModel)
-
-
-def test_leniency_does_not_mask_real_nameerror() -> None:
-    """The seed only covers known names — a genuinely undefined name still fails."""
-    code = """
-class Parse(BaseModel):
-    x: SomeUndefinedTypeXYZ
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        # Still surfaces as SchemaError (the seed doesn't cover this name) — the
-        # exact message varies (Pydantic defers it to model_json_schema()).
-        assert "fail" in str(e).lower() or "undefined" in str(e).lower()
-    else:
-        raise AssertionError("expected SchemaError for an undefined name")
-
-
-def test_syntax_error() -> None:
-    try:
-        check_schema("class Parse(:")
-    except SchemaError as e:
-        assert "failed to execute" in str(e)
-        assert "SyntaxError" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_runtime_error_in_code() -> None:
-    """Code that execs but raises (e.g., bad import) should surface as SchemaError."""
-    try:
-        check_schema("import this_module_does_not_exist_xyz")
-    except SchemaError as e:
-        assert "failed to execute" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_missing_parse_class() -> None:
-    code = """
-from pydantic import BaseModel
-
-class Foo(BaseModel):
-    x: int
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "did not define" in str(e)
-        assert "Parse" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_parse_not_basemodel() -> None:
-    try:
-        check_schema("class Parse: pass")
-    except SchemaError as e:
-        assert "pydantic.BaseModel" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_parse_is_not_a_class() -> None:
-    """`Parse` bound to something that isn't a class (e.g., a value) should fail cleanly."""
-    try:
-        check_schema("Parse = 42")
-    except SchemaError as e:
-        assert "pydantic.BaseModel" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_invalid_pydantic_field_type() -> None:
-    """A `Parse` class whose JSON schema can't be generated should fail at the schema step."""
-    code = """
-from pydantic import BaseModel
-
-class Weird:
-    pass
-
-class Parse(BaseModel):
-    model_config = {"arbitrary_types_allowed": True}
-    x: Weird
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "model_json_schema" in str(e)
-    else:
-        raise AssertionError("expected SchemaError")
-
-
-def test_rejects_list_of_untyped_dict() -> None:
-    """`list[dict]` produces an object without `properties` — OpenAI strict mode crashes
-    on this at call time; check_schema should reject it upfront so the schema proposal retries.
-    """
-    code = """
-from pydantic import BaseModel
-
-class Parse(BaseModel):
-    parse: list[dict]
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "untyped object" in str(e)
-        assert "BaseModel" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for list[dict]")
-
-
-def test_rejects_untyped_dict_field() -> None:
-    code = """
-from pydantic import BaseModel
-
-class Parse(BaseModel):
-    bag: dict
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "untyped object" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for dict field")
-
-
-def test_rejects_dict_str_any() -> None:
-    code = """
-from typing import Any
-from pydantic import BaseModel
-
-class Parse(BaseModel):
-    bag: dict[str, Any]
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "untyped object" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for dict[str, Any]")
-
-
-def test_rejects_value_typed_dict() -> None:
-    """`dict[str, str]` also has no `properties` block — strict mode rejects it too."""
-    code = """
-from pydantic import BaseModel
-
-class Parse(BaseModel):
-    bag: dict[str, str]
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "untyped object" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for dict[str, str]")
-
-
-def test_rejects_scalar_top_level_field() -> None:
-    """Every top-level `Parse` field must be a `list[...]` — a scalar would collapse to a
-    single document at merge time. check_schema rejects it so the schema proposal retries."""
-    code = """
-from pydantic import BaseModel
-
-class Parse(BaseModel):
-    answer: str
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "list[...]" in str(e) and "answer" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for a scalar top-level field")
-
-
-def test_rejects_single_object_top_level_field() -> None:
-    """A single nested object at top level (the `3cc3047c` collapse shape: `Parse.document:
-    <Model>`) is rejected too — each document's object would overwrite the previous at merge."""
-    code = """
-from pydantic import BaseModel
-
-class DocInfo(BaseModel):
-    title: str
-
-class Parse(BaseModel):
-    document: DocInfo
-"""
-    try:
-        check_schema(code)
-    except SchemaError as e:
-        assert "list[...]" in str(e) and "document" in str(e)
-    else:
-        raise AssertionError("expected SchemaError for a single-object top-level field")
-
-
-# -------------------- parse_one_document retry tests --------------------
-
-
-class _Item(BaseModel):
-    text: str
-
-
-class _Parse(BaseModel):
-    items: list[_Item]
-
-
-_SCHEMA_CODE = "from pydantic import BaseModel\nclass Item(BaseModel):\n    text: str\nclass Parse(BaseModel):\n    items: list[Item]\n"
-
-
-def _make_validation_error() -> ValidationError:
-    """Synthesize a real ValidationError so the retry path sees the right exception type."""
-    try:
-        _Parse.model_validate({"items": "not-a-list"})  # wrong shape
-    except ValidationError as e:
-        return e
-    raise RuntimeError("expected ValidationError")
-
-
-@contextlib.contextmanager
-def _patched_llm(responses: list[Any]) -> Iterator[list[dict[str, Any]]]:
-    """Replace litellm_chat_completion with a scripted fake.
-
-    Each call pops the next response from ``responses``. If the response is
-    an exception instance, it's raised; otherwise it's returned. Yields the
-    list of call-kwargs seen (in call order) for assertion.
-    """
-    original = parsing_mod.litellm_chat_completion
-    calls: list[dict[str, Any]] = []
-    queue = list(responses)
-
-    def fake(**kwargs: Any) -> Any:
-        calls.append(kwargs)
-        if not queue:
-            raise AssertionError("LLM called more times than the script provided")
-        nxt = queue.pop(0)
-        if isinstance(nxt, BaseException):
-            raise nxt
-        return nxt
-
-    parsing_mod.litellm_chat_completion = fake  # type: ignore[assignment]
-    try:
-        yield calls
-    finally:
-        parsing_mod.litellm_chat_completion = original  # type: ignore[assignment]
-
-
-def _run_extract(
-    responses: list[Any],
-    *,
-    max_attempts: int = 3,
-) -> tuple[BaseModel | None, list[dict[str, Any]], BaseException | None]:
-    """Run parse_one_document with the scripted LLM. Returns (result, calls, raised_or_None)."""
-    with _patched_llm(responses) as calls:
-        try:
-            result = parse_one_document(
-                document="some text",
-                schema_code=_SCHEMA_CODE,
-                parse_cls=_Parse,
-                task="q",
-                model="m",
-                prompt_version="v1",
-                max_attempts=max_attempts,
-            )
-            return result, calls, None
-        except (ValueError, RuntimeError) as e:
-            return None, calls, e
-
-
-def test_parse_one_document_succeeds_on_first_try_no_retry() -> None:
-    """When the first attempt validates, no retry happens."""
-    good = _Parse(items=[_Item(text="a")])
-    result, calls, raised = _run_extract([good])
-    assert raised is None
-    assert result is good
-    assert len(calls) == 1
-    assert calls[0]["kind"] == "llm_call"
-    # Initial user prompt is just the document, no retry-feedback wrapper.
-    assert calls[0]["user_prompt"] == "some text"
-
-
-def test_parse_one_document_retries_on_validation_error_and_recovers() -> None:
-    """First call raises ValidationError; second call succeeds; total 2 calls."""
-    bad = _make_validation_error()
-    good = _Parse(items=[_Item(text="ok")])
-    result, calls, raised = _run_extract([bad, good])
-    assert raised is None
-    assert result is good
-    assert len(calls) == 2
-    # Second call's kind is a retry-tagged variant of the original.
-    assert calls[1]["kind"].startswith("llm_call-retry")
-    # Second call's user_prompt includes the original document + the error.
-    assert "some text" in calls[1]["user_prompt"]
-    assert "ValidationError" in calls[1]["user_prompt"]
-
-
-def test_parse_one_document_raises_schema_error_after_max_attempts() -> None:
-    """After max_attempts ValidationErrors, raises SchemaError naming the last error."""
-    err = _make_validation_error()
-    result, calls, raised = _run_extract([err, err, err], max_attempts=3)
-    assert result is None
-    assert isinstance(raised, SchemaError)
-    assert "exhausted 3 attempts" in str(raised)
-    assert "ValidationError" in str(raised)
-    assert len(calls) == 3
-
-
-def test_parse_one_document_zero_attempts_rejected() -> None:
-    """max_attempts must be >= 1."""
-    _result, calls, raised = _run_extract([], max_attempts=0)
-    assert isinstance(raised, ValueError)
-    assert "max_attempts" in str(raised)
-    assert len(calls) == 0
-
-
-def test_parse_one_document_non_validation_error_does_not_retry() -> None:
-    """An unrelated exception (e.g. RuntimeError) bubbles up immediately — no retry."""
-    err = RuntimeError("API outage")
-    _result, calls, raised = _run_extract([err], max_attempts=3)
-    assert isinstance(raised, RuntimeError)
-    assert "API outage" in str(raised)
-    # Only one call — we don't retry on non-ValidationError exceptions.
-    assert len(calls) == 1
-
-
-def test_typed_basemodel_subclass_passes() -> None:
-    """A schema with a typed nested BaseModel must still pass (no regression)."""
-    code = """
-from pydantic import BaseModel
-
-class Event(BaseModel):
-    name: str
-    when: str
-
-class Parse(BaseModel):
-    events: list[Event]
-"""
-    cls = check_schema(code)
-    assert cls.__name__ == "Parse"
-
-
-if __name__ == "__main__":
-    tests = [
-        test_simple_schema,
-        test_nested_schema_resolves_forward_types,
-        test_schema_with_literal,
-        test_schema_without_pydantic_import_still_loads,
-        test_schema_without_typing_imports_still_loads,
-        test_explicit_imports_still_override_the_seed,
-        test_leniency_does_not_mask_real_nameerror,
-        test_syntax_error,
-        test_runtime_error_in_code,
-        test_missing_parse_class,
-        test_parse_not_basemodel,
-        test_parse_is_not_a_class,
-        test_invalid_pydantic_field_type,
-        test_rejects_list_of_untyped_dict,
-        test_rejects_untyped_dict_field,
-        test_rejects_dict_str_any,
-        test_rejects_value_typed_dict,
-        test_rejects_scalar_top_level_field,
-        test_rejects_single_object_top_level_field,
-        test_typed_basemodel_subclass_passes,
-        test_parse_one_document_succeeds_on_first_try_no_retry,
-        test_parse_one_document_retries_on_validation_error_and_recovers,
-        test_parse_one_document_raises_schema_error_after_max_attempts,
-        test_parse_one_document_zero_attempts_rejected,
-        test_parse_one_document_non_validation_error_does_not_retry,
+def parse_all(llm, documents, **kwargs):
+    return parse_documents(
+        documents=documents,
+        schema_code=SCHEMA,
+        parse_cls=Parse,
+        task="Who is mentioned?",
+        prompt_version="v1",
+        model=MODEL,
+        completion=llm,
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "record"),
+    [
+        (
+            """
+            from pydantic import BaseModel, Field
+
+            class Parse(BaseModel):
+                answers: list[str] = Field(description="the answers")
+            """,
+            {"answers": ["42"]},
+        ),
+        (
+            """
+            from pydantic import BaseModel, Field
+
+            class DocumentMove(BaseModel):
+                time: int = Field(description="Sentence number")
+                new_location: str
+
+            class Parse(BaseModel):
+                document_moves: list[DocumentMove]
+            """,
+            {"document_moves": [{"time": 1, "new_location": "kitchen"}]},
+        ),
+        (
+            """
+            from typing import Literal
+            from pydantic import BaseModel
+
+            class CakeMove(BaseModel):
+                time: int
+                actor: Literal["Maya", "Carlos"]
+
+            class Parse(BaseModel):
+                cake_moves: list[CakeMove]
+            """,
+            {"cake_moves": [{"time": 1, "actor": "Maya"}]},
+        ),
+        (
+            """
+            class Item(BaseModel):
+                name: str = Field(description="a name")
+
+            class Parse(BaseModel):
+                items: list[Item]
+            """,
+            {"items": [{"name": "a"}]},
+        ),
+        (
+            """
+            class Item(BaseModel):
+                kind: Literal["a", "b"]
+                notes: Optional[str] = None
+                tags: List[str] = Field(default_factory=list)
+
+            class Parse(BaseModel):
+                items: list[Item]
+            """,
+            {"items": [{"kind": "a", "notes": None, "tags": []}]},
+        ),
+        (
+            """
+            from pydantic import BaseModel, Field
+            from typing import Optional
+
+            class Item(BaseModel):
+                note: Optional[str] = Field(default=None, description="n")
+
+            class Parse(BaseModel):
+                items: list[Item]
+            """,
+            {"items": [{"note": "n"}]},
+        ),
+    ],
+)
+def test_a_usable_schema_returns_its_parse_class(code, record):
+    parse_cls = check_schema(textwrap.dedent(code))
+    assert parse_cls.__name__ == "Parse"
+    assert parse_cls.model_validate(record).model_dump() == record
+
+
+@pytest.mark.parametrize(
+    ("code", "error"),
+    [
+        ("class Parse(BaseModel):\n    x: SomeUndefinedTypeXYZ", "failed"),
+        ("class Parse(:", "failed to execute: SyntaxError"),
+        ("import this_module_does_not_exist_xyz", "failed to execute"),
+        ("class Foo(BaseModel):\n    x: int", "did not define a class named `Parse`"),
+        ("class Parse: pass", "must be a pydantic.BaseModel subclass"),
+        ("Parse = 42", "must be a pydantic.BaseModel subclass"),
+        (
+            """
+            class Weird:
+                pass
+
+            class Parse(BaseModel):
+                model_config = {"arbitrary_types_allowed": True}
+                x: Weird
+            """,
+            r"`Parse.model_json_schema\(\)` failed",
+        ),
+        ("class Parse(BaseModel):\n    parse: list[dict]", "untyped object.*BaseModel"),
+        ("class Parse(BaseModel):\n    bag: dict", "untyped object"),
+        ("class Parse(BaseModel):\n    bag: dict[str, Any]", "untyped object"),
+        ("class Parse(BaseModel):\n    bag: dict[str, str]", "untyped object"),
+        (
+            "class Parse(BaseModel):\n    answer: str",
+            r"not declared as `list\[...\]`: answer",
+        ),
+        (
+            """
+            class DocInfo(BaseModel):
+                title: str
+
+            class Parse(BaseModel):
+                document: DocInfo
+            """,
+            r"not declared as `list\[...\]`: document",
+        ),
+    ],
+)
+def test_an_unusable_schema_is_refused_with_what_to_fix(code, error):
+    with pytest.raises(SchemaError, match=error):
+        check_schema(textwrap.dedent(code))
+
+
+def test_a_malformed_reply_is_retried_with_the_validator_error(llm):
+    parse = parse_one(
+        llm.replies('{"rows": [{"who": 7}]}', '{"rows": [{"who": "Halloran"}]}')
+    )
+    assert parse.rows[0].who == "Halloran"
+    assert "validation error" in llm.requests[1]["messages"][1]["content"]
+
+
+def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
+    parse = parse_one(llm.replies('{"rows": [{"who": "Halloran"}]}'))
+    assert parse == Parse(rows=[{"who": "Halloran"}])
+    assert [request["messages"][1]["content"] for request in llm.requests] == ["memo"]
+    assert llm.requests[0]["response_format"]["json_schema"]["name"] == "Parse"
+
+
+def test_a_document_that_never_validates_stops_after_max_attempts(llm):
+    llm.answers(parsing='{"rows": "not-a-list"}')
+    with pytest.raises(SchemaError, match="exhausted 3 attempts.*ValidationError"):
+        parse_one(llm, max_attempts=3)
+    assert len(llm.requests) == 3
+    assert llm.requests[2]["messages"][1]["content"].startswith("memo\n\n---\n\n")
+
+
+def test_max_attempts_below_one_is_refused_before_any_request(llm):
+    with pytest.raises(ValueError, match="max_attempts must be >= 1"):
+        parse_one(llm, max_attempts=0)
+    assert llm.requests == []
+
+
+def test_a_provider_error_is_not_retried(llm):
+    outage = litellm.APIConnectionError(
+        "API outage", llm_provider="openai", model=MODEL
+    )
+    with pytest.raises(litellm.APIConnectionError, match="API outage"):
+        parse_one(llm.replies(outage))
+    assert len(llm.requests) == 1
+
+
+def test_each_document_is_parsed_whole_in_a_request_of_its_own(llm):
+    llm.answers(parsing=rows_named_after_the_document)
+    parse_all(llm, DOCS, workers=8)
+    sent = [
+        request["messages"][1]["content"] for request in llm.requests_for("parsing")
     ]
-    for t in tests:
-        t()
-        print(f"  PASS  {t.__name__}")
-    print(f"\nOK — {len(tests)} tests")
+    assert sorted(sent) == sorted(DOCS)
+
+
+@pytest.mark.parametrize(("snippets", "shown"), [(NOTES, True), (None, False)])
+def test_every_parsing_prompt_carries_the_task_and_every_documents_note(
+    llm, snippets, shown
+):
+    llm.answers(parsing=rows_named_after_the_document)
+    parse_all(llm, DOCS[:2], relevance_snippets=snippets, workers=2)
+    for request in llm.requests:
+        system = request["messages"][0]["content"]
+        assert "Who is mentioned?" in system
+        assert (RELEVANCE_HEADING in system) is shown
+        assert all((note in system) is shown for note in NOTES)
+
+
+def test_the_merge_keeps_document_order_and_each_records_source(llm):
+    llm.answers(parsing=rows_named_after_the_document)
+    result = parse_all(llm, DOCS, workers=8)
+    assert [row.who for row in result.parse.rows] == [
+        f"{document}#{part}" for document in DOCS for part in "ab"
+    ]
+    assert result.source_docs == {"rows": [0, 0, 1, 1, 2, 2]}
+
+
+def test_doc_ids_label_the_documents(llm):
+    llm.answers(parsing=rows_named_after_the_document)
+    result = parse_all(llm, DOCS[:2], doc_ids=["fileA", "fileB"])
+    assert result.doc_ids == ["fileA", "fileB"]
+    assert [result.doc_label(i) for i in (0, 1, 9)] == ["fileA", "fileB", "9"]
+
+
+def test_no_documents_parse_to_empty_lists_without_a_request(llm):
+    result = parse_all(llm, [])
+    assert result.parse == Parse(rows=[])
+    assert result.source_docs == {"rows": []}
+    assert llm.requests == []
+
+
+def test_one_documents_failure_is_raised_from_the_whole_parse(llm):
+    def fails_on_beta(request):
+        if request["messages"][1]["content"] == DOCS[1]:
+            raise RuntimeError("parse blew up")
+        return rows_named_after_the_document(request)
+
+    with pytest.raises(RuntimeError, match="parse blew up"):
+        parse_all(llm.answers(parsing=fails_on_beta), DOCS, workers=4)
+
+
+def test_progress_is_logged_per_document_at_info(llm, caplog):
+    caplog.set_level(logging.INFO, logger="r3con")
+    parse_all(llm.answers(parsing=rows_named_after_the_document), DOCS[:2], workers=1)
+    assert "parse doc 1/2" in caplog.text
+    assert "parse doc 2/2" in caplog.text
