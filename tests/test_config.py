@@ -10,7 +10,8 @@ FULL = {
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
-DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
+V1_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
+DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v2)"
 
 
 def test_the_default_config_loads_with_its_shipped_values():
@@ -18,7 +19,7 @@ def test_the_default_config_loads_with_its_shipped_values():
     assert config.name == "default"
     assert config.model == "openai/gpt-6-luna"
     assert (config.relevance_rounds, config.params) == (2, {})
-    assert config.prompts == PROMPTS
+    assert config.prompts == {**PROMPTS, "reasoning": "v2"}
     assert "seed" not in config.model_dump()
     assert config.label() == f"default[model=gpt-6-luna,rounds=2,{DEFAULT_PROMPTS}]"
 
@@ -59,13 +60,13 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     v9.parent.mkdir(parents=True)
     v9.write_text("instructions: |-\n  V9\n")
     assert load_config("exp").label() == (
-        f"exp[model=gpt-6-luna,rounds=3,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,rounds=3,{V1_PROMPTS}]"
     )
     assert load_config("exp", relevance_rounds=5).label() == (
-        f"exp[model=gpt-6-luna,rounds=5,{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,rounds=5,{V1_PROMPTS}]"
     )
     assert load_config("exp", params={"seed": 7}).label() == (
-        f"exp[model=gpt-6-luna,rounds=3,params={{seed=7}},{DEFAULT_PROMPTS}]"
+        f"exp[model=gpt-6-luna,rounds=3,params={{seed=7}},{V1_PROMPTS}]"
     )
     assert load_config("exp2").label() == (
         "exp2[model=gpt-6-luna,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
