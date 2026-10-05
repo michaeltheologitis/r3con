@@ -28,7 +28,7 @@ relevance snippets.
 
 from importlib.metadata import PackageNotFoundError, version
 
-from r3con import r3con
+from r3con import r3con, settings
 from r3con.config import RunConfig, load_config
 from r3con.pipeline import Answer, run_pipeline
 from r3con.prompts import load_prompt
@@ -36,7 +36,6 @@ from r3con.r3con import read_documents, run
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
 from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
-from r3con.settings import settings
 from r3con.stages.reasoning import reason
 from r3con.stages.relevance import (
     RelevantContext,

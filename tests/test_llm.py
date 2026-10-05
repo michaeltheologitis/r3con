@@ -3,8 +3,8 @@ import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from pydantic import BaseModel
 
+from r3con import settings
 from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
-from r3con.settings import settings
 
 MODEL = "openai/gpt-6-luna"
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import litellm
 import pytest
 
+from r3con import settings
 from r3con.cli import main
 from r3con.r3con import read_documents
 
@@ -118,6 +119,26 @@ def test_doc_workers_bounds_how_many_documents_are_read_at_once(answering, worke
     argv = ["--relevance-rounds", "1", "--doc-workers", str(workers)]
     assert r3con("run", "Who?", str(MEMOS), *argv) == 0
     assert answering.peak_in_flight == workers
+
+
+def test_doc_workers_below_one_exits_2_before_a_run_folder_exists(
+    scripted, tmp_path, capsys
+):
+    assert r3con("run", "Who?", str(MEMOS), "--doc-workers", "0") == 2
+    assert capsys.readouterr().err == "r3con: DOC_WORKERS must be >= 1, got 0.\n"
+    assert scripted.requests == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_cap_that_is_not_an_integer_exits_2_without_a_traceback(
+    scripted, tmp_path, capsys, monkeypatch
+):
+    monkeypatch.setattr(settings, "SCHEMA_MAX_ATTEMPTS", "3")
+    assert r3con("run", "Who?", str(MEMOS)) == 2
+    err = capsys.readouterr().err
+    assert err == "r3con: SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got '3'.\n"
+    assert scripted.requests == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_verbose_streams_stage_progress_to_stderr(answering, capsys):

@@ -6,15 +6,17 @@ import litellm
 import pytest
 import yaml
 
+from r3con import settings
 from r3con.config import PROMPT_STAGES, RunConfig
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
-from r3con.settings import settings
+from r3con.stages.structuring.parsing import SchemaError
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
+NEVER_COMMITS = "<code>\nprint(1)\n</code>"
 CONFIG = {
     "name": "test",
     "model": MODEL,
@@ -24,15 +26,23 @@ CONFIG = {
 }
 
 
-def answer(llm, task_logger=None, **fields):
-    """A whole run over DOCS on CONFIG with ``fields`` changed, ``llm`` answering."""
+def answer(
+    llm, task_logger=None, *, documents=DOCS, max_reasoning_turns=None, **fields
+):
+    """A whole run over ``documents`` on CONFIG with ``fields`` changed, ``llm``
+    answering."""
     return run_pipeline(
         task="Who?",
-        documents=DOCS,
+        documents=documents,
         config=RunConfig(**{**CONFIG, **fields}),
+        max_reasoning_turns=max_reasoning_turns,
         task_logger=task_logger,
         completion=llm,
     )
+
+
+def read_json(logger, name: str):
+    return json.loads((logger.dir / f"{name}.json").read_text())
 
 
 def notes_by_round():
@@ -169,3 +179,43 @@ def test_every_request_of_a_run_goes_through_the_callers_completion(
     assert len(answering_llm.requests) == 8
     assert {r["model"] for r in answering_llm.requests} == {QWEN}
     assert "completion" not in (logger.dir / "manifest.json").read_text()
+
+
+@pytest.mark.parametrize(
+    ("setting", "explicit"), [(2, None), (5, 2)], ids=["in-settings", "explicit"]
+)
+def test_a_turn_cap_bounds_the_run_and_is_recorded(
+    answering_llm, tmp_path, monkeypatch, setting, explicit
+):
+    monkeypatch.setattr(settings, "REASONING_MAX_TURNS", setting)
+    logger = TaskLogger("run", root=tmp_path)
+    answering_llm.answers(reasoning=NEVER_COMMITS)
+    answer(answering_llm, logger, max_reasoning_turns=explicit)
+    assert len(answering_llm.requests_for("reasoning")) == 3
+    assert read_json(logger, "reasoning/result")["n_turns"] == 2
+    assert read_json(logger, "manifest")["settings"]["reasoning_max_turns"] == 2
+
+
+@pytest.mark.parametrize(
+    ("cap", "stage", "reply"),
+    [
+        ("SCHEMA_MAX_ATTEMPTS", "schema", "class Foo(BaseModel):\n    x: int"),
+        ("PARSING_MAX_ATTEMPTS", "parsing", '{"rows": [{"who": 7}]}'),
+    ],
+)
+def test_an_attempt_cap_set_in_settings_bounds_its_stage(
+    answering_llm, monkeypatch, cap, stage, reply
+):
+    monkeypatch.setattr(settings, cap, 2)
+    with pytest.raises(SchemaError, match="exhausted 2 attempts"):
+        answer(answering_llm.answers(**{stage: reply}), documents=DOCS[:1])
+    assert len(answering_llm.requests_for(stage)) == 2
+
+
+def test_a_cap_below_its_floor_sends_and_writes_nothing(llm, tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "REASONING_MAX_TURNS", 0)
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(ValueError, match="REASONING_MAX_TURNS must be >= 1, got 0."):
+        answer(llm, logger)
+    assert llm.requests == []
+    assert not (logger.dir / "manifest.json").exists()

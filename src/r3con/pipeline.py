@@ -36,7 +36,7 @@ from r3con.config import RunConfig
 from r3con.logging_setup import get_logger
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
-from r3con.settings import settings
+from r3con.settings import settings_snapshot
 from r3con.stages import reasoning
 from r3con.stages.relevance import surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
@@ -93,7 +93,7 @@ def run_pipeline(
     task: str,
     documents: list[str],
     config: RunConfig,
-    max_reasoning_turns: int = settings.REASONING_MAX_TURNS,
+    max_reasoning_turns: int | None = None,
     reasoning_timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     task_logger: TaskLogger | None = None,
     api_base: str | None = None,
@@ -116,9 +116,14 @@ def run_pipeline(
     wrapper with the same ``(model, messages, **kwargs)`` shape.
 
 
+    Every runtime cap is read once, checked and recorded before the first request
+    (:func:`r3con.settings.settings_snapshot`); ``max_reasoning_turns`` replaces
+    ``settings.REASONING_MAX_TURNS`` when it is not ``None``.
+
     If ``task_logger`` is provided, each stage's artifacts are written immediately
     after that stage succeeds, so a later failure still leaves earlier artifacts.
     """
+    caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
     model = config.model
     rounds = config.relevance_rounds
     seed = config.seed
@@ -148,6 +153,7 @@ def run_pipeline(
             config=config,
             n_docs=len(documents),
             context_chars=sum(len(d) for d in documents),
+            settings=caps,
         )
 
     # --- Stage 1: surface relevance — the relevant context. ---
@@ -163,6 +169,7 @@ def run_pipeline(
         model=model,
         prompt_version=config.prompts["relevance"],
         rounds=rounds,
+        workers=caps["doc_workers"],
         run=relevance_run,
         **llm_kwargs,
     )
@@ -194,6 +201,7 @@ def run_pipeline(
         relevance_snippets=relevance_snippets,
         model=model,
         prompt_version=config.prompts["structuring/schema"],
+        max_attempts=caps["schema_max_attempts"],
         run=schema_run,
         **llm_kwargs,
     )
@@ -228,7 +236,9 @@ def run_pipeline(
         prompt_version=config.prompts["structuring/parsing"],
         relevance_snippets=relevance_snippets,
         model=model,
+        max_attempts=caps["parsing_max_attempts"],
         run=parsing_run,
+        workers=caps["doc_workers"],
         **llm_kwargs,
     )
     parsed = extraction.parse
@@ -256,7 +266,7 @@ def run_pipeline(
             relevance_snippets=relevance_snippets,
             model=model,
             prompt_version=config.prompts["reasoning"],
-            max_turns=max_reasoning_turns,
+            max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=reasoning_run,
             **llm_kwargs,

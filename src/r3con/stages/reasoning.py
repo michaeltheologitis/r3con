@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from r3con import settings
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -30,7 +31,6 @@ from r3con.runtime.codeact import (
     CodeActResult,
     run_codeact,
 )
-from r3con.settings import settings
 from r3con.stages.relevance import render_relevance
 
 
@@ -177,7 +177,7 @@ def reason(
     prompt_version: str,
     relevance_snippets: list[str] | None = None,
     source_docs: dict[str, list[int]] | None = None,
-    max_turns: int = settings.REASONING_MAX_TURNS,
+    max_turns: int | None = None,
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     additional_authorized_imports: list[str] | None = None,
     run: StageRun | None = None,

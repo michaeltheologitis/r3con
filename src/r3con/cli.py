@@ -21,7 +21,7 @@ from r3con.logging_setup import configure_logging, get_logger
 from r3con.pipeline import run_pipeline
 from r3con.r3con import read_documents
 from r3con.runs import TaskLogger, new_run_folder
-from r3con.settings import active_logs_dir
+from r3con.settings import active_logs_dir, settings_snapshot
 
 _log = get_logger("cli")
 
@@ -133,6 +133,11 @@ def _run(args: argparse.Namespace) -> int:
         seed=args.seed,
         relevance_rounds=args.relevance_rounds,
     )
+    try:
+        settings_snapshot()
+    except ValueError as e:
+        print(f"r3con: {e}", file=sys.stderr)
+        return 2
 
     task_logger = None
     if not args.no_artifacts:

@@ -16,11 +16,11 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
-from r3con.settings import settings
 from r3con.stages.relevance import render_relevance
 from r3con.stages.structuring.parsing import SchemaError, check_schema
 
@@ -140,7 +140,7 @@ def propose_schema(
     relevance_snippets: list[str] | None = None,
     model: str,
     prompt_version: str,
-    max_attempts: int = settings.SCHEMA_MAX_ATTEMPTS,
+    max_attempts: int | None = None,
     run: StageRun | None = None,
     **llm_kwargs: Any,
 ) -> ProposalResult:
@@ -148,8 +148,7 @@ def propose_schema(
 
     Calls the model up to ``max_attempts`` times; after each rejection,
     the prior attempt and the validator error are appended to the next
-    user prompt so the model can correct itself. Default comes from
-    ``settings.SCHEMA_MAX_ATTEMPTS``.
+    user prompt so the model can correct itself.
 
     Args:
         task: The task the schema must capture information for.
@@ -159,10 +158,8 @@ def propose_schema(
             actually surfaced, not the task's surface words alone. ``None``/empty
             → no relevance block (the model sees only the task).
         model: LiteLLM provider-prefixed model string (e.g. ``"openai/gpt-6-luna"``).
-        max_attempts: Cap on model calls. Defaults to
-            ``settings.SCHEMA_MAX_ATTEMPTS``; pass a smaller value
-            for a faster fail in tests, or a larger one if you expect
-            the model to need more retry cycles.
+        max_attempts: Cap on model calls; ``None`` reads
+            ``settings.SCHEMA_MAX_ATTEMPTS`` when the call runs.
         **llm_kwargs: Forwarded to :func:`litellm_chat_completion`.
 
     Returns:
@@ -174,6 +171,8 @@ def propose_schema(
             message references the last attempt's error.
         ValueError: if ``max_attempts`` is not positive.
     """
+    if max_attempts is None:
+        max_attempts = settings.SCHEMA_MAX_ATTEMPTS
     if max_attempts < 1:
         raise ValueError(
             f"max_attempts must be >= 1, got {max_attempts}. "

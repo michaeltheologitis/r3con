@@ -43,7 +43,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel, Field
 
-from r3con.settings import settings
+from r3con import settings
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PROMPT_STAGES: tuple[str, ...] = (

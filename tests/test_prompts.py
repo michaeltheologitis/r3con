@@ -1,8 +1,8 @@
 import pytest
 
+from r3con import settings
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
-from r3con.settings import settings
 
 # Enough to render any stage's template; Jinja ignores the names it does not use.
 CONTEXT = {

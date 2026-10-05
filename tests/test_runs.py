@@ -7,6 +7,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, Field
 
+from r3con import settings
 from r3con.config import PROMPT_STAGES, RunConfig
 from r3con.pipeline import run_pipeline
 from r3con.runs import (
@@ -16,7 +17,7 @@ from r3con.runs import (
     normalize_model_name,
     write_manifest,
 )
-from r3con.settings import settings
+from r3con.settings import settings_snapshot
 
 MODEL = "openai/gpt-6-luna"
 
@@ -259,6 +260,15 @@ def test_the_manifest_records_the_identity_and_the_installed_version(logger):
     assert recorded["prompts"] == dict.fromkeys(PROMPT_STAGES, "v1")
     assert manifest["settings"]["reasoning_max_turns"] == settings.REASONING_MAX_TURNS
     assert manifest["created"].startswith("20")
+
+
+def test_the_manifest_records_the_settings_it_is_given(logger):
+    caps = {**settings_snapshot(), "reasoning_max_turns": 3}
+    write_manifest(logger, task="q", config=config(), n_docs=1, settings=caps)
+    assert json.loads((logger.dir / "manifest.json").read_text())["settings"] == caps
+    write_manifest(logger, task="q", config=config(), n_docs=1)
+    recorded = json.loads((logger.dir / "manifest.json").read_text())["settings"]
+    assert recorded == settings_snapshot()
 
 
 def test_the_manifest_is_written_before_the_first_stage_fails(llm, logger):
