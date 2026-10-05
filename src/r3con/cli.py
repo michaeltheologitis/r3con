@@ -38,8 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Answer a question over a collection of documents.",
         description=(
             "Answer a question over a collection of documents. Sources may be "
-            "directories, globs, or individual files; each document must fit in the "
-            "model's context (there is no chunking)."
+            "directories, globs, or individual files; a document too long for the "
+            "model's context is read in parts."
         ),
     )
     run_cmd.add_argument("question", help="The question to answer.")

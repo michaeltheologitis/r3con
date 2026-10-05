@@ -9,13 +9,14 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    it is what every later stage reads.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
    from the task and the relevant context
-   (:mod:`r3con.stages.structuring.schema`), then **parse** every document, whole and
-   in parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
+   (:mod:`r3con.stages.structuring.schema`), then **parse** every document, in
+   parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context, in a multi-turn sandboxed Python loop.
 
-The document is the unit throughout: nothing is chunked, and the whole collection is
-never placed in one prompt.
+The document is the unit throughout: a document too long for the model's window is read
+in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
+prompt.
 
 With a ``task_logger``, each stage writes its artifacts into one flat run-folder as soon
 as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
@@ -246,7 +247,7 @@ def run_pipeline(
             ],
         }
 
-    # --- Stage 2b: structuring — parse every document, whole, in parallel. ---
+    # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     with _recorded_stage(
         task_logger, "structuring/parsing", model, transcript=False
