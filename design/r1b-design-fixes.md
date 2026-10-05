@@ -14,6 +14,8 @@ with `main` merged in at `623d21b` (PR #13: default model `openai/gpt-6-luna`, l
 - 2026-10-05 · first version.
 - 2026-10-05 · as built by the Implementer: the Conductor's two rulings (§3.1 items 3
   and 4), and what the build found (§3.3). §4.4, §7, §13 and §18 follow them.
+- 2026-10-05 · the Cartographer, reading the build at `243f647`: §3.3 items 6 and 7,
+  two claims the build contradicts. §4.4 and §18 follow item 6.
 
 **Reading it.** §1 to §3 cover what R1b changes and where the design departs from the
 spec; that is the Gate B read. §4 to §12 take one item each: why it is needed, the
@@ -203,6 +205,17 @@ one of the four overrides that R1.10 makes keyword-only.
    stop without quotes.
 5. **Notebook cell 5 was run alone.** Its code reads `MODEL`, which cell 1 defines, so
    it ran with `MODEL` bound to cell 1's literal and no other cell executed.
+6. **`run()` given a `RunConfig` that pins a missing prompt leaves an empty run
+   folder.** `run()` checks prompts only through `load_config`, which it skips for a
+   `RunConfig`, so the refusal comes from `run_pipeline` after `run()` has created the
+   folder. No request is sent. The same pin given as a config name leaves no folder.
+   Found by the Cartographer; not fixed.
+7. **A program that times out holds the loop until it ends.** The vendored `timeout`
+   runs the program inside `with ThreadPoolExecutor(...)`, whose exit waits for it. The
+   model is told "Program timed out after 0.5s", but `time.sleep(2)` under a 0.5 s limit
+   returns after 2.00 s (*run*). So `timeout_s` (§1, §11) bounds what the model is told,
+   not the wall-clock time; the same holds for the schema check's 30 s (§5.2). It
+   predates R1b. Found by the Cartographer; not fixed.
 
 ## 4 · R1.7 · Settings honoured
 
@@ -313,7 +326,8 @@ Steps 1 and 2 raise before anything is sent or written. A caller's own `TaskLogg
 has already created its run folder by then. `run()` and the CLI create theirs only
 after their own `settings_snapshot()` call, which follows `load_config` and its R1.12
 check, so through them a refused cap or prompt leaves no folder (§3.1 item 3); the CLI
-prints `r3con: <message>` and exits 2.
+prints `r3con: <message>` and exits 2. The exception is a `RunConfig` passed to `run()`
+whose prompt is refused: it leaves an empty folder (§3.3 item 6).
 
 `write_manifest` gains one keyword:
 
@@ -1138,4 +1152,5 @@ Outside `src/`: `pyproject.toml` (version 0.2.0), `uv.lock`, `examples/options.i
   fails as today, with the provider's error in `reasoning/error.txt` (R1.9). The fix is
   one regex.
 - **An empty run folder** after a refused cap, only for a caller that builds its own
-  `TaskLogger` (§4.4). It is cosmetic, and the error says what to change.
+  `TaskLogger` (§4.4), and after a refused prompt in a `RunConfig` passed to `run()`
+  (§3.3 item 6). It is cosmetic, and the error says what to change.
