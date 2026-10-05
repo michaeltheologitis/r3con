@@ -124,14 +124,12 @@ class Splits:
         """``margin_percent=None`` reads ``settings.WINDOW_MARGIN_PERCENT``.
 
         Raises:
-            ValueError: for a ``margin_percent`` outside 0 to 99.
+            ValueError: for a margin that is not an integer from 0 to 99, as the
+                settings snapshot refuses one.
         """
         if margin_percent is None:
             margin_percent = settings.WINDOW_MARGIN_PERCENT
-        if not 0 <= margin_percent <= 99:
-            raise ValueError(
-                f"margin_percent must be from 0 to 99, got {margin_percent}."
-            )
+        settings.check_cap("window_margin_percent", margin_percent)
         self._documents = list(documents)
         self._cuts: list[list[int]] = [[] for _ in self._documents]
         self._model = model

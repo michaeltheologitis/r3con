@@ -135,13 +135,6 @@ def test_looking_up_the_window_prints_nothing(
     assert logging.getLogger("LiteLLM").level == level
 
 
-@pytest.mark.parametrize("margin", [-1, 100])
-def test_a_margin_outside_0_to_99_is_refused(margin):
-    message = f"margin_percent must be from 0 to 99, got {margin}."
-    with pytest.raises(ValueError, match=f"^{message}$"):
-        Splits(["text"], model=QWEN, margin_percent=margin)
-
-
 def test_a_document_that_fits_is_sent_whole_under_its_plain_kind(logger):
     provider = Provider()
     splits, results = read(PARAGRAPHS, provider, task_logger=logger)

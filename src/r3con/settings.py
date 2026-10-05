@@ -121,14 +121,22 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         "window_margin_percent": WINDOW_MARGIN_PERCENT,
     }
     for key, value in snapshot.items():
-        floor = _FLOORS[key]
-        if type(value) is not int:  # a bool is not a cap
-            raise ValueError(
-                f"{key.upper()} must be an integer >= {floor}, got {value!r}."
-            )
-        if value < floor:
-            raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
-        ceiling = _CEILINGS.get(key)
-        if ceiling is not None and value > ceiling:
-            raise ValueError(f"{key.upper()} must be <= {ceiling}, got {value}.")
+        check_cap(key, value)
     return snapshot
+
+
+def check_cap(key: str, value: object) -> None:
+    """Refuse ``value`` for the cap ``key``, keyed as in the snapshot, unless it is an
+    integer from the cap's floor to its ceiling, if it has one.
+
+    Raises:
+        ValueError: naming the cap and the bound it breaks, e.g.
+            ``WINDOW_MARGIN_PERCENT must be <= 99, got 100.``
+    """
+    floor, ceiling = _FLOORS[key], _CEILINGS.get(key)
+    if type(value) is not int:  # a bool is not a cap
+        raise ValueError(f"{key.upper()} must be an integer >= {floor}, got {value!r}.")
+    if value < floor:
+        raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
+    if ceiling is not None and value > ceiling:
+        raise ValueError(f"{key.upper()} must be <= {ceiling}, got {value}.")
