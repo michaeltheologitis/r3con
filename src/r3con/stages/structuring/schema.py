@@ -11,6 +11,7 @@ message: a rejection has to say *what* was wrong precisely enough to act on.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -21,7 +22,7 @@ from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
-from r3con.stages.relevance import render_relevance
+from r3con.stages.relevance import Snippet, render_relevance
 from r3con.stages.structuring.parsing import SchemaError, check_schema
 
 _log = get_logger("structuring.schema")
@@ -137,7 +138,7 @@ def _retry_prompt(task: str, prev_code: str, error: str) -> str:
 def propose_schema(
     *,
     task: str,
-    relevance_snippets: list[str] | None = None,
+    relevance_snippets: Sequence[Snippet] | None = None,
     model: str,
     prompt_version: str,
     max_attempts: int | None = None,

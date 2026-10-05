@@ -40,7 +40,7 @@ from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.stages import reasoning
-from r3con.stages.relevance import surface_relevance
+from r3con.stages.relevance import join_parts, surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
@@ -59,8 +59,9 @@ class Answer:
     - ``answer`` — the committed answer text.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
-      (``relevant_context[i]`` describes ``documents[i]``). A document that contributes nothing
-      is an empty string, which is a real result rather than a failure.
+      (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
+      its parts' notes joined. A document that contributes nothing is an empty string,
+      which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every document,
       as plain JSON-able data. Each record carries a ``document`` key naming the 1-based
       document it came from.
@@ -309,7 +310,7 @@ def run_pipeline(
         }
     return Answer(
         answer=result.answer,
-        relevant_context=list(relevance_snippets),
+        relevant_context=[join_parts(s) for s in relevance_snippets],
         # the parse exactly as the agent saw it: plain data, each record stamped with the
         # 1-based document it came from
         structured_context=reasoning.tag_source_documents(

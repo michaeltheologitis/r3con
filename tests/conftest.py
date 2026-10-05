@@ -73,6 +73,8 @@ class FakeLLM:
     sets each stage's reply for when the queue is empty (one reply for every request
     of that stage, or a list consumed in order). A reply is the response's content, an
     exception to raise, or a callable from the request to the content.
+    ``refuses_over(chars)`` makes it a model with a window: a longer request is
+    refused as too long instead of answered.
     """
 
     def __init__(self) -> None:
@@ -80,6 +82,7 @@ class FakeLLM:
         self.peak_in_flight = 0
         self._queue: deque[Reply] = deque()
         self._by_stage: dict[str, Reply | deque[Reply]] = {}
+        self._limit: int | None = None
         self._in_flight = 0
         self._lock = threading.Lock()
 
@@ -96,6 +99,14 @@ class FakeLLM:
                 )
         return self
 
+    def refuses_over(self, chars: int) -> "FakeLLM":
+        """From now on, a request whose messages total more than ``chars`` characters
+        is recorded and refused with litellm's ``ContextWindowExceededError``, without
+        using up a scripted reply."""
+        with self._lock:
+            self._limit = chars
+        return self
+
     def requests_for(self, stage: Stage) -> list[Request]:
         return [request for request in self.requests if stage_of(request) == stage]
 
@@ -103,7 +114,11 @@ class FakeLLM:
         snapshot = copy.deepcopy(request)
         with self._lock:
             self.requests.append(snapshot)
-            reply = self._next_reply(snapshot)
+            size = sum(len(message["content"]) for message in request["messages"])
+            if self._limit is not None and size > self._limit:
+                reply = too_long(self._limit, size, request["model"])
+            else:
+                reply = self._next_reply(snapshot)
             self._in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
         try:
@@ -136,6 +151,18 @@ class FakeLLM:
                 f"no reply scripted for this {stage} request: {last!r}"
             )
         return answer
+
+
+def too_long(limit: int, size: int, model: str) -> litellm.ContextWindowExceededError:
+    """The error litellm raises for a provider that refuses a request as too long."""
+    return litellm.ContextWindowExceededError(
+        message=(
+            f"This model's maximum context length is {limit} tokens. However, you "
+            f"requested {size} tokens in the messages."
+        ),
+        model=model,
+        llm_provider="hosted_vllm",
+    )
 
 
 def _first_line(request: Request) -> str:
