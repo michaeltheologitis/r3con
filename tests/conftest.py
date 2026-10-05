@@ -155,3 +155,13 @@ def _isolated(
     logger.setLevel(level)
     logger.propagate = propagate
     logger.handlers[:] = handlers
+
+
+@pytest.fixture(scope="session")
+def httpserver_listen_address() -> tuple[str, int]:
+    """Serve pytest-httpserver on 127.0.0.1, the host the tests' ``allow_hosts`` names.
+
+    Its default, ``localhost``, resolves to ::1 first on GitHub's runners, and
+    pytest-socket refuses that connection.
+    """
+    return ("127.0.0.1", 0)
