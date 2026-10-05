@@ -70,7 +70,7 @@ _SCHEMA_GLOBALS: dict[str, Any] = {
 
 
 class SchemaError(ValueError):
-    """Raised when a proposed schema is unusable (won't exec, missing `Parse`, etc.)."""
+    """Raised when a proposed schema is unusable (won't run, missing `Parse`, etc.)."""
 
 
 def _decorators(schema_code: str) -> list[str]:
