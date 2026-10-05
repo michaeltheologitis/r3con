@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.notes import Budget
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -35,7 +36,7 @@ from r3con.runtime.codeact import (
 )
 from r3con.runtime.llm import count_tokens
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, render_relevance
+from r3con.stages.relevance import Snippet, note_texts, render_relevance
 
 _log = get_logger("reasoning")
 
@@ -170,6 +171,40 @@ def _system_prompt(
     )
 
 
+def check_first_turn(
+    *,
+    task: str,
+    relevance_snippets: Sequence[Snippet],
+    prompt_version: str,
+    budget: Budget,
+) -> None:
+    """Measure reasoning's first turn as far as it is known before the schema exists:
+    its prompt with ``relevance_snippets`` and the task, without a schema or a parse.
+    The real turn adds both, so this never hands over notes that would fit.
+
+    Raises:
+        r3con.notes.NotesTooLong: when even that turn is over the line.
+    """
+    system_prompt = _system_prompt(
+        task=task,
+        schema_code="",
+        relevance_snippets=relevance_snippets,
+        prompt_version=prompt_version,
+        parse_json="",
+        samples_block="",
+        parse_block="",
+    )
+    budget.splits.check_notes(
+        call="reasoning",
+        request=[system_prompt, _user_message(task)],
+        notes=note_texts(relevance_snippets),
+    )
+
+
+def _user_message(task: str) -> str:
+    return f"Input:\n<task>\n{task}\n</task>"
+
+
 def reason(
     *,
     task: str,
@@ -220,7 +255,7 @@ def reason(
         parse_json=parse_json,
         samples_block=_sample_record_per_field(parse_dict),
     )
-    user_message = f"Input:\n<task>\n{task}\n</task>"
+    user_message = _user_message(task)
 
     parse_block = _render_parse_for_codeact(parse_dict, parse_json)
     whole = parse_block == parse_json

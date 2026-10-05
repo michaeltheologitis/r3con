@@ -16,7 +16,7 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
-prompt.
+prompt. Notes that fill the window are read again shorter (:mod:`r3con.notes`).
 
 With a ``task_logger``, each stage writes its artifacts into one flat run-folder as soon
 as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
@@ -26,6 +26,7 @@ stage that fails leaves the calls it completed and its traceback (see
 
 from __future__ import annotations
 
+import functools
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -37,12 +38,18 @@ from pydantic import BaseModel
 
 from r3con.config import RunConfig, check_prompts
 from r3con.logging_setup import get_logger
+from r3con.notes import Budget
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
-from r3con.stages.relevance import join_parts, surface_relevance
+from r3con.stages.relevance import (
+    RelevantContext,
+    join_parts,
+    surface_relevance,
+    takes_word_budget,
+)
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
@@ -126,6 +133,29 @@ def _recorded_stage(
         raise
 
 
+def _relevance_result(
+    relevance: RelevantContext, rounds: int, n_docs: int
+) -> dict[str, Any]:
+    """``relevance/result.json``'s fields: per round, per document — ``round`` is the
+    refinement depth, the LAST round is what downstream stages consume, and
+    ``snippets[doc_i]`` aligns to ``documents[i]``. A round read under a word budget
+    names it in ``max_words``."""
+    return {
+        "n_rounds": rounds,
+        "n_docs": n_docs,
+        "rounds": [
+            {
+                "round": k + 1,
+                "snippets": per_doc,
+                **({} if words is None else {"max_words": words}),
+            }
+            for k, (per_doc, words) in enumerate(
+                zip(relevance.rounds, relevance.words, strict=True)
+            )
+        ],
+    }
+
+
 def _preview(text: str, n: int = 100) -> str:
     """One-line, truncated preview of an answer for the progress log."""
     s = " ".join((text or "").split())
@@ -203,6 +233,33 @@ def run_pipeline(
         task_logger=task_logger,
     )
 
+    # How many words each note may take, shared by every stage that carries the notes.
+    budget = Budget(
+        splits,
+        can_shorten=takes_word_budget(config.prompts["relevance"]),
+        task_logger=task_logger,
+    )
+    # Everything a read of the relevant context needs, its final notes sized for
+    # reasoning's first turn.
+    read_relevance = functools.partial(
+        surface_relevance,
+        task=task,
+        documents=documents,
+        model=model,
+        prompt_version=config.prompts["relevance"],
+        rounds=rounds,
+        workers=caps["doc_workers"],
+        splits=splits,
+        budget=budget,
+        final_check=lambda notes: reasoning.check_first_turn(
+            task=task,
+            relevance_snippets=notes,
+            prompt_version=config.prompts["reasoning"],
+            budget=budget,
+        ),
+        **llm_kwargs,
+    )
+
     # --- Stage 1: surface relevance — the relevant context. ---
     _log.info(
         "stage 1/3 · surfacing relevance (%d round(s), %d doc(s))",
@@ -210,27 +267,8 @@ def run_pipeline(
         len(documents),
     )
     with _recorded_stage(task_logger, "relevance", model, transcript=False) as record:
-        relevance = surface_relevance(
-            task=task,
-            documents=documents,
-            model=model,
-            prompt_version=config.prompts["relevance"],
-            rounds=rounds,
-            workers=caps["doc_workers"],
-            run=record.run,
-            splits=splits,
-            **llm_kwargs,
-        )
-        # Per-round, per-document — `round` is the refinement depth; the LAST round
-        # is what downstream stages consume. snippets[doc_i] aligns to documents[i].
-        record.result = {
-            "n_rounds": rounds,
-            "n_docs": len(documents),
-            "rounds": [
-                {"round": k + 1, "snippets": per_doc}
-                for k, per_doc in enumerate(relevance.rounds)
-            ],
-        }
+        relevance = read_relevance(run=record.run)
+        record.result = _relevance_result(relevance, rounds, len(documents))
     # the relevant context feeds every later stage
     relevance_snippets = relevance.snippets
 
