@@ -5,6 +5,7 @@ import time
 
 import litellm
 import pytest
+from pydantic import ValidationError
 
 from r3con.stages.structuring.parsing import (
     SchemaError,
@@ -32,6 +33,56 @@ DOCS = [
 ]
 NOTES = ["Doc A is about whales.", "Doc B is about ships."]
 RELEVANCE_HEADING = "## Task-conditioned document summaries"
+RICH_SCHEMA = """
+from datetime import date
+from decimal import Decimal
+from enum import Enum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class Kind(Enum):
+    SITE = "site"
+    CONTRACTOR = "contractor"
+
+
+class Note(BaseModel):
+    text: str
+
+
+class Tag(BaseModel):
+    label: str
+
+
+class Item(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: Kind
+    status: Literal["open", "closed"]
+    logged: date
+    cost: Decimal = Field(ge=0)
+    count: Annotated[int, Field(ge=0)]
+    name: str = Field(alias="itemName")
+    parent: "Item | None" = None
+    extras: list[Note | Tag]
+
+    def label(self) -> str:
+        return f"{self.name} ({self.kind.value})"
+
+
+class Parse(BaseModel):
+    items: list[Item]
+"""
+ITEM = {
+    "kind": "site",
+    "status": "open",
+    "logged": "2026-09-30",
+    "cost": "12.50",
+    "count": 3,
+    "itemName": "Pump",
+    "extras": [{"text": "leaks"}, {"label": "urgent"}],
+}
 
 
 def rows_named_after_the_document(request) -> str:
@@ -154,7 +205,7 @@ def test_a_usable_schema_returns_its_parse_class(code, record):
     ("code", "error"),
     [
         ("class Parse(BaseModel):\n    x: SomeUndefinedTypeXYZ", "failed"),
-        ("class Parse(:", "failed to execute: SyntaxError"),
+        ("class Parse(:", "SyntaxError"),
         ("import this_module_does_not_exist_xyz", "failed to execute"),
         ("class Foo(BaseModel):\n    x: int", "did not define a class named `Parse`"),
         ("class Parse: pass", "must be a pydantic.BaseModel subclass"),
@@ -193,6 +244,78 @@ def test_a_usable_schema_returns_its_parse_class(code, record):
 def test_an_unusable_schema_is_refused_with_what_to_fix(code, error):
     with pytest.raises(SchemaError, match=error):
         check_schema(textwrap.dedent(code))
+
+
+@pytest.mark.parametrize(
+    "reach",
+    [
+        lambda marker: f"import os\nos.system('touch {marker}')\n",
+        lambda marker: f"open('{marker}', 'w').close()\n",
+        lambda marker: f"__import__('os').system('touch {marker}')\n",
+    ],
+    ids=["import-os", "open", "dunder-import"],
+)
+def test_a_schema_cannot_reach_outside_the_interpreter(tmp_path, reach):
+    marker = tmp_path / "marker"
+    with pytest.raises(SchemaError, match="failed to execute"):
+        check_schema(reach(marker) + SCHEMA)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    ("method", "listed"),
+    [
+        (
+            """
+            @field_validator("who")
+            @classmethod
+            def named(cls, value):
+                return value
+            """,
+            ["@field_validator('who') on named", "@classmethod on named"],
+        ),
+        (
+            """
+            @model_validator(mode="after")
+            def whole(self):
+                return self
+            """,
+            ["@model_validator(mode='after') on whole"],
+        ),
+        (
+            """
+            @computed_field
+            @property
+            def shout(self) -> str:
+                return self.who.upper()
+            """,
+            ["@computed_field on shout", "@property on shout"],
+        ),
+    ],
+    ids=["field_validator", "model_validator", "computed_field"],
+)
+def test_a_decorated_method_is_refused_with_what_to_do_instead(method, listed):
+    code = (
+        "from pydantic import computed_field, field_validator, model_validator\n\n"
+        "class Row(BaseModel):\n    who: str\n"
+        + textwrap.indent(textwrap.dedent(method), "    ")
+        + "\nclass Parse(BaseModel):\n    rows: list[Row]\n"
+    )
+    with pytest.raises(SchemaError, match="decorators, which r3con does not run") as no:
+        check_schema(code)
+    assert all(entry in str(no.value) for entry in listed)
+    assert "Field(ge=0)" in str(no.value)
+
+
+def test_a_schema_with_plain_methods_and_rich_types_is_accepted():
+    parse_cls = check_schema(RICH_SCHEMA)
+    child = {**ITEM, "itemName": "Valve", "parent": {**ITEM, "extras": []}}
+    [item] = parse_cls.model_validate({"items": [child]}).items
+    assert item.label() == "Valve (site)"
+    assert item.parent.label() == "Pump (site)"
+    assert [type(extra).__name__ for extra in item.extras] == ["Note", "Tag"]
+    with pytest.raises(ValidationError, match="cost"):
+        parse_cls.model_validate({"items": [{**ITEM, "cost": "-1"}]})
 
 
 def test_a_malformed_reply_is_retried_with_the_validator_error(llm):

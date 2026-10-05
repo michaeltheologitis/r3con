@@ -49,7 +49,7 @@ def test_a_valid_first_schema_is_accepted_after_one_request(llm):
     ("bad", "error"),
     [
         (NO_PARSE, "did not define a class named `Parse`"),
-        ("class Parse(:", "failed to execute: SyntaxError"),
+        ("class Parse(:", "SyntaxError"),
     ],
 )
 def test_a_rejected_schema_is_sent_back_with_the_validators_error(llm, bad, error):
