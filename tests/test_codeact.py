@@ -1,5 +1,6 @@
 import pytest
 
+from r3con import settings
 from r3con.runtime.codeact import (
     CodeExecutionError,
     _clip_assistant_response,
@@ -205,6 +206,13 @@ def test_running_out_of_turns_asks_once_for_an_answer_in_prose(
     assert "out of code turns" in synthesis_request["messages"][-1]["content"]
     assert "stop" in llm.requests[0]
     assert "stop" not in synthesis_request
+
+
+def test_a_turn_cap_set_in_settings_bounds_a_direct_loop(llm, monkeypatch):
+    monkeypatch.setattr(settings, "REASONING_MAX_TURNS", 2)
+    result = solve(llm, prints("1"), prints("2"), "Two.")
+    assert (result.answer, result.terminated_by) == ("Two.", "max_turns")
+    assert len(llm.requests) == 3
 
 
 def test_max_turns_below_one_is_refused_before_any_request(llm):

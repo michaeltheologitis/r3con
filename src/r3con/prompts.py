@@ -29,7 +29,7 @@ from typing import Any
 import jinja2
 import yaml
 
-from r3con.settings import settings
+from r3con import settings
 
 
 def prompt_search_path() -> list[Path]:

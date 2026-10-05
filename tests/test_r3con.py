@@ -94,6 +94,16 @@ def test_a_prebuilt_config_refuses_overrides_it_would_swallow(llm):
     assert llm.requests == []
 
 
+def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
+    llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(r3con.settings, "REASONING_MAX_TURNS", 0)
+    with pytest.raises(ValueError, match="REASONING_MAX_TURNS must be >= 1, got 0."):
+        run("Who?", ["memo"], completion=llm, logs_dir=tmp_path / "logs")
+    assert not (tmp_path / "logs").exists()
+    assert llm.requests == []
+
+
 def test_run_answers_through_the_callers_completion(answering_llm):
     result = run(
         "Who?", ["Halloran memo"], completion=answering_llm, save_artifacts=False

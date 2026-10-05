@@ -33,8 +33,8 @@ from typing import TYPE_CHECKING, Any
 import litellm
 from pydantic import BaseModel
 
+from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.settings import settings
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
