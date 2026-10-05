@@ -96,8 +96,8 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
     ``RunConfig``, which is the run's identity.
 
     Raises:
-        ValueError: naming the first cap below its floor, e.g.
-            ``REASONING_MAX_TURNS must be >= 1, got 0.``
+        ValueError: naming the first cap that is not an integer (a ``bool`` is not)
+            or is below its floor, e.g. ``REASONING_MAX_TURNS must be >= 1, got 0.``
     """
     snapshot = {
         "doc_workers": active_doc_workers(),
@@ -111,6 +111,11 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         "reasoning_parse_max_toks": REASONING_PARSE_MAX_TOKS,
     }
     for key, value in snapshot.items():
-        if value < _FLOORS[key]:
-            raise ValueError(f"{key.upper()} must be >= {_FLOORS[key]}, got {value}.")
+        floor = _FLOORS[key]
+        if type(value) is not int:  # a bool is not a cap
+            raise ValueError(
+                f"{key.upper()} must be an integer >= {floor}, got {value!r}."
+            )
+        if value < floor:
+            raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
     return snapshot
