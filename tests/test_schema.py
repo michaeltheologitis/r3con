@@ -190,7 +190,7 @@ def test_every_attempt_is_measured(llm, window):
     assert handed.value.estimate > 2_550
 
 
-def test_without_a_budget_the_schema_call_is_sent_as_today(llm, window):
+def test_without_a_budget_the_schema_call_is_sent_unmeasured(llm, window):
     refused = too_long()
     with pytest.raises(litellm.ContextWindowExceededError) as failure:
         propose(llm.replies(refused), relevance_snippets=NOTES, model=window(3_000))

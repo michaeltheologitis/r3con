@@ -341,7 +341,9 @@ def test_the_final_check_reads_the_last_round_again_until_it_passes(
     assert context.rounds[0] == [SIXTY] * 3
 
 
-def test_without_a_budget_relevance_takes_r2s_path(llm, window, tmp_path):
+def test_without_a_budget_a_round_stops_where_more_parts_cannot_help(
+    llm, window, tmp_path
+):
     reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
     logger = TaskLogger("run", root=tmp_path)
     model = window(6_000)

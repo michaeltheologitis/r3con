@@ -491,9 +491,7 @@ def test_a_refused_parse_whose_notes_are_bigger_hands_them_over(llm):
     assert budget.splits.parts(0) == documents
 
 
-def test_without_a_budget_a_document_shorter_than_its_notes_is_cut_as_r2_does(
-    llm, window
-):
+def test_without_a_budget_a_document_shorter_than_its_notes_is_cut(llm, window):
     model = window(2_700)
     splits = Splits([SHORTER_THAN_THE_NOTES], model=model)
     parse_all(
