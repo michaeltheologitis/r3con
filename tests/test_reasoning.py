@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 
@@ -280,19 +281,17 @@ def test_a_samples_turn_over_the_line_hands_over_its_notes_before_sending(llm, w
     assert llm.requests == []
 
 
-@pytest.mark.parametrize("n_notes", [40, 1])
-def test_the_first_turn_without_a_parse_hands_over_notes_over_the_line(window, n_notes):
-    notes = [" ".join(["word"] * 60)] * n_notes
-    budget = Budget(Splits([], model=window(4_000)))
-    if n_notes == 1:
-        check_first_turn(
-            task="?", relevance_snippets=notes, prompt_version="v2", budget=budget
-        )
-        return
+def test_the_first_turn_without_a_parse_hands_over_notes_over_the_line(window):
+    check = functools.partial(
+        check_first_turn,
+        task="?",
+        prompt_version="v2",
+        budget=Budget(Splits([], model=window(4_000))),
+    )
+    notes = [" ".join(["word"] * 60)] * 40
+    check(relevance_snippets=notes[:1])
     with pytest.raises(NotesTooLong) as handed:
-        check_first_turn(
-            task="?", relevance_snippets=notes, prompt_version="v2", budget=budget
-        )
+        check(relevance_snippets=notes)
     without_a_parse = load_prompt(
         "reasoning", version="v2", task="?", relevance=render_relevance(notes)
     )
