@@ -322,7 +322,6 @@ def run_pipeline(
     with _recorded_stage(
         task_logger, "structuring/schema", model, transcript=True
     ) as record:
-        schema_run = record.run
         proposal = fitting(
             lambda notes: propose_schema(
                 task=task,
@@ -330,11 +329,11 @@ def run_pipeline(
                 model=model,
                 prompt_version=config.prompts["structuring/schema"],
                 max_attempts=caps["schema_max_attempts"],
-                run=schema_run,
+                run=record.run,
                 budget=budget,
                 **llm_kwargs,
             ),
-            schema_run,
+            record.run,
         )
         record.result = {
             "schema_code": proposal.schema_code,
@@ -350,7 +349,6 @@ def run_pipeline(
     with _recorded_stage(
         task_logger, "structuring/parsing", model, transcript=False
     ) as record:
-        parsing_run = record.run
         extraction = fitting(
             lambda notes: parse_documents(
                 documents=documents,
@@ -361,13 +359,13 @@ def run_pipeline(
                 relevance_snippets=notes,
                 model=model,
                 max_attempts=caps["parsing_max_attempts"],
-                run=parsing_run,
+                run=record.run,
                 workers=caps["doc_workers"],
                 splits=splits,
                 budget=budget,
                 **llm_kwargs,
             ),
-            parsing_run,
+            record.run,
         )
         record.result = {
             "parsed": extraction.parse,
@@ -378,7 +376,6 @@ def run_pipeline(
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
     with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
-        reasoning_run = record.run
         result = fitting(
             lambda notes: reasoning.reason(
                 task=task,
@@ -390,12 +387,12 @@ def run_pipeline(
                 prompt_version=config.prompts["reasoning"],
                 max_turns=caps["reasoning_max_turns"],
                 timeout_s=reasoning_timeout_s,
-                run=reasoning_run,
+                run=record.run,
                 splits=splits,
                 budget=budget,
                 **llm_kwargs,
             ),
-            reasoning_run,
+            record.run,
         )
         _log.info(
             "reasoning done (%s, %d turn(s)): %s",
