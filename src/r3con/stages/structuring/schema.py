@@ -181,7 +181,7 @@ def propose_schema(
             fit the model's window and carries notes: before it is sent, or from the
             provider's refusal. The caller hands it to ``budget.shorten``, reads the
             round that wrote the notes again under ``budget.words``, and proposes
-            again, as ``r3con.run`` does.
+            again.
     """
     if max_attempts is None:
         max_attempts = settings.SCHEMA_MAX_ATTEMPTS

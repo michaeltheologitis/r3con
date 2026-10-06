@@ -12,9 +12,10 @@ and only ever falls; no note is asked for fewer than ``MIN_NOTE_WORDS``. When ev
 cannot fit, the run stops with ``litellm.ContextWindowExceededError``.
 
 ``NotesTooLong`` is r3con's own exception, not a ``ContextWindowExceededError``, so
-nothing that cuts a document on a refusal takes it for one. ``r3con.run`` catches it
-only between its stages and the loops that read notes again; a stop is the only way a
-notes trouble leaves a run. Every event is recorded in ``notes.json`` in the run folder.
+nothing that cuts a document on a refusal takes it for one. It is caught where the
+round that wrote the notes can be read again, and handed to :meth:`Budget.shorten`,
+whose stop is a plain ``ContextWindowExceededError``. Every event is recorded in
+``notes.json`` in the run folder.
 """
 
 from __future__ import annotations
@@ -88,8 +89,8 @@ class Budget:
     until a request needs it), and the record of every time the notes were read again
     shorter, written to ``notes.json`` with a ``task_logger``.
 
-    ``splits`` is the run's :class:`r3con.splitting.Splits`, whose window and line the
-    record names and whose ``check_notes`` the stages without a document call.
+    ``splits`` is the run's :class:`r3con.splitting.Splits`: the record opens with its
+    window, and a request without a document is checked with its ``check_notes``.
     ``can_shorten`` is whether the run's relevance prompt can ask for a length; without
     it every :meth:`shorten` stops the run. Used from one thread.
     """

@@ -20,9 +20,8 @@ raises ``litellm.ContextWindowExceededError`` with a note naming the document.
 
 The bigger of what a request carries is halved. When a caller passes the notes a
 request carries and they are bigger than its document part (or the request has no
-document, ``check_notes``), the request is handed to :mod:`r3con.notes` by raising
-:class:`r3con.notes.NotesTooLong`, which reads the notes again shorter, instead of
-being cut.
+document, ``check_notes``), the request is not cut: it raises
+:class:`r3con.notes.NotesTooLong`, so that the notes can be read again shorter.
 """
 
 from __future__ import annotations
@@ -195,7 +194,8 @@ class Splits:
         Raises:
             r3con.notes.NotesTooLong: once every document is measured, the one with
                 the least room of those whose notes must be handed over.
-            litellm.ContextWindowExceededError: R2's stops, at once.
+            litellm.ContextWindowExceededError: at once, where more parts cannot help,
+                as :meth:`read_in_parts` raises it.
         """
         if self.line is None:
             return

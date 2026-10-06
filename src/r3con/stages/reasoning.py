@@ -238,7 +238,7 @@ def reason(
             fit with the samples and carries notes: before it is sent, or from the
             provider's refusal. The caller hands it to ``budget.shorten``, reads the
             round that wrote the notes again under ``budget.words``, and reasons
-            again, as ``r3con.run`` does.
+            again.
     """
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed

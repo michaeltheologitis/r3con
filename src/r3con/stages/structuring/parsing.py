@@ -368,7 +368,7 @@ def parse_documents(
             the model's window and its notes are the bigger part of it: before
             anything is sent, or from the provider's refusal. The caller hands it to
             ``budget.shorten``, reads the round that wrote the notes again under
-            ``budget.words``, and parses again, as ``r3con.run`` does.
+            ``budget.words``, and parses again.
     """
     if not documents:
         return ParseResult(
