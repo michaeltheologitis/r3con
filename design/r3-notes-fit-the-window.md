@@ -28,6 +28,8 @@ the bigger of what it carries. Branch `claude/tender-shannon-eq4lq7-r3`, cut at 
   right; the null shows again at 8,192 (seed 3). In both runs every wrong answer is a
   parse that kept sub-counts as records of their own, seen by reasoning as samples
   (§10.1, §2.5 item 9).
+- 2026-10-06 · the as-built (Cartographer): §2.5 item 11, where a relevance-v1 run stops;
+  §2.2 item 4 and §8 follow.
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, what was measured, and every
 place this design decides something the spec left open or departs from it, with the
@@ -203,8 +205,10 @@ fake replaces litellm's resends; a real provider costs 3).
    E7 computes how many came back over W from there. One record of the notes, not two.
 4. **A config that pins relevance v1 gets R3.1 and not R3.2.** v1 cannot ask for a length,
    so reading again would send the same prompt. When a request's notes do not fit, such a
-   run stops where R2 stopped (the same number of requests, *run*), with a note naming the
-   reason and v2. The spec does not say what happens to a v1 config.
+   run stops at the first notes trouble, with a note naming the reason and v2. Where that
+   trouble is R2's own stop, as for §9.2's 40 reports, it stops where R2 stopped (the same
+   number of requests, *run*); on a mapped window it can stop earlier (§2.5 item 11). The
+   spec does not say what happens to a v1 config.
 5. **R2's unit stop rows in `test_splitting.py` do not change.** The spec expects them
    rewritten. They pass no notes, which is still R2's case exactly; new rows pin the
    notes (§9.3). The pipeline tests that do change are in §9.2.
@@ -351,6 +355,17 @@ said, what the build found, what it does, and what it costs.
     seed 1) matches its recomputed row exactly. The harness now records a copy of each
     request's messages (`tests/test_experiments.py`, `recording`); an offline dry run
     with a fake that takes two reasoning turns failed before the fix and passes after.
+11. **A relevance-v1 run stops at its first notes trouble, not always where R2 stopped**
+    (found by the Cartographer, 2026-10-06; §2.2 item 4 and §8 now say so). With
+    `can_shorten` false every `shorten` stops, and on a mapped window the first trouble
+    can be the check after relevance against reasoning's first turn (§2.1 item 3), which
+    0.2.0 does not have. *Run*, offline, on E3's corpus and fakes (the five memos, 115
+    quiet sites, `memo_note`) with relevance v1 on a mapped 8,192-token window: the run
+    stops after 240 requests, before the schema call, with nothing sent over the line;
+    `f4dae00` sends all 362, reasoning's first turn at 11,909 tokens, over the window. On
+    an unknown window the v1 run stops at reasoning one request after `f4dae00` (the
+    samples turn, refused too). §9.2's 40 reports stop at the same request
+    either way, which is what the design measured. Cost: none; it stops sooner.
 
 ## 3 · Order of work
 
@@ -1093,7 +1108,9 @@ budget = Budget(
   `litellm.ContextWindowExceededError` and a note that says so (§5.3). With a known window
   that happens before anything is read again. The run folder keeps `notes.json`, the
   stage's `calls.json` and `error.txt`.
-- **A config that pins relevance v1** stops where R2 stopped, with a note naming v2.
+- **A config that pins relevance v1** stops at its first notes trouble, with a note naming
+  v2: on a mapped window that can be the check after relevance, before 0.2.0 would have
+  failed (§2.5 item 11).
 - **A direct caller of a stage** (`surface_relevance`, `parse_documents`, `propose_schema`,
   `reason`) that passes no `Budget` gets 0.2.0's behaviour, R3.1 in `reason` aside. One
   that passes a `Budget` gets R3.2: `surface_relevance` reads its own rounds again, and
