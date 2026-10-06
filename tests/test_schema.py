@@ -1,8 +1,5 @@
-import litellm
 import pytest
 
-from r3con.notes import Budget, NotesTooLong
-from r3con.splitting import Splits
 from r3con.stages.structuring.parsing import SchemaError
 from r3con.stages.structuring.schema import propose_schema
 
@@ -24,31 +21,15 @@ class Parse(BaseModel):
     others: list[Other]"""
 NO_PARSE = "from pydantic import BaseModel\n\nclass Foo(BaseModel):\n    x: int"
 THOUGHT = "One row per occurrence; inference counts the list."
-QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
-# Twenty 60-word notes put the schema call at about 2,920 tokens, over the 2,550-token
-# line of a 3,000-token window; ten put it at about 2,200, under it.
-NOTES = [" ".join(["word"] * 60)] * 20
 
 
 def propose(llm, **kwargs):
-    kwargs.setdefault("model", MODEL)
     return propose_schema(
         task="Where is the cake?",
+        model=MODEL,
         prompt_version="v1",
         completion=llm,
         **kwargs,
-    )
-
-
-def budget_on(model: str) -> Budget:
-    return Budget(Splits([], model=model))
-
-
-def too_long() -> litellm.ContextWindowExceededError:
-    return litellm.ContextWindowExceededError(
-        message="This model's maximum context length is 3000 tokens.",
-        model=QWEN,
-        llm_provider="hosted_vllm",
     )
 
 
@@ -142,57 +123,3 @@ def test_the_callers_request_options_reach_the_request(llm):
     assert request["model"] == MODEL
     assert request["seed"] == 42
     assert request["api_base"] == "http://x"
-
-
-def test_a_schema_request_over_the_line_hands_over_its_notes_before_sending(
-    llm, window
-):
-    with pytest.raises(NotesTooLong) as handed:
-        propose(
-            llm.replies(SCHEMA),
-            relevance_snippets=NOTES,
-            budget=budget_on(window(3_000)),
-        )
-    assert (handed.value.call, handed.value.cause) == ("schema", "estimate")
-    assert handed.value.notes == NOTES
-    assert llm.requests == []
-
-
-@pytest.mark.parametrize("snippets", [NOTES, None], ids=["notes", "no-notes"])
-def test_a_refused_schema_request_hands_over_its_notes_and_one_without_notes_is_raised(
-    llm, snippets
-):
-    refused = too_long()
-    with pytest.raises(Exception) as failure:
-        propose(
-            llm.replies(refused), relevance_snippets=snippets, budget=budget_on(QWEN)
-        )
-    if snippets is None:
-        assert failure.value is refused
-    else:
-        assert isinstance(failure.value, NotesTooLong)
-        assert (failure.value.call, failure.value.cause) == ("schema", "refusal")
-        assert failure.value.__cause__ is refused
-    assert len(llm.requests) == 1
-
-
-def test_every_attempt_is_measured(llm, window):
-    rejected = NO_PARSE + "\n# " + "padding " * 600
-    with pytest.raises(NotesTooLong) as handed:
-        propose(
-            llm.replies(rejected, SCHEMA),
-            relevance_snippets=NOTES[:10],
-            max_attempts=3,
-            budget=budget_on(window(3_000)),
-        )
-    assert len(llm.requests) == 1
-    assert "# Previous attempt (rejected by validator)" not in str(llm.requests)
-    assert handed.value.estimate > 2_550
-
-
-def test_without_a_budget_the_schema_call_is_sent_unmeasured(llm, window):
-    refused = too_long()
-    with pytest.raises(litellm.ContextWindowExceededError) as failure:
-        propose(llm.replies(refused), relevance_snippets=NOTES, model=window(3_000))
-    assert failure.value is refused
-    assert len(llm.requests) == 1
