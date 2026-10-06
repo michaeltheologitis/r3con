@@ -35,9 +35,13 @@ CONFIG = {
     "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
 }
 V2 = {**CONFIG["prompts"], "reasoning": "v2"}
+DEFAULT_PROMPTS = {**V2, "relevance": "v2"}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
+# Forty reports of about 400 characters, and a note of 1,000 characters, 177 words.
+REPORTS = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
+LONG_NOTE = (ROUTINE * 14)[:1_000]
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 
@@ -464,14 +468,13 @@ def test_notes_that_do_not_fit_stop_the_run_where_the_relevance_prompt_cannot_sh
     answering_llm, window, tmp_path, monkeypatch, measured
 ):
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
-    llm = answering_llm.answers(relevance=(ROUTINE * 14)[:1_000])
+    llm = answering_llm.answers(relevance=LONG_NOTE)
     if not measured:
         llm.refuses_over(20_000)
     logger = TaskLogger("run", root=tmp_path)
     model = window(6_000) if measured else QWEN
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=reports, model=model, prompts=V2)
+        answer(llm, logger, documents=REPORTS, model=model, prompts=V2)
     note, folder = stop.value.__notes__
     assert note == (
         "r3con: relevance-r2-d0 carries the notes of 39 documents (about 7,410 "
@@ -481,7 +484,7 @@ def test_notes_that_do_not_fit_stop_the_run_where_the_relevance_prompt_cannot_sh
     )
     assert folder == f"r3con: partial artifacts in {logger.dir}"
     assert "TASK-" not in note
-    assert [user for user in users(llm) if user in reports[0]] == [reports[0]] * (
+    assert [user for user in users(llm) if user in REPORTS[0]] == [REPORTS[0]] * (
         1 if measured else 2
     )
     assert len(llm.requests) == (40 if measured else 41)
@@ -494,7 +497,7 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
     # Relevance and the schema fit under the limit; a parse call, which carries every
     # note and a whole document, does not, and its document is shorter than its rest.
     documents = [f"{name} memo. " + ROUTINE * 66 for name in ("Halloran", "Merrow")]
-    llm = answering_llm.answers(relevance=(ROUTINE * 14)[:1_000]).refuses_over(10_000)
+    llm = answering_llm.answers(relevance=LONG_NOTE).refuses_over(10_000)
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
         answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
@@ -662,14 +665,14 @@ def test_notes_that_do_not_fit_are_read_again_shorter(
     n_requests,
 ):
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
-    llm = answering_llm.answers(relevance=within_budget((ROUTINE * 14)[:1_000]))
+    llm = answering_llm.answers(relevance=within_budget(LONG_NOTE))
     if refused_over:
         llm.refuses_over(refused_over)
     logger = TaskLogger("run", root=tmp_path)
     model = QWEN if refused_over else window(6_000)
-    prompts = {**V2, "relevance": "v2"}
-    result = answer(llm, logger, documents=reports, model=model, prompts=prompts)
+    result = answer(
+        llm, logger, documents=REPORTS, model=model, prompts=DEFAULT_PROMPTS
+    )
     assert len(result.relevant_context) == 40
     events = read_json(logger, "notes")["events"]
     assert [(e["call"], e["round"], e["words"]) for e in events] == read_again
@@ -687,14 +690,13 @@ def refused_parse_run(llm, within_budget, tmp_path, monkeypatch, *, relevance=No
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
     reports = [f"Report {i:02d}. " + ROUTINE for i in range(9)]
     reports.append("Report 09. " + (ROUTINE * 67)[:5_000])
-    note = within_budget((ROUTINE * 14)[:1_000])
+    note = within_budget(LONG_NOTE)
     llm.answers(relevance=note if relevance is None else relevance(note))
+    llm.refuses_over(18_500)
     logger = TaskLogger("run", root=tmp_path)
-    prompts = {**V2, "relevance": "v2"}
-    run = functools.partial(
-        answer, llm.refuses_over(18_500), logger, documents=reports, model=QWEN
+    return logger, functools.partial(
+        answer, llm, logger, documents=reports, model=QWEN, prompts=DEFAULT_PROMPTS
     )
-    return logger, functools.partial(run, prompts=prompts)
 
 
 def test_a_stage_sent_again_keeps_its_discarded_calls(
@@ -710,9 +712,7 @@ def test_a_stage_sent_again_keeps_its_discarded_calls(
     )
     assert (event["round"], event["words"]) == (2, 88)
     parses = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
-    assert parses == [f"parse-d{i}" for i in range(9)] + [
-        f"parse-d{i}" for i in range(10)
-    ]
+    assert parses == [f"parse-d{i}" for i in [*range(9), *range(10)]]
     reads = [call["kind"] for call in read_json(logger, "relevance/calls")]
     assert reads[20:] == [f"relevance-r2-w88-d{i}" for i in range(10)]
     rounds = read_json(logger, "relevance/result")["rounds"]
@@ -758,16 +758,15 @@ NINE_WORDS = "Report logged its routine checks and found nothing unusual."
 @pytest.mark.parametrize(
     ("measured", "relevance", "reply", "note"),
     [
-        (True, "v2", (ROUTINE * 14)[:1_000], "r3con: even at 10 words each"),
+        (True, "v2", LONG_NOTE, "r3con: even at 10 words each"),
         (False, "v2", NINE_WORDS, "r3con: relevance-r2-d0 was refused as too long"),
-        (True, "v1", (ROUTINE * 14)[:1_000], "r3con: relevance-r2-d0 carries"),
+        (True, "v1", LONG_NOTE, "r3con: relevance-r2-d0 carries"),
     ],
     ids=["floor-by-estimate", "floor-by-refusal", "v1"],
 )
 def test_no_stop_leaves_a_run_as_notes_too_long(
     answering_llm, window, tmp_path, measured, relevance, reply, note
 ):
-    reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
     llm = answering_llm.answers(relevance=reply)
     if not measured:
         llm.refuses_over(tokens=1_000)
@@ -775,7 +774,7 @@ def test_no_stop_leaves_a_run_as_notes_too_long(
     model = window(3_500) if measured else QWEN
     prompts = {**V2, "relevance": relevance}
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=reports, model=model, prompts=prompts)
+        answer(llm, logger, documents=REPORTS, model=model, prompts=prompts)
     assert type(stop.value) is litellm.ContextWindowExceededError
     assert not isinstance(stop.value, NotesTooLong)
     first, folder = stop.value.__notes__
