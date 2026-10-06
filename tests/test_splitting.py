@@ -5,7 +5,6 @@ from pathlib import Path
 import litellm
 import pytest
 
-from r3con.notes import NotesTooLong
 from r3con.runs import TaskLogger
 from r3con.splitting import Splits, halve
 
@@ -19,9 +18,6 @@ LOPSIDED = "\n\n".join(["a " * 150, "b " * 150, "c " * 450])
 JAPANESE = (
     "契約書の第三条に基づき、当事者は誠実に協議する。"  # 24 characters, 31 tokens
 )
-# A note of 33 words is 34 tokens with its paragraph break; 20 of them are 680.
-NOTE = " ".join(["word"] * 33)
-NOTES = [NOTE] * 20
 
 
 class Provider:
@@ -66,12 +62,6 @@ def read(document, send, *, model=QWEN, rest=REST, task_logger=None):
     """``document`` read as the only document of a run, in one ``parse`` call."""
     splits = Splits([document], model=model, task_logger=task_logger)
     return splits, splits.read_in_parts(0, call="parse", rest=rest, send=send)
-
-
-def with_notes(notes: list[str], prompt: str = REST) -> str:
-    """A rest that renders ``notes`` after ``prompt``, each followed by a paragraph
-    break, as a stage's prompt does."""
-    return prompt + "\n\n" + "".join(note + "\n\n" for note in notes)
 
 
 HALVES = {
@@ -387,203 +377,3 @@ def test_over_line_counts_only_what_its_bytes_cannot_settle(window, encodes):
     assert splits.over_line(" the" * 300, " the" * 600) == 900
     assert encodes == [" the" * 300, " the" * 300, " the" * 600]
     assert Splits([], model=QWEN).over_line(" the" * 3_000) is None
-
-
-def test_notes_bigger_than_the_part_are_handed_over_before_anything_is_sent(
-    window, logger
-):
-    document, provider = PARAGRAPHS[:900], Provider()
-    splits = Splits([document], model=window(1_000), task_logger=logger)
-    with pytest.raises(NotesTooLong) as handed:
-        splits.read_in_parts(
-            0, call="parse", rest=with_notes(NOTES), send=provider, notes=NOTES
-        )
-    assert provider.sent == []
-    assert splits.parts(0) == [document]
-    assert record(logger) is None
-    trouble = handed.value
-    assert (trouble.call, trouble.cause, trouble.estimate) == (
-        "parse-d0",
-        "estimate",
-        879,
-    )
-    assert (trouble.notes, trouble.notes_tokens, trouble.room) == (NOTES, 680, 651)
-    assert str(trouble).startswith("r3con estimated parse-d0 at 879 tokens, over the ")
-
-
-def test_a_part_bigger_than_its_notes_is_still_cut(window, logger):
-    notes = ["A short note on the other documents."]
-    provider = Provider()
-    splits = Splits([PARAGRAPHS], model=window(500), task_logger=logger)
-    splits.read_in_parts(
-        0, call="parse", rest=with_notes(notes), send=provider, notes=notes
-    )
-    assert provider.kinds == ["parse-d0c0", "parse-d0c1"]
-    events = record(logger)["documents"]["0"]["events"]
-    assert [(e["cause"], e["action"]) for e in events] == [("estimate", "split")]
-
-
-@pytest.mark.parametrize(
-    ("note_words", "kinds"),
-    [(33, ["parse-d0c0", "parse-d0c1"]), (34, [])],
-    ids=["a-tie", "notes-one-token-bigger"],
-)
-def test_a_tie_between_part_and_notes_cuts_the_part(window, note_words, kinds):
-    # The document is 34 tokens; a note of 33 words is 34 with its break.
-    document, notes = " ".join(["word"] * 34), [" ".join(["word"] * note_words)]
-    provider = Provider()
-    splits = Splits([document], model=window(1_000))
-    rest = with_notes(notes, prompt=" the" * 795)
-    if kinds:
-        splits.read_in_parts(0, call="parse", rest=rest, send=provider, notes=notes)
-    else:
-        with pytest.raises(NotesTooLong):
-            splits.read_in_parts(0, call="parse", rest=rest, send=provider, notes=notes)
-    assert provider.kinds == kinds
-
-
-def test_with_the_rest_alone_over_the_line_the_notes_are_handed_over(window, logger):
-    provider = Provider()
-    splits = Splits([PARAGRAPHS], model=window(1_000), task_logger=logger)
-    with pytest.raises(NotesTooLong) as handed:
-        splits.read_in_parts(
-            0,
-            call="parse",
-            rest=with_notes(NOTES, prompt=" the" * 200),
-            send=provider,
-            notes=NOTES,
-        )
-    assert (handed.value.call, handed.value.cause) == ("parse-d0", "estimate")
-    assert handed.value.estimate == 200 + 1 + 680 + 720
-    assert provider.sent == []
-    assert splits.parts(0) == [PARAGRAPHS]
-    assert record(logger) is None
-
-
-def test_a_refused_part_smaller_than_its_notes_hands_them_over(logger):
-    document, provider = PARAGRAPHS[:300], Provider(limit=0)
-    splits = Splits([document], model=QWEN, task_logger=logger)
-    with pytest.raises(NotesTooLong) as handed:
-        splits.read_in_parts(
-            0, call="parse", rest=with_notes(NOTES), send=provider, notes=NOTES
-        )
-    trouble = handed.value
-    assert (trouble.call, trouble.cause, trouble.room) == ("parse-d0", "refusal", None)
-    assert trouble.refusal is trouble.__cause__ is provider.refusals[0]
-    assert str(trouble) == (
-        "parse-d0 was refused as too long, and the notes it carries (about 680 "
-        "tokens) are the bigger part of it."
-    )
-    assert provider.kinds == ["parse-d0"]
-    assert splits.parts(0) == [document]
-    assert record(logger) is None
-
-
-def test_measure_cuts_by_estimate_and_raises_the_least_room(window, logger):
-    documents = [PARAGRAPHS, PARAGRAPHS[:900], PARAGRAPHS[:1_500]]
-    rests = {0: NOTES[:5], 1: NOTES, 2: NOTES}
-
-    def measured(docs):
-        splits = Splits(documents, model=window(1_000), task_logger=logger)
-        with pytest.raises(NotesTooLong) as handed:
-            splits.measure(
-                docs,
-                call="parse",
-                rests=lambda doc: (with_notes(rests[doc]), rests[doc]),
-            )
-        return splits, handed.value
-
-    splits, trouble = measured(range(3))
-    assert trouble.call == "parse-d2"
-    assert trouble.room < measured([1])[1].room
-    assert len(splits.parts(0)) == 2
-    assert (splits.parts(1), splits.parts(2)) == ([documents[1]], [documents[2]])
-    assert list(record(logger)["documents"]) == ["0"]
-
-
-def test_measure_does_nothing_without_a_window(logger):
-    asked: list[int] = []
-
-    def rests(doc):
-        asked.append(doc)
-        return with_notes(NOTES), NOTES
-
-    splits = Splits([PARAGRAPHS[:900]], model=QWEN, task_logger=logger)
-    splits.measure(range(1), call="parse", rests=rests)
-    assert asked == []
-    assert splits.parts(0) == [PARAGRAPHS[:900]]
-
-
-OVER = [with_notes(NOTES, prompt=" the" * 200), "Input:"]
-UNDER = [with_notes(NOTES), "Input:"]
-
-
-@pytest.mark.parametrize(
-    ("tokens", "request_texts", "notes", "handed", "counted"),
-    [
-        (1_000, OVER, NOTES, True, True),
-        (1_000, OVER, [], False, False),
-        (1_000, UNDER, NOTES, False, True),
-        (1_000_000, UNDER, NOTES, False, False),
-    ],
-    ids=["over-with-notes", "over-without-notes", "under", "under-in-bytes"],
-)
-def test_a_request_without_a_document_hands_over_only_notes_over_the_line(
-    window, encodes, tokens, request_texts, notes, handed, counted
-):
-    splits = Splits([], model=window(tokens))
-    if not handed:
-        splits.check_notes(call="schema", request=request_texts, notes=notes)
-    else:
-        with pytest.raises(NotesTooLong) as trouble:
-            splits.check_notes(call="schema", request=request_texts, notes=notes)
-        assert (trouble.value.call, trouble.value.cause) == ("schema", "estimate")
-        assert (trouble.value.estimate, trouble.value.room) == (883, 647)
-        assert str(trouble.value) == (
-            "r3con estimated schema at 883 tokens, over the 850-token line (the "
-            "1,000-token input window litellm's model map gives "
-            "hosted_vllm/window-1000, less 15%); it was not sent."
-        )
-    assert bool(encodes) is counted
-
-
-def test_a_refused_request_without_a_document_hands_over_its_notes():
-    splits = Splits([], model=QWEN)
-    refused = Provider(limit=0)
-    with pytest.raises(litellm.ContextWindowExceededError):
-        refused("x", "schema")
-    [refusal] = refused.refusals
-    with pytest.raises(NotesTooLong) as handed:
-        splits.check_notes(
-            call="schema", request=[with_notes(NOTES)], notes=NOTES, refusal=refusal
-        )
-    assert handed.value.__cause__ is handed.value.refusal is refusal
-    assert (handed.value.cause, handed.value.room) == ("refusal", None)
-    assert str(handed.value) == (
-        "schema was refused as too long, and the notes it carries (about 680 tokens) "
-        "are the bigger part of it."
-    )
-    splits.check_notes(call="schema", request=["Input:"], notes=[], refusal=refusal)
-
-
-def test_a_notes_signal_raised_by_send_passes_through_uncut(logger):
-    signal = NotesTooLong(
-        "parse-d0 did not fit.",
-        model=QWEN,
-        call="parse-d0",
-        cause="estimate",
-        estimate=900,
-        notes=NOTES,
-        notes_tokens=680,
-        room=100,
-    )
-
-    def send(part, kind):
-        raise signal
-
-    splits = Splits([PARAGRAPHS], model=QWEN, task_logger=logger)
-    with pytest.raises(NotesTooLong) as raised:
-        splits.read_in_parts(0, call="parse", rest=REST, send=send)
-    assert raised.value is signal
-    assert splits.parts(0) == [PARAGRAPHS]
-    assert record(logger) is None
