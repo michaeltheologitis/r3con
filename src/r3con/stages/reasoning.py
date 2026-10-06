@@ -275,11 +275,11 @@ def reason(
         )
         whole = False
         system_prompt = render(parse_block=_sample_view(parse_dict))
-    notes = note_texts(relevance_snippets or ())
+    check_notes = functools.partial(
+        splits.check_notes, call="reasoning", notes=note_texts(relevance_snippets or ())
+    )
     if budget is not None:
-        splits.check_notes(
-            call="reasoning", request=[system_prompt, user_message], notes=notes
-        )
+        check_notes(request=[system_prompt, user_message])
 
     def with_samples(refusal: ContextWindowExceededError) -> str:
         """The first turn's prompt with samples, once, after a refusal of it with
@@ -287,12 +287,7 @@ def reason(
         nonlocal whole, system_prompt
         if not whole:
             if budget is not None:
-                splits.check_notes(
-                    call="reasoning",
-                    request=[system_prompt, user_message],
-                    notes=notes,
-                    refusal=refusal,
-                )
+                check_notes(request=[system_prompt, user_message], refusal=refusal)
             raise refusal
         _log.warning(
             "reasoning's first turn was refused as too long with the whole parse "
