@@ -75,7 +75,8 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content, an
     exception to raise, or a callable from the request to the content.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
-    refused as too long instead of answered.
+    refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
+    request as a provider does, in tokens.
     """
 
     def __init__(self) -> None:
@@ -84,6 +85,7 @@ class FakeLLM:
         self._queue: deque[Reply] = deque()
         self._by_stage: dict[str, Reply | deque[Reply]] = {}
         self._limit: int | None = None
+        self._token_limit: int | None = None
         self._in_flight = 0
         self._lock = threading.Lock()
 
@@ -100,12 +102,15 @@ class FakeLLM:
                 )
         return self
 
-    def refuses_over(self, chars: int) -> "FakeLLM":
-        """From now on, a request whose messages total more than ``chars`` characters
-        is recorded and refused with litellm's ``ContextWindowExceededError``, without
+    def refuses_over(
+        self, chars: int | None = None, *, tokens: int | None = None
+    ) -> "FakeLLM":
+        """From now on, a request whose messages total more than ``chars`` characters,
+        or more than ``tokens`` tokens with its response format (``request_tokens``), is
+        recorded and refused with litellm's ``ContextWindowExceededError``, without
         using up a scripted reply."""
         with self._lock:
-            self._limit = chars
+            self._limit, self._token_limit = chars, tokens
         return self
 
     def requests_for(self, stage: Stage) -> list[Request]:
@@ -118,6 +123,11 @@ class FakeLLM:
             size = sum(len(message["content"]) for message in request["messages"])
             if self._limit is not None and size > self._limit:
                 reply = too_long(self._limit, size, request["model"])
+            elif (
+                self._token_limit is not None
+                and (count := request_tokens(request)) > self._token_limit
+            ):
+                reply = too_long(self._token_limit, count, request["model"])
             else:
                 reply = self._next_reply(snapshot)
             self._in_flight += 1
@@ -152,6 +162,15 @@ class FakeLLM:
                 f"no reply scripted for this {stage} request: {last!r}"
             )
         return answer
+
+
+def request_tokens(request: Request) -> int:
+    """A request's cl100k tokens as a provider counts them: its messages' contents and
+    its response format's schema as JSON."""
+    texts = [message["content"] for message in request["messages"]]
+    if "response_format" in request:
+        texts.append(json.dumps(request["response_format"]["json_schema"]["schema"]))
+    return sum(len(litellm.encode(text=text)) for text in texts)
 
 
 def too_long(limit: int, size: int, model: str) -> litellm.ContextWindowExceededError:
@@ -230,6 +249,36 @@ _BOILERPLATE = (
 )
 
 
+_SITES = (
+    "Ashby",
+    "Brook",
+    "Calder",
+    "Dunmore",
+    "Elsworth",
+    "Fairlie",
+    "Glenholm",
+    "Harrow",
+    "Ingle",
+    "Jarrow",
+    "Kelso",
+    "Linton",
+)
+
+
+def quiet_site_memos(n: int) -> list[str]:
+    """``n`` site memos of about 230 characters, each under its own site name, that log
+    no equipment incident, under CT-204 (even k) or CT-311 (odd k): added to the five
+    memos, they cannot change the answer."""
+    return [
+        f"MEMO — {_SITES[k % 12]} {k:03d} site, Q3 operations review\n\n"
+        "Equipment incidents logged this quarter: 0.\nNo faults were reported.\n"
+        "Planned maintenance at this site is carried out under contractor code "
+        f"{'CT-204' if k % 2 == 0 else 'CT-311'}.\n"
+        f"Site manager: {_SITES[(k * 7) % 12]} Hale."
+        for k in range(n)
+    ]
+
+
 def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
@@ -269,6 +318,11 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
 @pytest.fixture
 def grown_registry() -> Callable[..., str]:
     return grow_registry
+
+
+@pytest.fixture
+def quiet_sites() -> Callable[[int], list[str]]:
+    return quiet_site_memos
 
 
 @pytest.fixture
