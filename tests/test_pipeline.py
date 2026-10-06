@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from r3con import read_documents, settings
-from r3con.config import PROMPT_STAGES, RunConfig
+from r3con.config import PROMPT_STAGES, RunConfig, load_config
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
@@ -35,6 +35,8 @@ V2 = {**CONFIG["prompts"], "reasoning": "v2"}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
+SAMPLE = "only a SAMPLE"
+LINE_8192 = 6_963
 
 
 def answer(
@@ -113,6 +115,40 @@ def long_notes_for(registry: str, size: int):
         return note[:size] if document in registry else f"Notes on {document[:20]}."
 
     return reply
+
+
+def memo_note(request) -> str:
+    """A relevance reply of about 200 characters, 33 words, that names the document by
+    its first line, as a note on one of the memos does."""
+    first = request["messages"][1]["content"].splitlines()[0]
+    note = (
+        f"{first}: an operations document; it reports what each site logged and the "
+        "contractor code its maintenance runs under, which the registry maps to a name. "
+    ) * 4
+    return note[:200].rsplit(" ", 1)[0] + "."
+
+
+def whole_document_row(request) -> str:
+    """A parse reply whose one row is the whole document, so the parse fills the
+    reasoning prompt."""
+    return json.dumps({"rows": [{"who": request["messages"][1]["content"]}]})
+
+
+def memos_run(llm, documents, model, tmp_path):
+    """A run of the default config over ``documents`` on ``model``, ``llm`` answering."""
+    logger = TaskLogger("run", root=tmp_path)
+    result = run_pipeline(
+        task="Who?",
+        documents=documents,
+        config=load_config("default", model=model),
+        task_logger=logger,
+        completion=llm,
+    )
+    return logger, result
+
+
+def first_turns(llm) -> list[dict]:
+    return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
 def test_a_run_answers_and_leaves_every_stages_artifacts(answering_llm, tmp_path):
@@ -478,3 +514,32 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
     assert "structuring/parsing/result.json" not in written
     events = read_json(logger, "splits")["documents"]["0"]["events"]
     assert [(e["call"], e["action"]) for e in events] == [("parse-d0", "stop")]
+
+
+def test_reasoning_shows_samples_when_the_whole_parse_would_not_fit(
+    answering_llm, quiet_sites, window, tmp_path
+):
+    documents = read_documents(MEMOS) + quiet_sites(55)
+    llm = answering_llm.answers(relevance=memo_note, parsing=whole_document_row)
+    _, result = memos_run(llm, documents, window(8_192), tmp_path)
+    assert result.answer == "; ".join(documents)
+    assert len(llm.requests) == 182
+    assert max(tokens(request) for request in llm.requests) <= LINE_8192
+    [turn] = first_turns(llm)
+    assert SAMPLE in turn["messages"][0]["content"]
+
+
+def test_a_refused_first_turn_goes_again_once_with_samples(
+    answering_llm, quiet_sites, tmp_path
+):
+    documents = read_documents(MEMOS) + quiet_sites(55)
+    llm = answering_llm.answers(
+        relevance=memo_note, parsing=whole_document_row
+    ).refuses_over(tokens=8_192)
+    _, result = memos_run(llm, documents, QWEN, tmp_path)
+    assert result.answer == "; ".join(documents)
+    assert len(llm.requests) == 183
+    whole, samples = first_turns(llm)
+    assert SAMPLE not in whole["messages"][0]["content"]
+    assert tokens(whole) > 8_192
+    assert SAMPLE in samples["messages"][0]["content"]
