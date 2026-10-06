@@ -77,11 +77,13 @@ class FakeLLM:
     exception to raise, or a callable from the request to the content.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
-    request as a provider does, in tokens.
+    request as a provider does, in tokens. ``refused`` holds every request refused as
+    too long.
     """
 
     def __init__(self) -> None:
         self.requests: list[Request] = []
+        self.refused: list[Request] = []
         self.peak_in_flight = 0
         self._queue: deque[Reply] = deque()
         self._by_stage: dict[str, Reply | deque[Reply]] = {}
@@ -131,6 +133,8 @@ class FakeLLM:
                 reply = too_long(self._token_limit, count, request["model"])
             else:
                 reply = self._next_reply(snapshot)
+            if isinstance(reply, litellm.ContextWindowExceededError):
+                self.refused.append(snapshot)
             self._in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
         try:
