@@ -109,21 +109,10 @@ def tag_source_documents(
     return parse_dict
 
 
-def _render_parse_for_codeact(parse_dict: Any, parse_json: str) -> str:
-    """The ``parse`` view embedded in the codeact system prompt: the WHOLE parse
-    (``parse_json``) when it fits (the common case), else the sample view
-    (:func:`_sample_view`). Either way the full parse is also bound as the ``parse``
-    variable for the agent to compute over, so the sample path costs reach, not access.
-    The cap is ``settings.REASONING_PARSE_MAX_TOKS``, counted in cl100k_base tokens from
-    the vocabulary litellm ships (a flood guard for parses that run to thousands of
-    records)."""
-    if count_tokens(parse_json) <= settings.REASONING_PARSE_MAX_TOKS:
-        return parse_json
-    return _sample_view(parse_dict)
-
-
 def _sample_view(parse_dict: Any) -> str:
-    """A prominent "this is only a sample" note, then one sample record per field."""
+    """The parse view shown instead of the whole parse: a prominent "this is only a
+    sample" note, then one sample record per field. The full parse is bound as the
+    ``parse`` variable either way, so the sample view costs reach, not access."""
     n = (
         sum(len(v) for v in parse_dict.values() if isinstance(v, list))
         if isinstance(parse_dict, dict)
@@ -268,15 +257,19 @@ def reason(
     )
     user_message = _user_message(task)
 
-    parse_block = _render_parse_for_codeact(parse_dict, parse_json)
-    whole = parse_block == parse_json
-    system_prompt = render(parse_block=parse_block)
+    # The whole parse, unless it is over the flood guard (a parse that runs to
+    # thousands of records), or its first turn is over the line.
+    parse_tokens = count_tokens(parse_json)
+    whole = parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
+    system_prompt = render(
+        parse_block=parse_json if whole else _sample_view(parse_dict)
+    )
     if whole and (estimate := splits.over_line(system_prompt, user_message)):
         _log.info(
             "the whole parse (about %s tokens) would put reasoning's first turn at "
             "about %s tokens, over the %s-token line; showing one sample record per "
             "field",
-            f"{count_tokens(parse_json):,}",
+            f"{parse_tokens:,}",
             f"{estimate:,}",
             f"{splits.line:,}",
         )
@@ -304,7 +297,7 @@ def reason(
         _log.warning(
             "reasoning's first turn was refused as too long with the whole parse "
             "(about %s tokens); sending it again with one sample record per field",
-            f"{count_tokens(parse_json):,}",
+            f"{parse_tokens:,}",
         )
         whole = False
         system_prompt = render(parse_block=_sample_view(parse_dict))
