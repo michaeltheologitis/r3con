@@ -7,6 +7,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import copy
 import json
 import logging
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -279,6 +280,23 @@ def quiet_site_memos(n: int) -> list[str]:
     ]
 
 
+_WORD_BUDGET = re.compile(r"Keep it under (\d+) words")
+
+
+def keeping_to_budget(
+    reply: str | Callable[[Request], str],
+) -> Callable[[Request], str]:
+    """A relevance reply from a model that obeys a word budget: when the system prompt
+    asks for fewer than W words, the reply's first W words."""
+
+    def obeying(request: Request) -> str:
+        note = reply(request) if callable(reply) else reply
+        budget = _WORD_BUDGET.search(request["messages"][0]["content"])
+        return note if budget is None else " ".join(note.split()[: int(budget[1])])
+
+    return obeying
+
+
 def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
@@ -323,6 +341,11 @@ def grown_registry() -> Callable[..., str]:
 @pytest.fixture
 def quiet_sites() -> Callable[[int], list[str]]:
     return quiet_site_memos
+
+
+@pytest.fixture
+def within_budget() -> Callable[..., Callable[[Request], str]]:
+    return keeping_to_budget
 
 
 @pytest.fixture
