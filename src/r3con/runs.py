@@ -23,8 +23,7 @@ Layout per ``logs/<run-folder>/``:
   read under a word budget has ``max_words``) + ``calls.json`` (one per
   ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
   ``relevance-r{round}-d{doc}c{part}`` for a part, and
-  ``relevance-r{round}-w{W}-d{doc}`` for a round read under a budget of W words). A
-  round read again that fails leaves ``error.txt`` beside the earlier ``result.json``.
+  ``relevance-r{round}-w{W}-d{doc}`` for a round read under a budget of W words).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``

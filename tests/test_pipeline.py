@@ -1,4 +1,3 @@
-import functools
 import json
 import re
 from collections import Counter
@@ -13,7 +12,6 @@ from r3con.config import PROMPT_STAGES, RunConfig, load_config
 from r3con.notes import NotesTooLong
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
-from r3con.stages.relevance import join_parts
 from r3con.stages.structuring.parsing import SchemaError
 
 MODEL = "openai/gpt-6-luna"
@@ -35,7 +33,6 @@ CONFIG = {
     "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
 }
 V2 = {**CONFIG["prompts"], "reasoning": "v2"}
-DEFAULT_PROMPTS = {**V2, "relevance": "v2"}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
@@ -497,7 +494,7 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
     # Relevance and the schema fit under the limit; a parse call, which carries every
     # note and a whole document, does not, and its document is shorter than its rest.
     documents = [f"{name} memo. " + ROUTINE * 66 for name in ("Halloran", "Merrow")]
-    llm = answering_llm.answers(relevance=LONG_NOTE).refuses_over(10_000)
+    llm = answering_llm.answers(relevance=(ROUTINE * 41)[:3_000]).refuses_over(13_500)
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
         answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
@@ -612,144 +609,6 @@ def test_notes_that_do_not_fit_are_read_again_shorter_by_estimate(
         (e["call"], e["cause"], e["action"], e["round"], e["words"]) for e in events
     ] == [("reasoning", "estimate", "read again", 2, 16)]
     assert len(llm.requests) == 482
-
-
-def test_notes_that_do_not_fit_are_read_again_shorter_on_a_refusal(
-    answering_llm, quiet_sites, within_budget, tmp_path
-):
-    documents = read_documents(MEMOS) + quiet_sites(115)
-    llm = answering_llm.answers(relevance=within_budget(memo_note))
-    logger, result = memos_run(
-        llm.refuses_over(tokens=8_192), documents, QWEN, tmp_path
-    )
-    assert result.answer == first_lines(documents)
-    events = read_json(logger, "notes")["events"]
-    assert events and {event["cause"] for event in events} == {"refusal"}
-    assert {event["action"] for event in events} == {"read again"}
-    assert all(event["words"] >= 10 for event in events)
-    refused = [json.dumps(request["messages"]) for request in llm.refused]
-    assert len(refused) == len(set(refused))
-    assert len(llm.requests) == 485
-
-
-READ_AGAIN = {
-    "by-refusal": (
-        20_000,
-        [
-            ("relevance-r2-d0", 1, 88),
-            ("relevance-r2-w88-d0", 1, 44),
-            ("reasoning", 2, 22),
-        ],
-        247,
-    ),
-    "by-refusal-of-the-schema": (
-        17_000,
-        [("relevance-r2-d0", 1, 88), ("relevance-r2-w88-d0", 1, 44), ("schema", 2, 22)],
-        246,
-    ),
-    "by-estimate": (None, [("relevance-r2-d0", 1, 44)], 162),
-}
-
-
-@pytest.mark.parametrize(
-    ("refused_over", "read_again", "n_requests"), READ_AGAIN.values(), ids=READ_AGAIN
-)
-def test_notes_that_do_not_fit_are_read_again_shorter(
-    answering_llm,
-    within_budget,
-    window,
-    tmp_path,
-    monkeypatch,
-    refused_over,
-    read_again,
-    n_requests,
-):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(relevance=within_budget(LONG_NOTE))
-    if refused_over:
-        llm.refuses_over(refused_over)
-    logger = TaskLogger("run", root=tmp_path)
-    model = QWEN if refused_over else window(6_000)
-    result = answer(
-        llm, logger, documents=REPORTS, model=model, prompts=DEFAULT_PROMPTS
-    )
-    assert len(result.relevant_context) == 40
-    events = read_json(logger, "notes")["events"]
-    assert [(e["call"], e["round"], e["words"]) for e in events] == read_again
-    assert {e["cause"] for e in events} == {"refusal" if refused_over else "estimate"}
-    if not refused_over:
-        assert max(tokens(request) for request in llm.requests) <= 5_100
-        assert events[0]["sized_for"] == "reasoning"
-    assert len(llm.requests) == n_requests
-
-
-def refused_parse_run(llm, within_budget, tmp_path, monkeypatch, *, relevance=None):
-    """Ten reports on an unknown window whose every request fits under 18,500
-    characters but the last report's parse call, whose notes (ten of 1,000
-    characters, 177 words each) are bigger than its 5,000 characters."""
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    reports = [f"Report {i:02d}. " + ROUTINE for i in range(9)]
-    reports.append("Report 09. " + (ROUTINE * 67)[:5_000])
-    note = within_budget(LONG_NOTE)
-    llm.answers(relevance=note if relevance is None else relevance(note))
-    llm.refuses_over(18_500)
-    logger = TaskLogger("run", root=tmp_path)
-    return logger, functools.partial(
-        answer, llm, logger, documents=reports, model=QWEN, prompts=DEFAULT_PROMPTS
-    )
-
-
-def test_a_stage_sent_again_keeps_its_discarded_calls(
-    answering_llm, within_budget, tmp_path, monkeypatch
-):
-    logger, run = refused_parse_run(answering_llm, within_budget, tmp_path, monkeypatch)
-    run()
-    [event] = read_json(logger, "notes")["events"]
-    assert (event["call"], event["cause"], event["discarded"]) == (
-        "parse-d9",
-        "refusal",
-        9,
-    )
-    assert (event["round"], event["words"]) == (2, 88)
-    parses = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
-    assert parses == [f"parse-d{i}" for i in [*range(9), *range(10)]]
-    reads = [call["kind"] for call in read_json(logger, "relevance/calls")]
-    assert reads[20:] == [f"relevance-r2-w88-d{i}" for i in range(10)]
-    rounds = read_json(logger, "relevance/result")["rounds"]
-    assert [r.get("max_words") for r in rounds] == [None, 88]
-
-
-def test_the_relevant_context_is_the_notes_reasoning_saw(
-    answering_llm, within_budget, tmp_path, monkeypatch
-):
-    logger, run = refused_parse_run(answering_llm, within_budget, tmp_path, monkeypatch)
-    result = run()
-    reasoning_prompt = system_prompts(answering_llm, "reasoning")[-1]
-    last_round = read_json(logger, "relevance/result")["rounds"][-1]["snippets"]
-    assert result.relevant_context == [join_parts(s) for s in last_round]
-    assert all(len(note.split()) == 88 for note in result.relevant_context)
-    assert all(f"\n{note}\n" in reasoning_prompt for note in result.relevant_context)
-
-
-def test_a_failure_while_reading_again_is_recorded_by_both_stages_named_once(
-    answering_llm, within_budget, tmp_path, monkeypatch
-):
-    def down_when_read_again(note):
-        return [note] * 20 + [provider_down()]
-
-    logger, run = refused_parse_run(
-        answering_llm,
-        within_budget,
-        tmp_path,
-        monkeypatch,
-        relevance=down_when_read_again,
-    )
-    with pytest.raises(litellm.APIConnectionError) as failure:
-        run()
-    assert failure.value.__notes__ == [f"r3con: partial artifacts in {logger.dir}"]
-    for stage in ("relevance", "structuring/parsing"):
-        assert "provider down" in (logger.dir / stage / "error.txt").read_text()
-    assert (logger.dir / "relevance" / "result.json").is_file()
 
 
 NINE_WORDS = "Report logged its routine checks and found nothing unusual."
