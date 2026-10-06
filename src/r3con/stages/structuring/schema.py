@@ -15,14 +15,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
+from litellm.exceptions import ContextWindowExceededError
 from pydantic import BaseModel
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.notes import Budget
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.llm import litellm_chat_completion
-from r3con.stages.relevance import Snippet, render_relevance
+from r3con.stages.relevance import Snippet, note_texts, render_relevance
 from r3con.stages.structuring.parsing import SchemaError, check_schema
 
 _log = get_logger("structuring.schema")
@@ -143,6 +145,7 @@ def propose_schema(
     prompt_version: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
+    budget: Budget | None = None,
     **llm_kwargs: Any,
 ) -> ProposalResult:
     """Propose a validated Pydantic schema for ``task``.
@@ -161,6 +164,9 @@ def propose_schema(
         model: LiteLLM provider-prefixed model string (e.g. ``"openai/gpt-6-luna"``).
         max_attempts: Cap on model calls; ``None`` reads
             ``settings.SCHEMA_MAX_ATTEMPTS`` when the call runs.
+        budget: The run's notes budget (:mod:`r3con.notes`). With it, every attempt
+            is measured against the window before it is sent, and one that does not
+            fit, or is refused as too long, hands its notes over.
         **llm_kwargs: Forwarded to :func:`litellm_chat_completion`.
 
     Returns:
@@ -171,6 +177,11 @@ def propose_schema(
         SchemaError: if every attempt fails validation. The exception's
             message references the last attempt's error.
         ValueError: if ``max_attempts`` is not positive.
+        r3con.notes.NotesTooLong: only with a ``budget``, when an attempt does not
+            fit the model's window and carries notes: before it is sent, or from the
+            provider's refusal. The caller hands it to ``budget.shorten``, reads the
+            round that wrote the notes again under ``budget.words``, and proposes
+            again.
     """
     if max_attempts is None:
         max_attempts = settings.SCHEMA_MAX_ATTEMPTS
@@ -188,21 +199,32 @@ def propose_schema(
     )
     user_prompt = f"Input:\n<task>\n{task}\n</task>\nOutput:"
 
+    notes = note_texts(relevance_snippets or ())
     attempts: list[ProposalAttempt] = []
     last_error: str = ""
     for attempt_idx in range(max_attempts):
         _log.info("schema attempt %d/%d", attempt_idx + 1, max_attempts)
-        raw_response = cast(
-            str,
-            litellm_chat_completion(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                model=model,
-                run=run,
-                kind="llm_call" if attempt_idx == 0 else "retry",
-                **llm_kwargs,
-            ),
-        )
+        request = [system_prompt, user_prompt]
+        if budget is not None:
+            budget.splits.check_notes(call="schema", request=request, notes=notes)
+        try:
+            raw_response = cast(
+                str,
+                litellm_chat_completion(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    model=model,
+                    run=run,
+                    kind="llm_call" if attempt_idx == 0 else "retry",
+                    **llm_kwargs,
+                ),
+            )
+        except ContextWindowExceededError as refusal:
+            if budget is not None:
+                budget.splits.check_notes(
+                    call="schema", request=request, notes=notes, refusal=refusal
+                )
+            raise
         schema_code = _extract_schema(raw_response)
         thought = _extract_thought(raw_response)
         try:
