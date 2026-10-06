@@ -17,11 +17,6 @@ Two things say a request does not fit:
 Splitting stops when more parts cannot help, because what is sent beside the document
 (the prompt and the other documents' notes) has outgrown the window. The run then
 raises ``litellm.ContextWindowExceededError`` with a note naming the document.
-
-The bigger of what a request carries is halved. When a caller passes the notes a
-request carries and they are bigger than its document part (or the request has no
-document, ``check_notes``), the request is not cut: it raises
-:class:`r3con.notes.NotesTooLong`, so that the notes can be read again shorter.
 """
 
 from __future__ import annotations
@@ -30,7 +25,7 @@ import functools
 import itertools
 import re
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, NoReturn, TypeVar
 
 import litellm
@@ -38,7 +33,6 @@ from litellm.exceptions import ContextWindowExceededError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.notes import NotesTooLong, count_notes
 from r3con.runs import TaskLogger
 from r3con.runtime.llm import count_tokens, quiet_litellm
 
@@ -94,16 +88,12 @@ class Splits:
             if self.max_input_tokens is None
             else self.max_input_tokens * (100 - margin_percent) // 100
         )
-        self._record: dict[str, Any] = {**self.window, "documents": {}}
-
-    @property
-    def window(self) -> dict[str, Any]:
-        """The model and its window: the fields ``splits.json`` opens with."""
-        return {
-            "model": self.model,
+        self._record: dict[str, Any] = {
+            "model": model,
             "max_input_tokens": self.max_input_tokens,
-            "margin_percent": self.margin_percent,
+            "margin_percent": margin_percent,
             "line": self.line,
+            "documents": {},
         }
 
     def parts(self, doc: int) -> list[str]:
@@ -123,48 +113,34 @@ class Splits:
         return tokens if tokens > self.line else None
 
     def read_in_parts(
-        self,
-        doc: int,
-        *,
-        call: str,
-        rest: str,
-        send: Callable[[str, str], T],
-        notes: Sequence[str] = (),
+        self, doc: int, *, call: str, rest: str, send: Callable[[str, str], T]
     ) -> list[T]:
         """One result of ``send(part, kind)`` per part of ``documents[doc]``, in order,
         after splitting it as far as it must.
 
         ``call`` names the call (``"relevance-r2"``, ``"parse"``); a part's ``kind`` is
         ``{call}-d{doc}`` while the document is whole and ``{call}-d{doc}c{k}`` once it
-        is split. ``rest`` is everything sent beside a part, and ``notes`` the notes
-        inside it, one text per document or part. ``send`` raises
+        is split. ``rest`` is everything sent beside a part. ``send`` raises
         ``litellm.ContextWindowExceededError`` when the provider refuses a part; any
-        other exception, a ``NotesTooLong`` included, passes through untouched.
+        other exception passes through untouched.
 
         With a known window: while the rest is under the line, halve until every part's
         estimate is under it, then send; a refusal halves again and starts over. With an
         unknown window: send, and halve on a refusal. Either way the parts accepted
-        before a refusal are discarded and the level is read again. With ``notes``, a
-        request that does not fit while its notes are bigger than its part, or whose
-        rest alone is over the line, is not cut: it is handed over.
+        before a refusal are discarded and the level is read again.
 
         Raises:
-            r3con.notes.NotesTooLong: only with ``notes``, for that request, before
-                sending it or from its refusal.
             litellm.ContextWindowExceededError: with a note naming the document, when
                 more parts cannot help: the rest alone is over the line; with an
                 unknown window, a refused part is shorter than the rest; or a part of
                 one character still does not fit.
         """
-        # The rest's and the notes' tokens: counted once, and only when the request's
-        # size in bytes cannot settle whether it fits.
+        # The rest's tokens: counted once, and only when its size in bytes cannot settle
+        # whether a request fits.
         count_rest = functools.cache(functools.partial(count_tokens, rest))
-        count_rest_notes = functools.cache(functools.partial(count_notes, notes))
         while True:
             if self.line is not None:
-                self._split_to_fit(
-                    doc, call, rest, count_rest, notes, count_rest_notes, self.line
-                )
+                self._split_to_fit(doc, call, rest, count_rest, self.line)
             parts = self.parts(doc)
             results: list[T] = []
             for k, part in enumerate(parts):
@@ -172,77 +148,11 @@ class Splits:
                 try:
                     results.append(send(part, kind))
                 except ContextWindowExceededError as refusal:
-                    self._split_on_refusal(
-                        doc, kind, k, part, count_rest, notes, count_rest_notes, refusal
-                    )
+                    self._split_on_refusal(doc, kind, k, part, count_rest, refusal)
                     break
             else:
                 self._record_parts(doc, call, len(parts))
                 return results
-
-    def measure(
-        self,
-        docs: Iterable[int],
-        *,
-        call: str,
-        rests: Callable[[int], tuple[str, Sequence[str]]],
-    ) -> None:
-        """Before a stage sends anything, with a known window: cut each of ``docs`` by
-        estimate as :meth:`read_in_parts` would, ``rests(doc)`` giving the rest it is
-        sent with and the notes inside it.
-
-        Raises:
-            r3con.notes.NotesTooLong: once every document is measured, the one with
-                the least room of those whose notes must be handed over.
-            litellm.ContextWindowExceededError: at once, where more parts cannot help,
-                as :meth:`read_in_parts` raises it.
-        """
-        if self.line is None:
-            return
-        troubles: list[NotesTooLong] = []
-        for doc in docs:
-            rest, notes = rests(doc)
-            try:
-                self._split_to_fit(
-                    doc,
-                    call,
-                    rest,
-                    functools.cache(functools.partial(count_tokens, rest)),
-                    notes,
-                    functools.cache(functools.partial(count_notes, notes)),
-                    self.line,
-                )
-            except NotesTooLong as trouble:
-                troubles.append(trouble)
-        if troubles:
-            raise min(troubles, key=lambda trouble: trouble.room or 0)
-
-    def check_notes(
-        self,
-        *,
-        call: str,
-        request: Sequence[str],
-        notes: Sequence[str],
-        refusal: ContextWindowExceededError | None = None,
-    ) -> None:
-        """Hand over the notes of a request that carries no document, ``call`` (the
-        schema call, reasoning's first turn), when it does not fit: ``request`` is its
-        texts, ``notes`` the notes inside them. A request without notes is never
-        handed over.
-
-        Raises:
-            r3con.notes.NotesTooLong: without ``refusal``, when the request is over the
-                line; with it, from it.
-        """
-        if not notes:
-            return
-        if refusal is not None:
-            estimate = sum(map(count_tokens, request))
-            raise self._notes_too_long(
-                call, estimate, notes, count_notes(notes), refusal
-            ) from refusal
-        if (estimate := self.over_line(*request)) is not None:
-            raise self._notes_too_long(call, estimate, notes, count_notes(notes))
 
     def _split_to_fit(
         self,
@@ -250,21 +160,15 @@ class Splits:
         call: str,
         rest: str,
         count_rest: Callable[[], int],
-        notes: Sequence[str],
-        count_rest_notes: Callable[[], int],
         line: int,
     ) -> None:
         """Before sending, with a known window: stop if the rest alone is over the
-        line, or hand its notes over when it carries any; otherwise halve until every
-        part's request is estimated under it, handing the notes over instead when they
-        are bigger than the part over the line."""
+        line; otherwise halve until every part's request is estimated under it."""
         rest_size = _utf8_size(rest)
         if rest_size > line and count_rest() > line:
             parts = self.parts(doc)
             kind = _kind(call, doc, 0, len(parts))
             estimate = count_rest() + count_tokens(parts[0])
-            if notes:
-                raise self._notes_too_long(kind, estimate, notes, count_rest_notes())
             self._stop(
                 doc,
                 self._event(kind, "estimate", estimate, count_rest(), 0),
@@ -275,8 +179,6 @@ class Splits:
             k, estimate = over
             parts = self.parts(doc)
             kind = _kind(call, doc, k, len(parts))
-            if notes and count_rest_notes() > estimate - count_rest():
-                raise self._notes_too_long(kind, estimate, notes, count_rest_notes())
             event = self._event(kind, "estimate", estimate, count_rest(), 0)
             if len(parts[k]) == 1:
                 self._stop(doc, event, _no_room(count_rest()))
@@ -313,19 +215,12 @@ class Splits:
         k: int,
         part: str,
         count_rest: Callable[[], int],
-        notes: Sequence[str],
-        count_rest_notes: Callable[[], int],
         refusal: ContextWindowExceededError,
     ) -> None:
         """Halve after the provider refused part ``k``, or stop where more parts cannot
         help: a part of one character, or, with an unknown window, a part shorter than
-        the rest. Notes bigger than the part are handed over instead, from the
-        refusal."""
+        the rest."""
         part_tokens = count_tokens(part)
-        if notes and count_rest_notes() > part_tokens:
-            raise self._notes_too_long(
-                kind, count_rest() + part_tokens, notes, count_rest_notes(), refusal
-            ) from refusal
         event = self._event(
             kind, "refusal", count_rest() + part_tokens, count_rest(), k
         )
@@ -389,51 +284,14 @@ class Splits:
     def _not_sent(self, event: dict[str, Any]) -> ContextWindowExceededError:
         """The error for ``event``'s request, which r3con stopped before sending."""
         return ContextWindowExceededError(
-            message=self._estimated(event["call"], event["estimate"]),
+            message=(
+                f"r3con estimated {event['call']} at {event['estimate']:,} tokens, "
+                f"over the {self.line:,}-token line (the "
+                f"{self.max_input_tokens:,}-token input window litellm's model map "
+                f"gives {self.model}, less {self.margin_percent}%); it was not sent."
+            ),
             model=self.model,
             llm_provider="r3con",
-        )
-
-    def _estimated(self, call: str, estimate: int) -> str:
-        """Why ``call``, estimated at ``estimate`` tokens, was not sent."""
-        return (
-            f"r3con estimated {call} at {estimate:,} tokens, over the {self.line:,}-token "
-            f"line (the {self.max_input_tokens:,}-token input window litellm's model "
-            f"map gives {self.model}, less {self.margin_percent}%); it was not sent."
-        )
-
-    def _notes_too_long(
-        self,
-        call: str,
-        estimate: int,
-        notes: Sequence[str],
-        notes_tokens: int,
-        refusal: ContextWindowExceededError | None = None,
-    ) -> NotesTooLong:
-        """The hand-over of ``call``'s notes: by estimate, with the room they have
-        under the line; by refusal, with none."""
-        if refusal is None:
-            message = self._estimated(call, estimate)
-        else:
-            message = (
-                f"{call} was refused as too long, and the notes it carries (about "
-                f"{notes_tokens:,} tokens) are the bigger part of it."
-            )
-        room = (
-            None
-            if refusal is not None or self.line is None
-            else self.line - (estimate - notes_tokens)
-        )
-        return NotesTooLong(
-            message,
-            model=self.model,
-            call=call,
-            cause="estimate" if refusal is None else "refusal",
-            estimate=estimate,
-            notes=notes,
-            notes_tokens=notes_tokens,
-            room=room,
-            refusal=refusal,
         )
 
     @staticmethod
@@ -523,8 +381,8 @@ def _max_input_tokens(model: str) -> int | None:
         window = None
     if window is None:
         _log.info(
-            "litellm's model map gives no input window for %s; r3con fits a request "
-            "to it only when the model refuses one",
+            "litellm's model map gives no input window for %s; a document is split "
+            "only when the model refuses it",
             model,
         )
     return window

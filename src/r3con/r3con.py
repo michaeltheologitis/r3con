@@ -262,10 +262,8 @@ def run(
         Each of these is raised before any request and before a run folder exists, as
         is anything :func:`~r3con.config.load_config` refuses.
         Anything the underlying stages raise — most usefully
-        ``litellm.ContextWindowExceededError`` when the prompt sent beside a document
-        leaves it no room in the model's window, or when the notes, even at 10 words
-        each, do not fit it (notes that fill the window are otherwise read again
-        shorter, and ``notes.json`` in the run folder says so). With
+        ``litellm.ContextWindowExceededError`` when the prompt and notes sent beside a
+        document leave it no room in the model's window. With
         artifacts on, an exception from a stage carries a note naming the run folder,
         where the stage left its completed calls and ``error.txt``.
     """

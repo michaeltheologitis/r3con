@@ -1,15 +1,11 @@
-import functools
 import json
 import logging
 
 import litellm
 import pytest
 
-from r3con.notes import Budget, NotesTooLong
 from r3con.prompts import load_prompt
-from r3con.runtime.llm import count_tokens
-from r3con.splitting import Splits
-from r3con.stages.reasoning import _sample_record_per_field, check_first_turn, reason
+from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
@@ -240,62 +236,9 @@ def test_a_later_turn_refused_is_raised_as_it_is(llm):
     assert len(llm.requests) == 2
 
 
-@pytest.mark.parametrize(
-    ("snippets", "budgeted"),
-    [(None, True), (["Northgate logged 5."], False), (["Northgate logged 5."], True)],
-    ids=["no-notes", "no-budget", "notes-and-budget"],
-)
-def test_a_first_turn_refused_with_samples_hands_over_its_notes(
-    llm, snippets, budgeted
-):
+def test_a_first_turn_refused_with_samples_is_raised(llm):
     whole, samples = too_long(), too_long()
-    budget = Budget(Splits([], model=MODEL)) if budgeted else None
-    with pytest.raises(Exception) as failure:
-        reasoning_prompt(
-            llm.replies(whole, samples, COMMIT),
-            parsed=ROWS,
-            relevance_snippets=snippets,
-            budget=budget,
-        )
-    if snippets and budgeted:
-        assert isinstance(failure.value, NotesTooLong)
-        assert (failure.value.call, failure.value.cause) == ("reasoning", "refusal")
-        assert failure.value.__cause__ is samples
-    else:
-        assert failure.value is samples
+    with pytest.raises(litellm.ContextWindowExceededError) as failure:
+        reasoning_prompt(llm.replies(whole, samples, COMMIT), parsed=ROWS)
+    assert failure.value is samples
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
-
-
-def test_a_samples_turn_over_the_line_hands_over_its_notes_before_sending(llm, window):
-    model = window(4_000)
-    notes = [" ".join(["word"] * 60)] * 40
-    with pytest.raises(NotesTooLong) as handed:
-        reasoning_prompt(
-            llm,
-            parsed=ROWS,
-            relevance_snippets=notes,
-            model=model,
-            budget=Budget(Splits([], model=model)),
-        )
-    assert (handed.value.call, handed.value.cause) == ("reasoning", "estimate")
-    assert llm.requests == []
-
-
-def test_the_first_turn_without_a_parse_hands_over_notes_over_the_line(window):
-    check = functools.partial(
-        check_first_turn,
-        task="?",
-        prompt_version="v2",
-        budget=Budget(Splits([], model=window(4_000))),
-    )
-    notes = [" ".join(["word"] * 60)] * 40
-    check(relevance_snippets=notes[:1])
-    with pytest.raises(NotesTooLong) as handed:
-        check(relevance_snippets=notes)
-    without_a_parse = load_prompt(
-        "reasoning", version="v2", task="?", relevance=render_relevance(notes)
-    )
-    assert (handed.value.call, handed.value.notes) == ("reasoning", notes)
-    assert handed.value.estimate == count_tokens(without_a_parse) + count_tokens(
-        "Input:\n<task>\n?\n</task>"
-    )

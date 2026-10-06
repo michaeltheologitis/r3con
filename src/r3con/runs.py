@@ -19,12 +19,9 @@ Layout per ``logs/<run-folder>/``:
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
   rounds: [{round, snippets}], totals}`` — within a round the per-document relevance
   snippets align to ``documents[i]``, a document read in parts holding a list of its
-  parts' notes; the last round is the relevant context that feeds downstream; a round
-  read under a word budget has ``max_words``) + ``calls.json`` (one per
-  ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
-  ``relevance-r{round}-d{doc}c{part}`` for a part, and
-  ``relevance-r{round}-w{W}-d{doc}`` for a round read under a budget of W words). A
-  round read again that fails leaves ``error.txt`` beside the earlier ``result.json``.
+  parts' notes; the last round is the relevant context that feeds downstream) +
+  ``calls.json`` (one per ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``,
+  or ``relevance-r{round}-d{doc}c{part}`` for a part).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
@@ -36,8 +33,6 @@ Layout per ``logs/<run-folder>/``:
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
-- ``notes.json`` — only when notes were read again shorter or the run stopped for them
-  (:mod:`r3con.notes`): the model's window and every event.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and
@@ -80,7 +75,7 @@ from r3con.settings import active_logs_dir
 
 # Pulls the source-document index (and, for a document read in parts, the part index)
 # out of a call kind so calls.json carries per-call provenance. Matches ``parse-d0``,
-# ``relevance-r2-d3``, ``parse-d3c1`` and ``relevance-r2-w16-d7c1``.
+# ``relevance-r2-d3`` and ``parse-d3c1``.
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
 
 

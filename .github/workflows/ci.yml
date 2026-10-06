@@ -14,10 +14,6 @@ on:
         description: Also run the experiments, once (bills OPENAI_API_KEY)
         type: boolean
         default: false
-      e7_seeds:
-        description: E7's seeds, comma-separated (empty runs 1,2,3)
-        type: string
-        default: ""
   workflow_call:
     inputs:
       live:
@@ -124,7 +120,7 @@ jobs:
     if: inputs.experiment
     needs: [checks, test, lowest, wheel]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
@@ -141,7 +137,6 @@ jobs:
       - name: The experiments
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          R3CON_E7_SEEDS: ${{ inputs.e7_seeds }}
         run: uv run --locked pytest -m experiment -rA --basetemp="$RUNNER_TEMP/experiment"
       - uses: actions/upload-artifact@v7
         if: always()

@@ -7,7 +7,6 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import copy
 import json
 import logging
-import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -77,13 +76,11 @@ class FakeLLM:
     exception to raise, or a callable from the request to the content.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
-    request as a provider does, in tokens. ``refused`` holds every request refused as
-    too long.
+    request as a provider does, in tokens.
     """
 
     def __init__(self) -> None:
         self.requests: list[Request] = []
-        self.refused: list[Request] = []
         self.peak_in_flight = 0
         self._queue: deque[Reply] = deque()
         self._by_stage: dict[str, Reply | deque[Reply]] = {}
@@ -133,8 +130,6 @@ class FakeLLM:
                 reply = too_long(self._token_limit, count, request["model"])
             else:
                 reply = self._next_reply(snapshot)
-            if isinstance(reply, litellm.ContextWindowExceededError):
-                self.refused.append(snapshot)
             self._in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
         try:
@@ -284,23 +279,6 @@ def quiet_site_memos(n: int) -> list[str]:
     ]
 
 
-_WORD_BUDGET = re.compile(r"Keep it under (\d+) words")
-
-
-def keeping_to_budget(
-    reply: str | Callable[[Request], str],
-) -> Callable[[Request], str]:
-    """A relevance reply from a model that obeys a word budget: when the system prompt
-    asks for fewer than W words, the reply's first W words."""
-
-    def obeying(request: Request) -> str:
-        note = reply(request) if callable(reply) else reply
-        budget = _WORD_BUDGET.search(request["messages"][0]["content"])
-        return note if budget is None else " ".join(note.split()[: int(budget[1])])
-
-    return obeying
-
-
 def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
@@ -345,11 +323,6 @@ def grown_registry() -> Callable[..., str]:
 @pytest.fixture
 def quiet_sites() -> Callable[[int], list[str]]:
     return quiet_site_memos
-
-
-@pytest.fixture
-def within_budget() -> Callable[..., Callable[[Request], str]]:
-    return keeping_to_budget
 
 
 @pytest.fixture

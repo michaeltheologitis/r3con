@@ -26,7 +26,6 @@ from pydantic import BaseModel
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.notes import Budget
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -36,7 +35,7 @@ from r3con.runtime.codeact import (
 )
 from r3con.runtime.llm import count_tokens
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, note_texts, render_relevance
+from r3con.stages.relevance import Snippet, render_relevance
 
 _log = get_logger("reasoning")
 
@@ -160,40 +159,6 @@ def _system_prompt(
     )
 
 
-def check_first_turn(
-    *,
-    task: str,
-    relevance_snippets: Sequence[Snippet],
-    prompt_version: str,
-    budget: Budget,
-) -> None:
-    """Measure reasoning's first turn as far as it is known before the schema exists:
-    its prompt with ``relevance_snippets`` and the task, without a schema or a parse.
-    The real turn adds both, so this never hands over notes that would fit.
-
-    Raises:
-        r3con.notes.NotesTooLong: when even that turn is over the line.
-    """
-    system_prompt = _system_prompt(
-        task=task,
-        schema_code="",
-        relevance_snippets=relevance_snippets,
-        prompt_version=prompt_version,
-        parse_json="",
-        samples_block="",
-        parse_block="",
-    )
-    budget.splits.check_notes(
-        call="reasoning",
-        request=[system_prompt, _user_message(task)],
-        notes=note_texts(relevance_snippets),
-    )
-
-
-def _user_message(task: str) -> str:
-    return f"Input:\n<task>\n{task}\n</task>"
-
-
 def reason(
     *,
     task: str,
@@ -208,7 +173,6 @@ def reason(
     additional_authorized_imports: list[str] | None = None,
     run: StageRun | None = None,
     splits: Splits | None = None,
-    budget: Budget | None = None,
     **llm_kwargs: Any,
 ) -> CodeActResult:
     """Answer ``task`` over ``parsed`` with the multi-turn CodeAct loop.
@@ -226,19 +190,9 @@ def reason(
     ``model``) estimates the first turn with it over the line, or when the provider
     refuses that turn as too long, which sends it once more with the samples.
 
-    With the run's notes ``budget`` (:mod:`r3con.notes`), a first turn still over the
-    line with the samples, or refused with them, hands its notes over.
-
     The system prompt carries everything immutable across the loop's turns; the
     user message is the bare task. Loop mechanics live in
     :func:`r3con.runtime.codeact.run_codeact`.
-
-    Raises:
-        r3con.notes.NotesTooLong: only with a ``budget``, when the first turn does not
-            fit with the samples and carries notes: before it is sent, or from the
-            provider's refusal. The caller hands it to ``budget.shorten``, reads the
-            round that wrote the notes again under ``budget.words``, and reasons
-            again.
     """
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
@@ -255,7 +209,7 @@ def reason(
         parse_json=parse_json,
         samples_block=_sample_record_per_field(parse_dict),
     )
-    user_message = _user_message(task)
+    user_message = f"Input:\n<task>\n{task}\n</task>"
 
     # The whole parse, unless it is over the flood guard (a parse that runs to
     # thousands of records), or its first turn is over the line.
@@ -275,19 +229,12 @@ def reason(
         )
         whole = False
         system_prompt = render(parse_block=_sample_view(parse_dict))
-    check_notes = functools.partial(
-        splits.check_notes, call="reasoning", notes=note_texts(relevance_snippets or ())
-    )
-    if budget is not None:
-        check_notes(request=[system_prompt, user_message])
 
     def with_samples(refusal: ContextWindowExceededError) -> str:
         """The first turn's prompt with samples, once, after a refusal of it with
-        the whole parse; after a refusal with samples, the notes' hand-over."""
-        nonlocal whole, system_prompt
+        the whole parse."""
+        nonlocal whole
         if not whole:
-            if budget is not None:
-                check_notes(request=[system_prompt, user_message], refusal=refusal)
             raise refusal
         _log.warning(
             "reasoning's first turn was refused as too long with the whole parse "
@@ -295,8 +242,7 @@ def reason(
             f"{parse_tokens:,}",
         )
         whole = False
-        system_prompt = render(parse_block=_sample_view(parse_dict))
-        return system_prompt
+        return render(parse_block=_sample_view(parse_dict))
 
     return run_codeact(
         system_prompt=system_prompt,
