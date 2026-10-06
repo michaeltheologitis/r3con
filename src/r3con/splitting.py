@@ -95,12 +95,16 @@ class Splits:
             if self.max_input_tokens is None
             else self.max_input_tokens * (100 - margin_percent) // 100
         )
-        self._record: dict[str, Any] = {
-            "model": model,
+        self._record: dict[str, Any] = {**self.window, "documents": {}}
+
+    @property
+    def window(self) -> dict[str, Any]:
+        """The model and its window: the fields ``splits.json`` opens with."""
+        return {
+            "model": self.model,
             "max_input_tokens": self.max_input_tokens,
-            "margin_percent": margin_percent,
+            "margin_percent": self.margin_percent,
             "line": self.line,
-            "documents": {},
         }
 
     def parts(self, doc: int) -> list[str]:

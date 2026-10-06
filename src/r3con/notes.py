@@ -108,13 +108,7 @@ class Budget:
         self.words = None
         self._can_shorten = can_shorten
         self._task_logger = task_logger
-        self._record: dict[str, Any] = {
-            "model": splits.model,
-            "max_input_tokens": splits.max_input_tokens,
-            "margin_percent": splits.margin_percent,
-            "line": splits.line,
-            "events": [],
-        }
+        self._record: dict[str, Any] = {**splits.window, "events": []}
 
     def shorten(
         self,
