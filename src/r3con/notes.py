@@ -20,6 +20,7 @@ notes trouble leaves a run. Every event is recorded in ``notes.json`` in the run
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import KW_ONLY, dataclass
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from litellm.exceptions import ContextWindowExceededError
@@ -38,6 +39,7 @@ MIN_NOTE_WORDS = 10
 _OUTGROWN = "The relevant context has outgrown the model's window."
 
 
+@dataclass(eq=False, repr=False)
 class NotesTooLong(Exception):
     """A request that does not fit the model's window while the notes it carries are
     the bigger part of it: bigger than its document part, or all it carries beside its
@@ -54,41 +56,24 @@ class NotesTooLong(Exception):
       an estimate; ``None`` after a refusal.
     """
 
+    message: str
+    _: KW_ONLY
     model: str
     call: str
     cause: str
     estimate: int
-    notes: list[str]
+    notes: Sequence[str]
     notes_tokens: int
-    room: int | None
-    refusal: ContextWindowExceededError | None
+    room: int | None = None
+    refusal: ContextWindowExceededError | None = None
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        model: str,
-        call: str,
-        cause: str,
-        estimate: int,
-        notes: Sequence[str],
-        notes_tokens: int,
-        room: int | None = None,
-        refusal: ContextWindowExceededError | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.model = model
-        self.call = call
-        self.cause = cause
-        self.estimate = estimate
-        self.notes = list(notes)
-        self.notes_tokens = notes_tokens
-        self.room = room
-        self.refusal = refusal
+    def __post_init__(self) -> None:
+        super().__init__(self.message)
+        self.notes = list(self.notes)
         self.add_note(
-            f"r3con: the notes {call} carries (about {notes_tokens:,} tokens) are the "
-            "bigger part of a request that does not fit; hand this to the budget's "
-            "shorten and read their round again, as r3con.run does."
+            f"r3con: the notes {self.call} carries (about {self.notes_tokens:,} tokens) "
+            "are the bigger part of a request that does not fit; hand this to the "
+            "budget's shorten and read their round again, as r3con.run does."
         )
 
 
