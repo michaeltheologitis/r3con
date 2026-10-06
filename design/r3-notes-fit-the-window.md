@@ -30,6 +30,10 @@ the bigger of what it carries. Branch `claude/tender-shannon-eq4lq7-r3`, cut at 
   (§10.1, §2.5 item 9).
 - 2026-10-06 · the as-built (Cartographer): §2.5 item 11, where a relevance-v1 run stops;
   §2.2 item 4 and §8 follow.
+- 2026-10-06 · the literate refactor (Refactorer), no behaviour changed: `NotesTooLong`
+  is a dataclass with the same signature (§5.1); `reason` applies the flood guard itself
+  and `_render_parse_for_codeact` is gone (§4.2); `Splits.window` is the header
+  `splits.json` and `notes.json` share (§5.4, §11); three tests are renamed (§9.3).
 
 **Reading it.** §1 and §2 are the Gate B read: what changes, what was measured, and every
 place this design decides something the spec left open or departs from it, with the
@@ -462,8 +466,8 @@ def _system_prompt(
 ```
 
 - **`_sample_view`** is the second half of today's `_render_parse_for_codeact`
-  (`reasoning.py:115–126`): the "only a SAMPLE" note and one record per field. The flood
-  guard keeps calling it, unchanged.
+  (`reasoning.py:115–126`): the "only a SAMPLE" note and one record per field. The first
+  half, the flood guard, moves into `reason` (step 1), and the function goes.
 - **`_system_prompt`** is today's `load_prompt("reasoning", …)` call (`:174–184`), moved
   into a helper so that `reason` can render twice and `check_first_turn` (§7.4) renders the
   same prompt. The variables a prompt version may use do not change.
@@ -473,8 +477,9 @@ def _system_prompt(
 
 **The choice, in order** (`user` is the user message, `Input:\n<task>\n{task}\n</task>`):
 
-1. `parse_block = _render_parse_for_codeact(parse_dict, parse_json)`, as today: the whole
-   parse, or the sample view for a parse over `REASONING_PARSE_MAX_TOKS`.
+1. **The flood guard**, as today: the whole parse, or the sample view for a parse over
+   `REASONING_PARSE_MAX_TOKS`. `reason` counts the parse once and keeps the outcome as
+   `whole`.
 2. **Measured** (a known window): if the whole parse is shown and
    `splits.over_line(system_prompt, user)` returns an estimate, render again with
    `_sample_view(parse_dict)`, and log INFO on `r3con.reasoning`, for example:
@@ -518,34 +523,23 @@ first turn is under the line in UTF-8 bytes, so nothing is counted and the promp
 MIN_NOTE_WORDS = 10
 
 
+@dataclass(eq=False, repr=False)
 class NotesTooLong(Exception):
     """A request that does not fit the model's window while the notes it carries are
     the bigger part of it: bigger than its document part, or all it carries beside its
     own prompt (the schema call, reasoning's first turn). Not a
     ``ContextWindowExceededError``, so nothing that cuts a document takes it for one."""
 
+    message: str
+    _: KW_ONLY
     model: str
     call: str
     cause: str
     estimate: int
-    notes: list[str]
+    notes: Sequence[str]
     notes_tokens: int
-    room: int | None
-    refusal: ContextWindowExceededError | None
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        model: str,
-        call: str,
-        cause: str,
-        estimate: int,
-        notes: Sequence[str],
-        notes_tokens: int,
-        room: int | None = None,
-        refusal: ContextWindowExceededError | None = None,
-    ) -> None: ...
+    room: int | None = None
+    refusal: ContextWindowExceededError | None = None
 
 
 def count_notes(notes: Sequence[str]) -> int: ...
@@ -585,9 +579,10 @@ class Budget:
   `line - (estimate - notes_tokens)`, with a known window and an estimate; it is `None`
   after a refusal, even with a known window, because the provider counted more than the
   estimate. `refusal` is the provider's error, and `model` the run's model string, for the
-  stop's error. The constructor passes `message` to `Exception`, so `str(trouble)` is the
-  message, which the stop reuses. A `NotesTooLong` built after a refusal is raised `from`
-  it.
+  stop's error. A dataclass with `eq=False` and `repr=False`, it keeps `Exception`'s
+  identity and repr; `__post_init__` passes `message` to `Exception`, so `str(trouble)` is
+  the message, which the stop reuses, and keeps `notes` as a list. A `NotesTooLong` built
+  after a refusal is raised `from` it.
 - **Why not litellm's class** (§2.4). R2's `read_in_parts` cuts a document on
   `except ContextWindowExceededError`; a notes signal of that class, raised anywhere
   inside such a block now or after a later edit, would be taken for a refusal of the
@@ -701,7 +696,8 @@ A run that never reads notes again or stops for them has none. E3, *run*:
 }
 ```
 
-- The window is recorded once, from the run's `Splits`, like `splits.json`.
+- The window is recorded once, from the run's `Splits` (`Splits.window`), as
+  `splits.json` records it.
 - An event: the request that did not fit (`call`), why (`cause`), its estimate and its
   notes' tokens, the room W was sized for and the request it belongs to (`sized_for`:
   `call` itself, or reasoning's first turn, §7.2; `room` is `null` after a refusal), the
@@ -1179,9 +1175,9 @@ R2's E2 to E4 and the E3 diff pass unchanged (*run*: 391 of 395 pass on the prot
 | --- | --- |
 | `test_notes.py` (new) | `test_notes_are_halved_until_the_estimate_fits_their_room` (table: 33-word notes to 16 when 16 fits, to 10 when only 10 does) · `test_without_a_room_the_notes_are_halved_once` (28 to 14; with W = 14 set, to 10) · `test_a_budget_already_set_halves_from_itself_not_from_the_notes` (W = 16, notes that overshot at 25 words, to 10) · `test_no_note_is_asked_for_fewer_than_ten_words` (`start` 12 gives 10; 10 gives a stop) · `test_w_fits_every_later_request_it_is_given` (`also` with a smaller room picks the lower level; `sized_for` names it) · `test_ten_word_notes_that_cannot_fit_stop_before_anything_is_read_again` (r3con's error with the trouble's message, §5.3's note exactly, the event `"stop"` with `words` null, raised `from None`) · `test_a_refusal_at_the_floor_stops_with_the_providers_error` (the same object, its note) · `test_a_prompt_that_cannot_ask_for_a_length_stops_at_the_first_trouble` · `test_notes_json_is_written_at_each_event_and_only_then` · `test_notes_too_long_is_its_own_exception_naming_its_call` (not an instance of `ContextWindowExceededError` or `BadRequestError`; the fields; the message for each cause; the note for a direct caller) · `test_a_stop_is_a_plain_context_window_error` (by estimate and by refusal: `type(stop)` is litellm's class, not `NotesTooLong`) · `test_counting_notes_counts_each_with_its_paragraph_break` |
 | `test_splitting.py` | `test_notes_bigger_than_the_part_are_handed_over_before_anything_is_sent` (`window`, `Provider()`: nothing sent, no cut, the room) · `test_a_part_bigger_than_its_notes_is_still_cut` (R2's estimate splits, with small notes) · `test_a_tie_between_part_and_notes_cuts_the_part` · `test_with_the_rest_alone_over_the_line_the_notes_are_handed_over` · `test_a_refused_part_smaller_than_its_notes_hands_them_over` (`QWEN`, `Provider(limit=0)`: `room` None, `__cause__` the refusal, nothing cut) · `test_measure_cuts_by_estimate_and_raises_the_least_room` (two documents: one bigger than the notes is cut, the other raises; the raised room is the smaller) · `test_measure_does_nothing_without_a_window` · `test_a_request_without_a_document_hands_over_only_notes_over_the_line` (`check_notes`, rows: over with notes raises; over without notes returns; under returns; under in bytes is not counted, with R2's `encodes` fixture) · `test_a_refused_request_without_a_document_hands_over_its_notes` (with notes raises from the refusal; without, returns) · `test_over_line_counts_only_what_its_bytes_cannot_settle` · `test_a_notes_signal_raised_by_send_passes_through_uncut` (a `send` raising `NotesTooLong`: it propagates as itself, nothing is cut, no event is recorded; the ruling's hazard, pinned) |
-| `test_relevance.py` | `test_v2_is_v1_byte_for_byte_without_a_budget` (with and without other notes, and `max_words=None`) · `test_v2_asks_each_note_to_stay_under_its_budget` (the sentence, exactly, once) · `test_only_a_prompt_that_renders_the_budget_takes_one` (v2, v1, an overlay without `max_words`) · `test_note_texts_lists_each_document_or_part_note_without_the_empty_ones` · `test_notes_too_long_for_the_next_round_are_read_again_first` (`window`, `within_budget`: kinds `relevance-r1-d*`, then `relevance-r1-w{W}-d*`, then `relevance-r2-w{W}-d*`; `words == [W, W]`) · `test_a_round_refused_for_its_notes_reads_the_previous_round_again` (`QWEN`, `refuses_over`: a `"refusal"` event, `discarded` equal to the round's accepted calls) · `test_reread_reads_only_the_last_round_again` (the first round's notes are the same; only `relevance-r2-w*` kinds are sent) · `test_the_final_check_reads_the_last_round_again_until_it_passes` · `test_without_a_budget_relevance_takes_r2s_path` (the 40 reports of §9.2 on `window(6_000)`: R2's measured stop, `splits.json`, no read again) · `test_reread_or_a_final_check_without_a_budget_is_refused` |
-| `test_schema.py` | with a `Budget`: `test_a_schema_request_over_the_line_hands_over_its_notes_before_sending` · `test_a_refused_schema_request_hands_over_its_notes_and_one_without_notes_is_raised` · `test_every_attempt_is_measured` (a retry over the line raises after attempt 1); and `test_without_a_budget_the_schema_call_is_sent_as_today` (sent over the line, the refusal propagates) |
-| `test_parsing.py` | with a `Budget`: `test_parsing_measures_every_document_before_sending_any` (no request) · `test_a_refused_parse_whose_notes_are_bigger_hands_them_over`; and `test_without_a_budget_a_document_shorter_than_its_notes_is_cut_as_r2_does` |
+| `test_relevance.py` | `test_v2_is_v1_byte_for_byte_without_a_budget` (with and without other notes, and `max_words=None`) · `test_v2_asks_each_note_to_stay_under_its_budget` (the sentence, exactly, once) · `test_only_a_prompt_that_renders_the_budget_takes_one` (v2, v1, an overlay without `max_words`) · `test_note_texts_lists_each_document_or_part_note_without_the_empty_ones` · `test_notes_too_long_for_the_next_round_are_read_again_first` (`window`, `within_budget`: kinds `relevance-r1-d*`, then `relevance-r1-w{W}-d*`, then `relevance-r2-w{W}-d*`; `words == [W, W]`) · `test_a_round_refused_for_its_notes_reads_the_previous_round_again` (`QWEN`, `refuses_over`: a `"refusal"` event, `discarded` equal to the round's accepted calls) · `test_reread_reads_only_the_last_round_again` (the first round's notes are the same; only `relevance-r2-w*` kinds are sent) · `test_the_final_check_reads_the_last_round_again_until_it_passes` · `test_without_a_budget_a_round_stops_where_more_parts_cannot_help` (the 40 reports of §9.2 on `window(6_000)`: R2's measured stop, `splits.json`, no read again) · `test_reread_or_a_final_check_without_a_budget_is_refused` |
+| `test_schema.py` | with a `Budget`: `test_a_schema_request_over_the_line_hands_over_its_notes_before_sending` · `test_a_refused_schema_request_hands_over_its_notes_and_one_without_notes_is_raised` · `test_every_attempt_is_measured` (a retry over the line raises after attempt 1); and `test_without_a_budget_the_schema_call_is_sent_unmeasured` (sent over the line, the refusal propagates) |
+| `test_parsing.py` | with a `Budget`: `test_parsing_measures_every_document_before_sending_any` (no request) · `test_a_refused_parse_whose_notes_are_bigger_hands_them_over`; and `test_without_a_budget_a_document_shorter_than_its_notes_is_cut` |
 | `test_reasoning.py` | `test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line` (`window`: over the line, samples and the INFO line; under, the whole parse and today's prompt) · `test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_samples` (exactly two first-turn requests, the second with the note) · `test_a_first_turn_refused_with_samples_hands_over_its_notes` (with a `Budget`; without notes, or without a budget, the refusal is raised) · `test_a_later_turn_refused_is_raised_as_it_is` · `test_the_first_turn_without_a_parse_hands_over_notes_over_the_line` (`check_first_turn`). Guards: `test_a_huge_parse_is_shown_as_one_sample_per_field_and_says_so`, `test_a_small_parses_prompt_is_the_v1_template_with_the_parse_as_json` |
 | `test_codeact.py` | `test_a_refused_first_turn_is_sent_again_with_the_prompt_the_hook_gives` (the rest of the loop keeps it) · `test_the_hook_can_give_up_by_raising` · `test_without_a_hook_a_refused_first_turn_is_raised` (guard) · `test_the_hook_is_never_called_for_a_later_turn` |
 | `test_runs.py` | the kinds row `relevance-r2-w16-d7c1` reads `doc` 7, `chunk` 1 (guard) |
@@ -1387,8 +1383,8 @@ null shows again (8,192, seed 3, right on the shipped window).
 
 | Module | Item |
 | --- | --- |
-| `notes.py` (new) | R3.2 (`MIN_NOTE_WORDS`, `NotesTooLong(Exception)`, `count_notes`, `Budget` with `splits`, `_tokens_at`) |
-| `splitting.py` | R3.1 (`model`, `over_line`); R3.2 (`read_in_parts(notes=)`, the rule in the measured and refusal steps, `measure`, `check_notes`, the message helper shared with `_not_sent`, the docstring and the INFO line) |
+| `notes.py` (new) | R3.2 (`MIN_NOTE_WORDS`, `NotesTooLong`, a dataclass over `Exception`, `count_notes`, `Budget` with `splits`, `_tokens_at`) |
+| `splitting.py` | R3.1 (`model`, `over_line`); R3.2 (`read_in_parts(notes=)`, the rule in the measured and refusal steps, `measure`, `check_notes`, the message helper shared with `_not_sent`, `window`, the docstring and the INFO line) |
 | `runtime/codeact.py` | R3.1 (`on_first_turn_too_long`) |
 | `stages/reasoning.py` | R3.1 (`splits=`, `_system_prompt`, `_sample_view`, the choice and the hook); R3.2 (`budget=`, `check_first_turn`, the notes' check, Raises) |
 | `stages/relevance.py` | R3.2 (`RelevantContext.words`, `note_texts`, `takes_word_budget`, `max_words`, the round loop, `budget=`, `reread=`, `final_check=`) |

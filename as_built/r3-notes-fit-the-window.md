@@ -1,10 +1,19 @@
 # TASK-36 · R3 as built: notes that fill the window are read again shorter
 
-Cartographer, for TASK-36. This is what exists at `07aa539` on
-`claude/tender-shannon-eq4lq7-r3` (r3context 0.3.0), checked against
+Cartographer, for TASK-36; restated by the Refactorer after the literate refactor. This
+is what exists at `92c06d7` on `claude/tender-shannon-eq4lq7-r3` (r3context 0.3.0), the
+last commit to touch `src/` or `tests/`, checked against
 `design/r3-notes-fit-the-window.md`. The base is `main` at `f4dae00`, r3context 0.2.0.
-`src/` has not changed since `56f7389`, the release commit; the commits after it touch
-E7's harness, `ci.yml`'s seed input and the design, so both E7 runs ran this code.
+
+**Behaviour is `07aa539`'s**, which §4's measurements ran. `src/` did not change from
+`56f7389`, the release commit, to `07aa539`; the commits between touch E7's harness,
+`ci.yml`'s seed input and the design, so both E7 runs ran that code. The refactor,
+`42735c8` to `92c06d7`, changed how the code reads and nothing it sends or writes: run
+offline against `3d3ebd2`'s `src/`, seventeen runs (E1 to E6, the refused parse, the
+40 reports' three, the v1 stop's two, the floor's two, R2's parse stop, a grown
+registry) and ten direct `reason` calls give byte-identical requests (`messages`,
+`response_format`), log records, `notes.json`, `splits.json`, `result.json` files,
+`calls.json` kinds and outcomes. §2 says where code moved; §4.2 counts the head's tests.
 
 **Evidence.** *[run]* means executed: the suite, an offline probe, or a CI run whose
 artifacts I downloaded and recomputed. *[read]* means read in the code and not executed.
@@ -121,8 +130,8 @@ for a length, and `notes.json`'s record.
 
 ### 2.2 Module by module
 
-- **`notes.py`** (new, 291 lines with docstrings): `MIN_NOTE_WORDS = 10`,
-  `NotesTooLong`, `count_notes`, `Budget`. `Budget.shorten` tries W at half, a quarter, …
+- **`notes.py`** (new, 271 lines with docstrings): `MIN_NOTE_WORDS = 10`,
+  `NotesTooLong` (a dataclass over `Exception`), `count_notes`, `Budget`. `Budget.shorten` tries W at half, a quarter, …
   of the current W (of the notes' mean when none is set), floored at 10, keeping only
   values below the current W and below the notes' mean. By estimate it takes the first
   at which the notes, each cut at W words, fit every room it is given; after a refusal,
@@ -135,6 +144,8 @@ for a length, and `notes.json`'s record.
   must shrink, and raises the one with the least room, so W is sized for the tightest
   request. `check_notes` serves the requests without a document (the schema call,
   reasoning's first turn); `over_line` counts tokens only when bytes cannot settle it.
+  `window` is the model and its window, the fields `splits.json` and `notes.json` open
+  with.
 - **`stages/relevance.py`**: rounds are read by `read_round(r)`, which, when round r's
   requests hand over round r−1's notes, shortens, reads round r−1 again (recursively)
   and reads r again. `final_check`, reasoning's first turn as far as it is known after
@@ -147,9 +158,11 @@ for a length, and `notes.json`'s record.
 - **`stages/structuring/schema.py`, `parsing.py`**: with a budget, the schema call is
   checked before every attempt and a refusal carrying notes becomes `NotesTooLong`;
   parsing measures every document before sending any.
-- **`stages/reasoning.py`, `runtime/codeact.py`**: `reason` renders the first turn with
-  the whole parse and renders it again with `_sample_view` when `splits.over_line` says
-  it is over the line. `run_codeact(on_first_turn_too_long=)` lets `reason` swap the
+- **`stages/reasoning.py`, `runtime/codeact.py`**: `reason` counts the parse once, applies
+  the flood guard (`REASONING_PARSE_MAX_TOKS`) itself, renders the first turn with the
+  whole parse and renders it again with `_sample_view` when `splits.over_line` says it is
+  over the line; 0.2.0's `_render_parse_for_codeact` is gone. One `check_notes` partial
+  serves the check before sending and the one after a refused samples turn. `run_codeact(on_first_turn_too_long=)` lets `reason` swap the
   system prompt after a refusal of the first turn: once, to samples; with samples
   already shown, the hook hands the notes over (with a budget) or re-raises. Only the
   first turn; the `stop` retry stays. `check_first_turn` is the lower bound relevance
@@ -164,7 +177,7 @@ for a length, and `notes.json`'s record.
 **Where the complexity sits**: in the control flow of reading again, where the stage
 that raises decides which round is read again and which stage is sent again (relevance's
 recursion and its final check, the pipeline's `fitting`), and in `Budget.shorten`'s
-choice of W against several rooms. The pipeline's +163 −64 lines are mostly its three
+choice of W against several rooms. The pipeline's +160 −64 lines are mostly its three
 stage calls moving into `fitting` [read].
 
 ### 2.3 Public surface, from the code
@@ -174,7 +187,7 @@ stage calls moving into `fitting` [read].
   `count_notes(notes) -> int`;
   `Budget(splits, *, can_shorten=True, task_logger=None)` with `.words`, `.splits` and
   `.shorten(trouble, *, round_idx, discarded=0, also=()) -> int`.
-- `r3con.splitting.Splits`: `.model` (was private); `read_in_parts(..., notes=())`;
+- `r3con.splitting.Splits`: `.model` (was private); `.window`; `read_in_parts(..., notes=())`;
   `measure(docs, *, call, rests)`; `check_notes(*, call, request, notes, refusal=None)`;
   `over_line(*texts)`, the tokens when over the line, else `None`.
 - `r3con.stages.relevance`: `surface_relevance(..., budget=None, reread=None, final_check=None)`,
@@ -205,7 +218,7 @@ adds it to the design (§2.5 item 11, with §2.2 item 4 and §8 corrected).
 | 4 | A stop event keeps the round it would have read again, `words` null | — | [run]: probes |
 | 5 | E5's room is 2,599 tokens in the suite, 2,571 in the design | the suite asks "Who?" | [run]: suite |
 | 6 | Tests the design did not name | each pins a line no named test reaches | [run]: every test the design names exists |
-| 7 | src +1,074 −175 in 12 files; tests +1,640 −34 at `56f7389`, +1,645 −34 at the head | forecast: 500 to 650 and about 600 | [run] |
+| 7 | src +1,074 −175 in 12 files; tests +1,640 −34 at `56f7389`, +1,645 −34 at `07aa539`; after the refactor, src +1,051 −183, tests +1,647 −38 | forecast: 500 to 650 and about 600 | [run] |
 | 8 | litellm 1.101 does not map `openai/gpt-6-luna`; E7 needs the locked 1.104 | — | not run; CI's lowest-bounds job is green |
 | 9 | E7's null shows at 8,192 | §4.4 | [run]: recomputed |
 | 10 | E7's harness records a copy of each request | the loop's live list changed under it | [run]: the first run's nine rows recompute to the design's |
@@ -227,7 +240,7 @@ adds it to the design (§2.5 item 11, with §2.2 item 4 and §8 corrected).
 
 ### 4.2 The new tests, by what they pin
 
-The head collects 85 test ids that `f4dae00` does not, and retires 2 (the renamed v1
+The head collects 84 test ids that `f4dae00` does not, and retires 2 (the renamed v1
 stop's rows) [run]:
 
 | Item | Ids | Where |
@@ -236,7 +249,7 @@ stop's rows) [run]:
 | R3.2: W, the stop, `notes.json`, the exception | 20 | `test_notes.py` 16; `test_pipeline.py::test_no_stop_leaves_a_run_as_notes_too_long` 3; `test_cli.py` 1 |
 | R3.2: the bigger part is halved | 15 | `test_splitting.py` |
 | R3.2: v2's sentence, rounds read again | 12 | `test_relevance.py` |
-| R3.2: the stages hand their notes over | 14 | `test_schema.py` 5; `test_parsing.py` 3; `test_reasoning.py` 6 |
+| R3.2: the stages hand their notes over | 13 | `test_schema.py` 5; `test_parsing.py` 3; `test_reasoning.py` 5 |
 | R3.2: the run reads again and sends again | 11 | `test_pipeline.py`: E3, E4, E5, the 40 reports (3 rows), discarded calls, the notes reasoning saw, a failure while reading again, the v1 stop (2 rows) |
 | E6: an ordinary run's requests | 1 | `test_pipeline.py` |
 
