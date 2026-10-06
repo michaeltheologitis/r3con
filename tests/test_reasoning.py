@@ -1,15 +1,11 @@
-import functools
 import json
 import logging
 
 import litellm
 import pytest
 
-from r3con.notes import Budget, NotesTooLong
 from r3con.prompts import load_prompt
-from r3con.runtime.llm import count_tokens
-from r3con.splitting import Splits
-from r3con.stages.reasoning import _sample_record_per_field, check_first_turn, reason
+from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
@@ -246,23 +242,3 @@ def test_a_first_turn_refused_with_samples_is_raised(llm):
         reasoning_prompt(llm.replies(whole, samples, COMMIT), parsed=ROWS)
     assert failure.value is samples
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
-
-
-def test_the_first_turn_without_a_parse_hands_over_notes_over_the_line(window):
-    check = functools.partial(
-        check_first_turn,
-        task="?",
-        prompt_version="v2",
-        budget=Budget(Splits([], model=window(4_000))),
-    )
-    notes = [" ".join(["word"] * 60)] * 40
-    check(relevance_snippets=notes[:1])
-    with pytest.raises(NotesTooLong) as handed:
-        check(relevance_snippets=notes)
-    without_a_parse = load_prompt(
-        "reasoning", version="v2", task="?", relevance=render_relevance(notes)
-    )
-    assert (handed.value.call, handed.value.notes) == ("reasoning", notes)
-    assert handed.value.estimate == count_tokens(without_a_parse) + count_tokens(
-        "Input:\n<task>\n?\n</task>"
-    )

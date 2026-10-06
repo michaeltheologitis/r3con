@@ -22,20 +22,15 @@ are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`). Downstream stages consume the
 **final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept only
 for inspection.
-
-Given the run's notes budget (:mod:`r3con.notes`), a round whose notes would not fit a
-later request is read again under a word budget, each note asked to stay under W words,
-and every round after it is read under the same W.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 from r3con.logging_setup import get_logger
-from r3con.notes import MIN_NOTE_WORDS, Budget, NotesTooLong
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
@@ -63,13 +58,10 @@ class RelevantContext:
     - ``rounds`` — every round's per-document snippets, in order: ``rounds[k]`` is round
       ``k+1`` (so ``rounds[-1] is snippets``). Kept for inspection of the refinement;
       not fed downstream.
-    - ``words`` — the word budget each round's notes were read under, aligned with
-      ``rounds``: ``None`` for a round read without one.
     """
 
     snippets: list[Snippet]
     rounds: list[list[Snippet]]
-    words: list[int | None] = field(default_factory=list)
 
 
 def join_parts(snippet: Snippet) -> str:
@@ -78,22 +70,6 @@ def join_parts(snippet: Snippet) -> str:
     if isinstance(snippet, str):
         return snippet
     return "\n\n".join(note.strip() for note in snippet if note.strip())
-
-
-def note_texts(snippets: Sequence[Snippet]) -> list[str]:
-    """The notes a rendered block of ``snippets`` carries, in order: each document's
-    note, and each part's of a document read in parts, stripped, without the empty
-    ones."""
-    notes = (note for s in snippets for note in ([s] if isinstance(s, str) else s))
-    return [note.strip() for note in notes if note.strip()]
-
-
-def takes_word_budget(prompt_version: str) -> bool:
-    """Whether the relevance prompt at ``prompt_version`` can ask each note to stay
-    under a number of words: whether it renders differently when given one."""
-    return _system_prompt("", [], prompt_version, MIN_NOTE_WORDS) != _system_prompt(
-        "", [], prompt_version
-    )
 
 
 def render_relevance(relevance_snippets: Sequence[Snippet] | None) -> str:
@@ -126,20 +102,13 @@ def _render_other_states(other_snippets: list[str]) -> str:
     return _OTHER_SEP.join(parts)
 
 
-def _system_prompt(
-    task: str,
-    other_snippets: list[str],
-    prompt_version: str,
-    max_words: int | None = None,
-) -> str:
-    """The relevance system prompt: the task, the other documents' notes, and the
-    words the note may take, if any."""
+def _system_prompt(task: str, other_snippets: list[str], prompt_version: str) -> str:
+    """The relevance system prompt: the task, and the other documents' notes."""
     return load_prompt(
         "relevance",
         version=prompt_version,
         task=task,
         other_snippets=_render_other_states(other_snippets),
-        max_words=max_words,
     )
 
 
@@ -152,23 +121,19 @@ def relevance_snippet(
     prompt_version: str,
     run: StageRun | None = None,
     kind: str = "relevance",
-    max_words: int | None = None,
     **llm_kwargs: Any,
 ) -> str:
     """Surface one ``document``'s relevance snippet for the task, given the OTHER
     documents' previous-round snippets (empty list in round 1).
 
     The task + the (possibly empty) other-documents block live in the system prompt;
-    the document is the user message. With ``max_words``, a prompt that can (v2) asks
-    the note to stay under that many words. Returns the state text, stripped — an empty
+    the document is the user message. Returns the state text, stripped — an empty
     string is allowed (the document contributes nothing relevant to the task).
     """
     return cast(
         str,
         litellm_chat_completion(
-            system_prompt=_system_prompt(
-                task, other_snippets, prompt_version, max_words
-            ),
+            system_prompt=_system_prompt(task, other_snippets, prompt_version),
             user_prompt=document,
             model=model,
             run=run,
@@ -188,9 +153,6 @@ def surface_relevance(
     run: StageRun | None = None,
     workers: int | None = None,
     splits: Splits | None = None,
-    budget: Budget | None = None,
-    reread: RelevantContext | None = None,
-    final_check: Callable[[list[Snippet]], None] | None = None,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -206,31 +168,10 @@ def surface_relevance(
     one), so a document too long for the model's window is read in parts, one note per
     part, and stays split in later rounds. A part never sees its own document's other
     parts: the others' block holds the other documents only, a split one's notes joined.
-
-    With the run's ``budget``, every round measures its requests before sending them,
-    and a round whose requests do not fit because the previous round's notes are the
-    bigger part of them reads that round again under the budget's word budget first
-    (and the rounds before it, if need be); every round after is read under it too.
-    ``final_check`` measures the final notes against the biggest request they will ride
-    in later, raising ``NotesTooLong`` when they do not fit: it is run after the last
-    round, which is read again until it passes, and beside a round that did not fit.
-    ``reread`` is a context read before, under a budget since lowered: its last round is
-    read again under the budget, its earlier rounds kept. Without a budget, no round is
-    read again, and splitting alone applies.
-
-    Raises:
-        litellm.ContextWindowExceededError: when the notes cannot be read short enough
-            to fit (from :meth:`r3con.notes.Budget.shorten`), or when more parts cannot
-            help a document (:mod:`r3con.splitting`).
-        ValueError: for ``reread`` or ``final_check`` without a ``budget``, before any
-            request.
     """
-    if budget is None and (reread is not None or final_check is not None):
-        raise ValueError(
-            "reread= and final_check= belong to a run's notes budget; pass budget= too."
-        )
     # rounds < 1 = "no relevance snippets at all" (a deliberate rounds=0 re-run); an empty
-    # document corpus is likewise empty. Both short-circuit before any round is read.
+    # document corpus is likewise empty. Both short-circuit BEFORE round 1 runs (the
+    # unconditional run_round(None, 1) below) — a `return`, not a fall-through.
     if rounds < 1 or not documents:
         return RelevantContext(snippets=[], rounds=[])
 
@@ -240,22 +181,15 @@ def surface_relevance(
     def run_round(prev: list[Snippet] | None, round_idx: int) -> list[Snippet]:
         """Rewrite every document's relevance snippet in parallel. ``prev`` is the frozen
         previous-round state set (``None`` in round 1)."""
-        max_words = budget.words if budget is not None else None
-        call = f"relevance-r{round_idx}"
-        if max_words is not None:
-            call += f"-w{max_words}"
         _log.info(
-            "round %d/%d · %d doc(s) (≤%d parallel)%s",
+            "round %d/%d · %d doc(s) (≤%d parallel)",
             round_idx,
             rounds,
             len(documents),
             max_workers,
-            "" if max_words is None else f", each note under {max_words} words",
         )
 
-        def request(i: int) -> tuple[list[str], str, list[str]]:
-            """Document i's view of the others: their notes, the rest it is sent with,
-            and the notes inside that rest."""
+        def one(i: int, _document: str) -> Snippet:
             # Others-only: document i sees the previous round's snippets of the OTHER
             # documents (j != i), never its own (the document itself is the user message).
             others = (
@@ -263,21 +197,10 @@ def surface_relevance(
                 if prev is None
                 else [join_parts(s) for j, s in enumerate(prev) if j != i]
             )
-            rest = _system_prompt(task, others, prompt_version, max_words)
-            return others, rest, note_texts(others)
-
-        if budget is not None:
-            reader.measure(
-                range(len(documents)), call=call, rests=lambda i: request(i)[1:]
-            )
-
-        def one(i: int, _document: str) -> Snippet:
-            others, rest, notes = request(i)
-            parts = reader.read_in_parts(
+            notes = reader.read_in_parts(
                 i,
-                call=call,
-                rest=rest,
-                notes=notes if budget is not None else (),
+                call=f"relevance-r{round_idx}",
+                rest=_system_prompt(task, others, prompt_version),
                 send=lambda part, kind: relevance_snippet(
                     task=task,
                     document=part,
@@ -286,11 +209,10 @@ def surface_relevance(
                     prompt_version=prompt_version,
                     run=run,
                     kind=kind,
-                    max_words=max_words,
                     **llm_kwargs,
                 ),
             )
-            return parts[0] if len(parts) == 1 else parts
+            return notes[0] if len(notes) == 1 else notes
 
         result = parallel_map(one, documents, max_workers=max_workers)
         n_nonempty = sum(1 for s in result if join_parts(s).strip())
@@ -303,53 +225,9 @@ def surface_relevance(
         )
         return result
 
-    # The rounds read so far, and the word budget each was read under; only the
-    # previous round feeds the next.
-    read: list[list[Snippet]] = [] if reread is None else list(reread.rounds[:-1])
-    words: list[int | None] = (
-        [] if reread is None else [*reread.words, *[None] * len(read)][: len(read)]
-    )
+    all_rounds: list[list[Snippet]] = [run_round(None, 1)]
+    for r in range(2, rounds + 1):
+        # only the previous round feeds in
+        all_rounds.append(run_round(all_rounds[-1], r))
 
-    def read_round(r: int) -> None:
-        """Read round ``r``, dropping any later round; when its requests do not fit
-        for the previous round's notes, read that round again shorter first."""
-        while True:
-            calls_before = len(run.steps) if run is not None else 0
-            try:
-                notes = run_round(read[r - 2] if r > 1 else None, r)
-            except NotesTooLong as trouble:
-                if budget is None:
-                    raise
-                later = _trouble(final_check, read[r - 2])
-                budget.shorten(
-                    trouble,
-                    round_idx=r - 1,
-                    discarded=(len(run.steps) if run is not None else 0) - calls_before,
-                    also=[] if later is None else [later],
-                )
-                read_round(r - 1)
-                continue
-            read[r - 1 :] = [notes]
-            words[r - 1 :] = [budget.words if budget is not None else None]
-            return
-
-    for r in range(len(read) + 1, rounds + 1):
-        read_round(r)
-    if budget is not None:
-        while (trouble := _trouble(final_check, read[-1])) is not None:
-            budget.shorten(trouble, round_idx=rounds)
-            read_round(rounds)
-    return RelevantContext(snippets=read[-1], rounds=read, words=words)
-
-
-def _trouble(
-    check: Callable[[list[Snippet]], None] | None, notes: list[Snippet]
-) -> NotesTooLong | None:
-    """The ``NotesTooLong`` that ``check`` raises for ``notes``, if any."""
-    if check is None:
-        return None
-    try:
-        check(notes)
-    except NotesTooLong as trouble:
-        return trouble
-    return None
+    return RelevantContext(snippets=all_rounds[-1], rounds=all_rounds)

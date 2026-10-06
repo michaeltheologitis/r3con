@@ -127,16 +127,14 @@ def test_each_call_records_the_document_its_kind_names(logger):
     run.add_step(kind="relevance-r1-d2", messages=[], response=reply("a"))
     run.add_step(kind="parse-d0", messages=[], response=reply("b", finish="length"))
     run.add_step(kind="llm_call", messages=[], response=reply("c"))
-    run.add_step(kind="relevance-r2-w16-d7c1", messages=[], response=reply("d"))
     assert run.flush(write_transcript=False) == run.dir / "calls.json"
     calls = json.loads((run.dir / "calls.json").read_text())
     assert [(c["kind"], c["doc"], c["chunk"]) for c in calls] == [
         ("relevance-r1-d2", 2, None),
         ("parse-d0", 0, None),
         ("llm_call", None, None),
-        ("relevance-r2-w16-d7c1", 7, 1),
     ]
-    assert [c["output"] for c in calls] == ["a", "b", "c", "d"]
+    assert [c["output"] for c in calls] == ["a", "b", "c"]
     assert calls[1]["finish_reason"] == "length"
     assert not (run.dir / "transcript.yaml").exists()
 

@@ -11,7 +11,7 @@ FULL = {
     "prompts": PROMPTS,
 }
 V1_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
-DEFAULT_PROMPTS = "prompts=(rel=v2,schema=v1,parse=v1,reason=v2)"
+DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v2)"
 
 
 def test_the_default_config_loads_with_its_shipped_values():
@@ -19,7 +19,7 @@ def test_the_default_config_loads_with_its_shipped_values():
     assert config.name == "default"
     assert config.model == "openai/gpt-6-luna"
     assert (config.relevance_rounds, config.params) == (2, {})
-    assert config.prompts == {**PROMPTS, "relevance": "v2", "reasoning": "v2"}
+    assert config.prompts == {**PROMPTS, "reasoning": "v2"}
     assert "seed" not in config.model_dump()
     assert config.label() == f"default[model=gpt-6-luna,rounds=2,{DEFAULT_PROMPTS}]"
 

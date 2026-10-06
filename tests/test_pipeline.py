@@ -9,7 +9,6 @@ import yaml
 
 from r3con import read_documents, settings
 from r3con.config import PROMPT_STAGES, RunConfig, load_config
-from r3con.notes import NotesTooLong
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
@@ -36,9 +35,6 @@ V2 = {**CONFIG["prompts"], "reasoning": "v2"}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
-# Forty reports of about 400 characters, and a note of 1,000 characters, 177 words.
-REPORTS = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
-LONG_NOTE = (ROUTINE * 14)[:1_000]
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 
@@ -460,34 +456,42 @@ def test_a_later_stage_splits_further_without_renumbering(
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
 
 
-@pytest.mark.parametrize("measured", [False, True], ids=["by-refusal", "by-estimate"])
-def test_notes_that_do_not_fit_stop_the_run_where_the_relevance_prompt_cannot_shorten_them(
-    answering_llm, window, tmp_path, monkeypatch, measured
+@pytest.mark.parametrize(
+    ("measured", "clause"),
+    [
+        (False, "the part is about "),
+        (True, "over the 5,100-token line by themselves"),
+    ],
+    ids=["by-refusal", "by-estimate"],
+)
+def test_splitting_stops_at_the_relevant_contexts_line(
+    answering_llm, window, tmp_path, monkeypatch, measured, clause
 ):
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(relevance=LONG_NOTE)
+    reports = [f"Report {i:02d}. " + ROUTINE * 5 for i in range(40)]
+    llm = answering_llm.answers(relevance=(ROUTINE * 14)[:1_000])
     if not measured:
         llm.refuses_over(20_000)
     logger = TaskLogger("run", root=tmp_path)
     model = window(6_000) if measured else QWEN
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=REPORTS, model=model, prompts=V2)
+        answer(llm, logger, documents=reports, model=model, prompts=V2)
     note, folder = stop.value.__notes__
-    assert note == (
-        "r3con: relevance-r2-d0 carries the notes of 39 documents (about 7,410 "
-        "tokens), the bigger part of a request that does not fit, and the relevance "
-        "prompt this run pins cannot ask for shorter notes (the shipped v2 can). The "
-        "relevant context has outgrown the model's window."
+    assert note.startswith(
+        "r3con: reading documents[0] (Document 1) in more parts cannot help in "
+        "relevance-r2-d0: "
     )
+    assert clause in note
+    assert note.endswith("The relevant context has outgrown the model's window.")
     assert folder == f"r3con: partial artifacts in {logger.dir}"
     assert "TASK-" not in note
-    assert [user for user in users(llm) if user in REPORTS[0]] == [REPORTS[0]] * (
+    assert [user for user in users(llm) if user in reports[0]] == [reports[0]] * (
         1 if measured else 2
     )
     assert len(llm.requests) == (40 if measured else 41)
-    assert not (logger.dir / "splits.json").exists()
-    events = read_json(logger, "notes")["events"]
-    assert [(e["call"], e["action"]) for e in events] == [("relevance-r2-d0", "stop")]
+    [(doc, record)] = read_json(logger, "splits")["documents"].items()
+    assert (doc, record["cuts"]) == ("0", [])
+    assert [event["action"] for event in record["events"]] == ["stop"]
 
 
 def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
@@ -513,12 +517,10 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
 
 
 def test_reasoning_shows_samples_when_the_whole_parse_would_not_fit(
-    answering_llm, quiet_sites, within_budget, window, tmp_path
+    answering_llm, quiet_sites, window, tmp_path
 ):
     documents = read_documents(MEMOS) + quiet_sites(55)
-    llm = answering_llm.answers(
-        relevance=within_budget(memo_note), parsing=whole_document_row
-    )
+    llm = answering_llm.answers(relevance=memo_note, parsing=whole_document_row)
     _, result = memos_run(llm, documents, window(8_192), tmp_path)
     assert result.answer == "; ".join(documents)
     assert len(llm.requests) == 182
@@ -528,11 +530,11 @@ def test_reasoning_shows_samples_when_the_whole_parse_would_not_fit(
 
 
 def test_a_refused_first_turn_goes_again_once_with_samples(
-    answering_llm, quiet_sites, within_budget, tmp_path
+    answering_llm, quiet_sites, tmp_path
 ):
     documents = read_documents(MEMOS) + quiet_sites(55)
     llm = answering_llm.answers(
-        relevance=within_budget(memo_note), parsing=whole_document_row
+        relevance=memo_note, parsing=whole_document_row
     ).refuses_over(tokens=8_192)
     _, result = memos_run(llm, documents, QWEN, tmp_path)
     assert result.answer == "; ".join(documents)
@@ -541,103 +543,3 @@ def test_a_refused_first_turn_goes_again_once_with_samples(
     assert SAMPLE not in whole["messages"][0]["content"]
     assert tokens(whole) > 8_192
     assert SAMPLE in samples["messages"][0]["content"]
-
-
-def test_shortening_stops_where_ten_word_notes_cannot_fit(
-    answering_llm, quiet_sites, within_budget, window, tmp_path
-):
-    documents = read_documents(MEMOS) + quiet_sites(395)
-    llm = answering_llm.answers(relevance=within_budget(memo_note))
-    with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        memos_run(llm, documents, window(8_192), tmp_path)
-    assert type(stop.value) is litellm.ContextWindowExceededError
-    assert "r3con estimated relevance-r2-d" in str(stop.value)
-    assert stop.value.__notes__[0] == (
-        "r3con: even at 10 words each, the notes of 400 documents would take about "
-        "6,733 tokens, over the 2,599 that reasoning leaves them, so reading them "
-        "shorter cannot help. The relevant context has outgrown the model's window."
-    )
-    assert len(llm.requests) == 400
-    assert all(
-        "summaries of the other documents" not in s
-        for s in system_prompts(llm, "relevance")
-    )
-    assert all("Keep it under" not in s for s in system_prompts(llm, "relevance"))
-    events = json.loads((tmp_path / "run" / "notes.json").read_text())["events"]
-    assert [(e["action"], e["round"], e["words"]) for e in events] == [
-        ("stop", 1, None)
-    ]
-
-
-def test_an_ordinary_run_sends_what_a_v1_relevance_run_sends(
-    answering_llm, window, tmp_path, monkeypatch
-):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    documents, model = read_documents(MEMOS), window(1_000_000)
-    sent = {}
-    for version in ("v1", "v2"):
-        answering_llm.requests.clear()
-        logger = TaskLogger(version, root=tmp_path)
-        prompts = {**V2, "relevance": version}
-        answer(answering_llm, logger, documents=documents, model=model, prompts=prompts)
-        sent[version] = [
-            (r["messages"], r.get("response_format")) for r in answering_llm.requests
-        ]
-        assert not (logger.dir / "notes.json").exists()
-    assert len(sent["v2"]) == 17
-    assert sent["v2"] == sent["v1"]
-
-
-def first_lines(documents: list[str]) -> str:
-    """The answer ``answering_llm`` gives over ``documents``."""
-    return "; ".join(document.splitlines()[0] for document in documents)
-
-
-def test_notes_that_do_not_fit_are_read_again_shorter_by_estimate(
-    answering_llm, quiet_sites, within_budget, window, tmp_path
-):
-    documents = read_documents(MEMOS) + quiet_sites(115)
-    llm = answering_llm.answers(relevance=within_budget(memo_note))
-    logger, result = memos_run(llm, documents, window(8_192), tmp_path)
-    assert result.answer == first_lines(documents)
-    assert max(tokens(request) for request in llm.requests) <= LINE_8192
-    assert not (logger.dir / "splits.json").exists()
-    assert len(result.relevant_context) == 120
-    assert summary_headings(llm) == [str(n) for n in range(1, 121)]
-    events = read_json(logger, "notes")["events"]
-    assert [
-        (e["call"], e["cause"], e["action"], e["round"], e["words"]) for e in events
-    ] == [("reasoning", "estimate", "read again", 2, 16)]
-    assert len(llm.requests) == 482
-
-
-NINE_WORDS = "Report logged its routine checks and found nothing unusual."
-
-
-@pytest.mark.parametrize(
-    ("measured", "relevance", "reply", "note"),
-    [
-        (True, "v2", LONG_NOTE, "r3con: even at 10 words each"),
-        (False, "v2", NINE_WORDS, "r3con: relevance-r2-d0 was refused as too long"),
-        (True, "v1", LONG_NOTE, "r3con: relevance-r2-d0 carries"),
-    ],
-    ids=["floor-by-estimate", "floor-by-refusal", "v1"],
-)
-def test_no_stop_leaves_a_run_as_notes_too_long(
-    answering_llm, window, tmp_path, measured, relevance, reply, note
-):
-    llm = answering_llm.answers(relevance=reply)
-    if not measured:
-        llm.refuses_over(tokens=1_000)
-    logger = TaskLogger("run", root=tmp_path)
-    model = window(3_500) if measured else QWEN
-    prompts = {**V2, "relevance": relevance}
-    with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=REPORTS, model=model, prompts=prompts)
-    assert type(stop.value) is litellm.ContextWindowExceededError
-    assert not isinstance(stop.value, NotesTooLong)
-    first, folder = stop.value.__notes__
-    assert first.startswith(note)
-    assert first.endswith("The relevant context has outgrown the model's window.")
-    assert folder == f"r3con: partial artifacts in {logger.dir}"
-    assert [e["action"] for e in read_json(logger, "notes")["events"]] == ["stop"]

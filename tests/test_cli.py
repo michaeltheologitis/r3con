@@ -169,19 +169,3 @@ def test_verbose_streams_stage_progress_to_stderr(answering, capsys):
     assert out == f"{ANSWER}\n"
     assert "stage 1/3" in err
     assert "stage 3/3" in err
-
-
-def test_a_notes_stop_prints_a_context_window_error_and_its_notes(
-    scripted, window, capsys
-):
-    scripted.answers(relevance=("A long note on one memo. " * 40).strip())
-    assert r3con("run", "Who?", str(MEMOS), "--model", window(2_600)) == 1
-    err = capsys.readouterr().err
-    stop = err[err.index("r3con: ContextWindowExceededError:") :]
-    assert stop.startswith(
-        "r3con: ContextWindowExceededError: litellm.ContextWindowExceededError: "
-    )
-    assert "\nr3con: what reasoning sends beside its notes fills the " in stop
-    assert "The relevant context has outgrown the model's window.\n" in stop
-    assert err.count("partial artifacts") == 1
-    assert "NotesTooLong" not in err

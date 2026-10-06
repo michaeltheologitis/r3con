@@ -120,7 +120,6 @@ records, model calls, and the final reasoning transcript.
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
 ├── splits.json                  <- only when a document was read in parts
-├── notes.json                   <- only when notes were read again shorter
 ├── relevance/
 │   ├── result.json
 │   └── calls.json
