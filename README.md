@@ -70,7 +70,7 @@ result = r3con.run(
     "Which supplier missed the most delivery windows?",
     docs,
 )
-print(result)
+print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total."
 ```
 
 `read_documents` supports `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.pdf`, and
@@ -139,7 +139,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 
 ## Evaluation
 
-For benchmark results, baselines, and evaluation code, see
+Paper: for benchmark results, baselines, and evaluation code, see
 [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
 
 ## License
