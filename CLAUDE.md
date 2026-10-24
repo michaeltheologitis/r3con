@@ -9,7 +9,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 
 - `uv run ruff check`, `uv run ruff format --check` and `uv run pyright`: lint, format and types, as CI runs them.
 - `uv run pytest`: the unit tests. Sockets are disabled, so nothing reaches the network.
-- `uv run pytest -m live`: the live tier against a real provider, billed to `OPENAI_API_KEY`. Run it when a change affects what the model is sent or how it is called. CI runs it on a manual dispatch with `live` on.
+- `uv run pytest -m "live and not experiment"`: the live tier against a real provider, billed to `OPENAI_API_KEY`. Plain `-m live` also runs the experiments, which are marked live too and cost far more; run those only when asked. Run it when a change affects what the model is sent or how it is called. CI runs it on a manual dispatch with `live` on.
 
 ## Conventions
 
