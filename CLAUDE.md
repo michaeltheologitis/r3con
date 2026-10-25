@@ -5,14 +5,22 @@ Context representation for large-scale reasoning: for a question whose evidence 
 Read `../coding-skills/GUIDE.md` and follow it; in the main session a hook has already printed it.
 This project's Notion page (todos, changelog, notes): https://app.notion.com/p/40362fb22237814d9e8ccbaf2d812c8c
 
+## Goals and non-goals
+
+- Answer one question over many documents in one call: `r3con.run(question, documents)` or `r3con run`.
+- No model call reads more than one document's text, or a part of it when the request would not fit the model's window; the other documents reach it as relevance notes and, in reasoning, as parsed records.
+- Show the work: by default a run writes every stage's output and model calls to `./logs/<run>/`, because the answer alone rarely says whether to trust it.
+- Not a provider layer: models, connections and credentials are LiteLLM's, and r3con adds no model registry or credential variable of its own.
+- Not the paper's evaluation: benchmarks, baselines and evaluation code live in [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
+
 ## Checks
 
-- `uv run ruff check`, `uv run ruff format --check` and `uv run pyright`: lint, format and types, as CI runs them.
-- `uv run pytest`: the unit tests. Sockets are disabled, so nothing reaches the network.
-- `uv run pytest -m "live and not experiment"`: the live tier against a real provider, billed to `OPENAI_API_KEY`. Plain `-m live` also runs the experiments, which are marked live too and cost far more; run those only when asked. Run it when a change affects what the model is sent or how it is called. CI runs it on a manual dispatch with `live` on.
+- `uv run ruff check`, `uv run ruff format --check` and `uv run pyright`: lint, format and types.
+- `uv run pytest`: the unit tests, with sockets disabled and live tests deselected, so nothing reaches the network. CI also runs them on Python 3.11 to 3.14, at the lowest allowed dependency versions, and against the built wheel.
+- `uv run pytest -m "live and not experiment"`: an end-to-end run against OpenAI, billed to `OPENAI_API_KEY` and skipped without it. The unit tests fake the model, so run it when a change affects what the model is sent or how it is called. A manual CI dispatch runs it by default.
+- `uv run pytest -m experiment`: the experiments, measured live runs that cost far more. Run them only when Michael asks (in CI, a dispatch with `experiment` on); plain `-m live` includes them.
 
 ## Conventions
 
-- `src/r3con/runtime/python_executor.py` is vendored from smolagents (Apache-2.0, see `NOTICE`), and ruff and pyright skip it. Keep changes to it minimal, and say so in the PR.
-- Logging is the standard library's `logging` through `r3con.logging_setup.get_logger`, not structlog.
-- A release is a version bump in `pyproject.toml`, then a `v*` tag, which runs `release.yml` and publishes to PyPI. Ask Michael before tagging.
+- `src/r3con/runtime/python_executor.py` is a modified copy of smolagents' `local_python_executor.py` (v1.25.0, Apache-2.0), and ruff, pyright and the guide's style rules skip it. Keep changes to it minimal, and list each one in its header and in `NOTICE`.
+- A prompt version (`src/r3con/prompts/<stage>/vN.yaml`) is never edited once merged, and never reused after a revert: take the next number not listed by `git log --format= --name-only -- src/r3con/prompts/<stage>/`, and bump its pin in `src/r3con/configs/default.yaml`.
