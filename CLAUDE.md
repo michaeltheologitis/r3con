@@ -1,6 +1,6 @@
 # r3con
 
-r3con answers a question whose evidence is scattered across many documents: it notes what each document contributes, structures that into records, and reasons over them in a Python sandbox, with any model LiteLLM supports. Researchers and developers use it as a library or a CLI; it is on PyPI as `r3context` (imported as `r3con`) and is the method of the paper on arXiv (2609.27173).
+Context representation for large-scale reasoning: for a question whose evidence is scattered across many documents, r3con builds a task-specific representation of them (relevance, then structure) and reasons over it with any model LiteLLM supports. It is published on PyPI as `r3context`; the import package is `r3con`.
 
 Read `../coding-skills/GUIDE.md` and follow it; in the main session a hook has already printed it.
 This project's Notion page (todos, changelog, notes): https://app.notion.com/p/40362fb22237814d9e8ccbaf2d812c8c
