@@ -14,9 +14,6 @@ token
 .pypirc
 .env
 
-# Private working notes — local only, never published
-STATUS.md
-
 # Run artifacts
 logs/
 
