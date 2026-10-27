@@ -212,6 +212,8 @@ STOPS = {
         "Context. " * 600,
         PARAGRAPHS[:300],
         ["parse-d0"],
+        "parse-d0",
+        "refusal",
         "the part is about 64 tokens and the prompt and notes sent with it about 1,201",
     ),
     "the rest alone over the line": (
@@ -219,6 +221,8 @@ STOPS = {
         "Context. " * 600,
         PARAGRAPHS,
         [],
+        "parse-d0",
+        "estimate",
         (
             "the prompt and notes sent with it are about 1,201 tokens, over the "
             "850-token line by themselves"
@@ -229,37 +233,54 @@ STOPS = {
         "s",
         "abcd",
         ["parse-d0", "parse-d0c0", "parse-d0c0"],
+        "parse-d0c0",
+        "refusal",
         (
             "the part is one character, and the prompt and notes sent with it (about "
             "1 tokens) leave it no room"
+        ),
+    ),
+    # The rest is exactly the 850-token line: it fits alone, but no character fits.
+    "a part of one character still estimated over the line": (
+        1_000,
+        " the" * 850,
+        "abcd",
+        [],
+        "parse-d0c0",
+        "estimate",
+        (
+            "the part is one character, and the prompt and notes sent with it (about "
+            "850 tokens) leave it no room"
         ),
     ),
 }
 
 
 @pytest.mark.parametrize(
-    ("tokens", "rest", "document", "kinds", "clause"), STOPS.values(), ids=STOPS.keys()
+    ("tokens", "rest", "document", "kinds", "call", "cause", "clause"),
+    STOPS.values(),
+    ids=STOPS.keys(),
 )
 def test_splitting_stops_where_more_parts_cannot_help(
-    window, logger, tokens, rest, document, kinds, clause
+    window, logger, tokens, rest, document, kinds, call, cause, clause
 ):
     provider = Provider(limit=0)
     model = window(tokens) if tokens else QWEN
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
         read(document, provider, model=model, rest=rest, task_logger=logger)
     assert provider.kinds == kinds
-    if provider.refusals:
+    if cause == "refusal":
         assert stop.value is provider.refusals[-1]
     else:
-        assert "r3con estimated parse-d0 at " in str(stop.value)
+        assert f"r3con estimated {call} at " in str(stop.value)
     [note] = stop.value.__notes__
     assert note == (
         "r3con: reading documents[0] (Document 1) in more parts cannot help in "
-        f"{kinds[-1] if kinds else 'parse-d0'}: {clause}. The relevant context has "
-        "outgrown the model's window."
+        f"{call}: {clause}. The relevant context has outgrown the model's window."
     )
     assert "TASK-" not in note
-    assert record(logger)["documents"]["0"]["events"][-1]["action"] == "stop"
+    last = record(logger)["documents"]["0"]["events"][-1]
+    assert (last["call"], last["cause"], last["action"]) == (call, cause, "stop")
 
 
 def test_the_measured_stop_says_what_was_estimated_against_which_window(window):
