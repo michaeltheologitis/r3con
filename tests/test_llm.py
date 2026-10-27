@@ -412,8 +412,7 @@ def test_no_resend_starts_after_the_total_time_cap(
     httpserver, monkeypatch, waits, top_draws, reply, waited
 ):
     monkeypatch.setattr(settings, "LLM_RETRY_MAX_TOTAL_SECONDS", 5)
-    started = time.monotonic()
-    monkeypatch.setattr(time, "monotonic", lambda: started + sum(waits))
+    monkeypatch.setattr(time, "monotonic", lambda: sum(waits))
     answers_in_turn(httpserver, reply)
     with pytest.raises(litellm.RateLimitError):
         ask_server(httpserver)
