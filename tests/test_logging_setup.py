@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 from r3con.logging_setup import configure_logging, get_logger
 
 
@@ -24,3 +26,27 @@ def test_a_stages_records_reach_the_r3con_loggers_handlers(caplog):
     assert [(r.name, r.getMessage()) for r in caplog.records] == [
         ("r3con.relevance", "hello 3")
     ]
+
+
+@pytest.mark.parametrize(
+    ("raw", "level"),
+    [
+        ("info", logging.INFO),
+        ("Debug", logging.DEBUG),
+        (" info ", logging.INFO),
+        ("", logging.WARNING),
+    ],
+    ids=["lowercase", "mixed-case", "spaces", "empty"],
+)
+def test_the_log_level_variable_takes_any_case_and_spacing_and_empty_means_unset(
+    monkeypatch, raw, level
+):
+    monkeypatch.setenv("R3CON_LOG_LEVEL", raw)
+    configure_logging()
+    assert logging.getLogger("r3con").level == level
+
+
+def test_a_log_level_variable_that_is_not_a_level_is_refused_naming_it(monkeypatch):
+    monkeypatch.setenv("R3CON_LOG_LEVEL", "loud")
+    with pytest.raises(ValueError, match="^R3CON_LOG_LEVEL "):
+        configure_logging()
