@@ -24,9 +24,12 @@ Modifications (also listed in the file header):
     `Exception` to `BaseException`, so agent-emitted `try/except` cannot swallow
     control flow (upstream already does this for `FinalAnswerException`).
   - Repackaged from `smolagents` into `r3con.runtime`.
+  - Sorted `authorized_imports` in `LocalPythonExecutor.__init__` instead of
+    listing a set, so the refused-import message lists the modules in the same
+    order in every process (set order varies with the string hash seed).
 
 The behaviour of `evaluate_python_code`, the AST walker, the authorized-imports
-allowlist, the dunder/operation/while/timeout limits, and `BASE_PYTHON_TOOLS` is
-unchanged from upstream.
+allowlist's contents and matching, the dunder/operation/while/timeout limits, and
+`BASE_PYTHON_TOOLS` is unchanged from upstream.
 
 Everything else in this package is licensed under the MIT License (see LICENSE).

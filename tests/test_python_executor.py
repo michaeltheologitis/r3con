@@ -5,12 +5,14 @@ If one of these fails after a vendor update, decide deliberately: the new behavi
 is fine for r3con, or it broke a property r3con relies on.
 """
 
+import re
 import textwrap
 import time
 
 import pytest
 
 from r3con.runtime.python_executor import (
+    BASE_BUILTIN_MODULES,
     ExecutionTimeoutError,
     InterpreterError,
     LocalPythonExecutor,
@@ -60,7 +62,13 @@ def test_an_extra_authorized_import_is_let_through():
 @pytest.mark.parametrize(
     ("code", "error"),
     [
-        ("import os", "Import of os is not allowed"),
+        (
+            "import os",
+            re.escape(
+                "Import of os is not allowed. Authorized imports are: "
+                f"{sorted(BASE_BUILTIN_MODULES)}"
+            ),
+        ),
         ("(1).__class__", "__class__"),
         ("open('/etc/passwd')", "open"),
         ("exec('x = 1')", "exec"),
