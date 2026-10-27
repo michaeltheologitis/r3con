@@ -1,19 +1,33 @@
 import logging
+import random
+import re
+import socket
 import threading
+import time
+from email.utils import parsedate_to_datetime
+from importlib.metadata import version
 
 import litellm
+import openai
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
+from litellm.types.router import RetryPolicy
+from packaging.version import Version
 from pydantic import BaseModel
 
 from r3con import settings
 from r3con.runtime.llm import (
+    _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
     quiet_litellm,
 )
 
 MODEL = "openai/gpt-6-luna"
+VLLM = "hosted_vllm/fake"
+OPENAI = "openai/fake"
+BOTH_PATHS = pytest.mark.parametrize("model", [VLLM, OPENAI])
+CHAT = "/v1/chat/completions"
 VLLM_TOO_LONG = {
     "object": "error",
     "message": (
@@ -28,6 +42,34 @@ LOUD = (False, logging.INFO)
 QUIET = (True, logging.CRITICAL)
 ENTRY_GRACE_SECONDS = 0.2
 THREAD_TIMEOUT_SECONDS = 5
+SCRIPTED_ERROR = {"error": {"message": "scripted error", "type": "server_error"}}
+UNKNOWN_PARAMETER = {
+    "error": {"message": "unknown parameter: tone", "type": "invalid_request_error"}
+}
+QUOTA_SPENT = {
+    "error": {
+        "message": "You exceeded your current quota, please check your plan.",
+        "type": "insufficient_quota",
+        "param": None,
+        "code": "insufficient_quota",
+    }
+}
+ANSWER = {
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "OK"},
+            "finish_reason": "stop",
+        }
+    ]
+}
+OK = (200, ANSWER)
+RATE_LIMITED = (429, SCRIPTED_ERROR)
+TOO_LONG = (400, VLLM_TOO_LONG)
+CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
+LITELLM_KEEPS_OPENAIS_ERROR_CODE = Version(version("litellm")) >= Version("1.103")
+LONGEST_FIRST_BACKOFF = 1
+NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
 
 
 class Flat(BaseModel):
@@ -67,6 +109,12 @@ def loud_litellm(monkeypatch):
     logger.setLevel(level)
 
 
+@pytest.fixture
+def top_draws(monkeypatch):
+    """Every random draw at the top of its range: the longest backoff and jitter."""
+    monkeypatch.setattr(random, "uniform", lambda low, high: high)
+
+
 def litellm_settings():
     return litellm.suppress_debug_info, logging.getLogger("LiteLLM").level
 
@@ -77,26 +125,32 @@ def ask(llm, **kwargs):
     )
 
 
-def ask_vllm(httpserver):
-    """One call through litellm itself, to a local server in vLLM's words."""
+def ask_server(httpserver, model=VLLM, api_base=None, **kwargs):
+    """One call through litellm itself, to the local server unless ``api_base`` names
+    another, in vLLM's words unless ``model`` names another provider."""
     return litellm_chat_completion(
         system_prompt="s",
         user_prompt="u",
-        model="hosted_vllm/fake",
-        api_base=httpserver.url_for("/v1"),
+        model=model,
+        api_base=api_base or httpserver.url_for("/v1"),
         api_key="sk-fake",
+        **kwargs,
     )
 
 
-def fails_then_answers(httpserver, *, failures: int) -> None:
-    """Script the local server to answer ``failures`` 500s, then a 200 saying OK."""
-    error = {"error": {"message": "scripted 500", "type": "server_error"}}
-    message = {"role": "assistant", "content": "OK"}
-    answer = {"choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
-    for status, body in [(500, error)] * failures + [(200, answer)]:
-        httpserver.expect_ordered_request("/v1/chat/completions").respond_with_json(
-            body, status=status
+def answers_in_turn(httpserver, *replies: tuple) -> None:
+    """Script the local server to answer each ``(status, body)``, or ``(status, body,
+    headers)``, in turn, and the last one to every request after it."""
+    *first, (status, body, *headers) = replies
+    for earlier_status, earlier_body, *earlier_headers in first:
+        httpserver.expect_ordered_request(CHAT).respond_with_json(
+            earlier_body, earlier_status, *earlier_headers
         )
+    httpserver.expect_request(CHAT).respond_with_json(body, status, *headers)
+
+
+def rate_limited(retry_after: int) -> tuple[int, dict, dict[str, str]]:
+    return (429, SCRIPTED_ERROR, {"Retry-After": str(retry_after)})
 
 
 def sent_schema(llm, schema: type[BaseModel]) -> dict:
@@ -132,22 +186,14 @@ def test_a_dict_field_is_sent_without_properties_left_open(llm):
     assert by_site["additionalProperties"] == {"type": "integer"}
 
 
-def test_the_retry_count_sent_is_read_from_settings_when_the_call_runs(
-    llm, monkeypatch
-):
-    monkeypatch.setattr(settings, "LLM_NUM_RETRIES", 3)
-    ask(llm.replies("ok"))
-    assert llm.requests[0]["num_retries"] == 3
-
-
-def test_every_call_asks_litellm_for_two_retries(llm):
-    ask(llm.replies("ok"))
-    assert llm.requests[0]["num_retries"] == 2
-
-
-def test_a_callers_retry_count_wins(llm):
-    ask(llm.replies("ok"), num_retries=7)
-    assert llm.requests[0]["num_retries"] == 7
+def test_a_supplied_completion_is_called_once_per_request_without_retry_settings(llm):
+    slow_down = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model=MODEL
+    )
+    with pytest.raises(litellm.RateLimitError, match="slow down"):
+        ask(llm.replies(slow_down, "ok"))
+    assert len(llm.requests) == 1
+    assert CALLER_RETRY_SETTINGS.isdisjoint(llm.requests[0])
 
 
 def test_an_empty_structured_reply_is_rerolled_with_the_same_request(llm):
@@ -213,38 +259,196 @@ def test_without_a_completion_the_request_goes_to_litellm(llm, monkeypatch):
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_transient_server_error_is_retried(httpserver):
-    fails_then_answers(httpserver, failures=2)
-    assert ask_vllm(httpserver) == "OK"
+@BOTH_PATHS
+@pytest.mark.parametrize("status", [408, 409, 429, 500, 502, 503, 504, 529])
+def test_a_temporary_error_is_resent_as_many_times_as_settings_say(
+    httpserver, monkeypatch, model, status
+):
+    monkeypatch.setattr(settings, "LLM_TEMPORARY_ERROR_RETRIES", 2)
+    answers_in_turn(httpserver, (status, SCRIPTED_ERROR))
+    with pytest.raises(openai.APIError):
+        ask_server(httpserver, model=model)
     assert len(httpserver.log) == 3
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_server_failing_three_times_in_a_row_fails_the_call(httpserver):
-    fails_then_answers(httpserver, failures=3)
-    with pytest.raises(litellm.InternalServerError, match="scripted 500"):
-        ask_vllm(httpserver)
-    assert len(httpserver.log) == 3
+def test_a_refused_connection_is_resent(httpserver, monkeypatch, waits):
+    monkeypatch.setattr(settings, "LLM_TEMPORARY_ERROR_RETRIES", 2)
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        refusing = f"http://127.0.0.1:{unused.getsockname()[1]}/v1"
+        with pytest.raises(openai.APIError, match="Connection refused"):
+            ask_server(httpserver, api_base=refusing)
+    assert len(waits) == 2
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_request_refused_as_too_long_is_sent_three_times(httpserver):
-    httpserver.expect_request("/v1/chat/completions").respond_with_json(
-        VLLM_TOO_LONG, status=400
-    )
+@pytest.mark.parametrize(
+    ("model", "status", "body"),
+    [
+        (VLLM, 400, UNKNOWN_PARAMETER),
+        (VLLM, 401, {"error": "Unauthorized"}),
+        (VLLM, 403, SCRIPTED_ERROR),
+        (VLLM, 404, SCRIPTED_ERROR),
+        (VLLM, 422, SCRIPTED_ERROR),
+        (VLLM, *TOO_LONG),
+        (VLLM, 429, QUOTA_SPENT),
+        pytest.param(
+            OPENAI,
+            429,
+            QUOTA_SPENT,
+            marks=pytest.mark.skipif(
+                not LITELLM_KEEPS_OPENAIS_ERROR_CODE,
+                reason="litellm drops OpenAI's error code before 1.103",
+            ),
+        ),
+    ],
+    ids=["400", "401", "403", "404", "422", "too-long", "quota", "openai-quota"],
+)
+def test_a_refusal_is_sent_once(httpserver, model, status, body):
+    answers_in_turn(httpserver, (status, body))
+    with pytest.raises(openai.APIError) as refused:
+        ask_server(httpserver, model=model)
+    assert refused.value.status_code == status
+    assert len(httpserver.log) == 1
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_refusal_after_a_rate_limit_is_not_resent(httpserver):
+    answers_in_turn(httpserver, RATE_LIMITED, TOO_LONG)
     with pytest.raises(litellm.ContextWindowExceededError, match="maximum context"):
-        ask_vllm(httpserver)
-    assert len(httpserver.log) == 3
+        ask_server(httpserver)
+    assert len(httpserver.log) == 2
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_refused_key_is_sent_three_times(httpserver):
-    httpserver.expect_request("/v1/chat/completions").respond_with_json(
-        {"error": "Unauthorized"}, status=401
+def test_each_backoff_doubles_up_to_the_wait_cap(
+    httpserver, monkeypatch, waits, top_draws
+):
+    monkeypatch.setattr(settings, "LLM_TEMPORARY_ERROR_RETRIES", 3)
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX_WAIT_SECONDS", 2)
+    answers_in_turn(httpserver, RATE_LIMITED)
+    with pytest.raises(litellm.RateLimitError):
+        ask_server(httpserver)
+    assert waits == [1, 2, 2]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("headers", "wait"),
+    [
+        (
+            {"Retry-After-Ms": "1500", "Retry-After": "9"},
+            1.5 + _RETRY_AFTER_JITTER_SECONDS,
+        ),
+        ({"Retry-After": "1.5"}, 1.5 + _RETRY_AFTER_JITTER_SECONDS),
+        ({"Retry-After": "2"}, 2 + _RETRY_AFTER_JITTER_SECONDS),
+        (
+            {"Retry-After": "Tue, 27 Oct 2026 12:00:05 GMT"},
+            5 + _RETRY_AFTER_JITTER_SECONDS,
+        ),
+        ({}, LONGEST_FIRST_BACKOFF),
+        ({"Retry-After": "soon"}, LONGEST_FIRST_BACKOFF),
+    ],
+    ids=["ms-first", "fractional", "integer", "http-date", "absent", "garbage"],
+)
+def test_the_wait_is_read_from_the_retry_after_headers_else_backed_off(
+    httpserver, monkeypatch, waits, top_draws, model, headers, wait
+):
+    monkeypatch.setattr(time, "time", lambda: parsedate_to_datetime(NOW).timestamp())
+    answers_in_turn(httpserver, (429, SCRIPTED_ERROR, headers), OK)
+    assert ask_server(httpserver, model=model) == "OK"
+    assert waits == [wait]
+
+
+def test_retry_after_headers_are_read_whatever_their_case(
+    llm, monkeypatch, waits, top_draws
+):
+    slow_down = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model=MODEL
     )
-    with pytest.raises(litellm.AuthenticationError):
-        ask_vllm(httpserver)
-    assert len(httpserver.log) == 3
+    slow_down.litellm_response_headers = {"RETRY-AFTER": "2"}
+    monkeypatch.setattr(litellm, "completion", llm.replies(slow_down, "ok"))
+    assert (
+        litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL) == "ok"
+    )
+    assert waits == [2 + _RETRY_AFTER_JITTER_SECONDS]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize("retry_after", [0, 30, 90])
+def test_a_retry_after_is_waited_out_with_jitter_even_past_the_backoff_cap(
+    httpserver, monkeypatch, waits, top_draws, model, retry_after
+):
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX_WAIT_SECONDS", 60)
+    answers_in_turn(
+        httpserver, rate_limited(retry_after), rate_limited(retry_after), OK
+    )
+    assert ask_server(httpserver, model=model) == "OK"
+    wait = retry_after + _RETRY_AFTER_JITTER_SECONDS
+    assert waits == [wait, wait]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_retry_after_longer_than_the_time_left_gives_up_at_once(
+    httpserver, monkeypatch
+):
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX_TOTAL_SECONDS", 300)
+    answers_in_turn(httpserver, rate_limited(301), OK)
+    with pytest.raises(litellm.RateLimitError):
+        ask_server(httpserver)
+    assert len(httpserver.log) == 1
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize(
+    ("reply", "waited"),
+    [(RATE_LIMITED, [1, 2, 2]), (rate_limited(3), [4])],
+    ids=["backoff-cut-to-the-time-left", "retry-after-past-the-time-left"],
+)
+def test_no_resend_starts_after_the_total_time_cap(
+    httpserver, monkeypatch, waits, top_draws, reply, waited
+):
+    monkeypatch.setattr(settings, "LLM_RETRY_MAX_TOTAL_SECONDS", 5)
+    monkeypatch.setattr(time, "monotonic", lambda: sum(waits))
+    answers_in_turn(httpserver, reply)
+    with pytest.raises(litellm.RateLimitError):
+        ask_server(httpserver)
+    assert waits == waited
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_each_resend_is_logged_as_a_warning_naming_the_error_and_the_wait(
+    httpserver, caplog
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    answers_in_turn(httpserver, RATE_LIMITED, RATE_LIMITED, OK)
+    ask_server(httpserver)
+    resends = [record for record in caplog.records if record.name == "r3con.llm"]
+    assert [record.levelno for record in resends] == [logging.WARNING] * 2
+    resend = re.compile(r"in \S+ seconds as it raised RateLimitError")
+    assert all(resend.search(record.getMessage()) for record in resends)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize(
+    ("own_setting", "requests"),
+    [
+        ({"num_retries": 1}, 2),
+        ({"max_retries": 0}, 1),
+        ({"retry_policy": RetryPolicy(RateLimitErrorRetries=2)}, 3),
+    ],
+    ids=["num_retries", "max_retries", "retry_policy"],
+)
+def test_a_callers_own_retry_setting_replaces_r3cons_resends(
+    httpserver, own_setting, requests
+):
+    answers_in_turn(httpserver, RATE_LIMITED)
+    with pytest.raises(litellm.RateLimitError):
+        ask_server(httpserver, **own_setting)
+    assert len(httpserver.log) == requests
 
 
 def test_litellm_reads_its_bundled_price_map():
