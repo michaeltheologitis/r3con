@@ -19,8 +19,9 @@ content (a 200 with no JSON, which transport retries never see).
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
 
-Two helpers ask litellm something without calling a provider: :func:`count_tokens` and
-:func:`quiet_litellm`.
+Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
+:func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
+models, litellm's ``get_model_info`` lookup asks a server.
 
 ``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
 though nothing in this package imports it** — litellm imports it lazily, on the retry path
@@ -32,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +47,7 @@ if TYPE_CHECKING:
     from r3con.runs import StageRun
 
 _log = get_logger("llm")
+_quiet_lock = threading.RLock()
 
 
 def _enforce_strict_objects(schema: Any) -> Any:
@@ -249,17 +252,20 @@ def quiet_litellm() -> Iterator[None]:
 
     litellm prints its provider list to stdout when asked about a model string it cannot
     place (a Router alias). Its settings are globals, so the block silences another
-    thread's litellm calls too.
+    thread's litellm calls too, and a block in another thread waits for this one to end.
+    Keep the block to the lookup itself: a block that waits on another thread which also
+    enters ``quiet_litellm`` deadlocks.
     """
     logger = logging.getLogger("LiteLLM")
-    suppress, level = litellm.suppress_debug_info, logger.level
-    litellm.suppress_debug_info = True
-    logger.setLevel(logging.CRITICAL)
-    try:
-        yield
-    finally:
-        litellm.suppress_debug_info = suppress
-        logger.setLevel(level)
+    with _quiet_lock:
+        suppress, level = litellm.suppress_debug_info, logger.level
+        litellm.suppress_debug_info = True
+        logger.setLevel(logging.CRITICAL)
+        try:
+            yield
+        finally:
+            litellm.suppress_debug_info = suppress
+            logger.setLevel(level)
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
