@@ -27,9 +27,15 @@ Modifications (also listed in the file header):
   - Sorted `authorized_imports` in `LocalPythonExecutor.__init__` instead of
     listing a set, so the refused-import message lists the modules in the same
     order in every process (set order varies with the string hash seed).
+  - Replaced upstream's `timeout` thread wrapper, which waited for the program to
+    end before raising, with a deadline that `evaluate_ast` checks before each node
+    (the `timeout` function is left in place, unused). A loop stops at the limit;
+    one long built-in call still runs to its end. `ExecutionTimeoutError` is
+    upgraded from `Exception` to `BaseException` so that `evaluate_python_code`'s
+    own `except Exception` does not rewrap it as `InterpreterError`.
 
 The behaviour of `evaluate_python_code`, the AST walker, the authorized-imports
-allowlist's contents and matching, the dunder/operation/while/timeout limits, and
-`BASE_PYTHON_TOOLS` is unchanged from upstream.
+allowlist's contents and matching, the dunder/operation/while limits, and
+`BASE_PYTHON_TOOLS` is otherwise unchanged from upstream.
 
 Everything else in this package is licensed under the MIT License (see LICENSE).

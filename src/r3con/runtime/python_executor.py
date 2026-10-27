@@ -22,12 +22,19 @@
 #   - Sorted `authorized_imports` in LocalPythonExecutor.__init__ instead of
 #     listing a set, so the refused-import message lists the modules in the
 #     same order in every process (set order varies with the string hash seed).
+#   - Replaced upstream's `timeout` thread wrapper, which waited for the
+#     program to end before raising, with a deadline that evaluate_ast checks
+#     before each node (the `timeout` function is left in place, unused). A
+#     loop stops at the limit; one long built-in call (`time.sleep(60)`)
+#     still runs to its end. ExecutionTimeoutError is upgraded from
+#     Exception → BaseException so that evaluate_python_code's own
+#     `except Exception` does not rewrap it as InterpreterError.
 #
 # See the NOTICE file distributed with this package, and LICENSE-APACHE-2.0 for a
 # copy of the License.
 # Behavior of evaluate_python_code, the AST walker, the authorized-imports
-# allowlist's contents and matching, the dunder/operation/while/timeout limits,
-# and BASE_PYTHON_TOOLS is unchanged from upstream.
+# allowlist's contents and matching, the dunder/operation/while limits, and
+# BASE_PYTHON_TOOLS is otherwise unchanged from upstream.
 #
 # Original copyright notice preserved:
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
@@ -50,10 +57,12 @@ import inspect
 import logging
 import math
 import re
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 from importlib import import_module
@@ -341,10 +350,14 @@ class ReturnException(BaseException):
         self.value = value
 
 
-class ExecutionTimeoutError(Exception):
+class ExecutionTimeoutError(BaseException):
     """Exception raised when code execution exceeds the maximum allowed time."""
 
     pass
+
+
+# The running execution's deadline on time.monotonic(): infinite outside one or without a limit.
+_deadline: ContextVar[float] = ContextVar("_deadline", default=math.inf)
 
 
 def timeout(timeout_seconds: int):
@@ -1511,6 +1524,8 @@ def evaluate_ast(
             f"Reached the max number of operations of {MAX_OPERATIONS}. Maybe there is an infinite loop somewhere in the code, or you're just asking too many calculations."
         )
     state["_operations_count"]["counter"] += 1
+    if time.monotonic() > _deadline.get():
+        raise ExecutionTimeoutError("Code execution exceeded the maximum execution time")
     common_params = (state, static_tools, custom_tools, authorized_imports)
     if isinstance(expression, ast.Assign):
         # Assignment -> we evaluate the assignment which should update the state
@@ -1700,8 +1715,11 @@ def evaluate_python_code(
 
         static_tools["final_answer"] = final_answer
 
+    deadline = math.inf if timeout_seconds is None else time.monotonic() + timeout_seconds
+
     # Define the actual execution logic
     def _execute_code():
+        token = _deadline.set(deadline)
         result = None
         try:
             for node in expression.body:
@@ -1724,10 +1742,8 @@ def evaluate_python_code(
             raise InterpreterError(
                 f"Code execution failed at line '{ast.get_source_segment(code, node)}' due to: {type(e).__name__}: {e}"
             )
-
-    # Apply timeout if specified
-    if timeout_seconds is not None:
-        _execute_code = timeout(timeout_seconds)(_execute_code)
+        finally:
+            _deadline.reset(token)
 
     return _execute_code()
 

@@ -84,14 +84,66 @@ def test_what_the_sandbox_forbids_or_cannot_run_raises_an_interpreter_error(
         executor(code)
 
 
-def test_a_runaway_loop_is_stopped():
-    executor = LocalPythonExecutor(additional_authorized_imports=[], timeout_seconds=1)
+TIME_LIMIT_S = 0.5
+# Each loop ends on its own after LOOP_S, so a test fails rather than hangs.
+LOOP_S = 3
+STOPS_WITHIN_S = 2.0
+LOOP = f"""
+import time
+end = time.monotonic() + {LOOP_S}
+while time.monotonic() < end:
+    pass
+"""
+LOOP_INSIDE_TRY = f"""
+import time
+end = time.monotonic() + {LOOP_S}
+for i in range(10**9):
+    try:
+        if time.monotonic() > end:
+            break
+    except Exception:
+        pass
+"""
+LOOP_INSIDE_BARE_EXCEPT = LOOP_INSIDE_TRY.replace("except Exception:", "except:")
+
+
+@pytest.fixture
+def limited_executor() -> LocalPythonExecutor:
+    return LocalPythonExecutor(
+        additional_authorized_imports=[], timeout_seconds=TIME_LIMIT_S
+    )
+
+
+def seconds_until_timed_out(executor: LocalPythonExecutor, code: str) -> float:
     started = time.perf_counter()
-    with pytest.raises((InterpreterError, ExecutionTimeoutError)):
-        executor("while True:\n    pass")
-    # The worker thread cannot be killed; the loop ends at the iteration cap, which
-    # takes seconds under load. The bound catches a hang, not a slow machine.
-    assert time.perf_counter() - started < 20.0
+    with pytest.raises(ExecutionTimeoutError):
+        executor(code)
+    return time.perf_counter() - started
+
+
+@pytest.mark.parametrize(
+    "code",
+    [LOOP, LOOP_INSIDE_TRY, LOOP_INSIDE_BARE_EXCEPT],
+    ids=["plain", "except Exception", "bare except"],
+)
+def test_a_python_loop_stops_at_the_time_limit(limited_executor, code):
+    assert seconds_until_timed_out(limited_executor, code) < STOPS_WITHIN_S
+
+
+def test_variables_from_earlier_calls_survive_a_call_that_timed_out(
+    limited_executor,
+):
+    limited_executor("rows = ['a', 'b']")
+    seconds_until_timed_out(limited_executor, LOOP + "rows = []")
+    assert limited_executor("rows").output == ["a", "b"]
+
+
+def test_a_closure_from_an_earlier_call_outlives_that_calls_time_limit(
+    limited_executor,
+):
+    limited_executor("def adder(n):\n    return lambda x: x + n\nadd_two = adder(2)")
+    time.sleep(2 * TIME_LIMIT_S)
+    assert limited_executor("add_two(1)").output == 3
 
 
 @pytest.mark.parametrize(
