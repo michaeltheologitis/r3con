@@ -234,7 +234,8 @@ def run(
             ``litellm.completion``. Supply your own when you already own the connection —
             a configured ``litellm.Router``'s ``.completion`` for fallbacks or load
             balancing, or a wrapper that adds caching, logging or an internal gateway.
-            It is transport, so it does not change the run's identity.
+            It is transport, so it does not change the run's identity. r3con calls it
+            once per request and leaves any resending to it.
         logs_dir: where the run folder goes. Defaults to ``./logs``
             (or ``R3CON_LOGS_DIR``).
         save_artifacts: write the per-stage artifacts — the relevance snippets, the

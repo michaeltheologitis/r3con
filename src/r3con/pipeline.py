@@ -157,7 +157,8 @@ def run_pipeline(
     the request is actually made. None of them changes what a correct answer is, so none
     appears in the run identity. ``completion`` replaces ``litellm.completion`` for every
     call this run makes — hand it a configured ``litellm.Router``'s ``.completion``, or any
-    wrapper with the same ``(model, messages, **kwargs)`` shape.
+    wrapper with the same ``(model, messages, **kwargs)`` shape. It is called once per
+    request and owns its retrying.
 
     Before the first request, every stage's prompt is checked to exist
     (:func:`r3con.config.check_prompts`), and every runtime cap is read once, checked

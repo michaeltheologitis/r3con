@@ -49,9 +49,14 @@ SCHEMA_MAX_ATTEMPTS = 5
 # Cap on the parsing structured-output retry loop (one document).
 PARSING_MAX_ATTEMPTS = 5
 
-# How many times litellm resends a failed call. It resends any error, a refused request
-# (400) included, so each refusal costs this many extra requests.
-LLM_NUM_RETRIES = 2
+# Most resends of one request after temporary errors (the rule is in r3con.runtime.llm).
+LLM_TEMPORARY_ERROR_RETRIES = 10
+
+# Cap on the exponential backoff before one resend, in seconds (not on a Retry-After).
+LLM_RETRY_MAX_WAIT_SECONDS = 60
+
+# Seconds from a request's first attempt after which no resend starts.
+LLM_RETRY_MAX_TOTAL_SECONDS = 300
 
 # Re-rolls of an empty structured-output response (a 200 with no JSON, e.g. a
 # reasoning model that spent its budget on thinking).
@@ -72,7 +77,9 @@ _FLOORS: dict[str, int] = {
     "reasoning_max_turns": 1,
     "schema_max_attempts": 1,
     "parsing_max_attempts": 1,
-    "llm_num_retries": 0,
+    "llm_temporary_error_retries": 0,
+    "llm_retry_max_wait_seconds": 0,
+    "llm_retry_max_total_seconds": 0,
     "llm_empty_content_retries": 0,
     "reasoning_parse_max_toks": 0,
     "window_margin_percent": 0,
@@ -125,7 +132,9 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         ),
         "schema_max_attempts": SCHEMA_MAX_ATTEMPTS,
         "parsing_max_attempts": PARSING_MAX_ATTEMPTS,
-        "llm_num_retries": LLM_NUM_RETRIES,
+        "llm_temporary_error_retries": LLM_TEMPORARY_ERROR_RETRIES,
+        "llm_retry_max_wait_seconds": LLM_RETRY_MAX_WAIT_SECONDS,
+        "llm_retry_max_total_seconds": LLM_RETRY_MAX_TOTAL_SECONDS,
         "llm_empty_content_retries": LLM_EMPTY_CONTENT_RETRIES,
         "reasoning_parse_max_toks": REASONING_PARSE_MAX_TOKS,
         "window_margin_percent": WINDOW_MARGIN_PERCENT,

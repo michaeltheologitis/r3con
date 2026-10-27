@@ -338,6 +338,14 @@ def configs(tmp_path):
     return write
 
 
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """The seconds r3con waits before each resend, recorded instead of slept."""
+    recorded: list[float] = []
+    monkeypatch.setattr("r3con.runtime.llm._sleep", recorded.append)
+    return recorded
+
+
 @pytest.fixture(autouse=True)
 def _isolated(
     request: pytest.FixtureRequest,
@@ -351,6 +359,8 @@ def _isolated(
     monkeypatch.chdir(tmp_path)
     if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
         monkeypatch.setattr(litellm, "completion", FakeLLM())
+    if not request.node.get_closest_marker("live"):
+        request.getfixturevalue("waits")
     logger = logging.getLogger("r3con")
     level, propagate, handlers = logger.level, logger.propagate, list(logger.handlers)
     yield

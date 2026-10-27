@@ -23,21 +23,44 @@ Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
 models, litellm's ``get_model_info`` lookup asks a server.
 
-``num_retries`` is set here, and that is why **``tenacity`` is a declared dependency even
-though nothing in this package imports it** — litellm imports it lazily, on the retry path
-only. Drop it and every call that hits a transient error fails instead of retrying, on the
-one path you are least likely to exercise before shipping.
+**Temporary errors are resent; refusals are not.** When r3con calls ``litellm.completion``
+itself, tenacity resends a request whose error has the status 408, 409, 429, or 500 or
+above (which a timeout or a refused connection also carries), unless it says the quota is
+spent (OpenAI's 429 ``insufficient_quota``). Any other error is raised at once: a bad
+request, a refused key, an exhausted quota, or a request too long for the model, which
+:mod:`r3con.splitting` catches to read the document in parts. Before each resend a warning
+is logged and r3con waits for the error's Retry-After, ``0`` included, plus up to a second
+of jitter. The Retry-After is its ``retry-after-ms`` header in milliseconds, else its
+``retry-after`` header in seconds or as an HTTP date; when it is missing, unreadable or
+negative, r3con waits instead for a jittered exponential backoff of at most
+``settings.LLM_RETRY_MAX_WAIT_SECONDS``. No wait is longer than what is left of
+``settings.LLM_RETRY_MAX_TOTAL_SECONDS`` since the first attempt. The last error is raised
+after ``settings.LLM_TEMPORARY_ERROR_RETRIES`` resends, once that total time has passed,
+or at once when the Retry-After asks for longer than the time left. So no resend starts
+after the total cap, and a request that itself runs past it is not resent: one that hits
+litellm's default timeout of 600 seconds, say, since r3con sets none. Each request goes
+out with ``num_retries=0``, because litellm's own retries resend every error, refusals
+included; that also turns off the OpenAI SDK's, though a ``litellm.num_retries`` set by
+the host application still applies inside each attempt. A request that carries the
+caller's own ``num_retries``, ``max_retries`` or ``retry_policy`` goes to
+``litellm.completion`` as it is, to be retried by those. A supplied ``completion=`` is
+called as it is, once per request, and owns its retrying: a ``litellm.Router`` resends by
+the same status rule, with its own cooldowns and fallbacks.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import random
 import threading
+import time
 from collections.abc import Callable, Iterator
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
 
 import litellm
+import tenacity
 from pydantic import BaseModel
 
 from r3con import settings
@@ -48,6 +71,14 @@ if TYPE_CHECKING:
 
 _log = get_logger("llm")
 _quiet_lock = threading.RLock()
+
+_CALLER_RETRY_SETTINGS = frozenset({"num_retries", "max_retries", "retry_policy"})
+_QUOTA_EXHAUSTED = "insufficient_quota"
+_TEMPORARY_CLIENT_ERRORS = frozenset({408, 409, 429})
+_FIRST_SERVER_ERROR = 500
+_MILLISECONDS_PER_SECOND = 1000
+_RETRY_AFTER_JITTER_SECONDS = 1.0
+_sleep = time.sleep
 
 
 def _enforce_strict_objects(schema: Any) -> Any:
@@ -148,11 +179,10 @@ def litellm_chat_completion_full(
             },
         }
 
-    # litellm resends a failed call `num_retries` times, whatever the error; setdefault
-    # so a caller can still override.
-    request.setdefault("num_retries", settings.LLM_NUM_RETRIES)
-
-    response = (completion or litellm.completion)(**request)
+    if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
+        response = _resend_temporary_errors(request)
+    else:
+        response = (completion or litellm.completion)(**request)
 
     if run is not None:
         run.add_step(
@@ -193,7 +223,7 @@ def litellm_chat_completion(
     *empty* content, the call is **re-rolled** up to ``max_empty_retries`` times
     (default ``settings.LLM_EMPTY_CONTENT_RETRIES``) before raising — an empty body is
     a recoverable bad generation, not a hard error, and it's a successful HTTP 200 so
-    the transport ``num_retries`` never catches it. Each re-roll re-sends the same
+    the resends of temporary errors never catch it. Each re-roll re-sends the same
     request, so it is an independent sample (a ``seed`` the caller passes in ``kwargs``
     is re-sent unchanged). This recovers the common transient case where a reasoning
     model spent its budget on the thinking block; a *deterministic* empty still raises
@@ -266,6 +296,72 @@ def quiet_litellm() -> Iterator[None]:
         finally:
             litellm.suppress_debug_info = suppress
             logger.setLevel(level)
+
+
+def _resend_temporary_errors(request: dict[str, Any]) -> Any:
+    resending = tenacity.Retrying(
+        sleep=_sleep,
+        retry=tenacity.retry_if_exception(_is_temporary),
+        stop=_give_up,
+        wait=_wait_before_resending,
+        before_sleep=tenacity.before_sleep_log(_log, logging.WARNING),
+        reraise=True,
+    )
+    return resending(litellm.completion, **request, num_retries=0)
+
+
+def _is_temporary(error: BaseException) -> bool:
+    status = getattr(error, "status_code", None)
+    if not isinstance(status, int):
+        return False
+    if status < _FIRST_SERVER_ERROR and status not in _TEMPORARY_CLIENT_ERRORS:
+        return False
+    # litellm keeps OpenAI's code in body on the SDK path, in the message on its own.
+    return _QUOTA_EXHAUSTED not in f"{error} {getattr(error, 'body', None)}"
+
+
+def _give_up(retry_state: tenacity.RetryCallState) -> bool:
+    left = _seconds_left(retry_state)
+    retry_after = _retry_after(retry_state)
+    return (
+        retry_state.attempt_number > settings.LLM_TEMPORARY_ERROR_RETRIES
+        or left <= 0
+        or (retry_after is not None and retry_after > left)
+    )
+
+
+def _wait_before_resending(retry_state: tenacity.RetryCallState) -> float:
+    retry_after = _retry_after(retry_state)
+    if retry_after is None:
+        backoff = tenacity.wait_random_exponential(
+            max=settings.LLM_RETRY_MAX_WAIT_SECONDS
+        )
+        wait = backoff(retry_state)
+    else:
+        wait = retry_after + random.uniform(0, _RETRY_AFTER_JITTER_SECONDS)
+    return min(wait, _seconds_left(retry_state))
+
+
+def _seconds_left(retry_state: tenacity.RetryCallState) -> float:
+    elapsed = retry_state.seconds_since_start or 0.0
+    return settings.LLM_RETRY_MAX_TOTAL_SECONDS - elapsed
+
+
+def _retry_after(retry_state: tenacity.RetryCallState) -> float | None:
+    error = retry_state.outcome.exception() if retry_state.outcome else None
+    headers = getattr(error, "litellm_response_headers", None) or {}
+    seconds = _seconds_asked({name.lower(): value for name, value in headers.items()})
+    return seconds if seconds is not None and seconds >= 0 else None
+
+
+def _seconds_asked(headers: dict[str, Any]) -> float | None:
+    with contextlib.suppress(KeyError, ValueError):
+        return float(headers["retry-after-ms"]) / _MILLISECONDS_PER_SECOND
+    with contextlib.suppress(KeyError, ValueError):
+        return float(headers["retry-after"])
+    with contextlib.suppress(KeyError, ValueError):
+        return parsedate_to_datetime(headers["retry-after"]).timestamp() - time.time()
+    return None
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
