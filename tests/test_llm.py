@@ -1,10 +1,17 @@
+import logging
+import threading
+
 import litellm
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from pydantic import BaseModel
 
 from r3con import settings
-from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
+from r3con.runtime.llm import (
+    litellm_chat_completion,
+    litellm_chat_completion_full,
+    quiet_litellm,
+)
 
 MODEL = "openai/gpt-6-luna"
 VLLM_TOO_LONG = {
@@ -17,6 +24,10 @@ VLLM_TOO_LONG = {
     "param": None,
     "code": 400,
 }
+LOUD = (False, logging.INFO)
+QUIET = (True, logging.CRITICAL)
+ENTRY_GRACE_SECONDS = 0.2
+THREAD_TIMEOUT_SECONDS = 5
 
 
 class Flat(BaseModel):
@@ -43,6 +54,21 @@ class Counts(BaseModel):
 
 class Number(BaseModel):
     x: int
+
+
+@pytest.fixture
+def loud_litellm(monkeypatch):
+    """litellm free to print and its logger at INFO, until the test ends."""
+    monkeypatch.setattr(litellm, "suppress_debug_info", LOUD[0])
+    logger = logging.getLogger("LiteLLM")
+    level = logger.level
+    logger.setLevel(LOUD[1])
+    yield
+    logger.setLevel(level)
+
+
+def litellm_settings():
+    return litellm.suppress_debug_info, logging.getLogger("LiteLLM").level
 
 
 def ask(llm, **kwargs):
@@ -226,3 +252,33 @@ def test_litellm_reads_its_bundled_price_map():
     source = get_model_cost_map_source_info()
     assert source["source"] == "local"
     assert source["is_env_forced"] is True
+
+
+def test_nested_quiet_blocks_leave_litellm_as_they_found_it(loud_litellm):
+    with quiet_litellm(), quiet_litellm():
+        assert litellm_settings() == QUIET
+    assert litellm_settings() == LOUD
+
+
+def test_a_quiet_block_in_another_thread_leaves_litellm_as_it_found_it(loud_litellm):
+    starting, entered, main_left = (threading.Event() for _ in range(3))
+    seen_inside = []
+
+    def quiet_until_main_leaves():
+        starting.set()
+        with quiet_litellm():
+            seen_inside.append(litellm_settings())
+            entered.set()
+            main_left.wait(timeout=THREAD_TIMEOUT_SECONDS)
+
+    other = threading.Thread(target=quiet_until_main_leaves)
+    with quiet_litellm():
+        other.start()
+        assert starting.wait(timeout=THREAD_TIMEOUT_SECONDS)
+        entered.wait(timeout=ENTRY_GRACE_SECONDS)
+    main_left.set()
+    other.join(timeout=THREAD_TIMEOUT_SECONDS)
+
+    assert not other.is_alive()
+    assert seen_inside == [QUIET]
+    assert litellm_settings() == LOUD
