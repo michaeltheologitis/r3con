@@ -19,12 +19,15 @@
 #     FinalAnswerException; we apply the same treatment to the three other
 #     control-flow exceptions for consistent Python semantics.
 #   - Repackaged from `smolagents` into `r3con.runtime` (no code change).
+#   - Sorted `authorized_imports` in LocalPythonExecutor.__init__ instead of
+#     listing a set, so the refused-import message lists the modules in the
+#     same order in every process (set order varies with the string hash seed).
 #
 # See the NOTICE file distributed with this package, and LICENSE-APACHE-2.0 for a
 # copy of the License.
 # Behavior of evaluate_python_code, the AST walker, the authorized-imports
-# allowlist, the dunder/operation/while/timeout limits, and BASE_PYTHON_TOOLS
-# is unchanged from upstream.
+# allowlist's contents and matching, the dunder/operation/while/timeout limits,
+# and BASE_PYTHON_TOOLS is unchanged from upstream.
 #
 # Original copyright notice preserved:
 # Copyright 2024 The HuggingFace Inc. team. All rights reserved.
@@ -1777,7 +1780,7 @@ class LocalPythonExecutor(PythonExecutor):
         if max_print_outputs_length is None:
             self.max_print_outputs_length = DEFAULT_MAX_LEN_OUTPUT
         self.additional_authorized_imports = additional_authorized_imports
-        self.authorized_imports = list(set(BASE_BUILTIN_MODULES) | set(self.additional_authorized_imports))
+        self.authorized_imports = sorted(set(BASE_BUILTIN_MODULES) | set(self.additional_authorized_imports))
         self._check_authorized_imports_are_installed()
         # Wire BASE_PYTHON_TOOLS in directly. Upstream populates self.static_tools
         # lazily in send_tools(); we don't have agent tools, so combine the
