@@ -84,9 +84,19 @@ _CEILINGS: dict[str, int] = {"window_margin_percent": 99}
 
 def active_doc_workers() -> int:
     """Max documents processed concurrently within one task —
-    ``R3CON_DOC_WORKERS`` else ``DOC_WORKERS``."""
+    ``R3CON_DOC_WORKERS`` else ``DOC_WORKERS``.
+
+    Raises:
+        ValueError: naming whichever of the two is set to anything but an integer >= 1.
+    """
     raw = os.environ.get("R3CON_DOC_WORKERS")
-    return int(raw) if raw else DOC_WORKERS
+    if not raw:
+        return check_cap("doc_workers", DOC_WORKERS)
+    try:
+        workers = int(raw)
+    except ValueError:
+        workers = raw
+    return check_cap("doc_workers", workers, name="R3CON_DOC_WORKERS")
 
 
 def active_logs_dir() -> Path:
@@ -125,13 +135,16 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
     return snapshot
 
 
-def check_cap(key: str, value: object) -> None:
-    """Raise ``ValueError``, naming the cap, unless ``value`` is an integer from the
-    floor of the cap ``key`` (keyed as in the snapshot) to its ceiling, if it has one."""
+def check_cap(key: str, value: object, name: str | None = None) -> int:
+    """Return ``value`` if it is an integer from the floor of the cap ``key`` (keyed as
+    in the snapshot) to its ceiling, if it has one; else raise ``ValueError`` naming
+    ``name``, the setting the value came from (by default the cap's constant)."""
+    name = name or key.upper()
     floor, ceiling = _FLOORS[key], _CEILINGS.get(key)
     if type(value) is not int:  # a bool is not a cap
-        raise ValueError(f"{key.upper()} must be an integer >= {floor}, got {value!r}.")
+        raise ValueError(f"{name} must be an integer >= {floor}, got {value!r}.")
     if value < floor:
-        raise ValueError(f"{key.upper()} must be >= {floor}, got {value}.")
+        raise ValueError(f"{name} must be >= {floor}, got {value}.")
     if ceiling is not None and value > ceiling:
-        raise ValueError(f"{key.upper()} must be <= {ceiling}, got {value}.")
+        raise ValueError(f"{name} must be <= {ceiling}, got {value}.")
+    return value

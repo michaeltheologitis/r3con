@@ -143,11 +143,39 @@ def test_doc_workers_bounds_how_many_documents_are_read_at_once(answering, worke
     assert answering.peak_in_flight == workers
 
 
-def test_doc_workers_below_one_exits_2_before_a_run_folder_exists(
-    scripted, tmp_path, capsys
+@pytest.mark.parametrize(
+    ("argv", "env", "stderr"),
+    [
+        (
+            ["--doc-workers", "0"],
+            {},
+            "r3con: --doc-workers must be >= 1, got 0.\n",
+        ),
+        (
+            [],
+            {"R3CON_DOC_WORKERS": "0"},
+            "r3con: R3CON_DOC_WORKERS must be >= 1, got 0.\n",
+        ),
+        (
+            [],
+            {"R3CON_DOC_WORKERS": "abc"},
+            "r3con: R3CON_DOC_WORKERS must be an integer >= 1, got 'abc'.\n",
+        ),
+        (
+            [],
+            {"R3CON_LOG_LEVEL": "loud"},
+            "r3con: R3CON_LOG_LEVEL must be a level name such as INFO, got 'loud'.\n",
+        ),
+    ],
+    ids=["flag-below-one", "variable-below-one", "variable-not-int", "bad-level"],
+)
+def test_a_bad_setting_exits_2_naming_it_before_any_document_is_read(
+    scripted, tmp_path, capsys, monkeypatch, argv, env, stderr
 ):
-    assert r3con("run", "Who?", str(MEMOS), "--doc-workers", "0") == 2
-    assert capsys.readouterr().err == "r3con: DOC_WORKERS must be >= 1, got 0.\n"
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert r3con("run", "Who?", "./missing", *argv) == 2
+    assert capsys.readouterr().err == stderr
     assert scripted.requests == []
     assert list(tmp_path.iterdir()) == []
 

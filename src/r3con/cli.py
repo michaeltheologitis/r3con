@@ -21,7 +21,7 @@ from r3con.logging_setup import configure_logging, get_logger
 from r3con.pipeline import run_pipeline
 from r3con.r3con import read_documents
 from r3con.runs import TaskLogger, new_run_folder
-from r3con.settings import active_logs_dir, settings_snapshot
+from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
 _log = get_logger("cli")
 
@@ -112,27 +112,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _run(args: argparse.Namespace) -> int:
-    if args.doc_workers is not None:
-        # The stages read this through settings.active_doc_workers() at call time.
-        os.environ["R3CON_DOC_WORKERS"] = str(args.doc_workers)
     try:
-        documents = read_documents(args.documents)
-    except FileNotFoundError as e:
-        print(f"r3con: {e}", file=sys.stderr)
-        return 2
-    if not documents:
-        print("r3con: no documents to read (every source was empty).", file=sys.stderr)
-        return 2
-
-    try:
+        configure_logging("INFO" if args.verbose else None)
         config = load_config(
             args.config,
             model=args.model,
             relevance_rounds=args.relevance_rounds,
         )
+        if args.doc_workers is not None:
+            check_cap("doc_workers", args.doc_workers, name="--doc-workers")
+            # The stages read this through settings.active_doc_workers() at call time.
+            os.environ["R3CON_DOC_WORKERS"] = str(args.doc_workers)
         settings_snapshot()
+        documents = read_documents(args.documents)
     except (FileNotFoundError, ValueError) as e:
         print(f"r3con: {e}", file=sys.stderr)
+        return 2
+    if not documents:
+        print("r3con: no documents to read (every source was empty).", file=sys.stderr)
         return 2
 
     task_logger = None
@@ -170,7 +167,6 @@ def main(argv: list[str] | None = None) -> int:
     # directory rather than from this file, which lives in site-packages.
     load_dotenv(find_dotenv(usecwd=True))
     args = build_parser().parse_args(argv)
-    configure_logging("INFO" if getattr(args, "verbose", False) else None)
     if args.command == "run":
         try:
             return _run(args)

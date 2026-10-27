@@ -29,12 +29,23 @@ def get_logger(name: str | None = None) -> logging.Logger:
 def configure_logging(level: str | int | None = None) -> None:
     """Attach a single stderr handler to the ``r3con`` logger (idempotent).
 
-    Level comes from ``level``, else ``R3CON_LOG_LEVEL``, else ``WARNING``.
+    Level comes from ``level``, else ``R3CON_LOG_LEVEL`` (in any case), else
+    ``WARNING``.
+
+    Raises:
+        ValueError: naming the variable, if ``R3CON_LOG_LEVEL`` is not a level name.
     """
     logger = logging.getLogger(_NAME)
-    if level is None:
-        level = os.environ.get("R3CON_LOG_LEVEL", "WARNING")
-    logger.setLevel(level)
+    if level is not None:
+        logger.setLevel(level)
+    else:
+        raw = os.environ.get("R3CON_LOG_LEVEL") or "WARNING"
+        try:
+            logger.setLevel(raw.strip().upper())
+        except ValueError:
+            raise ValueError(
+                f"R3CON_LOG_LEVEL must be a level name such as INFO, got {raw!r}."
+            ) from None
     if not logger.handlers:
         # stderr, not stdout: the CLI writes the answer to stdout, so progress must not
         # pollute a pipe.

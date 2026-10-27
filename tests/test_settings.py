@@ -3,7 +3,7 @@ import re
 import pytest
 
 from r3con import settings
-from r3con.settings import settings_snapshot
+from r3con.settings import active_doc_workers, settings_snapshot
 from r3con.splitting import Splits
 
 
@@ -65,6 +65,13 @@ def test_a_cap_that_is_not_an_integer_is_refused(monkeypatch, value):
     message = f"SCHEMA_MAX_ATTEMPTS must be an integer >= 1, got {value!r}."
     with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
         settings_snapshot()
+
+
+@pytest.mark.parametrize("raw", ["abc", "0"])
+def test_a_bad_doc_workers_variable_is_refused_naming_it(monkeypatch, raw):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", raw)
+    with pytest.raises(ValueError, match="^R3CON_DOC_WORKERS "):
+        active_doc_workers()
 
 
 def test_an_explicit_turn_cap_below_its_floor_is_refused():
