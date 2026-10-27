@@ -5,14 +5,12 @@ import socket
 import threading
 import time
 from email.utils import parsedate_to_datetime
-from importlib.metadata import version
 
 import litellm
 import openai
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from packaging.version import Version
 from pydantic import BaseModel
 
 from r3con import settings
@@ -67,7 +65,6 @@ OK = (200, ANSWER)
 RATE_LIMITED = (429, SCRIPTED_ERROR)
 TOO_LONG = (400, VLLM_TOO_LONG)
 CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
-LITELLM_KEEPS_OPENAIS_ERROR_CODE = Version(version("litellm")) >= Version("1.103")
 LONGEST_FIRST_BACKOFF = 1
 NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
 
@@ -293,15 +290,7 @@ def test_a_refused_connection_is_resent(httpserver, monkeypatch, waits):
         (VLLM, 422, SCRIPTED_ERROR),
         (VLLM, *TOO_LONG),
         (VLLM, 429, QUOTA_SPENT),
-        pytest.param(
-            OPENAI,
-            429,
-            QUOTA_SPENT,
-            marks=pytest.mark.skipif(
-                not LITELLM_KEEPS_OPENAIS_ERROR_CODE,
-                reason="litellm drops OpenAI's error code before 1.103",
-            ),
-        ),
+        (OPENAI, 429, QUOTA_SPENT),
     ],
     ids=["400", "401", "403", "404", "422", "too-long", "quota", "openai-quota"],
 )

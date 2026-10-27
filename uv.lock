@@ -2117,7 +2117,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "jinja2", specifier = ">=3.1.0" },
-    { name = "litellm", specifier = ">=1.101,<2" },
+    { name = "litellm", specifier = ">=1.103,<2" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pypdf", specifier = ">=6.19.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
