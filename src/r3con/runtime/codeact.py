@@ -324,8 +324,12 @@ def run_codeact(
             ``settings.REASONING_MAX_TURNS`` when the call runs. On exhaustion we make
             one final plain-prose call to synthesize a best-effort answer from the work
             done (falling back to the last non-empty observation if it comes back empty).
-        timeout_s: per-execution wall-clock cap (in seconds). ``None`` disables
-            the cap.
+        timeout_s: per-execution wall-clock cap (in seconds), checked before each
+            step of the program: a loop stops at the cap, but one long built-in
+            call (``time.sleep(60)``, a huge ``sorted()``) runs to its end first.
+            A program stopped at the cap runs none of its own cleanup (``finally``
+            bodies, ``with`` exits), and its variables keep whatever they held when
+            it stopped. ``None`` disables the cap.
         additional_authorized_imports: extra modules the program is allowed
             to import beyond ``BASE_BUILTIN_MODULES``.
         run: optional :class:`r3con.runs.StageRun` to record each LLM call.
@@ -366,7 +370,7 @@ def run_codeact(
     # upstream, which surfaces here as ``CodeOutput.is_final_answer=True``.
     executor = LocalPythonExecutor(
         additional_authorized_imports=additional_authorized_imports or [],
-        # Typed int upstream; it reaches Future.result(timeout=), which takes a float.
+        # Typed int upstream; it is only added to time.monotonic(), so a float works.
         timeout_seconds=timeout_s,  # pyright: ignore[reportArgumentType]
         # final_answer is registered last so it can never be shadowed by a tool.
         additional_functions={**(tools or {}), "final_answer": _identity_final_answer},
