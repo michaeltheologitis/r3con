@@ -14,7 +14,7 @@ trying a new wording is one file dropped beside your work plus a config pin, nev
 editing ``v1.yaml`` in place retroactively changes what every past run claims to have run
 under. To change a prompt, add ``v2.yaml`` and bump the config's pin; the old file stays on
 disk untouched. The same holds while a run is in flight — :func:`load_prompt` re-reads the
-YAML on every call.
+file on every call, and recompiles it whenever its text has changed.
 
 Because the files travel in the wheel, ``v1`` names content only *relative to a release*,
 which is why a run's manifest records ``r3con_version`` alongside the version strings.
@@ -22,6 +22,7 @@ which is why a run's manifest records ``r3con_version`` alongside the version st
 
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Any
@@ -97,8 +98,14 @@ def load_prompt(name: str, *, version: str, **context: Any) -> str:
               Output: ...
     """
     path = require_prompt_path(name, version)
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return _compile_prompt(path.read_text(encoding="utf-8")).render(**context)
+
+
+# Keyed on the file's text, not its path, so an edited file is compiled afresh.
+@functools.lru_cache
+def _compile_prompt(text: str) -> jinja2.Template:
+    data = yaml.safe_load(text)
     body: str = data["instructions"]
     if examples := data.get("examples"):
         body += "\n\nExamples:\n\n" + "\n\n".join(ex["text"] for ex in examples)
-    return jinja2.Template(body).render(**context)
+    return jinja2.Template(body)

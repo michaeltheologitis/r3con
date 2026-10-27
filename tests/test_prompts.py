@@ -52,6 +52,13 @@ def test_an_overlay_shadows_the_packaged_version_of_the_same_name(overlay):
     assert load_prompt("relevance", version="v1", **CONTEXT) == "SHADOWED"
 
 
+def test_editing_the_file_between_calls_changes_the_rendered_prompt(overlay):
+    overlay("v2", "instructions: |-\n  FIRST {{ task }}\n")
+    assert load_prompt("relevance", version="v2", **CONTEXT) == "FIRST T"
+    overlay("v2", "instructions: |-\n  SECOND {{ task }}\n")
+    assert load_prompt("relevance", version="v2", **CONTEXT) == "SECOND T"
+
+
 def test_a_missing_version_names_every_place_it_looked(tmp_path):
     with pytest.raises(
         FileNotFoundError, match="'relevance' version 'v999'"
