@@ -45,11 +45,11 @@ git-ignored.
 
 A task whose r3con run raises is recorded with its error and scored worst (Loong 1,
 CorpusQA 0). A task gets no record instead when the connection fails (authentication,
-permission, connection, timeout, rate limit or a provider's server error, once r3con's
-own resends are spent), or when loading the task or judging its answer raises: the run
-logs it, exits non-zero and writes no line, and `--resume` retries it, judging a saved
-answer again rather than running r3con twice. To retry a recorded task, delete its folder
-and resume.
+permission, connection, timeout, rate limit or a provider's server error 500, 502 or
+503, once r3con's own resends are spent; other server errors are scored), or when
+loading the task or judging its answer raises: the run logs it, exits non-zero and
+writes no line, and `--resume` retries it, judging a saved answer again rather than
+running r3con twice. To retry a recorded task, delete its folder and resume.
 
 A run resumes only from the commit and run label it started with, and only from a clean
 tree: if `src/` or `evals/` had uncommitted changes to tracked files when it started, or
