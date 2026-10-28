@@ -115,7 +115,9 @@ result.run_dir  # Path      — directory containing run artifacts
 
 Every run writes its intermediate artifacts to a directory under `./logs`. This includes the
 relevance snippet produced for each document at every round, the generated schema, parsed
-records, model calls, and the final reasoning transcript.
+records, model calls, and the final reasoning transcript. Each call in `calls.json` records
+its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
+each stage's `result.json` totals them.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir

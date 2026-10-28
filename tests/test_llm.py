@@ -442,8 +442,13 @@ def test_a_callers_own_retry_setting_replaces_r3cons_resends(
 
 
 def test_a_recorded_call_carries_litellms_price_for_it(llm, monkeypatch, tmp_path):
-    rates = {"input_cost_per_token": 1.0, "output_cost_per_token": 10.0}
-    entry = {**rates, "litellm_provider": "openai", "mode": "chat"}
+    usd_in, usd_out = 1.0, 10.0
+    entry = {
+        "input_cost_per_token": usd_in,
+        "output_cost_per_token": usd_out,
+        "litellm_provider": "openai",
+        "mode": "chat",
+    }
     monkeypatch.setitem(litellm.model_cost, "openai/priced", entry)
     run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
 
@@ -455,11 +460,13 @@ def test_a_recorded_call_carries_litellms_price_for_it(llm, monkeypatch, tmp_pat
         run=run,
     )
 
-    assert [step.cost for step in run.steps] == [10 * 1.0 + 20 * 10.0]
+    [step] = run.steps
+    assert (
+        step.usd == step.tokens["prompt"] * usd_in + step.tokens["completion"] * usd_out
+    )
 
 
-def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, caplog, tmp_path):
-    caplog.set_level(logging.DEBUG, logger="r3con.llm")
+def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, tmp_path):
     run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
 
     litellm_chat_completion(
@@ -470,8 +477,7 @@ def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, caplog, tmp
         run=run,
     )
 
-    assert [step.cost for step in run.steps] == [None]
-    assert f"no price for this call to {VLLM}" in caplog.text
+    assert [step.usd for step in run.steps] == [None]
 
 
 def test_litellm_reads_its_bundled_price_map():

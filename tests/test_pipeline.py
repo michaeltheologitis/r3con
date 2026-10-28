@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from r3con import read_documents, settings
-from r3con.config import PROMPT_STAGES, RunConfig, load_config
+from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
@@ -147,11 +147,29 @@ def memos_run(llm, documents, model, tmp_path):
     return logger, result
 
 
+@pytest.fixture
+def priced_model():
+    """MODEL at round test rates: 10 tokens in and 20 out cost $10 a call. litellm
+    caches each model's price by name, so the cache is cleared once the rates are set
+    and again once they are undone."""
+    name = normalize_model_name(MODEL)
+    rates = {"input_cost_per_token": 0.5, "output_cost_per_token": 0.25}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(
+            litellm.model_cost, name, {**litellm.model_cost.get(name, {}), **rates}
+        )
+        litellm.get_model_info.cache_clear()
+        yield
+    litellm.get_model_info.cache_clear()
+
+
 def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def test_a_run_answers_and_leaves_every_stages_artifacts(answering_llm, tmp_path):
+def test_a_run_answers_and_leaves_every_stages_artifacts(
+    answering_llm, priced_model, tmp_path
+):
     logger = TaskLogger("run", root=tmp_path)
     result = answer(answering_llm, logger)
     assert str(result) == result.answer == "Halloran memo; Merrow memo"
@@ -183,13 +201,12 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(answering_llm, tmp_path
         "reasoning/transcript.yaml",
     }
     relevance = json.loads((logger.dir / "relevance/result.json").read_text())
-    calls = json.loads((logger.dir / "relevance/calls.json").read_text())
     assert (relevance["n_rounds"], relevance["n_docs"]) == (2, 2)
     assert [r["round"] for r in relevance["rounds"]] == [1, 2]
     assert relevance["totals"] == {
         "n_steps": 4,
         "tokens": {"prompt": 40, "completion": 80, "total": 120},
-        "usd": sum(call["cost"] for call in calls),
+        "usd": 40.0,
     }
 
 

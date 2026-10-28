@@ -104,7 +104,7 @@ def _recorded_stage(
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
     fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
-    token ``totals``. On any exception, an interrupt included, it writes the calls
+    token and cost ``totals``. On any exception, an interrupt included, it writes the calls
     that completed and ``error.txt`` with the traceback, adds a note naming the run
     folder to the exception, and re-raises. Without a logger it records nothing.
     """

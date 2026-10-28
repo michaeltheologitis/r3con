@@ -173,24 +173,25 @@ def test_calls_keep_non_ascii_as_text(logger):
                 "usd": None,
             },
         ),
-        ([], {"n_steps": 0, "tokens": None, "usd": 0}),
+        ([], {"n_steps": 0, "tokens": None, "usd": 0.0}),
     ],
     ids=["priced", "one-unpriced", "none"],
 )
 def test_a_stage_totals_its_steps_tokens_and_cost(logger, calls, totals):
     run = StageRun(stage="reasoning", task_logger=logger)
-    for tokens, cost in calls:
-        run.add_step(messages=[], response=reply(), tokens=tokens, cost=cost)
+    for tokens, usd in calls:
+        run.add_step(messages=[], response=reply(), tokens=tokens, usd=usd)
     assert run.compute_totals() == totals
+    assert type(run.compute_totals()["usd"]) is type(totals["usd"])
 
 
-def test_each_call_records_its_cost(logger):
+def test_each_call_records_what_it_cost(logger):
     run = StageRun(stage="relevance", task_logger=logger)
-    run.add_step(messages=[], response=reply(), cost=0.25)
+    run.add_step(messages=[], response=reply(), usd=0.25)
     run.add_step(messages=[], response=reply())
     run.flush(write_transcript=False)
     calls = json.loads((run.dir / "calls.json").read_text())
-    assert [call["cost"] for call in calls] == [0.25, None]
+    assert [call["usd"] for call in calls] == [0.25, None]
 
 
 def test_a_multi_turn_transcript_is_the_last_turns_whole_thread(logger):
