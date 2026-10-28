@@ -218,16 +218,26 @@ def test_a_seed_the_caller_sends_is_resent_unchanged_on_a_reroll(llm):
     assert [request["seed"] for request in llm.requests] == [5, 5, 5]
 
 
-def test_empty_structured_replies_raise_once_the_rerolls_run_out(llm):
+@pytest.mark.parametrize(
+    "asking", [{"schema": Number}, {"reroll_empty": True}], ids=["structured", "plain"]
+)
+def test_empty_replies_raise_once_the_rerolls_run_out(llm, asking):
     llm.replies("", "", "", "")
     with pytest.raises(ValueError, match=r"empty text after 4 attempt\(s\)\. For a"):
-        ask(llm, schema=Number, max_empty_retries=3)
+        ask(llm, max_empty_retries=3, **asking)
     assert len(llm.requests) == 4
 
 
 def test_an_empty_plain_reply_is_returned_as_it_is(llm):
     assert ask(llm.replies("")) == ""
     assert len(llm.requests) == 1
+
+
+def test_an_empty_plain_reply_is_rerolled_when_asked(llm):
+    assert ask(llm.replies("", "", "ok"), reroll_empty=True) == "ok"
+    first, *rerolls = llm.requests
+    assert len(rerolls) == 2
+    assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
 
 
 def test_a_structured_reply_that_parses_is_not_rerolled(llm):

@@ -14,7 +14,8 @@ wrapper with the same shape. It is **transport**, so it never enters a run's ide
 Two entry points. :func:`litellm_chat_completion_full` returns the raw response object;
 :func:`litellm_chat_completion` returns the text, or a validated Pydantic instance when
 a ``schema`` is given, re-rolling the same request if the model answers with empty
-content (a 200 with no JSON, which transport retries never see).
+content (a 200 with no JSON, which transport retries never see), as it does for plain
+text with ``reroll_empty``.
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
@@ -230,6 +231,7 @@ def litellm_chat_completion(
     run: StageRun | None = None,
     kind: str = "llm_call",
     max_empty_retries: int | None = None,
+    reroll_empty: bool = False,
     **kwargs: Any,
 ) -> str | BaseModel:
     """Call an LLM via LiteLLM and optionally parse structured output.
@@ -240,8 +242,8 @@ def litellm_chat_completion(
 
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
-    **Empty structured-output re-roll.** When ``schema`` is set and the model returns
-    *empty* content, the call is **re-rolled** up to ``max_empty_retries`` times
+    **Empty re-roll.** When ``schema`` is set, or ``reroll_empty`` is, and the model
+    returns *empty* content, the call is **re-rolled** up to ``max_empty_retries`` times
     (default ``settings.LLM_EMPTY_CONTENT_RETRIES``) before raising — an empty body is
     a recoverable bad generation, not a hard error, and it's a successful HTTP 200 so
     the resends of temporary errors never catch it. Each re-roll re-sends the same
@@ -273,22 +275,20 @@ def litellm_chat_completion(
 
         text = response.choices[0].message.content or ""
 
-        if schema is None:
+        if schema is None and not reroll_empty:
             return text
         if text:
-            return schema.model_validate_json(text)
+            return text if schema is None else schema.model_validate_json(text)
 
         attempt += 1
         if attempt > max_empty_retries:
             raise ValueError(
-                "Structured output was requested, but the model returned empty text "
-                f"after {attempt} attempt(s). For a reasoning model this usually means "
-                "thinking consumed the response — try a no-thinking config, a higher "
-                "max_tokens, or raising settings.LLM_EMPTY_CONTENT_RETRIES."
+                f"The model returned empty text after {attempt} attempt(s). For a "
+                "reasoning model this usually means thinking consumed the response — "
+                "try a no-thinking config, a higher max_tokens, or raising "
+                "settings.LLM_EMPTY_CONTENT_RETRIES."
             )
-        _log.warning(
-            "empty structured output, re-rolling (%d/%d)", attempt, max_empty_retries
-        )
+        _log.warning("empty reply, re-rolling (%d/%d)", attempt, max_empty_retries)
 
 
 def count_tokens(text: str) -> int:
