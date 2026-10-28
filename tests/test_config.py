@@ -102,7 +102,7 @@ def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
 
 
 UNKNOWN_STAGE = (
-    "prompts pins stage(s) r3con does not have: ['relevance']. The stages are "
+    "pins a prompt for stage(s) r3con does not have: ['relevance']. The stages are "
     "['relevance/first-round', 'relevance/later-rounds', 'structuring/schema', "
     "'structuring/parsing', 'reasoning']."
 )
@@ -117,9 +117,11 @@ def test_a_config_pinning_a_stage_r3con_does_not_have_is_refused_with_the_stages
     configs, prompts
 ):
     configs(old={**FULL, "prompts": prompts})
-    with pytest.raises(ValueError, match=re.escape(UNKNOWN_STAGE)):
+    with pytest.raises(ValueError) as refused:
         load_config("old")
-    with pytest.raises(ValidationError, match=re.escape(UNKNOWN_STAGE)):
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == f"config 'old' {UNKNOWN_STAGE}"
+    with pytest.raises(ValidationError, match=re.escape(f"RunConfig {UNKNOWN_STAGE}")):
         RunConfig(model="openai/m", prompts=prompts)
 
 

@@ -182,13 +182,10 @@ def _reply_schema(shown_ids: Sequence[str]) -> type[_Reply]:
     )
 
 
-def _request(
-    task: str, other_snippets: Mapping[str, str], prompts: Mapping[str, str]
-) -> _Request:
-    """A document's request in one round, given the OTHER documents' snippets by id:
-    the first-round prompt and plain text when none is non-empty, else the later-rounds
-    prompt and :func:`_reply_schema`. Empty snippets are not shown, so not citable."""
-    shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
+def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:
+    """A document's request in one round, given the OTHER documents' non-empty snippets
+    it shows, by id: the first-round prompt and plain text when there are none, else
+    the later-rounds prompt and :func:`_reply_schema`."""
     if not shown:
         version = prompts["relevance/first-round"]
         prompt = load_prompt("relevance/first-round", version=version, task=task)
@@ -214,13 +211,13 @@ def _cited(provenance: list[str], shown: Mapping[str, str], kind: str) -> list[s
 
 
 def _ask(
-    request: _Request, part: str, *, kind: str, attempt: int, **llm_call: Any
+    request: _Request, user_prompt: str, *, kind: str, attempt: int, **llm_call: Any
 ) -> tuple[str, list[str]]:
-    """One send of ``part`` (a document, or one part of one): its snippet, stripped,
-    and the shown ids it used."""
+    """One send of ``user_prompt`` (a document or one part of one, with any retry
+    feedback): its snippet, stripped, and the shown ids it used."""
     reply = litellm_chat_completion(
         system_prompt=request.system_prompt,
-        user_prompt=part,
+        user_prompt=user_prompt,
         schema=request.schema,
         kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
         **llm_call,
@@ -231,23 +228,58 @@ def _ask(
     return (reply.summary or "").strip(), _cited(reply.provenance, request.shown, kind)
 
 
+def _retry_prompt(part: str, error: str) -> str:
+    """The user message that resends ``part`` after a reply failed its schema: the
+    part again and the validator's error, as parsing resends a document."""
+    return (
+        f"{part}\n\n"
+        "---\n\n"
+        "Your previous response failed schema validation:\n\n"
+        f"{error}\n\n"
+        "Write the summary of the same document again, fixing only the offending "
+        "field(s) so the output validates against the schema. Output the corrected "
+        "JSON."
+    )
+
+
 def _read(
     request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
 ) -> tuple[str, list[str]]:
-    """:func:`_ask`, sending again a reply that does not fit its schema (invalid JSON, a
-    missing field), up to ``max_attempts`` sends; the last send's error is raised."""
+    """:func:`_ask`, sending ``part`` again with the validator's error when a reply does
+    not fit its schema (invalid JSON, a missing field), up to ``max_attempts`` sends;
+    the last send's error is raised."""
+    user_prompt = part
     for attempt in range(1, max_attempts):
         try:
-            return _ask(request, part, kind=kind, attempt=attempt, **llm_call)
-        except ValidationError as error:
+            return _ask(request, user_prompt, kind=kind, attempt=attempt, **llm_call)
+        except ValidationError as e:
+            error = f"{type(e).__name__}: {e}"
             _log.warning(
-                "%s: the reply does not fit its schema; sending it again (%d/%d): %s",
+                "%s: sending again (%d/%d) after %s",
                 kind,
                 attempt,
                 max_attempts - 1,
                 error,
             )
-    return _ask(request, part, kind=kind, attempt=max_attempts, **llm_call)
+            user_prompt = _retry_prompt(part, error)
+    return _ask(request, user_prompt, kind=kind, attempt=max_attempts, **llm_call)
+
+
+def _attempts(max_attempts: int | None) -> int:
+    """``max_attempts``, or ``settings.RELEVANCE_MAX_ATTEMPTS`` for ``None``.
+
+    Raises:
+        ValueError: if it is not positive.
+    """
+    if max_attempts is None:
+        max_attempts = settings.RELEVANCE_MAX_ATTEMPTS
+    if max_attempts < 1:
+        raise ValueError(
+            f"max_attempts must be >= 1, got {max_attempts}. "
+            f"Override via settings.RELEVANCE_MAX_ATTEMPTS (current default: "
+            f"{settings.RELEVANCE_MAX_ATTEMPTS})."
+        )
+    return max_attempts
 
 
 def relevance_snippet(
@@ -267,22 +299,25 @@ def relevance_snippet(
 
     The task + the other documents' snippets live in the system prompt; the document is
     the user message. ``prompts`` pins the version of ``relevance/first-round`` and
-    ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet to
-    show, the call uses the first-round prompt and reads back plain text; otherwise the
-    later-rounds prompt and a structured ``{summary, provenance}`` reply. A reply that
-    does not fit its schema is sent again, up to ``max_attempts`` sends (``None`` reads
-    ``settings.RELEVANCE_MAX_ATTEMPTS``).
+    ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet
+    to show, the call uses the first-round prompt and reads back plain text; otherwise
+    the later-rounds prompt and a structured ``{summary, provenance}`` reply. A reply
+    that does not fit its schema is sent again with the validator's error, up to
+    ``max_attempts`` sends (``None`` reads ``settings.RELEVANCE_MAX_ATTEMPTS``).
 
     Returns the snippet, stripped — an empty string is allowed (the document contributes
     nothing relevant to the task) — and the shown ids it used.
+
+    Raises:
+        ValueError: if ``max_attempts`` is not positive.
     """
+    attempts = _attempts(max_attempts)
+    shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
     return _read(
-        _request(task, other_snippets, prompts),
+        _request(task, shown, prompts),
         document,
         kind=kind,
-        max_attempts=(
-            settings.RELEVANCE_MAX_ATTEMPTS if max_attempts is None else max_attempts
-        ),
+        max_attempts=attempts,
         model=model,
         run=run,
         **llm_kwargs,
@@ -323,7 +358,8 @@ def surface_relevance(
     snippets listed separately under their part ids.
 
     Raises:
-        ValueError: if ``document_ids`` is not one distinct id per document.
+        ValueError: if ``document_ids`` is not one distinct id per document, or
+            ``max_attempts`` is not positive.
     """
     if len(document_ids) != len(documents) or len(set(document_ids)) != len(documents):
         raise ValueError(
@@ -331,21 +367,21 @@ def surface_relevance(
             f"{len(set(document_ids))} distinct of {len(document_ids)} for "
             f"{len(documents)} document(s)."
         )
+    attempts = _attempts(max_attempts)
     # rounds < 1 = "no relevance snippets at all" (a deliberate rounds=0 re-run); an empty
     # document corpus is likewise empty. Both short-circuit BEFORE round 1 runs (the
-    # unconditional run_round(None, 1) below) — a `return`, not a fall-through.
+    # unconditional first run_round below) — a `return`, not a fall-through.
     if rounds < 1 or not documents:
         return RelevantContext(records=[])
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
-    attempts = settings.RELEVANCE_MAX_ATTEMPTS if max_attempts is None else max_attempts
 
     def run_round(
-        prev: list[list[SnippetRecord]] | None, round_idx: int
+        prev: list[list[SnippetRecord]], round_idx: int
     ) -> list[list[SnippetRecord]]:
         """Rewrite every document's relevance snippet in parallel. ``prev`` is the frozen
-        previous-round set (``None`` in round 1)."""
+        previous-round set (no snippets in round 1)."""
         _log.info(
             "round %d/%d · %d doc(s) (≤%d parallel)",
             round_idx,
@@ -353,16 +389,13 @@ def surface_relevance(
             len(documents),
             max_workers,
         )
+        shown = {r.id: r.summary for parts in prev for r in parts if r.summary}
 
         def one(i: int, _document: str) -> list[SnippetRecord]:
             # Others-only: document i sees the previous round's snippets of the OTHER
-            # documents (j != i), never its own (the document itself is the user message).
-            others = {
-                record.id: record.summary
-                for j, parts in enumerate(prev or [])
-                if j != i
-                for record in parts
-            }
+            # documents, never its own (the document itself is the user message).
+            own = {record.id for record in prev[i]}
+            others = {id_: s for id_, s in shown.items() if id_ not in own}
             request = _request(task, others, prompts)
             replies = reader.read_in_parts(
                 i,
@@ -397,7 +430,7 @@ def surface_relevance(
         )
         return result
 
-    records = [run_round(None, 1)]
+    records = [run_round([[] for _ in documents], 1)]
     for r in range(2, rounds + 1):
         # only the previous round feeds in
         records.append(run_round(records[-1], r))

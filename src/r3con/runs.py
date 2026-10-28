@@ -25,12 +25,13 @@ Layout per ``logs/<run-folder>/``:
   the ids of the previous round's snippets it used; the last round is the relevant
   context that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call,
   tagged ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a
-  part).
+  part, and ``-retry-{n}`` added to the n-th resend of a reply that did not fit its
+  schema).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
   (``{parsed, source_docs, totals}``) + ``calls.json`` (one entry per ``parse-d{doc}``
-  call, or ``parse-d{doc}c{part}`` for a part).
+  call, or ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to a resend).
 - ``reasoning/`` (stage 3) — ``result.json``
   (``{answer, terminated_by, n_turns, turns, totals}``) + ``calls.json`` +
   ``transcript.yaml``.

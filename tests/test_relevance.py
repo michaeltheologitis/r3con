@@ -13,6 +13,7 @@ from r3con.stages.relevance import (
     SnippetRecord,
     draw_document_ids,
     join_parts,
+    relevance_snippet,
     render_relevance,
     surface_relevance,
 )
@@ -78,6 +79,11 @@ def by_round(result: RelevantContext, field: str) -> list[list[list]]:
 
 def reads_of(llm, document) -> list[dict]:
     return [r for r in llm.requests if r["messages"][1]["content"] == document]
+
+
+def sends_of(llm, document) -> list[dict]:
+    """Every request reading ``document``, resends with feedback included."""
+    return [r for r in llm.requests if r["messages"][1]["content"].startswith(document)]
 
 
 def allowed_ids(request) -> dict:
@@ -315,8 +321,21 @@ def test_a_reply_that_does_not_fit_its_schema_is_sent_again(llm, tmp_path):
         "relevance-r2-d0-retry-2",
         "relevance-r2-d1",
     ]
-    resent = [request["messages"] for request in reads_of(llm, "DOC0")[1:]]
-    assert resent == [resent[0]] * 3
+    first, *resends = sends_of(llm, "DOC0")[1:]
+    assert first["messages"][1]["content"] == "DOC0"
+    for resend in resends:
+        assert resend["messages"][0] == first["messages"][0]
+        user = resend["messages"][1]["content"]
+        assert user.startswith(
+            "DOC0\n\n---\n\nYour previous response failed schema validation:\n\n"
+            "ValidationError: 1 validation error for RelevanceSummary\nprovenance\n"
+            "  Field required"
+        )
+        assert user.endswith(
+            "Write the summary of the same document again, fixing only the offending "
+            "field(s) so the output validates against the schema. Output the corrected "
+            "JSON."
+        )
 
 
 @pytest.mark.parametrize("attempts", [1, 2])
@@ -330,7 +349,27 @@ def test_the_last_malformed_reply_is_raised_once_the_attempts_run_out(
 
     with pytest.raises(ValidationError, match="provenance"):
         surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply, workers=1)
-    assert len(reads_of(llm, "DOC0")) == 1 + attempts
+    assert len(sends_of(llm, "DOC0")) == 1 + attempts
+
+
+def test_fewer_than_one_attempt_is_refused_before_any_request(llm, monkeypatch):
+    message = r"max_attempts must be >= 1, got 0\. Override via"
+    with pytest.raises(ValueError, match=message):
+        surface(llm, ["DOC0", "DOC1"], rounds=2, max_attempts=0)
+    with pytest.raises(ValueError, match=message):
+        relevance_snippet(
+            task=TASK,
+            document="DOC0",
+            other_snippets={"1b1b1b": "A snippet."},
+            model=MODEL,
+            prompts=PROMPTS,
+            max_attempts=0,
+            completion=llm,
+        )
+    monkeypatch.setattr(settings, "RELEVANCE_MAX_ATTEMPTS", 0)
+    with pytest.raises(ValueError, match=message):
+        surface(llm, ["DOC0", "DOC1"], rounds=2)
+    assert llm.requests == []
 
 
 def test_a_null_summary_is_kept_empty_and_neither_shown_nor_citable(llm, shown_ids):

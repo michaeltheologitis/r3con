@@ -106,12 +106,7 @@ class RunConfig(BaseModel):
     @field_validator("prompts")
     @classmethod
     def _only_known_stages(cls, prompts: dict[str, str]) -> dict[str, str]:
-        unknown = sorted(set(prompts) - set(PROMPT_STAGES))
-        if unknown:
-            raise ValueError(
-                f"prompts pins stage(s) r3con does not have: {unknown}. The stages "
-                f"are {list(PROMPT_STAGES)}."
-            )
+        _check_stages(prompts, "RunConfig")
         return prompts
 
     def _identity_parts(self) -> list[str]:
@@ -195,6 +190,17 @@ def _check_params(params: Any, where: str) -> dict[str, Any]:
     return dict(params)
 
 
+def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
+    """Refuse a prompt pinned for a stage not in :data:`PROMPT_STAGES`, naming the
+    stages there are."""
+    unknown = sorted(set(prompts) - set(PROMPT_STAGES))
+    if unknown:
+        raise ValueError(
+            f"{where} pins a prompt for stage(s) r3con does not have: {unknown}. The "
+            f"stages are {list(PROMPT_STAGES)}."
+        )
+
+
 def _find(relative: str) -> Path | None:
     """First existing ``relative`` path across the config search path, else ``None``."""
     for root in config_search_path():
@@ -240,6 +246,7 @@ def load_config(
         raise ValueError(message)
     if "model" not in raw:
         raise ValueError(f"config {name!r} must define a `model`.")
+    _check_stages(raw.get("prompts") or {}, f"config {name!r}")
 
     cfg = RunConfig(
         name=name,
