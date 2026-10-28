@@ -243,7 +243,7 @@ def litellm_chat_completion(
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
     **Empty re-roll.** When ``schema`` is set, or ``reroll_empty`` is, and the model
-    returns *empty* content, the call is **re-rolled** up to ``max_empty_retries`` times
+    returns *empty* content (nothing, or only whitespace), the call is **re-rolled** up to ``max_empty_retries`` times
     (default ``settings.LLM_EMPTY_CONTENT_RETRIES``) before raising — an empty body is
     a recoverable bad generation, not a hard error, and it's a successful HTTP 200 so
     the resends of temporary errors never catch it. Each re-roll re-sends the same
@@ -277,7 +277,7 @@ def litellm_chat_completion(
 
         if schema is None and not reroll_empty:
             return text
-        if text:
+        if text.strip():
             return text if schema is None else schema.model_validate_json(text)
 
         attempt += 1

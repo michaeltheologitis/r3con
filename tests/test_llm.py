@@ -233,8 +233,9 @@ def test_an_empty_plain_reply_is_returned_as_it_is(llm):
     assert len(llm.requests) == 1
 
 
-def test_an_empty_plain_reply_is_rerolled_when_asked(llm):
-    assert ask(llm.replies("", "", "ok"), reroll_empty=True) == "ok"
+@pytest.mark.parametrize("empty", ["", "\n"])
+def test_an_empty_plain_reply_is_rerolled_when_asked(llm, empty):
+    assert ask(llm.replies(empty, empty, "ok"), reroll_empty=True) == "ok"
     first, *rerolls = llm.requests
     assert len(rerolls) == 2
     assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
