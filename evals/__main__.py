@@ -31,6 +31,7 @@ from evals import JUDGE_MODEL, corpusqa, log, loong
 from r3con.config import RunConfig, load_config
 from r3con.logging_setup import configure_logging
 from r3con.runs import StageRun, TaskLogger, new_run_folder
+from r3con.runtime.llm import is_temporary
 
 EVALS_DIR = Path(__file__).resolve().parent
 REPO_DIR = EVALS_DIR.parent
@@ -47,15 +48,11 @@ SAMPLE_SIZES = {"loong": 40, "corpusqa": 35}
 SEED = 20261028
 DEFAULT_WORKERS = 32
 USD_DIGITS = 4
-# Failures of the connection rather than of r3con: the task is left to retry, not scored.
-INFRASTRUCTURE_ERRORS = (
+# A refused key, access or quota: the setup's problem, not r3con's.
+SETUP_ERRORS = (
     exceptions.AuthenticationError,
     exceptions.PermissionDeniedError,
-    exceptions.APIConnectionError,
-    exceptions.Timeout,
     exceptions.RateLimitError,
-    exceptions.ServiceUnavailableError,
-    exceptions.InternalServerError,
 )
 
 
@@ -162,17 +159,18 @@ def _answer(
     benchmark: ModuleType, row: dict[str, Any], task_dir: Path, config: RunConfig
 ) -> dict[str, Any]:
     """r3con's answer to one task, from a fresh folder. A run that raises leaves its
-    error and an empty answer, which the judge scores worst, unless the connection
-    failed: then the error propagates, no answer is saved, and a resume retries it."""
+    error and an empty answer, which the judge scores worst, unless the error
+    ``is_temporary`` or is one of ``SETUP_ERRORS``: then it propagates, no answer is
+    saved, and a resume retries it."""
     question, documents = benchmark.inputs(row)
     shutil.rmtree(task_dir, ignore_errors=True)
     started = time.monotonic()
     answer, error = "", None
     try:
         answer = r3con.run(question, documents, config=config, logs_dir=task_dir).answer
-    except INFRASTRUCTURE_ERRORS:
-        raise
-    except Exception as e:  # noqa: BLE001 — a failed task is scored, not fatal
+    except Exception as e:
+        if is_temporary(e) or isinstance(e, SETUP_ERRORS):
+            raise
         error = f"{type(e).__name__}: {e}"
         log.warning("%s raised %s", row["id"], error)
     run_dir = next((path.parent for path in task_dir.glob("*/manifest.json")), None)

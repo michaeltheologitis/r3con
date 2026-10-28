@@ -38,9 +38,12 @@ INFRASTRUCTURE_FAILURES = [
     exceptions.RateLimitError(**LITELLM_ERROR),
     exceptions.ServiceUnavailableError(**LITELLM_ERROR),
     exceptions.InternalServerError(**LITELLM_ERROR),
+    exceptions.BadGatewayError(**LITELLM_ERROR),
+    exceptions.APIError(status_code=524, **LITELLM_ERROR),
 ]
 TASK_FAILURES = [
     exceptions.ContextWindowExceededError(**LITELLM_ERROR),
+    exceptions.APIError(status_code=400, **LITELLM_ERROR),
     SchemaError("no schema fits the question"),
     RuntimeError("the model is down"),
 ]
@@ -346,6 +349,19 @@ def test_main_prints_a_partial_runs_line_and_writes_none(
     assert re.fullmatch(r"\d{8}T\d{6}Z_[0-9a-f]{8}", line["run"])
     assert (cli_paths / "runs_dir" / line["run"] / "run.json").is_file()
     assert not (cli_paths / "results_path").exists()
+
+
+def test_main_fails_while_a_task_has_no_record_and_resume_runs_it_again(
+    loong_cache, corpusqa_cache, judging_llm, cli_paths
+):
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    judging_llm.answers(schema=exceptions.BadGatewayError(**LITELLM_ERROR))
+
+    assert main([]) == 1
+    [folder] = (cli_paths / "runs_dir").iterdir()
+    requests = len(judging_llm.requests)
+    assert main(["--resume", str(folder)]) == 1
+    assert len(judging_llm.requests) == 2 * requests
 
 
 @pytest.mark.parametrize(

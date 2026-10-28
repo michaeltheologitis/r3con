@@ -18,7 +18,8 @@ content (a 200 with no JSON, which transport retries never see).
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
-:func:`_drop_long_enums` keeps a schema within OpenAI's limit on enum values.
+:func:`_drop_refused_constraints` removes what it refuses: an enum past its limit, and a
+pattern with a lookaround.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -54,6 +55,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import random
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -81,6 +83,8 @@ _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
+# OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
+_LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _sleep = time.sleep
 
 
@@ -111,18 +115,22 @@ def _enforce_strict_objects(schema: Any) -> Any:
     return schema
 
 
-def _drop_long_enums(schema: Any) -> Any:
-    """Remove from ``schema`` every ``enum`` of more than :data:`_MAX_ENUM_VALUES`
-    values, which OpenAI refuses; the field keeps its type, so the caller checks the
-    values once the reply is in."""
+def _drop_refused_constraints(schema: Any) -> Any:
+    """Remove from ``schema`` what OpenAI refuses: every ``enum`` of more than
+    :data:`_MAX_ENUM_VALUES` values, and every ``pattern`` with a lookaround, such as the
+    one Pydantic writes for a ``Decimal``. The field keeps its type, so the caller checks
+    the values once the reply is in."""
     if isinstance(schema, dict):
         if len(schema.get("enum") or []) > _MAX_ENUM_VALUES:
             del schema["enum"]
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and _LOOKAROUND.search(pattern):
+            del schema["pattern"]
         for v in schema.values():
-            _drop_long_enums(v)
+            _drop_refused_constraints(v)
     elif isinstance(schema, list):
         for item in schema:
-            _drop_long_enums(item)
+            _drop_refused_constraints(item)
     return schema
 
 
@@ -192,7 +200,7 @@ def litellm_chat_completion_full(
             "type": "json_schema",
             "json_schema": {
                 "name": schema.__name__,
-                "schema": _drop_long_enums(
+                "schema": _drop_refused_constraints(
                     _enforce_strict_objects(schema.model_json_schema())
                 ),
                 "strict": True,
@@ -320,7 +328,7 @@ def quiet_litellm() -> Iterator[None]:
 def _resend_temporary_errors(request: dict[str, Any]) -> Any:
     resending = tenacity.Retrying(
         sleep=_sleep,
-        retry=tenacity.retry_if_exception(_is_temporary),
+        retry=tenacity.retry_if_exception(is_temporary),
         stop=_give_up,
         wait=_wait_before_resending,
         before_sleep=tenacity.before_sleep_log(_log, logging.WARNING),
@@ -329,7 +337,8 @@ def _resend_temporary_errors(request: dict[str, Any]) -> Any:
     return resending(litellm.completion, **request, num_retries=0)
 
 
-def _is_temporary(error: BaseException) -> bool:
+def is_temporary(error: BaseException) -> bool:
+    """Whether r3con resends ``error``: a 5xx, 408, 409 or 429, unless quota ran out."""
     status = getattr(error, "status_code", None)
     if not isinstance(status, int):
         return False
