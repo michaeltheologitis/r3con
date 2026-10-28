@@ -31,9 +31,8 @@ document's records.
 from __future__ import annotations
 
 import ast
-import re
 import typing
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast, get_origin
 
@@ -44,7 +43,7 @@ from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.llm import LOOKAROUND_RE, litellm_chat_completion
+from r3con.runtime.llm import litellm_chat_completion
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
     InterpreterError,
@@ -93,8 +92,7 @@ def check_schema(schema_code: str) -> type[BaseModel]:
             does not define a ``Parse`` class, ``Parse`` is not a ``pydantic.BaseModel``
             subclass, its JSON schema cannot be generated, it contains untyped object
             fields (``dict``, ``list[dict]``, ``dict[str, X]``) that are incompatible
-            with OpenAI strict structured-output mode, a pattern it checks uses a regex
-            lookaround, which that mode refuses, or any top-level ``Parse`` field
+            with OpenAI strict structured-output mode, or any top-level ``Parse`` field
             is not a ``list[...]`` (each document is parsed separately and the
             per-document parses are merged by list-concatenation, so a non-list
             top-level field would silently collapse to a single document).
@@ -141,19 +139,6 @@ def check_schema(schema_code: str) -> type[BaseModel]:
             f"structured-output backend (OpenAI strict mode rejects any object that does "
             f"not declare its properties). Define a dedicated Pydantic BaseModel subclass "
             f"with named, typed fields for each object you want to capture."
-        )
-
-    lookarounds = [
-        pattern
-        for pattern in _checked_patterns(parse_cls.__pydantic_core_schema__)
-        if LOOKAROUND_RE.search(pattern)
-    ]
-    if lookarounds:
-        raise SchemaError(
-            f"Schema pattern(s) use a regex lookaround: {', '.join(lookarounds)}. The "
-            "structured-output backend refuses lookahead and lookbehind, so it cannot "
-            "hold the model to these patterns. Write each without (?=, (?!, (?<= or "
-            "(?<!, or drop it."
         )
 
     non_list = [
@@ -219,22 +204,6 @@ def _find_untyped_objects(schema: Any, path: str = "$") -> list[str]:
 
     walk(schema, path)
     return found
-
-
-def _checked_patterns(node: Any) -> Iterator[str]:
-    """Every regex in a Pydantic core schema: the patterns Pydantic checks a reply
-    against. A ``Decimal``'s JSON-schema pattern is not among them."""
-    if isinstance(node, dict):
-        pattern = node.get("pattern")
-        if isinstance(pattern, re.Pattern):
-            pattern = pattern.pattern
-        if isinstance(pattern, str):
-            yield pattern
-        for value in node.values():
-            yield from _checked_patterns(value)
-    elif isinstance(node, list):
-        for item in node:
-            yield from _checked_patterns(item)
 
 
 def _parsing_retry_prompt(document: str, error: str) -> str:

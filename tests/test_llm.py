@@ -1,4 +1,3 @@
-import json
 import logging
 import random
 import re
@@ -13,7 +12,7 @@ import openai
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
@@ -96,47 +95,6 @@ class Counts(BaseModel):
 
 class Number(BaseModel):
     x: int
-
-
-class Coded(BaseModel):
-    code: str = Field(pattern=r"^[A-Z]{2}-\d{3}$")
-    rows: list[Inner]
-
-
-INNER_SENT = {
-    "properties": {
-        "kind": {"title": "Kind", "type": "string"},
-        "note": {
-            "anyOf": [{"type": "string"}, {"type": "null"}],
-            "default": None,
-            "title": "Note",
-        },
-    },
-    "required": ["kind", "note"],
-    "title": "Inner",
-    "type": "object",
-    "additionalProperties": False,
-}
-ROWS_SENT = {"items": {"$ref": "#/$defs/Inner"}, "title": "Rows", "type": "array"}
-LISTED_SENT = {
-    "$defs": {"Inner": INNER_SENT},
-    "properties": {"rows": ROWS_SENT},
-    "required": ["rows"],
-    "title": "Listed",
-    "type": "object",
-    "additionalProperties": False,
-}
-CODED_SENT = {
-    "$defs": {"Inner": INNER_SENT},
-    "properties": {
-        "code": {"pattern": r"^[A-Z]{2}-\d{3}$", "title": "Code", "type": "string"},
-        "rows": ROWS_SENT,
-    },
-    "required": ["code", "rows"],
-    "title": "Coded",
-    "type": "object",
-    "additionalProperties": False,
-}
 
 
 @pytest.fixture
@@ -230,21 +188,31 @@ def test_an_enum_past_openais_limit_is_sent_without_its_values(llm, n, kept):
     assert pick["type"] == "string"
 
 
+@pytest.mark.parametrize(
+    ("pattern", "kept"),
+    [
+        (r"^\d{4}$", True),
+        (r"^(?=\d)\w+$", False),
+        (r"^(?!x)\w+$", False),
+        (r"(?<=#)\d+", False),
+        (r"(?<!#)\d+", False),
+    ],
+)
+def test_a_pattern_with_a_lookaround_is_sent_without_it(llm, pattern, kept):
+    coded = create_model(
+        "Coded",
+        __config__=ConfigDict(regex_engine="python-re"),
+        code=(str, Field(pattern=pattern)),
+    )
+    code = sent_schema(llm, coded)["properties"]["code"]
+    assert code.get("pattern") == (pattern if kept else None)
+    assert code["type"] == "string"
+
+
 def test_a_dict_field_is_sent_without_properties_left_open(llm):
     by_site = sent_schema(llm, Counts)["properties"]["by_site"]
     assert "required" not in by_site
     assert by_site["additionalProperties"] == {"type": "integer"}
-
-
-@pytest.mark.parametrize(
-    ("schema", "sent"),
-    [(Listed, LISTED_SENT), (Coded, CODED_SENT)],
-    ids=["plain", "coded"],
-)
-def test_a_schema_without_a_lookaround_is_sent_byte_for_byte_as_before(
-    llm, schema, sent
-):
-    assert json.dumps(sent_schema(llm, schema)) == json.dumps(sent)
 
 
 def test_a_supplied_completion_is_called_once_per_request_without_retry_settings(llm):

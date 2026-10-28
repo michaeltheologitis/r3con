@@ -20,7 +20,7 @@ text with ``reroll_empty``.
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
 :func:`_drop_refused_constraints` removes what it refuses: an enum past its limit, and a
-regex lookaround.
+pattern with a lookaround.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -85,7 +85,7 @@ _RETRY_AFTER_JITTER_SECONDS = 1.0
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
-LOOKAROUND_RE = re.compile(r"\(\?<?[=!]")
+_LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _sleep = time.sleep
 
 
@@ -120,14 +120,12 @@ def _drop_refused_constraints(schema: Any) -> Any:
     """Remove from ``schema`` what OpenAI refuses: every ``enum`` of more than
     :data:`_MAX_ENUM_VALUES` values, and every ``pattern`` with a lookaround, such as the
     one Pydantic writes for a ``Decimal``. The field keeps its type, so the caller checks
-    the values once the reply is in. Pydantic never checks a ``Decimal``'s pattern, and
-    :func:`r3con.stages.structuring.parsing.check_schema` refuses a lookaround it would
-    check, so no reply is held to a pattern the model was not sent."""
+    the values once the reply is in."""
     if isinstance(schema, dict):
         if len(schema.get("enum") or []) > _MAX_ENUM_VALUES:
             del schema["enum"]
         pattern = schema.get("pattern")
-        if isinstance(pattern, str) and LOOKAROUND_RE.search(pattern):
+        if isinstance(pattern, str) and _LOOKAROUND.search(pattern):
             del schema["pattern"]
         for v in schema.values():
             _drop_refused_constraints(v)
