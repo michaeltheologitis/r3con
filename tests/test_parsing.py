@@ -130,7 +130,7 @@ def citing(by_first_word: dict[str, list[str]]):
 
     def reply(request) -> dict:
         first_word = re.match(r"\w+", parsed(request)).group()
-        return {"parse": {"rows": []}, "provenance": by_first_word[first_word]}
+        return {"parse": {"rows": []}, "provenance_ids": by_first_word[first_word]}
 
     return reply
 
@@ -166,7 +166,7 @@ def refuses_a_lookaround(reply: dict):
     return answer
 
 
-def parse_one(llm, prompt_version="v2", document_ids=(), **kwargs):
+def parse_one(llm, prompt_version="v3", document_ids=(), **kwargs):
     """The memo parsed as the document IDS[0] names."""
     return parse_one_document(
         document="memo",
@@ -189,7 +189,7 @@ def parse_all(llm, documents, model=MODEL, **kwargs):
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who is mentioned?",
-        prompt_version="v2",
+        prompt_version="v3",
         document_ids=IDS[: len(documents)],
         model=model,
         completion=llm,
@@ -403,7 +403,7 @@ def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
         schema_code=COSTS,
         parse_cls=check_schema(COSTS),
         task="What did it cost?",
-        prompt_version="v2",
+        prompt_version="v3",
         document_id=IDS[0],
         document_ids=[],
         model=MODEL,
@@ -452,9 +452,9 @@ def test_a_provider_error_is_not_retried(llm):
     assert len(llm.requests) == 1
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_ids_and_the_reply_schema_do_not_depend_on_the_prompt_version(llm, version):
-    reply = {"parse": {"rows": [{"who": "Halloran"}]}, "provenance": [IDS[1]]}
+    reply = {"parse": {"rows": [{"who": "Halloran"}]}, "provenance_ids": [IDS[1]]}
     result = parse_one(
         llm.replies(reply), version, relevance_snippets=NOTES, document_ids=IDS[:2]
     )
@@ -464,7 +464,7 @@ def test_ids_and_the_reply_schema_do_not_depend_on_the_prompt_version(llm, versi
     assert shown_ids(request) == IDS[:2]
     system = request["messages"][0]["content"]
     assert f"### Document ID: {IDS[0]}\nDoc A is about whales." in system
-    assert ("## Output" in system) is (version == "v2")
+    assert ("## Output" in system) is (version != "v1")
 
 
 def test_the_reply_asks_for_the_parse_and_the_ids_of_exactly_the_notes_shown(llm):
@@ -474,9 +474,9 @@ def test_the_reply_asks_for_the_parse_and_the_ids_of_exactly_the_notes_shown(llm
     )
     [request] = llm.requests
     schema = reply_schema(request)
-    assert schema["required"] == ["parse", "provenance"]
+    assert schema["required"] == ["parse", "provenance_ids"]
     assert schema["properties"]["parse"] == {"$ref": "#/$defs/Parse"}
-    provenance = schema["properties"]["provenance"]
+    provenance = schema["properties"]["provenance_ids"]
     assert provenance["items"]["enum"] == shown_ids(request)
     assert shown_ids(request) == [IDS[0], f"{IDS[1]}.1", f"{IDS[1]}.2"]
     assert "default" not in provenance
@@ -490,7 +490,7 @@ def test_the_reply_asks_for_the_parse_and_the_ids_of_exactly_the_notes_shown(llm
 def test_with_no_note_to_cite_provenance_is_any_list_and_what_it_holds_is_dropped(
     llm, snippets, caplog
 ):
-    llm.answers(parsing={"parse": {"rows": []}, "provenance": ["0f0f0f"]})
+    llm.answers(parsing={"parse": {"rows": []}, "provenance_ids": ["0f0f0f"]})
     with caplog.at_level(logging.WARNING, logger="r3con"):
         result = parse_all(llm, DOCS, relevance_snippets=snippets, workers=3)
     assert result.provenance == [[], [], []]
@@ -499,9 +499,22 @@ def test_with_no_note_to_cite_provenance_is_any_list_and_what_it_holds_is_droppe
     for request in llm.requests:
         assert reply_schema_name(request) == "ParseReply"
         schema = reply_schema(request)
-        assert schema["required"] == ["parse", "provenance"]
-        assert schema["properties"]["provenance"]["items"] == {"type": "string"}
+        assert schema["required"] == ["parse", "provenance_ids"]
+        assert schema["properties"]["provenance_ids"]["items"] == {"type": "string"}
         assert "## Output" in request["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("snippets", [NOTES, None], ids=["a-note-to-cite", "none"])
+def test_a_reply_without_provenance_ids_cites_nothing_and_is_not_sent_again(
+    llm, snippets
+):
+    reply = {"parse": {"rows": [{"who": "Halloran"}]}}
+    document_ids = IDS[: len(snippets or ())]
+    result = parse_one(
+        llm.replies(reply), relevance_snippets=snippets, document_ids=document_ids
+    )
+    assert result == (Parse(rows=[{"who": "Halloran"}]), [])
+    assert len(llm.requests) == 1
 
 
 def test_document_ids_that_are_not_one_per_document_are_refused_before_any_request(
@@ -513,7 +526,7 @@ def test_document_ids_that_are_not_one_per_document_are_refused_before_any_reque
             schema_code=SCHEMA,
             parse_cls=Parse,
             task="Who is mentioned?",
-            prompt_version="v2",
+            prompt_version="v3",
             document_ids=IDS[:2],
             model=MODEL,
             completion=llm,
@@ -522,7 +535,7 @@ def test_document_ids_that_are_not_one_per_document_are_refused_before_any_reque
 
 
 def test_an_empty_notes_id_is_shown_but_cannot_be_cited(llm, caplog):
-    reply = {"parse": {"rows": []}, "provenance": [IDS[1]]}
+    reply = {"parse": {"rows": []}, "provenance_ids": [IDS[1]]}
     with caplog.at_level(logging.WARNING, logger="r3con"):
         _, provenance = parse_one(
             llm.replies(reply),
@@ -534,7 +547,7 @@ def test_an_empty_notes_id_is_shown_but_cannot_be_cited(llm, caplog):
     assert shown_ids(request) == IDS[:2]
     no_summary = f"### Document ID: {IDS[1]}\n(no relevant summary for this task)"
     assert no_summary in request["messages"][0]["content"]
-    assert reply_schema(request)["properties"]["provenance"]["items"]["enum"] == [
+    assert reply_schema(request)["properties"]["provenance_ids"]["items"]["enum"] == [
         IDS[0]
     ]
     assert f"did not show: ['{IDS[1]}']" in caplog.text
@@ -550,7 +563,7 @@ def test_each_documents_provenance_is_recorded_aligned_with_the_documents(llm):
 
 
 def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog):
-    reply = {"parse": {"rows": []}, "provenance": ["0f0f0f", IDS[0]]}
+    reply = {"parse": {"rows": []}, "provenance_ids": ["0f0f0f", IDS[0]]}
     with caplog.at_level(logging.WARNING, logger="r3con"):
         _, provenance = parse_one(
             llm.replies(reply),

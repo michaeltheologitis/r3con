@@ -9,6 +9,7 @@ from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
 from r3con.runtime.codeact import run_codeact
 from r3con.stages.reasoning import reason
+from r3con.stages.relevance import relevance_snippet
 from r3con.stages.structuring.parsing import check_schema, parse_one_document
 
 MODEL = "openai/gpt-6-luna"
@@ -123,8 +124,25 @@ def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, exampl
         model=MODEL,
         completion=llm.replies(reply),
     )
-    assert set(reply) == {"parse", "provenance"}
-    assert (parse.model_dump(), provenance) == (reply["parse"], reply["provenance"])
+    assert set(reply) == {"parse", "provenance_ids"}
+    assert (parse.model_dump(), provenance) == (reply["parse"], reply["provenance_ids"])
+    assert len(llm.requests) == 1
+
+
+@pytest.mark.parametrize("example", examples("relevance/later-rounds"))
+def test_each_later_rounds_example_replies_in_json_its_reply_schema_takes(llm, example):
+    others = re.findall(r"^### Summary ID: (\w+)\n(.+)$", example, re.MULTILINE)
+    reply = json.loads(example.rsplit("\n", 1)[1])
+    summary, provenance = relevance_snippet(
+        task="?",
+        document="?",
+        other_snippets=dict(others),
+        model=MODEL,
+        prompts=PINNED,
+        completion=llm.replies(reply),
+    )
+    assert set(reply) == {"summary", "provenance_ids"}
+    assert (summary, provenance) == (reply["summary"], reply["provenance_ids"])
     assert len(llm.requests) == 1
 
 

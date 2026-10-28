@@ -39,7 +39,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, create_model, field_validator
 
 from r3con import settings
 from r3con.config import ReasoningPath
@@ -49,7 +49,7 @@ from r3con.runs import StageRun
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S, CodeActTurn, run_codeact
 from r3con.runtime.llm import count_tokens, send_until_valid
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, cited, provenance_schema, render_relevance
+from r3con.stages.relevance import Snippet, cited, list_of_ids, render_relevance
 
 _log = get_logger("reasoning")
 
@@ -312,7 +312,11 @@ def _reason_directly(
     schema in ``max_attempts`` sends, why not: the ``fallback`` of a
     :class:`ReasoningResult`."""
     system_prompt = render(parse_block=parse_json)
-    schema = provenance_schema("ReasoningAnswer", _DirectReply, document_ids)
+    schema = create_model(
+        "ReasoningAnswer",
+        __base__=_DirectReply,
+        provenance=(list_of_ids(document_ids), Field(default_factory=list)),
+    )
     schema_json = json.dumps(schema.model_json_schema())
     if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(

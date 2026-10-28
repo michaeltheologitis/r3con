@@ -15,10 +15,10 @@ document read in parts), all documents in parallel (bounded by
 - The **user message** is the document being parsed, or one part of it, under a first
   line ``Document ID: <id>`` naming the document (a part's too).
 
-The reply is structured: the populated ``Parse``, and its ``provenance``, the ids of the
-notes the call used, from among the non-empty ones it shows, its own document's
+The reply is structured: the populated ``Parse``, and its ``provenance_ids``, the ids of
+the notes the call used, from among the non-empty ones it shows, its own document's
 included (:func:`r3con.stages.relevance.citable_ids`). With no such note,
-``provenance`` is any list of strings, and whatever it holds is dropped
+``provenance_ids`` is any list of strings, and whatever it holds is dropped
 (:func:`r3con.stages.relevance.cited`). Every call of a run sends the same system prompt
 and reply schema, built once.
 
@@ -95,7 +95,7 @@ _SCHEMA_GLOBALS: dict[str, Any] = {
 
 class _Reply(BaseModel):
     parse: BaseModel
-    provenance: list[str]
+    provenance_ids: list[str]
 
 
 class _Request(NamedTuple):
@@ -251,7 +251,7 @@ def _request(
 ) -> _Request:
     """The request of every parse call of a run. The system prompt carries the task, the
     schema source and the relevant context, each note headed by its document's id; the
-    reply is ``{parse, provenance}``, ``provenance`` one of the citable ids each
+    reply is ``{parse, provenance_ids}``, ``provenance_ids`` one of the citable ids each
     (:func:`r3con.stages.relevance.citable_ids`), or any string when none is.
 
     Raises:
@@ -266,9 +266,9 @@ def _request(
         relevance=render_relevance(relevance_snippets, document_ids),
     )
     reply = create_model("ParseReply", __base__=_Reply, parse=(parse_cls, ...))
-    if citable:
-        reply = provenance_schema("ParseReply", reply, citable)
-    return _Request(system_prompt, reply, citable)
+    return _Request(
+        system_prompt, provenance_schema("ParseReply", reply, citable), citable
+    )
 
 
 def _headed(document_id: str, part: str) -> str:
@@ -299,7 +299,7 @@ def _read(
         **llm_call,
     )
     reply = cast(_Reply, reply)
-    return reply.parse, cited(reply.provenance, request.citable, kind)
+    return reply.parse, cited(reply.provenance_ids, request.citable, kind)
 
 
 def _attempts(max_attempts: int | None) -> int:
