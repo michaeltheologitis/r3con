@@ -11,6 +11,9 @@ This is the whole surface most callers need::
     result.provenance             # the ids of the documents the answer used
     result.schema_code            # the schema proposed for this question
 
+Each document's relevance summary and its parse also record the summaries they used
+(``result.relevance_provenance``, ``result.parsing_provenance``).
+
 (``from r3con import run`` works too — same function, imported from the package root.)
 
 ``documents`` is a list of strings: the documents themselves. To read them off disk,

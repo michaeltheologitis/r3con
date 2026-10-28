@@ -21,7 +21,7 @@ prompts:
   relevance/first-round: v1
   relevance/later-rounds: v1
   structuring/schema: v1
-  structuring/parsing: v1
+  structuring/parsing: v2
   reasoning/direct: v2
   reasoning/coding: v2
 

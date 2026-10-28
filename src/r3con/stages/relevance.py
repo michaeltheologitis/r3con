@@ -36,7 +36,7 @@ for inspection.
 from __future__ import annotations
 
 import random
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, NamedTuple, TypeVar, cast
 
@@ -99,10 +99,10 @@ class RelevantContext:
     @property
     def provenance(self) -> list[list[str]]:
         """The ids each document's final-round snippet used, aligned with
-        :attr:`snippets`; a document read in parts has its parts' ids combined, in
-        order, without repeats."""
+        :attr:`snippets`, a document read in parts having its parts' ids combined
+        (:func:`combine_parts`)."""
         return [
-            list(dict.fromkeys(id_ for part in parts for id_ in part.provenance))
+            combine_parts(part.provenance for part in parts)
             for parts in self._final_round()
         ]
 
@@ -164,23 +164,52 @@ def render_relevance(
     Raises:
         ValueError: if ``document_ids`` is not one id per snippet.
     """
-    if not relevance_snippets:
-        return ""
-    numbers = [str(n) for n in range(1, len(relevance_snippets) + 1)]
+    numbers = [str(n) for n in range(1, len(relevance_snippets or ()) + 1)]
     names, label = (
         (numbers, "Document")
         if document_ids is None
         else (document_ids, "Document ID:")
     )
     nothing = "(no relevant summary for this task)"
-    sections: list[str] = []
+    return "\n\n".join(
+        f"### {label} {name}\n{note.strip() or nothing}"
+        for name, note in _headed_notes(relevance_snippets, names)
+    )
+
+
+def citable_ids(
+    relevance_snippets: Sequence[Snippet] | None, document_ids: Sequence[str]
+) -> list[str]:
+    """The ids of the notes :func:`render_relevance` shows under ``document_ids`` that
+    a reply may cite, in order: every note's but an empty one's, as a later relevance
+    round shows only non-empty snippets.
+
+    Raises:
+        ValueError: if ``document_ids`` is not one id per snippet.
+    """
+    return [
+        id_
+        for id_, note in _headed_notes(relevance_snippets, document_ids)
+        if note.strip()
+    ]
+
+
+def _headed_notes(
+    relevance_snippets: Sequence[Snippet] | None, names: Sequence[str]
+) -> Iterator[tuple[str, str]]:
+    """Each note of ``relevance_snippets``, in order, with the name heading it: its
+    document's from ``names``, or ``<name>.<k>`` for part ``k`` of a document read in
+    parts (:func:`_part_ids`); nothing for an empty / ``None`` list.
+
+    Raises:
+        ValueError: if ``names`` is not one name per snippet.
+    """
+    if not relevance_snippets:
+        return
     for name, snippet in zip(names, relevance_snippets, strict=True):
         notes = snippet if isinstance(snippet, list) else [snippet]
-        sections += [
-            f"### {label} {part}\n{(note or '').strip() or nothing}"
-            for part, note in zip(_part_ids(name, len(notes)), notes, strict=True)
-        ]
-    return "\n\n".join(sections)
+        for part, note in zip(_part_ids(name, len(notes)), notes, strict=True):
+            yield part, note or ""
 
 
 def _render_other_snippets(shown: Mapping[str, str]) -> str:
@@ -219,6 +248,12 @@ def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _R
     )
     schema = provenance_schema("RelevanceSummary", _Reply, list(shown))
     return _Request(prompt, schema, shown)
+
+
+def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
+    """A document's ids from those of its parts: a document read in parts has its
+    parts' ids combined, in order, without repeats."""
+    return list(dict.fromkeys(id_ for ids in ids_per_part for id_ in ids))
 
 
 def cited(provenance: Sequence[str], shown: Collection[str], kind: str) -> list[str]:

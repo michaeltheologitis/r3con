@@ -69,7 +69,7 @@ def judging_llm(answering_llm, monkeypatch: pytest.MonkeyPatch):
     when the question names ACME and 40 otherwise, and a CorpusQA answer is
     equivalent when the gold is 42."""
 
-    def parse_or_judge(request: dict[str, Any]) -> str:
+    def parse_or_judge(request: dict[str, Any]) -> str | dict[str, Any]:
         schema = request["response_format"]["json_schema"]["name"]
         user = request["messages"][1]["content"]
         if schema == "Rating":
@@ -78,8 +78,8 @@ def judging_llm(answering_llm, monkeypatch: pytest.MonkeyPatch):
         if schema == "Equivalence":
             equivalent = "Answer 2: 42\n" in user
             return json.dumps({"explanation": "Checked.", "equivalent": equivalent})
-        first_line = user.splitlines()[0]
-        return json.dumps({"rows": [{"who": first_line}]})
+        document = user.split("\n\n", 1)[1]
+        return {"rows": [{"who": document.splitlines()[0]}]}
 
     answering_llm.answers(parsing=parse_or_judge)
     monkeypatch.setattr(litellm, "completion", answering_llm)

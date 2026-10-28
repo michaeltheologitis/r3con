@@ -19,9 +19,9 @@ from r3con.stages.structuring.parsing import (
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
-# 3,920 characters in 20 paragraphs, P0 to P19: refused whole under a 5,500-character
-# limit beside the parse prompt, read in halves that start at P0 and P10.
-LONG = "\n\n".join(f"P{i}. " + "word " * 38 for i in range(20))
+# 7,868 characters in 40 paragraphs, P0 to P39: refused whole under a 10,000-character
+# limit beside the parse prompt, read in halves that start at P0 and P20.
+LONG = "\n\n".join(f"P{i}. " + "word " * 38 for i in range(40))
 SCHEMA = """from pydantic import BaseModel
 
 
@@ -39,7 +39,10 @@ DOCS = [
     "Gamma memo about harbors.",
 ]
 NOTES = ["Doc A is about whales.", "Doc B is about ships."]
+IDS = ["a1a1a1", "b2b2b2", "c3c3c3"]
 RELEVANCE_HEADING = "## Task-conditioned document summaries"
+NOTHING_PARSED = {"rows": []}
+ID_HEADING = re.compile(r"^### Document ID: (\S+)$", re.MULTILINE)
 RICH_SCHEMA = """
 from datetime import date
 from decimal import Decimal
@@ -102,18 +105,48 @@ ITEM = {
 }
 
 
-def rows_named_after_the_document(request) -> str:
+def parsed(request) -> str:
+    """The document, or part, a parse request sends below its ``Document ID`` line."""
+    return request["messages"][1]["content"].split("\n\n", 1)[1]
+
+
+def rows_named_after_the_document(request) -> dict:
     """Two rows per document, each naming it, so a merge's order shows."""
-    document = request["messages"][1]["content"].splitlines()[0]
+    document = parsed(request).splitlines()[0]
     # Later documents answer first, so the merge cannot rely on arrival order.
     time.sleep(0.02 * (len(DOCS) - DOCS.index(document)))
-    return json.dumps({"rows": [{"who": f"{document}#a"}, {"who": f"{document}#b"}]})
+    return {"rows": [{"who": f"{document}#a"}, {"who": f"{document}#b"}]}
 
 
-def a_row_named_by_the_first_word(request) -> str:
+def a_row_named_by_the_first_word(request) -> dict:
     """One row per document or part, naming its first word."""
-    first_word = re.match(r"\w+", request["messages"][1]["content"]).group()
-    return json.dumps({"rows": [{"who": first_word}]})
+    first_word = re.match(r"\w+", parsed(request)).group()
+    return {"rows": [{"who": first_word}]}
+
+
+def citing(by_first_word: dict[str, list[str]]):
+    """A parse reply that cites the ids ``by_first_word`` gives the document's, or
+    the part's, first word."""
+
+    def reply(request) -> dict:
+        first_word = re.match(r"\w+", parsed(request)).group()
+        return {"parse": {"rows": []}, "provenance": by_first_word[first_word]}
+
+    return reply
+
+
+def shown_ids(request) -> list[str]:
+    """The ids heading the notes a parse request shows, without its examples'."""
+    system = request["messages"][0]["content"].split("## Your job", 1)[0]
+    return ID_HEADING.findall(system)
+
+
+def reply_schema(request) -> dict:
+    return request["response_format"]["json_schema"]["schema"]
+
+
+def reply_schema_name(request) -> str:
+    return request["response_format"]["json_schema"]["name"]
 
 
 def refuses_a_lookaround(reply: dict):
@@ -133,13 +166,16 @@ def refuses_a_lookaround(reply: dict):
     return answer
 
 
-def parse_one(llm, **kwargs):
+def parse_one(llm, prompt_version="v2", document_ids=(), **kwargs):
+    """The memo parsed as the document IDS[0] names."""
     return parse_one_document(
         document="memo",
+        document_id=IDS[0],
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who?",
-        prompt_version="v1",
+        prompt_version=prompt_version,
+        document_ids=document_ids,
         model=MODEL,
         completion=llm,
         **kwargs,
@@ -147,12 +183,14 @@ def parse_one(llm, **kwargs):
 
 
 def parse_all(llm, documents, model=MODEL, **kwargs):
+    """``documents`` parsed, each named by its id in IDS."""
     return parse_documents(
         documents=documents,
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who is mentioned?",
-        prompt_version="v1",
+        prompt_version="v2",
+        document_ids=IDS[: len(documents)],
         model=model,
         completion=llm,
         **kwargs,
@@ -360,12 +398,14 @@ def test_a_schema_with_plain_methods_and_rich_types_is_accepted():
 
 def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
     reply = {"costs": [{"amount": "1520.75"}]}
-    parse = parse_one_document(
+    parse, _ = parse_one_document(
         document="memo",
         schema_code=COSTS,
         parse_cls=check_schema(COSTS),
         task="What did it cost?",
-        prompt_version="v1",
+        prompt_version="v2",
+        document_id=IDS[0],
+        document_ids=[],
         model=MODEL,
         completion=llm.answers(parsing=refuses_a_lookaround(reply)),
     )
@@ -373,26 +413,28 @@ def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
 
 
 def test_a_malformed_reply_is_retried_with_the_validator_error(llm):
-    parse = parse_one(
-        llm.replies('{"rows": [{"who": 7}]}', '{"rows": [{"who": "Halloran"}]}')
+    parse, _ = parse_one(
+        llm.replies({"rows": [{"who": 7}]}, {"rows": [{"who": "Halloran"}]})
     )
     assert parse.rows[0].who == "Halloran"
     assert "validation error" in llm.requests[1]["messages"][1]["content"]
 
 
 def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
-    parse = parse_one(llm.replies('{"rows": [{"who": "Halloran"}]}'))
-    assert parse == Parse(rows=[{"who": "Halloran"}])
-    assert [request["messages"][1]["content"] for request in llm.requests] == ["memo"]
-    assert llm.requests[0]["response_format"]["json_schema"]["name"] == "Parse"
+    result = parse_one(llm.replies({"rows": [{"who": "Halloran"}]}))
+    assert result == (Parse(rows=[{"who": "Halloran"}]), [])
+    sent = [request["messages"][1]["content"] for request in llm.requests]
+    assert sent == [f"Document ID: {IDS[0]}\n\nmemo"]
+    assert reply_schema_name(llm.requests[0]) == "ParseReply"
 
 
 def test_a_document_that_never_validates_stops_after_max_attempts(llm):
-    llm.answers(parsing='{"rows": "not-a-list"}')
+    llm.answers(parsing={"rows": "not-a-list"})
     with pytest.raises(ValidationError, match="rows"):
         parse_one(llm, max_attempts=3)
     assert len(llm.requests) == 3
-    assert llm.requests[2]["messages"][1]["content"].startswith("memo\n\n---\n\n")
+    resent = llm.requests[2]["messages"][1]["content"]
+    assert resent.startswith(f"Document ID: {IDS[0]}\n\nmemo\n\n---\n\n")
 
 
 def test_max_attempts_below_one_is_refused_before_any_request(llm):
@@ -410,13 +452,144 @@ def test_a_provider_error_is_not_retried(llm):
     assert len(llm.requests) == 1
 
 
-def test_each_document_is_parsed_whole_in_a_request_of_its_own(llm):
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_ids_and_the_reply_schema_do_not_depend_on_the_prompt_version(llm, version):
+    reply = {"parse": {"rows": [{"who": "Halloran"}]}, "provenance": [IDS[1]]}
+    result = parse_one(
+        llm.replies(reply), version, relevance_snippets=NOTES, document_ids=IDS[:2]
+    )
+    assert result == (Parse(rows=[{"who": "Halloran"}]), [IDS[1]])
+    [request] = llm.requests
+    assert reply_schema_name(request) == "ParseReply"
+    assert shown_ids(request) == IDS[:2]
+    system = request["messages"][0]["content"]
+    assert f"### Document ID: {IDS[0]}\nDoc A is about whales." in system
+    assert ("## Output" in system) is (version == "v2")
+
+
+def test_the_reply_asks_for_the_parse_and_the_ids_of_exactly_the_notes_shown(llm):
+    notes = ["Doc A is about whales.", ["Part one of B.", "Part two of B."]]
+    parse_one(
+        llm.replies(NOTHING_PARSED), relevance_snippets=notes, document_ids=IDS[:2]
+    )
+    [request] = llm.requests
+    schema = reply_schema(request)
+    assert schema["required"] == ["parse", "provenance"]
+    assert schema["properties"]["parse"] == {"$ref": "#/$defs/Parse"}
+    provenance = schema["properties"]["provenance"]
+    assert provenance["items"]["enum"] == shown_ids(request)
+    assert shown_ids(request) == [IDS[0], f"{IDS[1]}.1", f"{IDS[1]}.2"]
+    assert "default" not in provenance
+
+
+@pytest.mark.parametrize(
+    "snippets",
+    [None, [], ["", " ", ""]],
+    ids=["relevance-off", "no-rounds", "every-note-empty"],
+)
+def test_with_no_note_to_cite_provenance_is_any_list_and_what_it_holds_is_dropped(
+    llm, snippets, caplog
+):
+    llm.answers(parsing={"parse": {"rows": []}, "provenance": ["0f0f0f"]})
+    with caplog.at_level(logging.WARNING, logger="r3con"):
+        result = parse_all(llm, DOCS, relevance_snippets=snippets, workers=3)
+    assert result.provenance == [[], [], []]
+    assert "did not show: ['0f0f0f']" in caplog.text
+    assert len(llm.requests) == len(DOCS)
+    for request in llm.requests:
+        assert reply_schema_name(request) == "ParseReply"
+        schema = reply_schema(request)
+        assert schema["required"] == ["parse", "provenance"]
+        assert schema["properties"]["provenance"]["items"] == {"type": "string"}
+        assert "## Output" in request["messages"][0]["content"]
+
+
+def test_document_ids_that_are_not_one_per_document_are_refused_before_any_request(
+    llm,
+):
+    with pytest.raises(ValueError, match=r"got 2 for 3 document\(s\)"):
+        parse_documents(
+            documents=DOCS,
+            schema_code=SCHEMA,
+            parse_cls=Parse,
+            task="Who is mentioned?",
+            prompt_version="v2",
+            document_ids=IDS[:2],
+            model=MODEL,
+            completion=llm,
+        )
+    assert llm.requests == []
+
+
+def test_an_empty_notes_id_is_shown_but_cannot_be_cited(llm, caplog):
+    reply = {"parse": {"rows": []}, "provenance": [IDS[1]]}
+    with caplog.at_level(logging.WARNING, logger="r3con"):
+        _, provenance = parse_one(
+            llm.replies(reply),
+            relevance_snippets=["Doc A is about whales.", ""],
+            document_ids=IDS[:2],
+        )
+    assert provenance == []
+    [request] = llm.requests
+    assert shown_ids(request) == IDS[:2]
+    no_summary = f"### Document ID: {IDS[1]}\n(no relevant summary for this task)"
+    assert no_summary in request["messages"][0]["content"]
+    assert reply_schema(request)["properties"]["provenance"]["items"]["enum"] == [
+        IDS[0]
+    ]
+    assert f"did not show: ['{IDS[1]}']" in caplog.text
+
+
+def test_each_documents_provenance_is_recorded_aligned_with_the_documents(llm):
+    notes = [f"Notes on {document}" for document in DOCS]
+    cites = {"Alpha": [IDS[1]], "Beta": [], "Gamma": [IDS[2], IDS[0], IDS[2]]}
+    result = parse_all(
+        llm.answers(parsing=citing(cites)), DOCS, relevance_snippets=notes, workers=3
+    )
+    assert result.provenance == [[IDS[1]], [], [IDS[2], IDS[0]]]
+
+
+def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog):
+    reply = {"parse": {"rows": []}, "provenance": ["0f0f0f", IDS[0]]}
+    with caplog.at_level(logging.WARNING, logger="r3con"):
+        _, provenance = parse_one(
+            llm.replies(reply),
+            relevance_snippets=NOTES,
+            document_ids=IDS[:2],
+            kind="parse-d1",
+        )
+    assert provenance == [IDS[0]]
+    assert (
+        "parse-d1: dropped provenance id(s) the call did not show: ['0f0f0f']"
+        in caplog.text
+    )
+
+
+def test_a_document_read_in_parts_combines_its_parts_ids_in_order_without_repeats(
+    llm,
+):
+    notes = [["Notes on P0.", "Notes on P20."], "Notes on Beta."]
+    cites = {
+        "P0": [IDS[1], f"{IDS[0]}.1"],
+        "P20": [f"{IDS[0]}.1", f"{IDS[0]}.2"],
+        "Beta": [],
+    }
+    llm.refuses_over(10_000).answers(parsing=citing(cites))
+    result = parse_all(
+        llm, [LONG, DOCS[1]], model=QWEN, relevance_snippets=notes, workers=2
+    )
+    assert result.provenance == [[IDS[1], f"{IDS[0]}.1", f"{IDS[0]}.2"], []]
+    assert len(llm.requests_for("parsing")) == 4
+
+
+def test_each_document_is_parsed_whole_in_a_request_of_its_own_under_its_id(llm):
     llm.answers(parsing=rows_named_after_the_document)
     parse_all(llm, DOCS, workers=8)
     sent = [
         request["messages"][1]["content"] for request in llm.requests_for("parsing")
     ]
-    assert sorted(sent) == sorted(DOCS)
+    headed = [f"Document ID: {id_}\n\n{doc}" for id_, doc in zip(IDS, DOCS)]
+    assert sorted(sent) == sorted(headed)
 
 
 @pytest.mark.parametrize(("snippets", "shown"), [(NOTES, True), (None, False)])
@@ -445,12 +618,13 @@ def test_no_documents_parse_to_empty_lists_without_a_request(llm):
     result = parse_all(llm, [])
     assert result.parse == Parse(rows=[])
     assert result.source_docs == {"rows": []}
+    assert result.provenance == []
     assert llm.requests == []
 
 
 def test_one_documents_failure_is_raised_from_the_whole_parse(llm):
     def fails_on_beta(request):
-        if request["messages"][1]["content"] == DOCS[1]:
+        if parsed(request) == DOCS[1]:
             raise RuntimeError("parse blew up")
         return rows_named_after_the_document(request)
 
@@ -466,13 +640,15 @@ def test_progress_is_logged_per_document_at_info(llm, caplog):
 
 
 def test_a_refused_document_is_parsed_in_parts_and_every_record_keeps_its_index(llm):
-    llm.refuses_over(5_500).answers(parsing=a_row_named_by_the_first_word)
+    llm.refuses_over(10_000).answers(parsing=a_row_named_by_the_first_word)
     result = parse_all(llm, [DOCS[0], LONG, DOCS[2]], model=QWEN, workers=3)
-    assert [row.who for row in result.parse.rows] == ["Alpha", "P0", "P10", "Gamma"]
+    assert [row.who for row in result.parse.rows] == ["Alpha", "P0", "P20", "Gamma"]
     assert result.source_docs == {"rows": [0, 1, 1, 2]}
 
 
-def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
+def test_parsing_starts_from_the_parts_it_is_given_each_under_its_documents_id(
+    llm, tmp_path
+):
     def refuses_the_whole(part, kind):
         if part == LONG:
             raise litellm.ContextWindowExceededError(
@@ -487,4 +663,4 @@ def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
     parse_all(llm, [LONG], model=QWEN, splits=splits, run=run)
     assert [step.kind for step in run.steps] == ["parse-d0c0", "parse-d0c1"]
     sent = [request["messages"][1]["content"] for request in llm.requests]
-    assert sent == splits.parts(0)
+    assert sent == [f"Document ID: {IDS[0]}\n\n{part}" for part in splits.parts(0)]

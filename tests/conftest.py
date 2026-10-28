@@ -38,6 +38,8 @@ R3CON_VARIABLES = (
     "R3CON_LOG_LEVEL",
 )
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+# The line, and the blank one after it, that heads a parse request's user message.
+PARSE_HEADING = re.compile(r"\ADocument ID: \w+\n\n")
 ANSWERING_SCHEMA = """Thought: one row per person.
 <schema>
 class Row(BaseModel):
@@ -55,6 +57,11 @@ ANSWERING_CODE = (
 
 class UnscriptedRequest(AssertionError):
     """A request reached a fake that had no reply for it."""
+
+
+def _schema_name(request: Request) -> str | None:
+    """The name of the schema ``request`` asks its reply to fit, if any."""
+    return request.get("response_format", {}).get("json_schema", {}).get("name")
 
 
 def stage_of(request: Request) -> Stage:
@@ -83,7 +90,9 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request for structured output gets a text reply as its
-    summary, citing nothing; a direct reasoning request gets a text reply as it is.
+    summary, citing nothing; a parsing request for ``{parse, provenance}`` gets a dict
+    reply without ``parse`` as its parse, citing nothing; a direct reasoning request
+    gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
     request as a provider does, in tokens.
@@ -152,6 +161,12 @@ class FakeLLM:
                 and stage_of(snapshot) == "relevance"
             ):
                 content = {"summary": content, "provenance": []}
+            if (
+                isinstance(content, dict)
+                and "parse" not in content
+                and _schema_name(snapshot) == "ParseReply"
+            ):
+                content = {"parse": content, "provenance": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
             # The dict form, because litellm treats mock_response="" as absent.
@@ -305,7 +320,9 @@ def summary_ids_shown(request: Request) -> list[str]:
 
 
 def _first_line(request: Request) -> str:
-    return request["messages"][1]["content"].splitlines()[0]
+    """The first line of the document a request sends, below a parse request's
+    ``Document ID`` line."""
+    return re.sub(PARSE_HEADING, "", request["messages"][1]["content"]).splitlines()[0]
 
 
 def _joined_rows(request: Request) -> Content:
@@ -336,7 +353,7 @@ def answering_llm(llm: FakeLLM) -> FakeLLM:
     return llm.answers(
         relevance=lambda request: f"Notes on {_first_line(request)}.",
         schema=ANSWERING_SCHEMA,
-        parsing=lambda request: json.dumps({"rows": [{"who": _first_line(request)}]}),
+        parsing=lambda request: {"rows": [{"who": _first_line(request)}]},
         reasoning=_joined_rows,
     )
 
