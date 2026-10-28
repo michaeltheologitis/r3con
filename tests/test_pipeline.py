@@ -389,6 +389,26 @@ def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_s
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
 
 
+def test_direct_replies_that_never_fit_reason_with_code_and_the_folder_says_why(
+    answering_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
+    no_answer = {"provenance": []}
+    llm = answering_llm.answers(reasoning=[no_answer, no_answer, COMMITS_THE_PARSE])
+    logger = TaskLogger("run", root=tmp_path)
+    result = answer(llm, logger)
+    assert ast.literal_eval(result.answer) == stamped(result.document_ids)
+    reasoning = read_json(logger, "reasoning/result")
+    assert reasoning["path"] == "coding"
+    assert reasoning["fallback"] == {
+        "cause": "invalid",
+        "error": "answer: Field required",
+    }
+    kinds = [call["kind"] for call in read_json(logger, "reasoning/calls")]
+    assert kinds == ["direct", "direct-retry-1", "turn-1"]
+    assert read_json(logger, "manifest")["settings"]["reasoning_max_attempts"] == 2
+
+
 def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     answering_llm, tmp_path, refusal
 ):
@@ -871,7 +891,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "estimate",
-        "estimate": 10_135,
+        "estimate": 10_130,
         "line": LINE_8192,
     }
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()

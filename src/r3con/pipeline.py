@@ -339,6 +339,7 @@ def run_pipeline(
             prompts=config.prompts,
             path=config.reasoning,
             document_ids=document_ids,
+            max_attempts=caps["reasoning_max_attempts"],
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=record.run,

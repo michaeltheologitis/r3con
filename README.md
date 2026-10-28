@@ -128,7 +128,8 @@ over the relevance snippets and the parsed records, or `coding`, an agent that r
 records with code. A run takes the direct path unless its config, `--reasoning` or
 `reasoning=` says `coding`. A direct run whose prompt doesn't fit the model's window takes
 the coding path instead, and `fallback` says why: `cause` `estimate` (with `estimate` and
-`line`, in tokens) or `refusal` (with `error`). Otherwise `fallback` is `null`.
+`line`, in tokens) or `refusal` (with `error`). So does a direct run whose every reply
+fails its schema, with `cause` `invalid` (with `error`). Otherwise `fallback` is `null`.
 
 Each document gets a random id of 6 hex characters for the run, and `ids.json` maps each
 id to the document's 0-based index in `documents` (also `result.document_ids`). In

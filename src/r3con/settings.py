@@ -52,6 +52,9 @@ SCHEMA_MAX_ATTEMPTS = 5
 # Cap on the parsing structured-output retry loop (one document).
 PARSING_MAX_ATTEMPTS = 5
 
+# Cap on the sends of the direct reasoning request whose reply does not fit its schema.
+REASONING_MAX_ATTEMPTS = 3
+
 # Most resends of one request after temporary errors (the rule is in r3con.runtime.llm).
 LLM_TEMPORARY_ERROR_RETRIES = 10
 
@@ -82,6 +85,7 @@ _FLOORS: dict[str, int] = {
     "relevance_max_attempts": 1,
     "schema_max_attempts": 1,
     "parsing_max_attempts": 1,
+    "reasoning_max_attempts": 1,
     "llm_temporary_error_retries": 0,
     "llm_retry_max_wait_seconds": 0,
     "llm_retry_max_total_seconds": 0,
@@ -138,6 +142,7 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         "relevance_max_attempts": RELEVANCE_MAX_ATTEMPTS,
         "schema_max_attempts": SCHEMA_MAX_ATTEMPTS,
         "parsing_max_attempts": PARSING_MAX_ATTEMPTS,
+        "reasoning_max_attempts": REASONING_MAX_ATTEMPTS,
         "llm_temporary_error_retries": LLM_TEMPORARY_ERROR_RETRIES,
         "llm_retry_max_wait_seconds": LLM_RETRY_MAX_WAIT_SECONDS,
         "llm_retry_max_total_seconds": LLM_RETRY_MAX_TOTAL_SECONDS,

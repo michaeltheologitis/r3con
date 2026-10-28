@@ -18,7 +18,8 @@ document has is dropped with a warning.
 
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
 it over the line or the provider refuses it as too long, takes the coding path instead,
-starting from one sample record per field.
+starting from one sample record per field. So does one whose every reply fails its
+schema, starting from whichever view of the parse the coding path picks.
 
 Either way it reasons over the parse *together with* the relevant context from stage 1 —
 the two are co-equal views, and the parse alone is lossy. It never sees the source
@@ -39,7 +40,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError, field_validator
 
 from r3con import settings
 from r3con.config import ReasoningPath
@@ -59,14 +60,19 @@ from r3con.stages.relevance import (
 
 _log = get_logger("reasoning")
 
-# The most sends of the direct request when its replies do not fit their schema.
-DIRECT_MAX_ATTEMPTS = 3
 _REWRITE = "Answer the same task again"
 
 
 class _DirectReply(BaseModel):
     answer: str
     provenance: list[str]
+
+    @field_validator("answer")
+    @classmethod
+    def _not_empty(cls, answer: str) -> str:
+        if not answer.strip():
+            raise ValueError("the answer is empty")
+        return answer
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -175,8 +181,9 @@ class ReasoningResult:
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
     - ``fallback``: why a direct run took the coding path, else ``None``:
-      ``{"cause": "estimate", "estimate": tokens, "line": tokens}`` or
-      ``{"cause": "refusal", "error": message}``.
+      ``{"cause": "estimate", "estimate": tokens, "line": tokens}``,
+      ``{"cause": "refusal", "error": message}``, or, when no reply fit its schema,
+      ``{"cause": "invalid", "error": message}``.
     """
 
     answer: str
@@ -312,6 +319,13 @@ def _reason_with_code(
     )
 
 
+def _in_brief(error: ValidationError) -> str:
+    """``error`` on one line, without the reply it quotes."""
+    return "; ".join(
+        f"{'.'.join(map(str, e['loc'])) or 'reply'}: {e['msg']}" for e in error.errors()
+    )
+
+
 def _reason_directly(
     *,
     render: Callable[..., str],
@@ -320,17 +334,21 @@ def _reason_directly(
     model: str,
     splits: Splits,
     document_ids: Sequence[str],
+    max_attempts: int,
     run: StageRun | None,
     **llm_kwargs: Any,
 ) -> ReasoningResult | dict[str, Any]:
-    """The direct path's answer, or, when its prompt does not fit, why not: the
-    ``fallback`` of a :class:`ReasoningResult`.
+    """The direct path's answer, or, when its prompt does not fit or no reply fits its
+    schema, why not: the ``fallback`` of a :class:`ReasoningResult`.
 
     The reply is ``{answer, provenance}``, ``provenance`` an ``enum`` of
-    ``document_ids``; a reply that does not fit it is sent again with the validator's
-    error, up to ``DIRECT_MAX_ATTEMPTS`` sends, and the last send's error is raised."""
+    ``document_ids`` that reads as ``[]`` when missing, and ``answer`` not empty; a
+    reply that does not fit is sent again with the validator's error, up to
+    ``max_attempts`` sends."""
     system_prompt = render(parse_block=parse_json)
-    schema = provenance_schema("ReasoningAnswer", _DirectReply, document_ids)
+    schema = provenance_schema(
+        "ReasoningAnswer", _DirectReply, document_ids, required=False
+    )
     schema_json = json.dumps(schema.model_json_schema())
     if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(
@@ -347,7 +365,7 @@ def _reason_directly(
             schema=schema,
             rewrite=_REWRITE,
             kind="direct",
-            max_attempts=DIRECT_MAX_ATTEMPTS,
+            max_attempts=max_attempts,
             log=_log,
             model=model,
             run=run,
@@ -359,6 +377,13 @@ def _reason_directly(
             "instead"
         )
         return {"cause": "refusal", "error": str(refusal)}
+    except ValidationError as invalid:
+        _log.warning(
+            "reasoning's direct reply did not fit its schema in %d send(s); reasoning "
+            "with code instead",
+            max_attempts,
+        )
+        return {"cause": "invalid", "error": _in_brief(invalid)}
     reply = cast(_DirectReply, reply)
     return ReasoningResult(
         answer=reply.answer.strip(),
@@ -378,6 +403,7 @@ def reason(
     document_ids: Sequence[str],
     relevance_snippets: Sequence[Snippet] | None = None,
     source_docs: dict[str, list[int]] | None = None,
+    max_attempts: int | None = None,
     max_turns: int | None = None,
     timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
     additional_authorized_imports: list[str] | None = None,
@@ -393,14 +419,24 @@ def reason(
     ``"direct"`` or ``"coding"``. ``document_ids`` is each document's id for the run
     (:func:`r3con.stages.relevance.draw_document_ids`), aligned with
     ``relevance_snippets`` and the indices in ``source_docs``: the prompt names each
-    document by its id, and the answer's provenance cites them. ``max_turns``,
-    ``timeout_s`` and ``additional_authorized_imports`` apply only to the coding path.
-    ``splits`` (``None`` builds one for ``model``) says whether a prompt fits the
-    model's window.
+    document by its id, and the answer's provenance cites them. ``max_attempts``
+    (``None`` reads ``settings.REASONING_MAX_ATTEMPTS``) caps the sends of the direct
+    request; ``max_turns``, ``timeout_s`` and ``additional_authorized_imports`` apply
+    only to the coding path. ``splits`` (``None`` builds one for ``model``) says whether
+    a prompt fits the model's window.
 
     Raises:
-        ValueError: if ``relevance_snippets`` is not one snippet per document id.
+        ValueError: if ``relevance_snippets`` is not one snippet per document id, or
+            ``max_attempts`` is not positive.
     """
+    if max_attempts is None:
+        max_attempts = settings.REASONING_MAX_ATTEMPTS
+    if max_attempts < 1:
+        raise ValueError(
+            f"max_attempts must be >= 1, got {max_attempts}. Override via "
+            "settings.REASONING_MAX_ATTEMPTS (current default: "
+            f"{settings.REASONING_MAX_ATTEMPTS})."
+        )
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
     )
@@ -445,9 +481,11 @@ def reason(
         model=model,
         splits=splits,
         document_ids=document_ids,
+        max_attempts=max_attempts,
         run=run,
         **llm_kwargs,
     )
     if isinstance(outcome, ReasoningResult):
         return outcome
-    return replace(with_code(whole=False), fallback=outcome)
+    # A prompt that did not fit would not fit with the whole parse either.
+    return replace(with_code(whole=outcome["cause"] == "invalid"), fallback=outcome)

@@ -192,13 +192,17 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
 
 
 def provenance_schema(
-    name: str, base: type[_ReplyT], shown_ids: Sequence[str]
+    name: str, base: type[_ReplyT], shown_ids: Sequence[str], *, required: bool = True
 ) -> type[_ReplyT]:
     """``base``, named ``name``, with its ``provenance`` a list of the ids a call shows.
     The shown ids reach only the JSON schema, as an ``enum``; the reply itself is read
-    as plain strings and checked by :func:`cited`."""
+    as plain strings and checked by :func:`cited`. Unless ``required``, a reply without
+    ``provenance`` reads as citing nothing, though the strict schema sent still
+    requires it."""
     shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
-    return create_model(name, __base__=base, provenance=(list[shown_id], ...))
+    # Unlike a default, a default_factory stays out of the schema, where strict refuses it.
+    default = ... if required else Field(default_factory=list)
+    return create_model(name, __base__=base, provenance=(list[shown_id], default))
 
 
 def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:

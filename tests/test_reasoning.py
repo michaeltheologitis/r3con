@@ -4,13 +4,11 @@ import re
 
 import litellm
 import pytest
-from pydantic import ValidationError
 
 from r3con import settings
 from r3con.config import REASONING_PATHS
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun, TaskLogger
-from r3con.stages import reasoning
 from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
@@ -35,7 +33,7 @@ TWO_DOCUMENTS = {
     "source_docs": {"rows": [0, 1, 1]},
     "document_ids": IDS[:2],
 }
-MALFORMED = {"answer": "An answer without its provenance."}
+EMPTY_ANSWER = {"answer": " \n", "provenance": []}
 
 
 def reasoning_prompt(llm, path="coding", **kwargs) -> str:
@@ -130,14 +128,30 @@ def test_the_direct_request_asks_for_the_answer_and_the_shown_documents_ids(llm)
     response_format = request["response_format"]
     assert response_format["json_schema"]["name"] == "ReasoningAnswer"
     assert response_format["json_schema"]["strict"] is True
-    schema = response_format["json_schema"]["schema"]
-    assert schema["required"] == ["answer", "provenance"]
-    assert schema["additionalProperties"] is False
-    assert schema["properties"]["answer"]["type"] == "string"
-    assert schema["properties"]["provenance"]["items"] == {
-        "type": "string",
-        "enum": IDS[:2],
+    assert response_format["json_schema"]["schema"] == {
+        "properties": {
+            "answer": {"title": "Answer", "type": "string"},
+            "provenance": {
+                "items": {"enum": IDS[:2], "type": "string"},
+                "title": "Provenance",
+                "type": "array",
+            },
+        },
+        "required": ["answer", "provenance"],
+        "title": "ReasoningAnswer",
+        "type": "object",
+        "additionalProperties": False,
     }
+
+
+def test_a_direct_reply_without_provenance_cites_nothing(llm):
+    result = ask(llm, {"answer": "Halloran."})
+    assert (result.answer, result.provenance, result.path) == (
+        "Halloran.",
+        [],
+        "direct",
+    )
+    assert len(llm.requests) == 1
 
 
 def test_an_empty_direct_reply_is_sent_again(llm):
@@ -147,11 +161,9 @@ def test_an_empty_direct_reply_is_sent_again(llm):
     assert again["messages"] == first["messages"]
 
 
-def test_a_malformed_direct_reply_is_sent_again_with_the_validators_error(
-    llm, tmp_path
-):
+def test_an_empty_answer_is_sent_again_with_the_validators_error(llm, tmp_path):
     run = StageRun(stage="reasoning", task_logger=TaskLogger("run", root=tmp_path))
-    result = ask(llm, MALFORMED, {"answer": "Halloran.", "provenance": []}, run=run)
+    result = ask(llm, EMPTY_ANSWER, {"answer": "Halloran.", "provenance": []}, run=run)
     assert result.answer == "Halloran."
     assert [step.kind for step in run.steps] == ["direct", "direct-retry-1"]
     first, again = llm.requests
@@ -160,8 +172,8 @@ def test_a_malformed_direct_reply_is_sent_again_with_the_validators_error(
     assert user.startswith(
         "Input:\n<task>\nWho?\n</task>\n\n---\n\n"
         "Your previous response failed schema validation:\n\n"
-        "ValidationError: 1 validation error for ReasoningAnswer\nprovenance\n"
-        "  Field required"
+        "ValidationError: 1 validation error for ReasoningAnswer\nanswer\n"
+        "  Value error, the answer is empty"
     )
     assert user.endswith(
         "Answer the same task again, fixing only the offending field(s) so the output "
@@ -169,10 +181,44 @@ def test_a_malformed_direct_reply_is_sent_again_with_the_validators_error(
     )
 
 
-def test_the_last_malformed_direct_reply_is_raised_once_the_attempts_run_out(llm):
-    with pytest.raises(ValidationError, match="provenance"):
-        ask(llm, *[MALFORMED] * reasoning.DIRECT_MAX_ATTEMPTS)
-    assert len(llm.requests) == reasoning.DIRECT_MAX_ATTEMPTS
+@pytest.mark.parametrize(
+    ("flood_guard", "whole"), [(16_000, True), (1_000, False)], ids=["whole", "samples"]
+)
+def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_picks(
+    llm, monkeypatch, caplog, flood_guard, whole
+):
+    monkeypatch.setattr(settings, "REASONING_PARSE_MAX_TOKS", flood_guard)
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    bad = [{"provenance": []}, "not JSON", EMPTY_ANSWER]
+    result = ask(llm, *bad, COMMIT)
+    assert (result.answer, result.path) == ("ok", "coding")
+    assert result.fallback == {
+        "cause": "invalid",
+        "error": "answer: Value error, the answer is empty",
+    }
+    *direct, coding = llm.requests
+    assert len(direct) == settings.REASONING_MAX_ATTEMPTS
+    assert (LAST_ROW in coding["messages"][0]["content"]) is whole
+    assert caplog.messages[-1] == (
+        "reasoning's direct reply did not fit its schema in 3 send(s); reasoning with "
+        "code instead"
+    )
+
+
+def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(
+    llm, monkeypatch
+):
+    monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
+    result = ask(llm, "not JSON", "{", COMMIT)
+    assert result.fallback is not None and result.fallback["cause"] == "invalid"
+    assert result.fallback["error"].startswith("reply: Invalid JSON")
+    assert len(llm.requests) == 3
+
+
+def test_fewer_than_one_attempt_is_refused_before_any_request(llm):
+    with pytest.raises(ValueError, match=r"max_attempts must be >= 1, got 0\."):
+        ask(llm, max_attempts=0)
+    assert llm.requests == []
 
 
 @PATHS
@@ -523,12 +569,12 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     result = ask(llm, COMMIT, model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "estimate", "estimate": 3_918, "line": 3_400}
+    assert result.fallback == {"cause": "estimate", "estimate": 3_913, "line": 3_400}
     [request] = llm.requests
     assert SAMPLE in request["messages"][0]["content"]
     assert caplog.messages == [
         (
-            "reasoning's direct prompt would take about 3,918 tokens, over the "
+            "reasoning's direct prompt would take about 3,913 tokens, over the "
             "3,400-token line; reasoning with code instead"
         )
     ]
