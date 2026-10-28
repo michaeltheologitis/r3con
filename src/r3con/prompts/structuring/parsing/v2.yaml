@@ -13,7 +13,7 @@ instructions: |-
   ```
 
   {% if relevance %}## Task-conditioned document summaries (background to help you — do NOT extract from these)
-  To help you extract well, each document in the collection has already been summarized upstream in a task-specific way. Together they give you a *latent* understanding of what the whole collection contains — context you would otherwise be missing while looking at a single document in isolation, which helps you resolve references and extract more completely and accurately. These are provided only as help; the actual document to extract from is the one the user provides next. Extract only from that document, never from these summaries. Each summary is headed by the ID of the document it describes (**Document ID: <ID>**).
+  To help you extract well, each document in the collection has already been summarized upstream in a task-specific way. Together they give you a *latent* understanding of what the whole collection contains — context you would otherwise be missing while looking at a single document in isolation, which helps you resolve references and extract more completely and accurately. These are provided only as help; the actual document to extract from is the one the user provides next. Extract only from that document, never from these summaries. Each summary is headed by the ID of the document it describes (**Document ID: <ID>**). The document you are parsing is the one whose ID heads the user message.
 
   {{ relevance }}
 
@@ -52,9 +52,11 @@ examples:
       The staff cafeteria's menu for the week; no staffing news.
 
       Document:
+      Document ID: 5c1e07
+
       After the audit, the board moved quickly. Reyes was let go on Friday, her badge deactivated by noon. Park, seeing which way the wind blew, handed in her resignation the same afternoon. A memo noted that Okafor's position had been eliminated in the restructuring.
 
-      Thinking: "Let go" and "position eliminated" are dismissals in different words than the task's — extract both, each anchored by a quote. The memo's summary (5c1e07) fixes which Reyes is meant, so the name resolves to Dana Reyes; the cafeteria menu's (e48a2d) doesn't help here. Park resigned: leaving voluntarily is a different event, so skip it.
+      Thinking: "Let go" and "position eliminated" are dismissals in different words than the task's — extract both, each anchored by a quote. The memo's own summary (5c1e07) fixes which Reyes is meant, so the name resolves to Dana Reyes; the cafeteria menu's (e48a2d) doesn't help here. Park resigned: leaving voluntarily is a different event, so skip it.
 
       Reply:
 
@@ -87,6 +89,8 @@ examples:
       ```
 
       Document:
+      Document ID: 7b30e4
+
       She knew the routine. Anton sneered, "You'll never amount to anything." Maria didn't flinch. "Then I'll surprise you," she said quietly. Later, at the cafe, a stranger muttered something about her shoes; she pretended not to hear.
 
       Thinking: Anton's sneer is a clear insult. The cafe muttering is too vague to identify the insult — skipping the record rather than guessing the quote.
@@ -113,7 +117,7 @@ examples:
 
       ```python
       class Incident(BaseModel):
-          site: str = Field(description="the site where it happened")
+          site: str = Field(description="the site where it happened, resolved to its name")
           what: str = Field(description="what happened, in brief")
       class Parse(BaseModel):
           incidents: list[Incident] = []
@@ -127,6 +131,8 @@ examples:
       The facilities register; it lists the Riverside site under its internal name, Plant B.
 
       Document:
+      Document ID: 3f9b42
+
       Safety memo, week 32. After the incident at Plant B on Tuesday, when a forklift struck a shelving rack, all forklift drivers will repeat their refresher training.
 
       Thinking: The memo names the site only as "Plant B". The register's summary (a07c5d) says that is the Riverside site, so the site resolves to "Riverside (Plant B)". What happened comes from the memo itself, and its own summary (3f9b42) adds nothing to it.

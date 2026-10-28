@@ -12,7 +12,8 @@ document read in parts), all documents in parallel (bounded by
   rest of the corpus says. Each note is headed by its document's id,
   ``### Document ID: <id>``, or ``<id>.<k>`` for part ``k`` of a document read in
   parts.
-- The **user message** is the document being parsed, or one part of it.
+- The **user message** is the document being parsed, or one part of it, under a first
+  line ``Document ID: <id>`` naming the document (a part's too).
 
 The reply is structured: the populated ``Parse``, and its ``provenance``, the ids of the
 notes the call used, from among the non-empty ones it shows, its own document's
@@ -272,14 +273,27 @@ def _request(
     return _Request(system_prompt, schema, citable)
 
 
+def _headed(document_id: str, part: str) -> str:
+    """The user message that sends ``part``, a document or one part of one, under its
+    document's id."""
+    return f"Document ID: {document_id}\n\n{part}"
+
+
 def _read(
-    request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
+    request: _Request,
+    document_id: str,
+    part: str,
+    *,
+    kind: str,
+    max_attempts: int,
+    **llm_call: Any,
 ) -> tuple[BaseModel, list[str]]:
     """``part`` (a document or one part of one) parsed under ``request`` by
-    :func:`send_until_valid`: its ``Parse``, and the citable ids it used."""
+    :func:`send_until_valid`, headed by its document's id: its ``Parse``, and the
+    citable ids it used."""
     reply = send_until_valid(
         request.system_prompt,
-        part,
+        _headed(document_id, part),
         schema=request.schema,
         rewrite=_REWRITE,
         kind=kind,
@@ -308,6 +322,7 @@ def _attempts(max_attempts: int | None) -> int:
 def parse_one_document(
     *,
     document: str,
+    document_id: str,
     schema_code: str,
     parse_cls: type[BaseModel],
     task: str,
@@ -325,8 +340,9 @@ def parse_one_document(
     The system prompt carries the task, the schema source, and the relevant
     context (``relevance_snippets`` — every document's note, the
     cross-document context), each note headed by its document's id from
-    ``document_ids``, one per snippet; the document itself is the user message. One LLM
-    call, whose reply is the ``Parse`` and the ids of the notes it used.
+    ``document_ids``, one per snippet; the user message is the document under its
+    ``document_id`` (for a part, its document's). One LLM call, whose reply is the
+    ``Parse`` and the ids of the notes it used.
 
     Returns the ``Parse`` and those ids, in order and without repeats, less any the
     call could not cite (dropped with a warning); ``[]`` when no note could be cited.
@@ -351,6 +367,7 @@ def parse_one_document(
     )
     return _read(
         request,
+        document_id,
         document,
         kind=kind,
         max_attempts=attempts,
@@ -444,10 +461,11 @@ def parse_documents(
         return reader.read_in_parts(
             i,
             call="parse",
-            rest=request.system_prompt,
+            rest=request.system_prompt + _headed(document_ids[i], ""),
             schema=request.schema,
             send=lambda part, kind: _read(
                 request,
+                document_ids[i],
                 part,
                 kind=kind,
                 max_attempts=attempts,

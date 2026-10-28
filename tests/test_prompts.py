@@ -116,6 +116,7 @@ def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, exampl
     reply = json.loads(example.split("```json\n", 1)[1].split("\n```", 1)[0])
     parse, provenance = parse_one_document(
         document="?",
+        document_id=re.search(r"^Document ID: (\w+)$", example, re.MULTILINE)[1],
         schema_code=schema_code,
         parse_cls=check_schema(schema_code),
         task="?",

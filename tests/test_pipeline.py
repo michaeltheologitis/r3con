@@ -54,7 +54,7 @@ ROUTINE = "The site logged its routine checks and found nothing out of the ordin
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
-DOCUMENT_ID_LINE = re.compile(r"^### Document ID: \S+$", re.MULTILINE)
+DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
 
 
 def answer(
@@ -161,10 +161,15 @@ def memo_note(request) -> str:
     return note[:200].rsplit(" ", 1)[0] + "."
 
 
+def parsed(request) -> str:
+    """The document, or part, a parse request sends below its ``Document ID`` line."""
+    return request["messages"][1]["content"].split("\n\n", 1)[1]
+
+
 def whole_document_row(request) -> dict:
     """A parse reply whose one row is the whole document, so the parse fills the
     reasoning prompt."""
-    return {"rows": [{"who": request["messages"][1]["content"]}]}
+    return {"rows": [{"who": parsed(request)}]}
 
 
 def memos_run(llm, documents, model, tmp_path, **overrides):
@@ -216,12 +221,11 @@ def citing_every_shown_id(shown_ids):
 
 
 def citing_its_own_note(request) -> dict:
-    """A parse reply: the document as its one row, citing the id heading the note on
-    it."""
-    system, document = (message["content"] for message in request["messages"])
-    note = rf"^### Document ID: (\S+)\nNotes on {re.escape(document)}\.$"
-    [own] = re.findall(note, system, re.MULTILINE)
-    return {"parse": {"rows": [{"who": document}]}, "provenance": [own]}
+    """A parse reply: the document as its one row, citing the id heading its user
+    message, its own."""
+    user = request["messages"][1]["content"]
+    own = re.match(r"Document ID: (\w+)\n", user)[1]
+    return {"parse": {"rows": [{"who": parsed(request)}]}, "provenance": [own]}
 
 
 def first_turns(llm) -> list[dict]:
@@ -509,7 +513,7 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
     documents = memos_with(grown_registry(40_000))
 
     def rows(request):
-        document = request["messages"][1]["content"]
+        document = parsed(request)
         return {"rows": [] if document == documents[1] else [{"who": document[:20]}]}
 
     logger = TaskLogger("run", root=tmp_path)

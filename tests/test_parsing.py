@@ -105,9 +105,14 @@ ITEM = {
 }
 
 
+def parsed(request) -> str:
+    """The document, or part, a parse request sends below its ``Document ID`` line."""
+    return request["messages"][1]["content"].split("\n\n", 1)[1]
+
+
 def rows_named_after_the_document(request) -> dict:
     """Two rows per document, each naming it, so a merge's order shows."""
-    document = request["messages"][1]["content"].splitlines()[0]
+    document = parsed(request).splitlines()[0]
     # Later documents answer first, so the merge cannot rely on arrival order.
     time.sleep(0.02 * (len(DOCS) - DOCS.index(document)))
     return {"rows": [{"who": f"{document}#a"}, {"who": f"{document}#b"}]}
@@ -115,7 +120,7 @@ def rows_named_after_the_document(request) -> dict:
 
 def a_row_named_by_the_first_word(request) -> dict:
     """One row per document or part, naming its first word."""
-    first_word = re.match(r"\w+", request["messages"][1]["content"]).group()
+    first_word = re.match(r"\w+", parsed(request)).group()
     return {"rows": [{"who": first_word}]}
 
 
@@ -124,7 +129,7 @@ def citing(by_first_word: dict[str, list[str]]):
     the part's, first word."""
 
     def reply(request) -> dict:
-        first_word = re.match(r"\w+", request["messages"][1]["content"]).group()
+        first_word = re.match(r"\w+", parsed(request)).group()
         return {"parse": {"rows": []}, "provenance": by_first_word[first_word]}
 
     return reply
@@ -162,8 +167,10 @@ def refuses_a_lookaround(reply: dict):
 
 
 def parse_one(llm, prompt_version="v2", document_ids=(), **kwargs):
+    """The memo parsed as the document IDS[0] names."""
     return parse_one_document(
         document="memo",
+        document_id=IDS[0],
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who?",
@@ -397,6 +404,7 @@ def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
         parse_cls=check_schema(COSTS),
         task="What did it cost?",
         prompt_version="v2",
+        document_id=IDS[0],
         document_ids=[],
         model=MODEL,
         completion=llm.answers(parsing=refuses_a_lookaround(reply)),
@@ -415,7 +423,8 @@ def test_a_malformed_reply_is_retried_with_the_validator_error(llm):
 def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
     result = parse_one(llm.replies('{"rows": [{"who": "Halloran"}]}'))
     assert result == (Parse(rows=[{"who": "Halloran"}]), [])
-    assert [request["messages"][1]["content"] for request in llm.requests] == ["memo"]
+    sent = [request["messages"][1]["content"] for request in llm.requests]
+    assert sent == [f"Document ID: {IDS[0]}\n\nmemo"]
     assert reply_schema_name(llm.requests[0]) == "Parse"
 
 
@@ -424,7 +433,8 @@ def test_a_document_that_never_validates_stops_after_max_attempts(llm):
     with pytest.raises(ValidationError, match="rows"):
         parse_one(llm, max_attempts=3)
     assert len(llm.requests) == 3
-    assert llm.requests[2]["messages"][1]["content"].startswith("memo\n\n---\n\n")
+    resent = llm.requests[2]["messages"][1]["content"]
+    assert resent.startswith(f"Document ID: {IDS[0]}\n\nmemo\n\n---\n\n")
 
 
 def test_max_attempts_below_one_is_refused_before_any_request(llm):
@@ -552,13 +562,14 @@ def test_a_document_read_in_parts_combines_its_parts_ids_in_order_without_repeat
     assert len(llm.requests_for("parsing")) == 4
 
 
-def test_each_document_is_parsed_whole_in_a_request_of_its_own(llm):
+def test_each_document_is_parsed_whole_in_a_request_of_its_own_under_its_id(llm):
     llm.answers(parsing=rows_named_after_the_document)
     parse_all(llm, DOCS, workers=8)
     sent = [
         request["messages"][1]["content"] for request in llm.requests_for("parsing")
     ]
-    assert sorted(sent) == sorted(DOCS)
+    headed = [f"Document ID: {id_}\n\n{doc}" for id_, doc in zip(IDS, DOCS)]
+    assert sorted(sent) == sorted(headed)
 
 
 @pytest.mark.parametrize(("snippets", "shown"), [(NOTES, True), (None, False)])
@@ -593,7 +604,7 @@ def test_no_documents_parse_to_empty_lists_without_a_request(llm):
 
 def test_one_documents_failure_is_raised_from_the_whole_parse(llm):
     def fails_on_beta(request):
-        if request["messages"][1]["content"] == DOCS[1]:
+        if parsed(request) == DOCS[1]:
             raise RuntimeError("parse blew up")
         return rows_named_after_the_document(request)
 
@@ -615,7 +626,9 @@ def test_a_refused_document_is_parsed_in_parts_and_every_record_keeps_its_index(
     assert result.source_docs == {"rows": [0, 1, 1, 2]}
 
 
-def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
+def test_parsing_starts_from_the_parts_it_is_given_each_under_its_documents_id(
+    llm, tmp_path
+):
     def refuses_the_whole(part, kind):
         if part == LONG:
             raise litellm.ContextWindowExceededError(
@@ -630,4 +643,4 @@ def test_parsing_starts_from_the_parts_it_is_given(llm, tmp_path):
     parse_all(llm, [LONG], model=QWEN, splits=splits, run=run)
     assert [step.kind for step in run.steps] == ["parse-d0c0", "parse-d0c1"]
     sent = [request["messages"][1]["content"] for request in llm.requests]
-    assert sent == splits.parts(0)
+    assert sent == [f"Document ID: {IDS[0]}\n\n{part}" for part in splits.parts(0)]

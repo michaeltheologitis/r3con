@@ -38,6 +38,8 @@ R3CON_VARIABLES = (
     "R3CON_LOG_LEVEL",
 )
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+# The line, and the blank one after it, that heads a parse request's user message.
+PARSE_HEADING = re.compile(r"\ADocument ID: \w+\n\n")
 ANSWERING_SCHEMA = """Thought: one row per person.
 <schema>
 class Row(BaseModel):
@@ -318,7 +320,9 @@ def summary_ids_shown(request: Request) -> list[str]:
 
 
 def _first_line(request: Request) -> str:
-    return request["messages"][1]["content"].splitlines()[0]
+    """The first line of the document a request sends, below a parse request's
+    ``Document ID`` line."""
+    return re.sub(PARSE_HEADING, "", request["messages"][1]["content"]).splitlines()[0]
 
 
 def _joined_rows(request: Request) -> Content:

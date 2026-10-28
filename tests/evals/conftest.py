@@ -78,8 +78,8 @@ def judging_llm(answering_llm, monkeypatch: pytest.MonkeyPatch):
         if schema == "Equivalence":
             equivalent = "Answer 2: 42\n" in user
             return json.dumps({"explanation": "Checked.", "equivalent": equivalent})
-        first_line = user.splitlines()[0]
-        return {"rows": [{"who": first_line}]}
+        document = user.split("\n\n", 1)[1]
+        return {"rows": [{"who": document.splitlines()[0]}]}
 
     answering_llm.answers(parsing=parse_or_judge)
     monkeypatch.setattr(litellm, "completion", answering_llm)
