@@ -18,13 +18,13 @@ instructions: |-
   {{ relevance }}
 
   {% endif %}## Your job
-  Populate `Parse` with every instance found in the document below (the user message). Resolve pronouns to their named entities. An empty list is correct when the document has no instances.
+  Populate `Parse` with every instance found in the document below (the user message). Resolve pronouns to their named entities. An empty list is correct when the document has no instances.{% if citable %}
 
   ## Output
   Reply in two fields:
 
   - `parse`: the populated `Parse`.
-  - `provenance`: The IDs of the documents above whose summaries you used in parsing this document — those that provided useful information for it. Leave out documents that didn't contribute. Leave it an empty list if none contributed any info.
+  - `provenance`: The IDs of the documents above whose summaries you used in parsing this document — those that provided useful information for it. Leave out documents that didn't contribute. Leave it an empty list if none contributed any info.{% endif %}
 
 examples:
   - name: same-substance-different-words-extract-with-a-quote

@@ -98,8 +98,8 @@ class Answer:
     - ``parsing_provenance`` — for each document, aligned 1:1 with ``documents``, the
       ids of the final-round relevance snippets its parse used, its own document's
       among them when it helped: each a document's id, or ``<id>.<k>`` for part ``k``
-      of a document read in parts in that round. A document read in parts has its
-      parts' ids combined, in order, without repeats.
+      of a document read in parts in that round, combined across a document's parts
+      as in ``relevance_provenance``.
     - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
       ``source_docs`` with each index replaced by that document's id, so it lines up
       with ``source_docs`` by position. A record parsed from one part of a document read

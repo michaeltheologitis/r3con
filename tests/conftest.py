@@ -57,6 +57,11 @@ class UnscriptedRequest(AssertionError):
     """A request reached a fake that had no reply for it."""
 
 
+def _schema_name(request: Request) -> str | None:
+    """The name of the schema ``request`` asks its reply to fit, if any."""
+    return request.get("response_format", {}).get("json_schema", {}).get("name")
+
+
 def stage_of(request: Request) -> Stage:
     """The pipeline stage that built ``request``, read from the shape r3con gives it."""
     if "response_format" in request:
@@ -83,7 +88,9 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request for structured output gets a text reply as its
-    summary, citing nothing; a direct reasoning request gets a text reply as it is.
+    summary, citing nothing; a parsing request for ``{parse, provenance}`` gets a dict
+    reply without ``parse`` as its parse, citing nothing; a direct reasoning request
+    gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
     request as a provider does, in tokens.
@@ -152,6 +159,12 @@ class FakeLLM:
                 and stage_of(snapshot) == "relevance"
             ):
                 content = {"summary": content, "provenance": []}
+            if (
+                isinstance(content, dict)
+                and "parse" not in content
+                and _schema_name(snapshot) == "ParseReply"
+            ):
+                content = {"parse": content, "provenance": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
             # The dict form, because litellm treats mock_response="" as absent.
@@ -331,15 +344,12 @@ def llm() -> FakeLLM:
 @pytest.fixture
 def answering_llm(llm: FakeLLM) -> FakeLLM:
     """``llm``, answering every stage so that any run completes: each document's
-    first line is its note and its one parsed row, citing no note, and the answer joins
-    the rows, on either reasoning path."""
+    first line is its note and its one parsed row, and the answer joins the rows, on
+    either reasoning path."""
     return llm.answers(
         relevance=lambda request: f"Notes on {_first_line(request)}.",
         schema=ANSWERING_SCHEMA,
-        parsing=lambda request: {
-            "parse": {"rows": [{"who": _first_line(request)}]},
-            "provenance": [],
-        },
+        parsing=lambda request: {"rows": [{"who": _first_line(request)}]},
         reasoning=_joined_rows,
     )
 

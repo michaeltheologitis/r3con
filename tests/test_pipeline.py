@@ -164,8 +164,7 @@ def memo_note(request) -> str:
 def whole_document_row(request) -> dict:
     """A parse reply whose one row is the whole document, so the parse fills the
     reasoning prompt."""
-    rows = [{"who": request["messages"][1]["content"]}]
-    return {"parse": {"rows": rows}, "provenance": []}
+    return {"rows": [{"who": request["messages"][1]["content"]}]}
 
 
 def memos_run(llm, documents, model, tmp_path, **overrides):
@@ -336,17 +335,11 @@ def test_a_config_that_pins_parsing_v1_still_runs(answering_llm, tmp_path):
     result = answer(answering_llm, logger, prompts=prompts)
     assert result.answer == "Halloran memo; Merrow memo"
     assert result.parsing_provenance == [[], []]
-    v1 = load_prompt(
-        "structuring/parsing",
-        version="v1",
-        task="Who?",
-        schema_code=result.schema_code,
-        relevance=render_relevance(
-            [f"Notes on {d}." for d in DOCS], result.document_ids
-        ),
-    )
-    assert system_prompts(answering_llm, "parsing") == [v1, v1]
-    assert read_json(logger, "manifest")["config"]["prompts"] == prompts
+    for prompt in system_prompts(answering_llm, "parsing"):
+        assert "## Output" not in prompt
+        assert "provenance" not in prompt
+    manifest = read_json(logger, "manifest")["config"]
+    assert manifest["prompts"]["structuring/parsing"] == "v1"
 
 
 def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
@@ -485,11 +478,13 @@ def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_sch
         shown = text.split("## Your job", 1)[0]
         assert re.findall(r"^### Document ID: (\S+)$", shown, re.MULTILINE) == ids
         assert ids_in(DOCUMENT_ID_LINE.sub("", text)) == set()
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert schema["properties"]["provenance"]["items"]["enum"] == ids
     for request in answering_llm.requests_for("schema"):
         assert ids_in(json.dumps(request, default=str)) == set()
 
 
-def test_the_schema_names_each_document_by_number_and_parsing_and_reasoning_by_id(
+def test_the_schema_names_each_document_by_number_and_reasoning_by_id(
     answering_llm,
 ):
     result = answer(answering_llm)
@@ -498,13 +493,6 @@ def test_the_schema_names_each_document_by_number_and_parsing_and_reasoning_by_i
         assert "### Document 1\nNotes on Halloran memo." in prompt
         assert "### Document 2\nNotes on Merrow memo." in prompt
         assert "Document ID" not in prompt
-    for request in answering_llm.requests_for("parsing"):
-        prompt = request["messages"][0]["content"]
-        assert f"### Document ID: {ids[0]}\nNotes on Halloran memo." in prompt
-        assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
-        assert re.search(r"### Document \d", prompt) is None
-        schema = request["response_format"]["json_schema"]["schema"]
-        assert schema["properties"]["provenance"]["items"]["enum"] == ids
     [request] = answering_llm.requests_for("reasoning")
     prompt = request["messages"][0]["content"]
     assert summary_headings(answering_llm) == ids
@@ -522,8 +510,7 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
 
     def rows(request):
         document = request["messages"][1]["content"]
-        rows = [] if document == documents[1] else [{"who": document[:20]}]
-        return {"parse": {"rows": rows}, "provenance": []}
+        return {"rows": [] if document == documents[1] else [{"who": document[:20]}]}
 
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(parsing=rows).refuses_over(18_000)
@@ -697,7 +684,7 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
         (
             "PARSING_MAX_ATTEMPTS",
             "parsing",
-            '{"parse": {"rows": [{"who": 7}]}, "provenance": []}',
+            {"rows": [{"who": 7}]},
             pytest.raises(ValidationError, match="who"),
         ),
     ],

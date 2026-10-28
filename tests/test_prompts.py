@@ -109,7 +109,10 @@ def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example
 @pytest.mark.parametrize("example", examples("structuring/parsing"))
 def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, example):
     schema_code = example.split("```python\n", 1)[1].split("\n```", 1)[0]
-    headed = re.findall(r"^### Document ID: (\w+)\n(.+)$", example, re.MULTILINE)
+    # An example shown no summary replies as a call that shows one, citing none.
+    headed = re.findall(r"^### Document ID: (\w+)\n(.+)$", example, re.MULTILINE) or [
+        ("0a0a0a", "Another document's summary.")
+    ]
     reply = json.loads(example.split("```json\n", 1)[1].split("\n```", 1)[0])
     parse, provenance = parse_one_document(
         document="?",
