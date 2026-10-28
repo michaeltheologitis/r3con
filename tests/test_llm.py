@@ -5,13 +5,14 @@ import socket
 import threading
 import time
 from email.utils import parsedate_to_datetime
+from typing import Literal
 
 import litellm
 import openai
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
@@ -176,6 +177,15 @@ def test_every_object_sent_in_strict_mode_is_closed_and_fully_required(
         node = node[key]
     assert node["required"] == required
     assert node["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(("n", "kept"), [(1_000, True), (1_001, False)])
+def test_an_enum_past_openais_limit_is_sent_without_its_values(llm, n, kept):
+    values = tuple(f"v{i}" for i in range(n))
+    choice = create_model("Choice", pick=(Literal[values], ...))
+    pick = sent_schema(llm, choice)["properties"]["pick"]
+    assert pick.get("enum") == (list(values) if kept else None)
+    assert pick["type"] == "string"
 
 
 def test_a_dict_field_is_sent_without_properties_left_open(llm):

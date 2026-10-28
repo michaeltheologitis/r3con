@@ -13,15 +13,15 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
 - **Round 1** — each document's relevance snippet is written from the task and the
   document alone (no other document is visible), with the ``relevance/first-round``
   prompt, as plain text.
-- **Round k ≥ 2** — each document's state is rewritten given the task and the
+- **Round k ≥ 2** — each document's snippet is rewritten given the task and the
   **previous round's** snippets of the OTHER documents (never the document's own prior
-  state — the document itself is in the user message), with the
+  snippet — the document itself is in the user message), with the
   ``relevance/later-rounds`` prompt. Only the immediately-previous round is fed in, not
   the whole history. The reply is structured: the ``summary``, or null, and its
   ``provenance``, the ids of the shown snippets it used. With nothing to show, the
   first-round prompt is used instead.
 
-Every document has a random id for the run (:func:`draw_document_ids`), and each note
+Every document has an id for the run (:func:`draw_document_ids`), and each snippet
 carries its document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in
 that round. The model sees ids only on the other documents' snippets, never the id of
 the document it is reading.
@@ -35,14 +35,14 @@ for inspection.
 
 from __future__ import annotations
 
-import json
-import secrets
+import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, cast
+from typing import Annotated, Any, NamedTuple, cast
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, Field, ValidationError, create_model
 
+from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
@@ -53,20 +53,18 @@ from r3con.splitting import Splits
 
 _log = get_logger("relevance")
 
-# OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
-MAX_ALLOWED_IDS = 1000
-_DOCUMENT_ID_BYTES = 3
+_ID_HEX_DIGITS = 6
 
 Snippet = str | list[str]
 """A document's relevance snippet, or, for a document read in parts, one per part."""
 
 
 @dataclass(frozen=True)
-class Note:
+class SnippetRecord:
     """One relevance snippet with its id: a whole document's, or one part's.
 
-    ``provenance`` holds the ids of the previous round's snippets it used: empty in
-    round 1, and whenever nothing was shown or nothing shown was used.
+    ``summary`` is the snippet's text, and ``provenance`` the ids of the previous
+    round's snippets it used: empty in round 1, and whenever it used none.
     """
 
     id: str
@@ -78,35 +76,60 @@ class Note:
 class RelevantContext:
     """Output of :func:`surface_relevance` — the relevant context.
 
-    - ``snippets`` — the final-round per-document relevance snippets, aligned 1:1 with the
-      input ``documents`` (``snippets[d]`` is the note document ``d`` contributes toward
-      the task, or, for a document read in parts, the list of its parts' notes). This is
-      what downstream stages consume.
-    - ``rounds`` — every round's per-document snippets, in order: ``rounds[k]`` is round
-      ``k+1`` (so ``rounds[-1] is snippets``). Kept for inspection of the refinement;
-      not fed downstream.
-    - ``document_ids`` — each document's id in this run, aligned with ``documents``.
-    - ``notes`` — ``rounds`` with ids and provenance: ``notes[k][d]`` is document
-      ``d``'s notes in round ``k+1``, one per part.
+    ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
+    (one for a document read whole). Earlier rounds are kept for inspection; the final
+    round is what downstream stages consume, as :attr:`snippets`.
     """
 
-    snippets: list[Snippet]
-    rounds: list[list[Snippet]]
-    document_ids: list[str]
-    notes: list[list[list[Note]]]
+    records: list[list[list[SnippetRecord]]]
+
+    @property
+    def snippets(self) -> list[Snippet]:
+        """The final round's snippet of each document, aligned 1:1 with the input
+        ``documents``: its text, or, for a document read in parts, one per part. Empty
+        when no round ran."""
+        return [
+            parts[0].summary if len(parts) == 1 else [part.summary for part in parts]
+            for parts in self._final_round()
+        ]
+
+    @property
+    def provenance(self) -> list[list[str]]:
+        """The ids each document's final-round snippet used, aligned with
+        :attr:`snippets`; a document read in parts has its parts' ids combined, in
+        order, without repeats."""
+        return [
+            list(dict.fromkeys(id_ for part in parts for id_ in part.provenance))
+            for parts in self._final_round()
+        ]
+
+    def _final_round(self) -> list[list[SnippetRecord]]:
+        return self.records[-1] if self.records else []
+
+
+class _Reply(BaseModel):
+    summary: str | None
+    provenance: list[str]
+
+
+class _Request(NamedTuple):
+    """What a document's calls in one round send beside it: the system prompt, the
+    reply's schema (``None`` for plain text), and the snippets shown, by id."""
+
+    system_prompt: str
+    schema: type[_Reply] | None
+    shown: dict[str, str]
 
 
 def draw_document_ids(n: int) -> list[str]:
-    """``n`` distinct random ids of 6 hex characters, one per document of a run. An id
-    already drawn is drawn again, so identical documents still get distinct ids."""
-    ids: dict[str, None] = {}
-    while len(ids) < n:
-        ids[secrets.token_hex(_DOCUMENT_ID_BYTES)] = None
-    return list(ids)
+    """``n`` distinct random ids of 6 hex characters, one per document of a run, so
+    identical documents still get distinct ids."""
+    space = 16**_ID_HEX_DIGITS
+    return [f"{x:0{_ID_HEX_DIGITS}x}" for x in random.sample(range(space), n)]
 
 
 def _part_ids(document_id: str, n_parts: int) -> list[str]:
-    """The ids of a document's notes in one round: its id when read whole, else
+    """The ids of a document's snippets in one round: its id when read whole, else
     ``<id>.<k>`` for part ``k``, from 1."""
     if n_parts == 1:
         return [document_id]
@@ -119,11 +142,6 @@ def join_parts(snippet: Snippet) -> str:
     if isinstance(snippet, str):
         return snippet
     return "\n\n".join(note.strip() for note in snippet if note.strip())
-
-
-def join_provenance(notes: Sequence[Note]) -> list[str]:
-    """A document's provenance: its parts' cited ids, in order, without repeats."""
-    return list(dict.fromkeys(cited for note in notes for cited in note.provenance))
 
 
 def render_relevance(relevance_snippets: Sequence[Snippet] | None) -> str:
@@ -148,59 +166,88 @@ def render_relevance(relevance_snippets: Sequence[Snippet] | None) -> str:
     return "\n\n".join(sections)
 
 
-def _shown(other_snippets: Mapping[str, str]) -> dict[str, str]:
-    """The other documents' snippets a call shows, by id, stripped: the empty ones are
-    left out, so they cannot be cited."""
-    return {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
-
-
-def _render_other_states(shown: Mapping[str, str]) -> str:
+def _render_other_snippets(shown: Mapping[str, str]) -> str:
     """The shown snippets, each under its ``### Summary ID: <id>`` heading, separated
     by blank lines."""
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
-def _summary_schema(shown_ids: Sequence[str]) -> type[BaseModel]:
-    """The later-rounds reply: the summary, or null, then the shown ids it used. Past
-    :data:`MAX_ALLOWED_IDS` the ids are plain strings, checked once the reply is in."""
-    allowed = Literal[tuple(shown_ids)] if len(shown_ids) <= MAX_ALLOWED_IDS else str
+def _reply_schema(shown_ids: Sequence[str]) -> type[_Reply]:
+    """The later-rounds reply: the summary, or null, then the ids it used. The shown
+    ids reach only the JSON schema, as an ``enum``; the reply itself is read as plain
+    strings and checked by :func:`_cited`."""
+    shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
     return create_model(
-        "RelevanceSummary",
-        summary=(str | None, ...),
-        provenance=(list[allowed], ...),
+        "RelevanceSummary", __base__=_Reply, provenance=(list[shown_id], ...)
     )
 
 
 def _request(
-    task: str,
-    shown: Mapping[str, str],
-    first_round_version: str,
-    later_rounds_version: str,
-) -> tuple[str, type[BaseModel] | None]:
-    """The system prompt and the reply's schema: the first-round prompt and no schema
-    when nothing is shown, else the later-rounds prompt and :func:`_summary_schema`."""
+    task: str, other_snippets: Mapping[str, str], prompts: Mapping[str, str]
+) -> _Request:
+    """A document's request in one round, given the OTHER documents' snippets by id:
+    the first-round prompt and plain text when none is non-empty, else the later-rounds
+    prompt and :func:`_reply_schema`. Empty snippets are not shown, so not citable."""
+    shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
     if not shown:
-        prompt = load_prompt(
-            "relevance/first-round", version=first_round_version, task=task
-        )
-        return prompt, None
+        version = prompts["relevance/first-round"]
+        prompt = load_prompt("relevance/first-round", version=version, task=task)
+        return _Request(prompt, None, shown)
     prompt = load_prompt(
         "relevance/later-rounds",
-        version=later_rounds_version,
+        version=prompts["relevance/later-rounds"],
         task=task,
-        other_snippets=_render_other_states(shown),
+        other_snippets=_render_other_snippets(shown),
     )
-    return prompt, _summary_schema(list(shown))
+    return _Request(prompt, _reply_schema(list(shown)), shown)
 
 
-def _keep_shown(cited: list[str], shown: Mapping[str, str], kind: str) -> list[str]:
-    """``cited`` without the ids the call did not show, each dropped with a warning."""
-    unshown = [id_ for id_ in cited if id_ not in shown]
+def _cited(provenance: list[str], shown: Mapping[str, str], kind: str) -> list[str]:
+    """The ids a reply cites, in order and without repeats, less those the call did not
+    show, which are dropped with a warning."""
+    unshown = [id_ for id_ in provenance if id_ not in shown]
     if unshown:
         _log.warning(
             "%s: dropped provenance id(s) the call did not show: %s", kind, unshown
         )
-    return [id_ for id_ in cited if id_ in shown]
+    return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown))
+
+
+def _ask(
+    request: _Request, part: str, *, kind: str, attempt: int, **llm_call: Any
+) -> tuple[str, list[str]]:
+    """One send of ``part`` (a document, or one part of one): its snippet, stripped,
+    and the shown ids it used."""
+    reply = litellm_chat_completion(
+        system_prompt=request.system_prompt,
+        user_prompt=part,
+        schema=request.schema,
+        kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
+        **llm_call,
+    )
+    if request.schema is None:
+        return cast(str, reply).strip(), []
+    reply = cast(_Reply, reply)
+    return (reply.summary or "").strip(), _cited(reply.provenance, request.shown, kind)
+
+
+def _read(
+    request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
+) -> tuple[str, list[str]]:
+    """:func:`_ask`, sending again a reply that does not fit its schema (invalid JSON, a
+    missing field), up to ``max_attempts`` sends; the last send's error is raised."""
+    for attempt in range(1, max_attempts):
+        try:
+            return _ask(request, part, kind=kind, attempt=attempt, **llm_call)
+        except ValidationError as error:
+            _log.warning(
+                "%s: the reply does not fit its schema; sending it again (%d/%d): %s",
+                kind,
+                attempt,
+                max_attempts - 1,
+                error,
+            )
+    return _ask(request, part, kind=kind, attempt=max_attempts, **llm_call)
 
 
 def relevance_snippet(
@@ -209,41 +256,36 @@ def relevance_snippet(
     document: str,
     other_snippets: Mapping[str, str],
     model: str,
-    first_round_version: str,
-    later_rounds_version: str,
+    prompts: Mapping[str, str],
     run: StageRun | None = None,
     kind: str = "relevance",
+    max_attempts: int | None = None,
     **llm_kwargs: Any,
 ) -> tuple[str, list[str]]:
     """Surface one ``document``'s relevance snippet for the task, given the OTHER
     documents' previous-round snippets by id (empty in round 1).
 
     The task + the other documents' snippets live in the system prompt; the document is
-    the user message. With no non-empty snippet to show, the call uses the first-round
-    prompt and reads back plain text; otherwise the later-rounds prompt and a structured
-    ``{summary, provenance}`` reply, whose ids may only be those shown.
+    the user message. ``prompts`` pins the version of ``relevance/first-round`` and
+    ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet to
+    show, the call uses the first-round prompt and reads back plain text; otherwise the
+    later-rounds prompt and a structured ``{summary, provenance}`` reply. A reply that
+    does not fit its schema is sent again, up to ``max_attempts`` sends (``None`` reads
+    ``settings.RELEVANCE_MAX_ATTEMPTS``).
 
     Returns the snippet, stripped — an empty string is allowed (the document contributes
     nothing relevant to the task) — and the shown ids it used.
     """
-    shown = _shown(other_snippets)
-    system_prompt, schema = _request(
-        task, shown, first_round_version, later_rounds_version
-    )
-    reply = litellm_chat_completion(
-        system_prompt=system_prompt,
-        user_prompt=document,
-        model=model,
-        schema=schema,
-        run=run,
+    return _read(
+        _request(task, other_snippets, prompts),
+        document,
         kind=kind,
+        max_attempts=(
+            settings.RELEVANCE_MAX_ATTEMPTS if max_attempts is None else max_attempts
+        ),
+        model=model,
+        run=run,
         **llm_kwargs,
-    )
-    if schema is None:
-        return cast(str, reply).strip(), []
-    fields = cast(BaseModel, reply).model_dump()
-    return (fields["summary"] or "").strip(), _keep_shown(
-        fields["provenance"], shown, kind
     )
 
 
@@ -251,47 +293,59 @@ def surface_relevance(
     *,
     task: str,
     documents: list[str],
+    document_ids: list[str],
     model: str,
-    first_round_version: str,
-    later_rounds_version: str,
+    prompts: Mapping[str, str],
     rounds: int = 2,
-    document_ids: list[str] | None = None,
     run: StageRun | None = None,
     workers: int | None = None,
     splits: Splits | None = None,
+    max_attempts: int | None = None,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
 
-    Round 1 writes each document's state from the task + document alone; each later
+    Round 1 writes each document's snippet from the task + document alone; each later
     round rewrites every document given the *previous round's* snippets of the OTHER
-    documents (never its own). Returns a :class:`RelevantContext` (`.snippets` =
-    last-round per-document, `.rounds` = all rounds, `.notes` = all rounds with ids and
-    provenance). ``rounds=1`` = independent round-1 only; ``rounds < 1`` = no relevance
-    snippets at all (`.snippets` / `.rounds` / `.notes` empty — a deliberate
-    "no-relevance" run). An empty ``documents`` → empty results.
+    documents (never its own). Returns a :class:`RelevantContext` holding every round's
+    snippet records. ``rounds=1`` = independent round-1 only; ``rounds < 1`` = no
+    relevance snippets at all (no records — a deliberate "no-relevance" run). An empty
+    ``documents`` → empty results.
 
-    ``document_ids`` names each document (``None`` draws them, :func:`draw_document_ids`).
+    ``document_ids`` names each document, one distinct id each
+    (:func:`draw_document_ids`). ``prompts`` and ``max_attempts`` are as in
+    :func:`relevance_snippet`.
 
     Each document is read through ``splits`` (built over ``documents``; ``None`` builds
-    one), so a document too long for the model's window is read in parts, one note per
-    part, and stays split in later rounds. A part never sees its own document's other
-    parts: the others' block holds the other documents only, a split one's notes listed
-    separately under their part ids.
+    one), so a document too long for the model's window is read in parts, one snippet
+    per part, and stays split in later rounds. A part never sees its own document's
+    other parts: the others' block holds the other documents only, a split one's
+    snippets listed separately under their part ids.
+
+    Raises:
+        ValueError: if ``document_ids`` is not one distinct id per document.
     """
-    ids = draw_document_ids(len(documents)) if document_ids is None else document_ids
+    if len(document_ids) != len(documents) or len(set(document_ids)) != len(documents):
+        raise ValueError(
+            "document_ids must be one distinct id per document: got "
+            f"{len(set(document_ids))} distinct of {len(document_ids)} for "
+            f"{len(documents)} document(s)."
+        )
     # rounds < 1 = "no relevance snippets at all" (a deliberate rounds=0 re-run); an empty
     # document corpus is likewise empty. Both short-circuit BEFORE round 1 runs (the
     # unconditional run_round(None, 1) below) — a `return`, not a fall-through.
     if rounds < 1 or not documents:
-        return RelevantContext(snippets=[], rounds=[], document_ids=ids, notes=[])
+        return RelevantContext(records=[])
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
+    attempts = settings.RELEVANCE_MAX_ATTEMPTS if max_attempts is None else max_attempts
 
-    def run_round(prev: list[list[Note]] | None, round_idx: int) -> list[list[Note]]:
+    def run_round(
+        prev: list[list[SnippetRecord]] | None, round_idx: int
+    ) -> list[list[SnippetRecord]]:
         """Rewrite every document's relevance snippet in parallel. ``prev`` is the frozen
-        previous-round note set (``None`` in round 1)."""
+        previous-round set (``None`` in round 1)."""
         _log.info(
             "round %d/%d · %d doc(s) (≤%d parallel)",
             round_idx,
@@ -300,48 +354,42 @@ def surface_relevance(
             max_workers,
         )
 
-        def one(i: int, _document: str) -> list[Note]:
-            # Others-only: document i sees the previous round's notes of the OTHER
+        def one(i: int, _document: str) -> list[SnippetRecord]:
+            # Others-only: document i sees the previous round's snippets of the OTHER
             # documents (j != i), never its own (the document itself is the user message).
             others = {
-                note.id: note.summary
-                for j, notes in enumerate(prev or [])
+                record.id: record.summary
+                for j, parts in enumerate(prev or [])
                 if j != i
-                for note in notes
+                for record in parts
             }
-            system_prompt, schema = _request(
-                task, _shown(others), first_round_version, later_rounds_version
-            )
-            schema_text = (
-                "" if schema is None else json.dumps(schema.model_json_schema())
-            )
+            request = _request(task, others, prompts)
             replies = reader.read_in_parts(
                 i,
                 call=f"relevance-r{round_idx}",
-                rest=system_prompt + schema_text,
-                send=lambda part, kind: relevance_snippet(
-                    task=task,
-                    document=part,
-                    other_snippets=others,
-                    model=model,
-                    first_round_version=first_round_version,
-                    later_rounds_version=later_rounds_version,
-                    run=run,
+                rest=request.system_prompt,
+                schema=request.schema,
+                send=lambda part, kind: _read(
+                    request,
+                    part,
                     kind=kind,
+                    max_attempts=attempts,
+                    model=model,
+                    run=run,
                     **llm_kwargs,
                 ),
             )
             return [
-                Note(id=id_, summary=summary, provenance=provenance)
+                SnippetRecord(id=id_, summary=summary, provenance=provenance)
                 for id_, (summary, provenance) in zip(
-                    _part_ids(ids[i], len(replies)), replies, strict=True
+                    _part_ids(document_ids[i], len(replies)), replies, strict=True
                 )
             ]
 
         result = parallel_map(one, documents, max_workers=max_workers)
-        n_nonempty = sum(1 for notes in result if any(n.summary for n in notes))
+        n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))
         _log.info(
-            "round %d/%d done · %d/%d doc(s) had a relevant state",
+            "round %d/%d done · %d/%d doc(s) had a relevant snippet",
             round_idx,
             rounds,
             n_nonempty,
@@ -349,19 +397,8 @@ def surface_relevance(
         )
         return result
 
-    all_notes: list[list[list[Note]]] = [run_round(None, 1)]
+    records = [run_round(None, 1)]
     for r in range(2, rounds + 1):
         # only the previous round feeds in
-        all_notes.append(run_round(all_notes[-1], r))
-
-    all_rounds = [[_snippet(notes) for notes in per_doc] for per_doc in all_notes]
-    return RelevantContext(
-        snippets=all_rounds[-1], rounds=all_rounds, document_ids=ids, notes=all_notes
-    )
-
-
-def _snippet(notes: list[Note]) -> Snippet:
-    """A document's notes as its snippet: the text, or one per part."""
-    if len(notes) == 1:
-        return notes[0].summary
-    return [note.summary for note in notes]
+        records.append(run_round(records[-1], r))
+    return RelevantContext(records=records)

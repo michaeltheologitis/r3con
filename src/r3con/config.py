@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from r3con import settings
 from r3con.prompts import require_prompt_path
@@ -102,6 +102,17 @@ class RunConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     # the overrides applied on load, recorded with the config
     overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("prompts")
+    @classmethod
+    def _only_known_stages(cls, prompts: dict[str, str]) -> dict[str, str]:
+        unknown = sorted(set(prompts) - set(PROMPT_STAGES))
+        if unknown:
+            raise ValueError(
+                f"prompts pins stage(s) r3con does not have: {unknown}. The stages "
+                f"are {list(PROMPT_STAGES)}."
+            )
+        return prompts
 
     def _identity_parts(self) -> list[str]:
         """The output-shaping components that make up the run identity, in label
@@ -206,8 +217,8 @@ def load_config(
 
     Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
     are not a mapping, ``ValueError`` if the config sets a field r3con does not read,
-    omits a required field or a prompt version for any stage, or pins the retired
-    ``relevance`` stage, and
+    omits a required field or a prompt version for any stage, or pins a prompt for a
+    stage r3con does not have, and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -254,15 +265,9 @@ def check_prompts(config: RunConfig) -> None:
     """Refuse a config that cannot render every stage's prompt, before any request.
 
     Raises:
-        ValueError: if the config pins ``relevance``, now two stages, or a stage in
-            :data:`PROMPT_STAGES` has no version pinned.
+        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned.
         FileNotFoundError: if a pinned version has no file on the prompt search path.
     """
-    if "relevance" in config.prompts:
-        raise ValueError(
-            f"config {config.name!r} pins a prompt for `relevance`, which is now two "
-            "stages: pin `relevance/first-round` and `relevance/later-rounds` instead."
-        )
     missing = [s for s in PROMPT_STAGES if s not in config.prompts]
     if missing:
         raise ValueError(

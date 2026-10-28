@@ -16,6 +16,7 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
     assert list(snapshot) == [
         "doc_workers",
         "reasoning_max_turns",
+        "relevance_max_attempts",
         "schema_max_attempts",
         "parsing_max_attempts",
         "llm_temporary_error_retries",
@@ -32,6 +33,7 @@ def test_the_snapshot_holds_each_cap_as_set_when_it_is_taken(monkeypatch):
     [
         ("DOC_WORKERS", 0, 1),
         ("REASONING_MAX_TURNS", 0, 1),
+        ("RELEVANCE_MAX_ATTEMPTS", 0, 1),
         ("SCHEMA_MAX_ATTEMPTS", 0, 1),
         ("PARSING_MAX_ATTEMPTS", 0, 1),
         ("LLM_TEMPORARY_ERROR_RETRIES", -1, 0),

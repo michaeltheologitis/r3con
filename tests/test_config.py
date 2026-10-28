@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -99,21 +101,26 @@ def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
         load_config("bad")
 
 
+UNKNOWN_STAGE = (
+    "prompts pins stage(s) r3con does not have: ['relevance']. The stages are "
+    "['relevance/first-round', 'relevance/later-rounds', 'structuring/schema', "
+    "'structuring/parsing', 'reasoning']."
+)
+
+
 @pytest.mark.parametrize(
     "prompts",
     [{**PROMPTS, "relevance": "v1"}, {"relevance": "v1"}],
-    ids=["beside-the-new-keys", "alone"],
+    ids=["beside-the-stages", "alone"],
 )
-def test_a_config_pinning_the_old_relevance_stage_names_the_two_that_replace_it(
+def test_a_config_pinning_a_stage_r3con_does_not_have_is_refused_with_the_stages(
     configs, prompts
 ):
     configs(old={**FULL, "prompts": prompts})
-    with pytest.raises(ValueError) as refused:
+    with pytest.raises(ValueError, match=re.escape(UNKNOWN_STAGE)):
         load_config("old")
-    assert str(refused.value) == (
-        "config 'old' pins a prompt for `relevance`, which is now two stages: pin "
-        "`relevance/first-round` and `relevance/later-rounds` instead."
-    )
+    with pytest.raises(ValidationError, match=re.escape(UNKNOWN_STAGE)):
+        RunConfig(model="openai/m", prompts=prompts)
 
 
 @pytest.mark.parametrize(("name", "value"), [("relevence_rounds", 3), ("seed", 7)])

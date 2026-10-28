@@ -42,12 +42,7 @@ from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
-from r3con.stages.relevance import (
-    draw_document_ids,
-    join_parts,
-    join_provenance,
-    surface_relevance,
-)
+from r3con.stages.relevance import draw_document_ids, join_parts, surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
@@ -231,27 +226,25 @@ def run_pipeline(
         relevance = surface_relevance(
             task=task,
             documents=documents,
-            model=model,
-            first_round_version=config.prompts["relevance/first-round"],
-            later_rounds_version=config.prompts["relevance/later-rounds"],
-            rounds=rounds,
             document_ids=document_ids,
+            model=model,
+            prompts=config.prompts,
+            rounds=rounds,
+            max_attempts=caps["relevance_max_attempts"],
             workers=caps["doc_workers"],
             run=record.run,
             splits=splits,
             **llm_kwargs,
         )
-        # Per round, every note in document order with its id and provenance; the LAST
-        # round is what downstream stages consume.
         record.result = {
             "n_rounds": rounds,
             "n_docs": len(documents),
             "rounds": [
                 {
                     "round": k + 1,
-                    "summaries": [asdict(n) for notes in per_doc for n in notes],
+                    "snippets": [asdict(r) for parts in per_doc for r in parts],
                 }
-                for k, per_doc in enumerate(relevance.notes)
+                for k, per_doc in enumerate(relevance.records)
             ],
         }
     # the relevant context feeds every later stage
@@ -357,8 +350,5 @@ def run_pipeline(
         source_docs=extraction.source_docs,
         run_dir=task_logger.dir if task_logger is not None else None,
         document_ids=document_ids,
-        provenance=[
-            join_provenance(notes)
-            for notes in (relevance.notes[-1] if relevance.notes else [])
-        ],
+        provenance=relevance.provenance,
     )

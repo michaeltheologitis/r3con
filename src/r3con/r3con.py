@@ -256,8 +256,8 @@ def run(
             not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
             given (which would be silently ignored), if the config pins no prompt
-            version for a stage or pins the retired ``relevance`` stage, or if a
-            setting in :mod:`r3con.settings` is below its floor.
+            version for a stage, or if a setting in :mod:`r3con.settings` is below its
+            floor.
         FileNotFoundError: if the config, by name or as a :class:`RunConfig`, pins a
             prompt version that has no file.
         Each of these is raised before any request and before a run folder exists, as

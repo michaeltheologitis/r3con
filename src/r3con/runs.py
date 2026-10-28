@@ -19,7 +19,7 @@ Layout per ``logs/<run-folder>/``:
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  rounds: [{round, summaries: [{id, summary, provenance}]}], totals}`` — within a round
+  rounds: [{round, snippets: [{id, summary, provenance}]}], totals}`` — within a round
   every relevance snippet in document order, a document read in parts as one per part,
   each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that round) and
   the ids of the previous round's snippets it used; the last round is the relevant

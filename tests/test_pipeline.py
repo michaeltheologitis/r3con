@@ -1,13 +1,13 @@
-import itertools
 import json
+import random
 import re
-import secrets
 from collections import Counter
 from pathlib import Path
 
 import litellm
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from r3con import read_documents, settings
 from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
@@ -166,11 +166,8 @@ def priced_model():
 
 
 def counting_ids(monkeypatch) -> None:
-    """From now on, document ids are drawn as 000000, 000001, and so on."""
-    draws = itertools.count()
-    monkeypatch.setattr(
-        secrets, "token_hex", lambda nbytes: f"{next(draws):0{2 * nbytes}x}"
-    )
+    """Document ids drawn as 000000, 000001, and so on, the same in every run."""
+    monkeypatch.setattr(random, "sample", lambda population, k: list(population[:k]))
 
 
 def citing_every_shown_id(shown_ids):
@@ -248,14 +245,14 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
     assert rounds == [
         {
             "round": 1,
-            "summaries": [
+            "snippets": [
                 {"id": id_, "summary": note, "provenance": []}
                 for id_, note in zip(ids, notes, strict=True)
             ],
         },
         {
             "round": 2,
-            "summaries": [
+            "snippets": [
                 {"id": ids[0], "summary": notes[0], "provenance": [ids[2], ids[1]]},
                 {"id": ids[1], "summary": notes[1], "provenance": [ids[2], ids[0]]},
                 {"id": ids[2], "summary": notes[2], "provenance": [ids[1], ids[0]]},
@@ -471,9 +468,9 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
     assert stamps == [1, 2, 3, 4, 4, 4, 4, 5]
-    summaries = read_json(logger, "relevance/result")["rounds"][0]["summaries"]
-    part_notes = [s["summary"] for s in summaries[3:7]]
-    assert [s["id"] for s in summaries[3:7]] == [
+    snippets = read_json(logger, "relevance/result")["rounds"][0]["snippets"]
+    part_notes = [s["summary"] for s in snippets[3:7]]
+    assert [s["id"] for s in snippets[3:7]] == [
         f"{result.document_ids[3]}.{k}" for k in range(1, 5)
     ]
     for request in llm.requests_for("relevance"):
@@ -490,6 +487,37 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
         ("refusal", "split"),
     ]
     assert record["parts"] == {"relevance-r1": 4, "relevance-r2": 4, "parse": 4}
+
+
+def test_identical_documents_get_distinct_ids_and_each_sees_the_others(
+    answering_llm, shown_ids, monkeypatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+    result = answer(answering_llm, documents=["Same memo"] * 3)
+    ids = result.document_ids
+    assert len(set(ids)) == 3
+    round_2 = [
+        r for r in answering_llm.requests_for("relevance") if "response_format" in r
+    ]
+    assert [set(shown_ids(request)) for request in round_2] == [
+        set(ids) - {id_} for id_ in ids
+    ]
+
+
+def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
+    answering_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "RELEVANCE_MAX_ATTEMPTS", 2)
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+
+    def reply(request):
+        return {"summary": "x"} if "response_format" in request else "A snippet."
+
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(ValidationError, match="provenance"):
+        answer(answering_llm.answers(relevance=reply), logger)
+    assert len(answering_llm.requests_for("relevance")) == len(DOCS) + 2
+    assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2
 
 
 def test_a_split_documents_provenance_joins_its_parts_without_repeats(

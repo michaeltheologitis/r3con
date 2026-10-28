@@ -31,7 +31,6 @@ document's records.
 from __future__ import annotations
 
 import ast
-import json
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -364,9 +363,7 @@ def parse_documents(
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
-    rest = _system_prompt(
-        task, schema_code, relevance_snippets, prompt_version
-    ) + json.dumps(parse_cls.model_json_schema())
+    rest = _system_prompt(task, schema_code, relevance_snippets, prompt_version)
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
     def one(i: int, _document: str) -> list[BaseModel]:
@@ -375,6 +372,7 @@ def parse_documents(
             i,
             call="parse",
             rest=rest,
+            schema=parse_cls,
             send=lambda part, kind: parse_one_document(
                 document=part,
                 schema_code=schema_code,

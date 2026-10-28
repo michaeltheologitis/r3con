@@ -43,6 +43,9 @@ DOC_WORKERS = 16
 # Hard cap on the reasoning agent's turns.
 REASONING_MAX_TURNS = 30
 
+# Cap on the sends of one relevance request whose reply does not fit its schema.
+RELEVANCE_MAX_ATTEMPTS = 3
+
 # Cap on the schema-proposal validation retry loop.
 SCHEMA_MAX_ATTEMPTS = 5
 
@@ -75,6 +78,7 @@ WINDOW_MARGIN_PERCENT = 15
 _FLOORS: dict[str, int] = {
     "doc_workers": 1,
     "reasoning_max_turns": 1,
+    "relevance_max_attempts": 1,
     "schema_max_attempts": 1,
     "parsing_max_attempts": 1,
     "llm_temporary_error_retries": 0,
@@ -130,6 +134,7 @@ def settings_snapshot(*, reasoning_max_turns: int | None = None) -> dict[str, in
         "reasoning_max_turns": (
             REASONING_MAX_TURNS if reasoning_max_turns is None else reasoning_max_turns
         ),
+        "relevance_max_attempts": RELEVANCE_MAX_ATTEMPTS,
         "schema_max_attempts": SCHEMA_MAX_ATTEMPTS,
         "parsing_max_attempts": PARSING_MAX_ATTEMPTS,
         "llm_temporary_error_retries": LLM_TEMPORARY_ERROR_RETRIES,
