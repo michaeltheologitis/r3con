@@ -152,24 +152,45 @@ def test_calls_keep_non_ascii_as_text(logger):
 
 
 @pytest.mark.parametrize(
-    ("tokens", "totals"),
+    ("calls", "totals"),
     [
         (
             [
-                {"prompt": 10, "completion": 2, "total": 12},
-                {"prompt": 25, "completion": 6, "total": 31},
+                ({"prompt": 10, "completion": 2, "total": 12}, 0.25),
+                ({"prompt": 25, "completion": 6, "total": 31}, 0.5),
             ],
-            {"n_steps": 2, "tokens": {"prompt": 35, "completion": 8, "total": 43}},
+            {
+                "n_steps": 2,
+                "tokens": {"prompt": 35, "completion": 8, "total": 43},
+                "usd": 0.75,
+            },
         ),
-        ([None], {"n_steps": 1, "tokens": None}),
-        ([], {"n_steps": 0, "tokens": None}),
+        (
+            [({"prompt": 10, "completion": 2, "total": 12}, 0.25), (None, None)],
+            {
+                "n_steps": 2,
+                "tokens": {"prompt": 10, "completion": 2, "total": 12},
+                "usd": None,
+            },
+        ),
+        ([], {"n_steps": 0, "tokens": None, "usd": 0}),
     ],
+    ids=["priced", "one-unpriced", "none"],
 )
-def test_a_stage_totals_its_steps_and_their_tokens(logger, tokens, totals):
+def test_a_stage_totals_its_steps_tokens_and_cost(logger, calls, totals):
     run = StageRun(stage="reasoning", task_logger=logger)
-    for used in tokens:
-        run.add_step(messages=[], response=reply(), tokens=used)
+    for tokens, cost in calls:
+        run.add_step(messages=[], response=reply(), tokens=tokens, cost=cost)
     assert run.compute_totals() == totals
+
+
+def test_each_call_records_its_cost(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    run.add_step(messages=[], response=reply(), cost=0.25)
+    run.add_step(messages=[], response=reply())
+    run.flush(write_transcript=False)
+    calls = json.loads((run.dir / "calls.json").read_text())
+    assert [call["cost"] for call in calls] == [0.25, None]
 
 
 def test_a_multi_turn_transcript_is_the_last_turns_whole_thread(logger):

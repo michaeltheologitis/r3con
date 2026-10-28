@@ -183,11 +183,13 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(answering_llm, tmp_path
         "reasoning/transcript.yaml",
     }
     relevance = json.loads((logger.dir / "relevance/result.json").read_text())
+    calls = json.loads((logger.dir / "relevance/calls.json").read_text())
     assert (relevance["n_rounds"], relevance["n_docs"]) == (2, 2)
     assert [r["round"] for r in relevance["rounds"]] == [1, 2]
     assert relevance["totals"] == {
         "n_steps": 4,
         "tokens": {"prompt": 40, "completion": 80, "total": 120},
+        "usd": sum(call["cost"] for call in calls),
     }
 
 
