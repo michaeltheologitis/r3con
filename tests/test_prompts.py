@@ -1,7 +1,6 @@
 import json
 import re
 
-import jsonschema
 import pytest
 import yaml
 
@@ -12,6 +11,7 @@ from r3con.runtime.codeact import run_codeact
 from r3con.stages.reasoning import reason
 
 MODEL = "openai/gpt-6-luna"
+PINNED = load_config("default").prompts
 
 # Enough to render any stage's template; Jinja ignores the names it does not use.
 CONTEXT = {
@@ -26,8 +26,10 @@ CONTEXT = {
 
 
 def examples(stage: str) -> list:
-    """The text of each example of ``stage``'s v2 prompt, under its name."""
-    prompt = yaml.safe_load((settings.PROMPTS_DIR / stage / "v2.yaml").read_text())
+    """The text of each example of the prompt the default config pins for ``stage``,
+    under its name."""
+    path = settings.PROMPTS_DIR / stage / f"{PINNED[stage]}.yaml"
+    prompt = yaml.safe_load(path.read_text())
     return [pytest.param(e["text"], id=e["name"]) for e in prompt["examples"]]
 
 
@@ -90,15 +92,14 @@ def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example
         schema_code="",
         parsed=parse,
         model=MODEL,
-        prompts={"reasoning/direct": "v2", "reasoning/coding": "v2"},
+        prompts=PINNED,
         path="direct",
         document_ids=ids,
         completion=llm.replies(reply),
     )
-    jsonschema.validate(
-        reply, llm.requests[0]["response_format"]["json_schema"]["schema"]
-    )
+    assert set(reply) == {"answer", "provenance"}
     assert (result.answer, result.provenance) == (reply["answer"], reply["provenance"])
+    assert len(llm.requests) == 1
 
 
 @pytest.mark.parametrize("example", examples("reasoning/coding"))

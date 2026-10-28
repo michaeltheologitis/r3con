@@ -42,7 +42,6 @@ from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_f
 from r3con.stages.reasoning import ReasoningResult, reason
 from r3con.stages.relevance import (
     RelevantContext,
-    draw_document_ids,
     relevance_snippet,
     render_relevance,
     surface_relevance,
@@ -79,7 +78,6 @@ __all__ = [
     "StageRun",
     "TaskLogger",
     "check_schema",
-    "draw_document_ids",
     "litellm_chat_completion",
     "litellm_chat_completion_full",
     "load_config",

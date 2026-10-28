@@ -120,8 +120,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     should not sink a run. Empty documents are dropped — an empty document contributes
     nothing and costs a relevance call.
 
-    Document order is preserved end to end (it is what ``Document N`` refers to
-    throughout the artifacts), so a stable, sorted walk matters.
+    Document order is preserved end to end (it is what ``Document N`` refers to in the
+    structuring prompts and ``structured_context``, and ``document_ids`` aligns with
+    it), so a stable, sorted walk matters.
 
     Raises:
         FileNotFoundError: if a source matches nothing.

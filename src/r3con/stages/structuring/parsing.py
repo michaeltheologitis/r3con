@@ -15,9 +15,10 @@ document read in parts), all documents in parallel (bounded by
 Each document (or part) yields one populated ``Parse``; the parses merge into one
 (list fields concatenated in document order, a document's parts in order). Every
 merged record is tagged with its **source-document index**
-(``ParseResult.source_docs``), which the reasoning stage stamps onto each record as
-``"document": N`` (the id-injection) so the model can name the document a fact came
-from.
+(``ParseResult.source_docs``), which the reasoning stage turns into the document's id
+and stamps onto each record as ``"document": "<id>"`` (the id-injection), so the model
+can name the document a fact came from. Only ``Answer.structured_context`` stamps the
+1-based number, ``"document": N``, instead.
 
 This module also owns :func:`check_schema`, stage 2's schema validator. It lives
 here, with the code that *uses* a schema rather than with the code that proposes

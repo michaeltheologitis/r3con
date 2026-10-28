@@ -200,7 +200,7 @@ def provenance_schema(
     ``provenance`` reads as citing nothing, though the strict schema sent still
     requires it."""
     shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
-    # Unlike a default, a default_factory stays out of the schema, where strict refuses it.
+    # A default_factory stays out of the schema; strict mode refuses a default.
     default = ... if required else Field(default_factory=list)
     return create_model(name, __base__=base, provenance=(list[shown_id], default))
 

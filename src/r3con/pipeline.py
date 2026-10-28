@@ -375,8 +375,7 @@ def run_pipeline(
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance_snippets],
-        # the parse reasoning was given, as plain data, each record stamped with the
-        # 1-based document it came from rather than the id reasoning saw
+        # plain data, each record stamped with its document's 1-based number, not its id
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
             extraction.source_docs,
