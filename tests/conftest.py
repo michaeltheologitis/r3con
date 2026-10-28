@@ -51,7 +51,8 @@ class Parse(BaseModel):
 </schema>"""
 ANSWERING_CODE = (
     '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
-    'provenance=[r["document"] for r in parse["rows"]])\n</code>'
+    'provenance_ids={"summary_ids": [], '
+    '"parse_ids": [r["document"] for r in parse["rows"]]})\n</code>'
 )
 
 
@@ -326,9 +327,9 @@ def _first_line(request: Request) -> str:
 
 
 def _joined_rows(request: Request) -> Content:
-    """A reasoning reply that joins the parse's rows and cites their documents: on the
-    coding path, code that does; on the direct path, the rows of the parse its prompt
-    shows, joined, and their documents' ids."""
+    """A reasoning reply that joins the parse's rows and cites their documents for
+    their records: on the coding path, code that does; on the direct path, the rows of
+    the parse its prompt shows, joined, and their documents' ids."""
     if "response_format" not in request:
         return ANSWERING_CODE
     system = request["messages"][0]["content"]
@@ -336,7 +337,10 @@ def _joined_rows(request: Request) -> Content:
     rows = json.loads(shown[shown.index("{") : shown.rindex("}") + 1])["rows"]
     return {
         "answer": "; ".join(row["who"] for row in rows),
-        "provenance": [row["document"] for row in rows],
+        "provenance_ids": {
+            "summary_ids": [],
+            "parse_ids": [row["document"] for row in rows],
+        },
     }
 
 

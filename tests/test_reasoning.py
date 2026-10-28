@@ -13,16 +13,16 @@ from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
-PROMPTS = {"reasoning/direct": "v2", "reasoning/coding": "v2"}
+PROMPTS = {"reasoning/direct": "v3", "reasoning/coding": "v3"}
 PATHS = pytest.mark.parametrize("path", REASONING_PATHS)
 IDS = [f"d0c{n:03x}" for n in range(10)]
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
 SAMPLE = "only a SAMPLE"
 NUMBERED = re.compile(r"Document \d|\"document\": \d")
-# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,200
-# tokens with the whole parse and about 2,700 with one sample record per field; the
-# direct request about 3,920 with its reply's schema.
+# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,410
+# tokens with the whole parse and about 2,920 with one sample record per field; the
+# direct request about 4,130 with its reply's schema.
 ROWS = {"rows": [{"who": f"Site {i:03d} logged nothing unusual"} for i in range(100)]}
 LAST_ROW = '"who": "Site 099 logged nothing unusual"'
 TWO_DOCUMENTS = {
@@ -31,7 +31,19 @@ TWO_DOCUMENTS = {
     "source_docs": {"rows": [0, 1, 1]},
     "document_ids": IDS[:2],
 }
-EMPTY_ANSWER = {"answer": " \n", "provenance": []}
+# Document 1's summary is empty, and document 2, read in parts, has no records.
+THREE_DOCUMENTS = {
+    "relevance_snippets": ["Halloran logged 5.", "", ["Calder, part one.", "Two."]],
+    "parsed": {"rows": [{"who": "Halloran"}, {"who": "Merrow"}]},
+    "source_docs": {"rows": [0, 1]},
+    "document_ids": IDS[:3],
+}
+NO_IDS = {"summary_ids": [], "parse_ids": []}
+EMPTY_ANSWER = {"answer": " \n", "provenance_ids": NO_IDS}
+KEYS_WARNING = (
+    "coding: provenance_ids must map summary_ids and parse_ids to lists of ids; got "
+    "{!r}, which cites nothing"
+)
 
 
 def reasoning_prompt(llm, path="coding", **kwargs) -> str:
@@ -43,7 +55,7 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
     kwargs.setdefault("model", MODEL)
     snippets = kwargs.get("relevance_snippets")
     kwargs.setdefault("document_ids", IDS[: len(snippets)] if snippets else IDS)
-    reply = citing(path, [])
+    reply = citing(path)
     reason(prompts=PROMPTS, path=path, completion=llm.replies(reply), **kwargs)
     return llm.requests[-1]["messages"][0]["content"]
 
@@ -63,11 +75,37 @@ def ask(llm, *replies, path="direct", **kwargs):
     )
 
 
-def citing(path: str, provenance: list) -> str | dict:
-    """A reply on ``path`` that answers "ok" and cites ``provenance``."""
+def citing(path: str, summary_ids=(), parse_ids=()) -> str | dict:
+    """A reply on ``path`` that answers "ok" and cites ``summary_ids`` and
+    ``parse_ids``."""
+    ids = {"summary_ids": list(summary_ids), "parse_ids": list(parse_ids)}
     if path == "direct":
-        return {"answer": "ok", "provenance": provenance}
-    return f"Thought: commit.\n<code>\nfinal_answer('ok', provenance={provenance!r})\n</code>"
+        return {"answer": "ok", "provenance_ids": ids}
+    return committing(f", provenance_ids={ids!r}")
+
+
+def committing(arguments: str) -> str:
+    """A coding turn that commits "ok", with ``arguments`` after the answer."""
+    return f"Thought: commit.\n<code>\nfinal_answer('ok'{arguments})\n</code>"
+
+
+def cite(llm, path, *replies, prompts=PROMPTS, documents=TWO_DOCUMENTS):
+    """``reason`` over ``documents`` on ``path``, ``llm`` answering with ``replies``."""
+    return reason(
+        task="?",
+        schema_code="",
+        model=MODEL,
+        prompts=prompts,
+        path=path,
+        completion=llm.replies(*replies),
+        **documents,
+    )
+
+
+def lists_of_ids(request) -> dict:
+    """The JSON schema of each list of ids a direct request's reply may cite."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    return schema["$defs"]["ProvenanceIds"]["properties"]
 
 
 def first_turn_prompts(llm) -> list[str]:
@@ -100,11 +138,11 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     )
 
 
-def test_on_the_direct_path_one_call_answers_with_the_documents_it_used(llm):
-    reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance": [IDS[1]]}
+def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(llm):
+    reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance_ids": NO_IDS}
     result = ask(llm, reply)
     assert result.answer == "Site 099 logged nothing unusual."
-    assert result.provenance == [IDS[1]]
+    assert result.provenance == NO_IDS
     assert (result.path, result.fallback) == ("direct", None)
     assert (result.turns, result.terminated_by) == ((), "reply")
     [request] = llm.requests
@@ -112,14 +150,14 @@ def test_on_the_direct_path_one_call_answers_with_the_documents_it_used(llm):
         {
             "role": "system",
             "content": load_prompt(
-                "reasoning/direct", version="v2", parse_block=json.dumps(ROWS, indent=2)
+                "reasoning/direct", version="v3", parse_block=json.dumps(ROWS, indent=2)
             ),
         },
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
 
 
-def test_the_direct_request_asks_for_the_answer_and_the_shown_documents_ids(llm):
+def test_the_direct_reply_cites_from_an_enum_of_summaries_and_one_of_parses_shown(llm):
     reasoning_prompt(llm, "direct", **TWO_DOCUMENTS)
     [request] = llm.requests
     response_format = request["response_format"]["json_schema"]
@@ -128,23 +166,136 @@ def test_the_direct_request_asks_for_the_answer_and_the_shown_documents_ids(llm)
         True,
     )
     schema = response_format["schema"]
-    assert schema["required"] == ["answer", "provenance"]
-    assert schema["properties"]["provenance"]["items"]["enum"] == IDS[:2]
-    assert "default" not in schema["properties"]["provenance"]
+    assert schema["required"] == ["answer", "provenance_ids"]
+    assert schema["$defs"]["ProvenanceIds"]["required"] == ["summary_ids", "parse_ids"]
+    lists = lists_of_ids(request)
+    summaries = [IDS[0], f"{IDS[1]}.1", f"{IDS[1]}.2"]
+    assert lists["summary_ids"]["items"]["enum"] == summaries
+    assert lists["parse_ids"]["items"]["enum"] == IDS[:2]
+    assert '"default"' not in json.dumps(schema)
 
 
-def test_a_direct_reply_without_provenance_cites_nothing(llm):
+@PATHS
+def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    cited = [IDS[1], f"{IDS[2]}.2"]
+    result = cite(llm, path, citing(path, summary_ids=cited), documents=THREE_DOCUMENTS)
+    assert result.provenance == {"summary_ids": [f"{IDS[2]}.2"], "parse_ids": []}
+    assert caplog.messages == [
+        (
+            f"{path} summary_ids: dropped provenance id(s) the call did not show: "
+            f"['{IDS[1]}']"
+        )
+    ]
+    if path == "direct":
+        enum = lists_of_ids(llm.requests[0])["summary_ids"]["items"]["enum"]
+        assert enum == [IDS[0], f"{IDS[2]}.1", f"{IDS[2]}.2"]
+
+
+@PATHS
+def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, path):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    cited = [IDS[2], IDS[1]]
+    result = cite(llm, path, citing(path, parse_ids=cited), documents=THREE_DOCUMENTS)
+    assert result.provenance == {"summary_ids": [], "parse_ids": [IDS[1]]}
+    assert caplog.messages == [
+        (
+            f"{path} parse_ids: dropped provenance id(s) the call did not show: "
+            f"['{IDS[2]}']"
+        )
+    ]
+    if path == "direct":
+        assert lists_of_ids(llm.requests[0])["parse_ids"]["items"]["enum"] == IDS[:2]
+
+
+@PATHS
+def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropped(
+    llm, caplog, path
+):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    unstamped = {"parsed": {"rows": [{"who": "Halloran"}]}, "document_ids": IDS[:1]}
+    reply = citing(path, summary_ids=[IDS[0]], parse_ids=[IDS[0]])
+    result = cite(llm, path, reply, documents=unstamped)
+    assert result.provenance == NO_IDS
+    assert caplog.messages == [
+        f"{path} {key}: dropped provenance id(s) the call did not show: ['{IDS[0]}']"
+        for key in ("summary_ids", "parse_ids")
+    ]
+    if path == "direct":
+        lists = lists_of_ids(llm.requests[0])
+        assert [lists[key]["items"] for key in lists] == [{"type": "string"}] * 2
+
+
+def test_a_direct_reply_without_provenance_ids_cites_nothing(llm):
     result = ask(llm, {"answer": "Halloran."})
     assert (result.answer, result.provenance, result.path) == (
         "Halloran.",
-        [],
+        NO_IDS,
         "direct",
     )
     assert len(llm.requests) == 1
 
 
+def test_a_commit_without_provenance_ids_cites_nothing(llm, caplog):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    result = cite(llm, "coding", committing(""))
+    assert (result.answer, result.provenance) == ("ok", NO_IDS)
+    assert caplog.messages == []
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        [IDS[0]],
+        {"summary_ids": IDS[0], "parse_ids": []},
+        {"summary_ids": [IDS[0]], "parse_ids": [7]},
+        IDS[0],
+    ],
+    ids=["a-list", "a-string-for-a-list", "a-number-for-an-id", "a-string"],
+)
+def test_provenance_ids_that_are_not_lists_of_ids_by_view_cite_nothing_with_a_warning(
+    llm, caplog, given
+):
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    result = cite(llm, "coding", committing(f", provenance_ids={given!r}"))
+    assert (result.answer, result.provenance) == ("ok", NO_IDS)
+    assert caplog.messages == [KEYS_WARNING.format(given)]
+
+
+def test_a_missing_list_cites_nothing_and_an_unknown_key_is_ignored(llm, caplog):
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    given = {"summary_ids": [IDS[0]], "documents": [IDS[1]]}
+    result = cite(llm, "coding", committing(f", provenance_ids={given!r}"))
+    assert result.provenance == {"summary_ids": [IDS[0]], "parse_ids": []}
+    assert caplog.messages == []
+
+
+def test_a_commit_may_pass_its_provenance_ids_second_by_position(llm):
+    given = {"summary_ids": [IDS[0]], "parse_ids": [IDS[1]]}
+    result = cite(llm, "coding", committing(f", {given!r}"))
+    assert (result.answer, result.provenance) == ("ok", given)
+
+
+def test_a_coding_v2_commit_still_answers_and_its_provenance_list_cites_nothing(
+    llm, caplog
+):
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    prompts = {**PROMPTS, "reasoning/coding": "v2"}
+    v2_style = committing(f", provenance=[{IDS[0]!r}]")
+    result = cite(llm, "coding", v2_style, prompts=prompts)
+    assert (result.answer, result.terminated_by) == ("ok", "final_answer")
+    assert result.provenance == NO_IDS
+    assert "final_answer(answer, provenance=[...])" in first_turn_prompts(llm)[0]
+    assert caplog.messages == [
+        (
+            "coding: ignored final_answer argument(s) other than provenance_ids: "
+            f"{{'provenance': ['{IDS[0]}']}}"
+        )
+    ]
+
+
 def test_an_empty_direct_reply_is_sent_again(llm):
-    result = ask(llm, "", {"answer": "Halloran.", "provenance": []})
+    result = ask(llm, "", {"answer": "Halloran.", "provenance_ids": NO_IDS})
     assert result.answer == "Halloran."
     first, again = llm.requests
     assert again["messages"] == first["messages"]
@@ -152,7 +303,9 @@ def test_an_empty_direct_reply_is_sent_again(llm):
 
 def test_an_empty_answer_is_sent_again_with_the_validators_error(llm, tmp_path):
     run = StageRun(stage="reasoning", task_logger=TaskLogger("run", root=tmp_path))
-    result = ask(llm, EMPTY_ANSWER, {"answer": "Halloran.", "provenance": []}, run=run)
+    result = ask(
+        llm, EMPTY_ANSWER, {"answer": "Halloran.", "provenance_ids": NO_IDS}, run=run
+    )
     assert result.answer == "Halloran."
     assert [step.kind for step in run.steps] == ["direct", "direct-retry-1"]
     first, again = llm.requests
@@ -178,8 +331,8 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
 ):
     monkeypatch.setattr(settings, "REASONING_PARSE_MAX_TOKS", flood_guard)
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    bad = [{"provenance": []}, "not JSON", EMPTY_ANSWER]
-    result = ask(llm, *bad, citing("coding", []))
+    bad = [{"provenance_ids": NO_IDS}, "not JSON", EMPTY_ANSWER]
+    result = ask(llm, *bad, citing("coding"))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback == {
         "cause": "invalid",
@@ -198,7 +351,7 @@ def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(
     llm, monkeypatch
 ):
     monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
-    result = ask(llm, "not JSON", "{", citing("coding", []))
+    result = ask(llm, "not JSON", "{", citing("coding"))
     assert result.fallback is not None and result.fallback["cause"] == "invalid"
     assert result.fallback["error"].startswith("reply: Invalid JSON")
     assert len(llm.requests) == 3
@@ -212,36 +365,41 @@ def test_fewer_than_one_attempt_is_refused_before_any_request(llm):
 
 @PATHS
 @pytest.mark.parametrize(
-    ("cited", "kept", "dropped"),
+    ("summary_ids", "parse_ids", "kept", "dropped"),
     [
-        ([IDS[1], IDS[0]], [IDS[1], IDS[0]], None),
-        ([IDS[1], IDS[0], IDS[1]], [IDS[1], IDS[0]], None),
-        ([f"{IDS[1]}.2", f"{IDS[1]}.1", IDS[0]], [IDS[1], IDS[0]], None),
         (
-            ["ffffff", IDS[0], "Document 2", "ffffff.2"],
-            [IDS[0]],
-            "['ffffff', 'Document 2', 'ffffff']",
+            [f"{IDS[1]}.2", IDS[0]],
+            [IDS[1], IDS[0]],
+            ([f"{IDS[1]}.2", IDS[0]], [IDS[1], IDS[0]]),
+            (None, None),
         ),
-        ([], [], None),
+        (
+            [IDS[0], IDS[0]],
+            [IDS[1], IDS[0], IDS[1]],
+            ([IDS[0]], [IDS[1], IDS[0]]),
+            (None, None),
+        ),
+        (
+            ["ffffff", IDS[1], f"{IDS[1]}.1"],
+            ["Document 2", f"{IDS[1]}.1", IDS[0]],
+            ([f"{IDS[1]}.1"], [IDS[0]]),
+            (f"['ffffff', '{IDS[1]}']", f"['Document 2', '{IDS[1]}.1']"),
+        ),
+        ([], [], ([], []), (None, None)),
     ],
-    ids=["in-order", "repeats", "parts", "unknown", "none"],
+    ids=["in-order", "repeats", "unshown", "none"],
 )
-def test_only_the_shown_documents_ids_are_kept_in_order_once_each(
-    llm, caplog, path, cited, kept, dropped
+def test_only_the_shown_ids_are_kept_in_order_once_each(
+    llm, caplog, path, summary_ids, parse_ids, kept, dropped
 ):
     caplog.set_level(logging.WARNING, logger="r3con.relevance")
-    result = reason(
-        task="?",
-        schema_code="",
-        model=MODEL,
-        prompts=PROMPTS,
-        path=path,
-        completion=llm.replies(citing(path, cited)),
-        **TWO_DOCUMENTS,
-    )
-    assert result.provenance == kept
-    warning = f"{path}: dropped provenance id(s) the call did not show: {dropped}"
-    assert caplog.messages == ([warning] if dropped else [])
+    result = cite(llm, path, citing(path, summary_ids, parse_ids))
+    assert result.provenance == {"summary_ids": kept[0], "parse_ids": kept[1]}
+    assert caplog.messages == [
+        f"{path} {key}: dropped provenance id(s) the call did not show: {ids}"
+        for key, ids in zip(("summary_ids", "parse_ids"), dropped, strict=True)
+        if ids
+    ]
 
 
 @pytest.mark.parametrize(
@@ -271,7 +429,7 @@ def test_records_from_a_document_without_an_id_are_refused_before_any_request(
 
 def test_a_coding_answer_at_the_turn_cap_cites_nothing(llm):
     result = ask(llm, PRINTS, "The answer is ok.", path="coding", max_turns=1)
-    assert (result.provenance, result.terminated_by) == ([], "max_turns")
+    assert (result.provenance, result.terminated_by) == (NO_IDS, "max_turns")
 
 
 @PATHS
@@ -343,21 +501,17 @@ def test_a_sample_view_shows_the_records_ids(llm, monkeypatch):
     assert NUMBERED.search(summaries(prompt)) is None
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
 def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
     llm, version
 ):
-    reason(
-        task="?",
-        schema_code="",
-        model=MODEL,
-        prompts={**PROMPTS, "reasoning/direct": version},
-        path="direct",
-        completion=llm.replies(citing("direct", [])),
-        **TWO_DOCUMENTS,
-    )
+    prompts = {**PROMPTS, "reasoning/direct": version}
+    reply = citing("direct", [f"{IDS[1]}.1"], [IDS[0]])
+    result = cite(llm, "direct", reply, prompts=prompts)
+    assert result.provenance == {"summary_ids": [f"{IDS[1]}.1"], "parse_ids": [IDS[0]]}
     [request] = llm.requests
     assert request["response_format"]["json_schema"]["name"] == "ReasoningAnswer"
+    assert list(lists_of_ids(request)) == ["summary_ids", "parse_ids"]
     assert (
         f"### Document ID: {IDS[0]}\nHalloran logged 5."
         in (request["messages"][0]["content"])
@@ -402,7 +556,7 @@ def test_a_small_parses_prompt_is_its_paths_template_with_the_parse_as_json(llm,
     }
     assert prompt == load_prompt(
         f"reasoning/{path}",
-        version="v2",
+        version="v3",
         relevance=render_relevance(notes, IDS[:2]),
         parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
     )
@@ -480,14 +634,14 @@ def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
     assert (SAMPLE in prompt) is not whole
     if whole:
         assert prompt == load_prompt(
-            "reasoning/coding", version="v2", parse_block=json.dumps(ROWS, indent=2)
+            "reasoning/coding", version="v3", parse_block=json.dumps(ROWS, indent=2)
         )
         assert caplog.messages == []
     else:
         assert caplog.messages == [
             (
                 "the whole parse (about 1,609 tokens) would put reasoning's first turn "
-                "at about 4,195 tokens, over the 3,400-token line; showing one sample "
+                "at about 4,412 tokens, over the 3,400-token line; showing one sample "
                 "record per field"
             )
         ]
@@ -497,7 +651,7 @@ def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_sample
     llm, caplog, refusal
 ):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    result = ask(llm, refusal(), PRINTS, citing("coding", []), path="coding")
+    result = ask(llm, refusal(), PRINTS, citing("coding"), path="coding")
     assert result.answer == "ok"
     whole, samples = first_turn_prompts(llm)
     assert LAST_ROW in whole and SAMPLE not in whole
@@ -522,7 +676,7 @@ def test_a_later_turn_refused_is_raised_as_it_is(llm, refusal):
 def test_a_first_turn_refused_with_samples_is_raised(llm, refusal):
     whole, samples = refusal(), refusal()
     with pytest.raises(litellm.ContextWindowExceededError) as failure:
-        reasoning_prompt(llm.replies(whole, samples, citing("coding", [])), parsed=ROWS)
+        reasoning_prompt(llm.replies(whole, samples, citing("coding")), parsed=ROWS)
     assert failure.value is samples
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
 
@@ -531,14 +685,14 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     llm, window, caplog
 ):
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
-    result = ask(llm, citing("coding", []), model=window(4_000))
+    result = ask(llm, citing("coding"), model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "estimate", "estimate": 3_913, "line": 3_400}
+    assert result.fallback == {"cause": "estimate", "estimate": 4_126, "line": 3_400}
     [request] = llm.requests
     assert SAMPLE in request["messages"][0]["content"]
     assert caplog.messages == [
         (
-            "reasoning's direct prompt would take about 3,913 tokens, over the "
+            "reasoning's direct prompt would take about 4,126 tokens, over the "
             "3,400-token line; reasoning with code instead"
         )
     ]
@@ -547,12 +701,12 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
 def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_samples(
     llm, caplog
 ):
-    # The direct request takes about 3,920 tokens, the coding one with samples 2,700.
+    # The direct request takes about 4,130 tokens, the coding one with samples 2,920.
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    result = ask(llm.refuses_over(tokens=3_000), citing("coding", []))
+    result = ask(llm.refuses_over(tokens=3_500), citing("coding"))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback is not None and result.fallback["cause"] == "refusal"
-    assert "maximum context length is 3000 tokens" in result.fallback["error"]
+    assert "maximum context length is 3500 tokens" in result.fallback["error"]
     direct, coding = (request["messages"][0]["content"] for request in llm.requests)
     assert "final_answer(" not in direct and LAST_ROW in direct
     assert "final_answer(" in coding and SAMPLE in coding and LAST_ROW not in coding

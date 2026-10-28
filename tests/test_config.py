@@ -18,11 +18,11 @@ DEFAULT_PROMPTS = {
     **PROMPTS,
     "relevance/later-rounds": "v2",
     "structuring/parsing": "v3",
-    "reasoning/direct": "v2",
-    CODING: "v2",
+    "reasoning/direct": "v3",
+    CODING: "v3",
 }
 DEFAULT_LABEL_PROMPTS = (
-    "prompts=(rel1=v1,rel2=v2,schema=v1,parse=v3,direct=v2,coding=v2)"
+    "prompts=(rel1=v1,rel2=v2,schema=v1,parse=v3,direct=v3,coding=v3)"
 )
 # The prompts the default config pinned before reasoning had two paths.
 OLD_DEFAULT_PROMPTS = {

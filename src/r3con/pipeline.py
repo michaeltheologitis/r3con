@@ -14,7 +14,8 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
    sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
-   fit the model's window). The answer cites the ids of the documents it used.
+   fit the model's window). The answer cites the summaries it used, and the documents
+   whose parsed records it used, by id.
 
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
@@ -71,7 +72,10 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
-    - ``provenance`` — the ids of the documents the answer used.
+    - ``provenance`` — the ids the answer used, by view: ``provenance["summary_ids"]``,
+      those of the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of
+      a document read in parts), and ``provenance["parse_ids"]``, those of the
+      documents whose records in ``structured_context`` it used. An id can be in both.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
@@ -116,7 +120,7 @@ class Answer:
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
-    provenance: list[str] = field(default_factory=list)
+    provenance: dict[str, list[str]] = field(default_factory=reasoning.cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
 

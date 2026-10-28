@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 
@@ -7,7 +8,6 @@ import yaml
 from r3con import settings
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
-from r3con.runtime.codeact import run_codeact
 from r3con.stages.reasoning import reason
 from r3con.stages.relevance import relevance_snippet
 from r3con.stages.structuring.parsing import check_schema, parse_one_document
@@ -35,11 +35,16 @@ def examples(stage: str) -> list:
     return [pytest.param(e["text"], id=e["name"]) for e in prompt["examples"]]
 
 
-def shown(example: str) -> tuple[list[str], dict]:
-    """An example's document ids, from its summaries' headings, and its parse."""
-    ids = re.findall(r"^### Document ID: (\w+)$", example, re.MULTILINE)
+def shown(example: str) -> dict:
+    """What an example shows, as ``reason`` takes it: its summaries, under their
+    document ids, and its parse."""
+    headed = re.findall(r"^### Document ID: (\w+)\n(.+)$", example, re.MULTILINE)
     parse = json.loads(example.split("`parse`:\n", 1)[1].split("\n\nThought:", 1)[0])
-    return ids, parse
+    return {
+        "relevance_snippets": [note for _, note in headed],
+        "document_ids": [id_ for id_, _ in headed],
+        "parsed": parse,
+    }
 
 
 def stamps(parse: dict) -> set[str]:
@@ -89,21 +94,24 @@ def test_the_coding_prompt_renders_as_the_old_reasoning_v2(context):
 
 @pytest.mark.parametrize("example", examples("reasoning/direct"))
 def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example):
-    ids, parse = shown(example)
-    assert stamps(parse) <= set(ids)
+    views = shown(example)
+    assert stamps(views["parsed"]) <= set(views["document_ids"])
     reply = json.loads(example.rsplit("\n", 1)[1])
     result = reason(
         task="?",
         schema_code="",
-        parsed=parse,
         model=MODEL,
         prompts=PINNED,
         path="direct",
-        document_ids=ids,
         completion=llm.replies(reply),
+        **views,
     )
-    assert set(reply) == {"answer", "provenance"}
-    assert (result.answer, result.provenance) == (reply["answer"], reply["provenance"])
+    assert set(reply) == {"answer", "provenance_ids"}
+    assert set(reply["provenance_ids"]) == {"summary_ids", "parse_ids"}
+    assert (result.answer, result.provenance) == (
+        reply["answer"],
+        reply["provenance_ids"],
+    )
     assert len(llm.requests) == 1
 
 
@@ -148,24 +156,28 @@ def test_each_later_rounds_example_replies_in_json_its_reply_schema_takes(llm, e
 
 @pytest.mark.parametrize("example", examples("reasoning/coding"))
 def test_each_coding_example_runs_and_commits_ids_it_shows(llm, example):
-    ids, parse = shown(example)
-    assert stamps(parse) <= set(ids)
+    views = shown(example)
+    assert stamps(views["parsed"]) <= set(views["document_ids"])
     turns = re.findall(r"^Thought:.*?</code>", example, re.MULTILINE | re.DOTALL)
     printed = re.findall(
         r"^<observation>\n(.*?)\n</observation>$", example, re.MULTILINE | re.DOTALL
     )
-    result = run_codeact(
-        system_prompt="",
-        user_message="",
+    committed = re.search(r"provenance_ids=(\{.*\})\)\n</code>$", example)
+    result = reason(
+        task="?",
+        schema_code="",
         model=MODEL,
-        variables={"parse": parse},
+        prompts=PINNED,
+        path="coding",
         completion=llm.replies(*turns),
+        **views,
     )
     assert (result.terminated_by, len(result.turns)) == ("final_answer", len(turns))
     assert [turn.observation for turn in result.turns[:-1]] == [
         f"<observation>\n{text}\n\n</observation>" for text in printed
     ]
-    assert result.provenance and set(result.provenance) <= set(ids)
+    assert committed is not None
+    assert result.provenance == ast.literal_eval(committed[1])
 
 
 def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):
