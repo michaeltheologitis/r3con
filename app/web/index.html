@@ -1,0 +1,2036 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>r3con Run Panel</title>
+<style>
+/* Layout: a terminal window. The run panel (a pannable canvas) fills the left, a 46ch column on the
+   right holds the chat and the files tab; on phones the panel stacks above that column. */
+:root {
+  --bg: #fcfbfa;
+  --panel: #f4f2ef;
+  --fg: #1f1e1c;
+  --dim: #736b62;
+  --line: #e5e0d9;
+  --code: #f0ece7;
+  --accent: #c15f3c;
+  --ok: #3f7d4e;
+  --err: #b1452f;
+  --warn: #8f6113;
+  --fill-a: #ebc3b2;
+  --fill-b: #ecd59f;
+  --fill-c: #c1ccd5;
+  --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
+  --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1a1918;
+    --panel: #141312;
+    --fg: #e8e5e1;
+    --dim: #968e84;
+    --line: #2e2b28;
+    --code: #232120;
+    --accent: #d77757;
+    --ok: #7fb38a;
+    --err: #e2806d;
+    --warn: #d6a54c;
+    --fill-a: #7c4936;
+    --fill-b: #78642f;
+    --fill-c: #4b5862;
+    --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #1a1918;
+  --panel: #141312;
+  --fg: #e8e5e1;
+  --dim: #968e84;
+  --line: #2e2b28;
+  --code: #232120;
+  --accent: #d77757;
+  --ok: #7fb38a;
+  --err: #e2806d;
+  --warn: #d6a54c;
+  --fill-a: #7c4936;
+  --fill-b: #78642f;
+  --fill-c: #4b5862;
+  --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13.5px/1.55 var(--font);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+p { margin: 0; }
+:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+.btn {
+  font: inherit;
+  color: var(--dim);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.btn:hover { color: var(--fg); }
+.k, .dim { color: var(--dim); }
+.ok { color: var(--ok); }
+.err { color: var(--err); }
+.flag { color: var(--warn); }
+.vh {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.vh:focus-visible + label { outline: 1px solid var(--accent); outline-offset: 2px; }
+.probe { position: absolute; visibility: hidden; white-space: pre; }
+
+/* ---- frame ---- */
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 16px;
+}
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 2ch;
+  min-width: 0;
+  padding-block: 0.65em;
+}
+.brand { color: var(--accent); font-weight: 600; white-space: nowrap; }
+.status {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.top-actions { display: flex; gap: 2ch; }
+.frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46ch;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+@media (max-width: 760px) {
+  .frame {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 55fr) minmax(0, 45fr);
+  }
+  .side { border-left: 0 !important; border-top: 1px solid var(--line); }
+}
+
+/* ---- panel ---- */
+.panel {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--panel);
+  touch-action: none;
+  cursor: grab;
+}
+.panel.panning { cursor: grabbing; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; user-select: none; -webkit-user-select: none; }
+.world.glide { transition: transform 0.35s ease; }
+.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.edge {
+  fill: none;
+  stroke: var(--dim);
+  stroke-width: calc(1px / var(--k, 1));
+  transition: opacity 0.4s, stroke 0.4s, stroke-width 0.4s;
+}
+.edge.context { opacity: 0.16; }
+.edge.self { opacity: 0.5; stroke-dasharray: calc(2px / var(--k, 1)) calc(3px / var(--k, 1)); }
+.edge.flow { opacity: 0.5; }
+.edge.cite { opacity: 0.85; }
+.edge.hl { opacity: 0.9; stroke: var(--fg); }
+.panel.is-lit .edge { opacity: 0.07; }
+.panel.is-lit .edge.hl { opacity: 0.55; }
+.panel.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
+.edge.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s ease-out forwards; }
+.edge.fade { animation: fade 0.6s ease-out; }
+
+.node {
+  position: absolute;
+  translate: -50% -14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 0.5ch;
+  color: var(--dim);
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: opacity 0.4s;
+}
+.node.enter { animation: node-in 0.35s ease-out; }
+.node .icon { width: 28px; height: 28px; color: var(--fg); transition: color 0.4s; }
+.node .icon svg { display: block; width: 28px; height: 28px; overflow: visible; }
+.node .label { line-height: 1.5; }
+.node .spin { position: absolute; top: -0.7em; left: calc(50% + 12px); color: var(--accent); display: none; }
+.node.working .spin { display: block; }
+.node.working .icon { color: var(--dim); }
+.node.void { opacity: 0.45; }
+.node:hover .label, .node.selected .label { color: var(--fg); }
+.node.selected .name { font-weight: 600; }
+.node.answer .icon {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  font-size: 26px;
+  line-height: 1;
+}
+.panel.is-lit .node { opacity: 0.3; }
+.panel.is-lit .node.on-path { opacity: 1; }
+.panel.is-lit .node.on-path .icon { color: var(--accent); }
+.panel.is-lit .node.on-path .label { color: var(--fg); }
+.f-a { fill: var(--fill-a); }
+.f-b { fill: var(--fill-b); }
+.f-c { fill: var(--fill-c); }
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.2em;
+  padding: 0 2ch;
+  text-align: center;
+  color: var(--dim);
+  pointer-events: none;
+}
+.empty strong { color: var(--fg); font-weight: 600; }
+.panel-tools {
+  position: absolute;
+  left: 1.5ch;
+  bottom: 0.7em;
+  display: flex;
+  gap: 2ch;
+  color: var(--dim);
+}
+
+.inspector {
+  position: absolute;
+  z-index: 5;
+  width: min(54ch, calc(100% - 20px));
+  max-height: calc(100% - 20px);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75em;
+  padding: 0.9em 2ch 1em;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  cursor: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+}
+.inspector.wide { width: min(84ch, calc(100% - 20px)); }
+.inspector > .btn { align-self: flex-start; }
+.insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
+.insp-title { font-weight: 600; overflow-wrap: anywhere; }
+.insp-title .g { color: var(--fg); }
+.insp-title .g.accent { color: var(--accent); }
+.insp-text { overflow-wrap: anywhere; }
+.insp-text.strong { font-weight: 600; }
+.row { overflow-wrap: anywhere; }
+.row > .k:first-child { margin-right: 1ch; }
+.ref {
+  font: inherit;
+  color: var(--fg);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--line);
+  text-underline-offset: 3px;
+}
+.ref:hover { text-decoration-color: var(--fg); }
+.records { display: flex; flex-direction: column; gap: 0.15em; }
+.rec { padding-left: 2ch; overflow-wrap: anywhere; }
+.code {
+  margin: 0;
+  padding: 0.7em 1.5ch;
+  overflow: auto;
+  font: inherit;
+  white-space: pre;
+  tab-size: 4;
+  background: var(--code);
+  border-radius: 4px;
+}
+.code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- side column ---- */
+.side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+  border-left: 1px solid var(--line);
+}
+.tabs {
+  display: flex;
+  gap: 3ch;
+  padding: 0.6em 2ch;
+  border-bottom: 1px solid var(--line);
+}
+.tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
+.tab .count { color: var(--dim); font-weight: 400; }
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.6em 2ch 1em;
+  display: flex;
+  flex-direction: column;
+}
+.turn, .turn-body { display: flex; flex-direction: column; }
+.line {
+  display: grid;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  align-items: start;
+  width: 100%;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+.line.main, .line.answer, .line.spin { margin-top: 0.55em; }
+.line.sub { padding-left: 2ch; color: var(--dim); }
+.line.dim { color: var(--dim); }
+.line.link { cursor: pointer; }
+.line.link:hover { color: var(--fg); }
+.line.user {
+  margin-top: 0.9em;
+  padding: 0.3em 1ch;
+  grid-template-columns: 2ch minmax(0, 1fr);
+  background: var(--panel);
+  border-radius: 4px;
+}
+.line.user .g { color: var(--dim); }
+.line.answer .g { color: var(--accent); }
+.line.answer .t { font-weight: 600; }
+.line.spin { color: var(--dim); }
+.line.spin .g { color: var(--accent); }
+
+.ask {
+  margin: 0 2ch;
+  padding: 0.55em 1.5ch 0.45em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3em;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.ask:focus-within { border-color: var(--accent); }
+.prompt { position: relative; }
+.prompt .caret { position: absolute; left: 0; top: 0; color: var(--dim); }
+.ask:focus-within .caret { color: var(--accent); }
+.prompt:has(textarea:placeholder-shown) .caret { visibility: hidden; }
+#question {
+  display: block;
+  width: 100%;
+  min-height: calc(1.55em * 2);
+  max-height: calc(1.55em * 6);
+  field-sizing: content;
+  padding: 0 0 0 2ch;
+  font: inherit;
+  color: var(--fg);
+  background: none;
+  border: 0;
+  outline: none;
+  resize: none;
+}
+#question:placeholder-shown { padding-left: 0; }
+#question::placeholder { color: var(--dim); opacity: 1; }
+.ask-foot { display: flex; justify-content: space-between; gap: 2ch; color: var(--dim); }
+.ask-foot span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-btn { font-weight: 600; }
+.note { padding: 0.5em 2ch 0.7em; color: var(--dim); }
+
+.files {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.9em 2ch 1em;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9em;
+}
+.file-list { list-style: none; margin: 0; padding: 0; }
+.file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2ch;
+  width: 100%;
+  padding: 0.05em 0;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file .size { color: var(--dim); }
+.file:hover .name { text-decoration: underline; text-decoration-color: var(--dim); text-underline-offset: 3px; }
+.file-actions { display: flex; flex-wrap: wrap; gap: 0.3em 3ch; }
+.file-actions label { cursor: pointer; }
+.drop-hint {
+  padding: 0.9em 2ch;
+  color: var(--dim);
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+}
+.file-view { gap: 0.7em; }
+.file-view .back { align-self: flex-start; }
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: none;
+  place-items: center;
+  color: var(--accent);
+  background: var(--bg);
+  opacity: 0.94;
+  border: 1px dashed var(--accent);
+  pointer-events: none;
+}
+.side.dropping .drop-overlay { display: grid; }
+
+@keyframes node-in { from { opacity: 0; scale: 0.8; } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes fade { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <span class="brand">✻ r3con</span>
+    <span class="status" id="run-status" aria-live="polite"></span>
+    <nav class="top-actions" aria-label="Run controls">
+      <button class="btn" id="replay-btn" type="button" hidden>replay</button>
+      <button class="btn" id="theme-btn" type="button">theme · light</button>
+    </nav>
+  </header>
+
+  <div class="frame">
+    <main class="panel" id="panel" aria-label="Run panel">
+      <div class="world" id="world">
+        <svg class="edges" aria-hidden="true">
+          <g id="layer-base"></g>
+          <g id="layer-mid"></g>
+          <g id="layer-lit"></g>
+        </svg>
+        <div id="nodes"></div>
+      </div>
+      <div class="empty" id="empty">
+        <strong id="empty-count"></strong>
+        <span id="empty-hint"></span>
+      </div>
+      <div class="panel-tools">
+        <button class="btn" id="fit-btn" type="button">fit</button>
+        <span id="zoom-level">100%</span>
+      </div>
+      <div class="inspector" id="inspector" role="dialog" aria-label="Details" tabindex="-1" hidden></div>
+    </main>
+
+    <aside class="side" id="side">
+      <div class="tabs" role="tablist" aria-label="Chat and files">
+        <button class="btn tab" id="tab-chat" type="button" role="tab" aria-selected="true" aria-controls="chat-pane">chat</button>
+        <button class="btn tab" id="tab-files" type="button" role="tab" aria-selected="false" aria-controls="files-pane">files <span class="count" id="files-count"></span></button>
+      </div>
+
+      <section class="pane" id="chat-pane" role="tabpanel" aria-labelledby="tab-chat">
+        <div class="transcript" id="transcript" aria-live="polite"></div>
+        <form class="ask" id="ask-form">
+          <div class="prompt">
+            <span class="caret" aria-hidden="true">›</span>
+            <textarea id="question" name="question" rows="2" placeholder="› ask about your documents" aria-label="Ask about your documents"></textarea>
+          </div>
+          <div class="ask-foot">
+            <span id="ask-mode"></span>
+            <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="pane" id="files-pane" role="tabpanel" aria-labelledby="tab-files" hidden>
+        <div class="files" id="file-list-view">
+          <div class="dim" id="files-head"></div>
+          <ul class="file-list" id="file-list"></ul>
+          <div class="file-actions">
+            <input class="vh" id="file-input" type="file" multiple>
+            <label class="btn" for="file-input">+ add files</label>
+            <input class="vh" id="folder-input" type="file" webkitdirectory multiple>
+            <label class="btn" for="folder-input">+ add folder</label>
+            <button class="btn" id="sample-btn" type="button" hidden>use the sample memos</button>
+          </div>
+          <div class="drop-hint">or drop files and folders here</div>
+          <p class="err" id="files-error" hidden></p>
+        </div>
+        <div class="files file-view" id="file-view" hidden></div>
+      </section>
+
+      <p class="note">prototype · replays one recorded run</p>
+      <div class="drop-overlay" aria-hidden="true">drop to add files</div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const SAMPLE = {
+ "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many? Give the contractor's name, not its code.",
+ "model": "gpt-6-luna",
+ "version": "0.4.0",
+ "runFolder": "20261028T135104Z_96fe324b",
+ "created": "2026-10-28T13:51:04+00:00",
+ "docs": [
+  {
+   "name": "01_northgate.txt",
+   "text": "MEMO — Northgate site, Q3 operations review\n\nEquipment incidents logged this quarter: 5.\nThree were conveyor stoppages, two were HVAC trips.\nPlanned maintenance at this site is carried out under contractor code CT-118.\nSite manager: Dana Reyes.\n",
+   "size": 247
+  },
+  {
+   "name": "02_eastfield.txt",
+   "text": "MEMO — Eastfield site, Q3 operations review\n\nEquipment incidents logged this quarter: 9.\nMostly compressor faults, clustered in August.\nPlanned maintenance at this site is carried out under contractor code CT-204.\nSite manager: Sam Okafor.\n",
+   "size": 242
+  },
+  {
+   "name": "03_riverside.txt",
+   "text": "MEMO — Riverside site, Q3 operations review\n\nEquipment incidents logged this quarter: 6.\nFour were electrical, two were water ingress after the storm in September.\nPlanned maintenance at this site is carried out under contractor code CT-118.\nSite manager: Priya Raman.\n",
+   "size": 271
+  },
+  {
+   "name": "04_contractor_registry.txt",
+   "text": "APPROVED CONTRACTOR REGISTRY (extract, revised July)\n\nCT-118 .... Halloran Services Ltd — mechanical and electrical maintenance\nCT-204 .... Merrow Facilities Group — HVAC and compressed air\nCT-311 .... Bellweather Grounds — landscaping (seasonal)\n\nCodes are used in site paperwork; the registry is the authority for the mapping.\n",
+   "size": 335
+  },
+  {
+   "name": "05_cafeteria.txt",
+   "text": "MEMO — Cafeteria refurbishment, phase 2\n\nThe serving counter will be replaced during the October shutdown. Seating\ncapacity rises from 60 to 82. Catering staff should expect two weeks of\nreduced service. No impact on production areas.\n",
+   "size": 237
+  }
+ ],
+ "r1": [
+  {
+   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies the maintenance contractor only by code CT-118; it does not give the contractor’s name.",
+   "provenance": []
+  },
+  {
+   "summary": "A Q3 operations memo for the Eastfield site. It reports 9 equipment incidents, with planned maintenance handled by contractor code CT-204; it does not give the contractor’s name.",
+   "provenance": []
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118; it does not give the contractor’s name.",
+   "provenance": []
+  },
+  {
+   "summary": "An approved contractor registry extract mapping site-paperwork codes to contractor names. Relevant to the task, CT-118 is Halloran Services Ltd and CT-204 is Merrow Facilities Group; it provides no equipment-incident counts or Q3 totals.",
+   "provenance": []
+  },
+  {
+   "summary": "A cafeteria refurbishment memo describing an October serving-counter replacement and temporary reduced service. It provides no information about maintenance contractors or Q3 equipment incidents.",
+   "provenance": []
+  }
+ ],
+ "r2": [
+  {
+   "summary": "A Northgate Q3 operations memo reports 5 equipment incidents and identifies maintenance contractor code CT-118, which the registry maps to Halloran Services Ltd. These 5 incidents contribute to that contractor’s Q3 total.",
+   "provenance": [
+    3
+   ]
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204, which the contractor registry maps to Merrow Facilities Group.",
+   "provenance": [
+    3
+   ]
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Riverside site. It logs 6 equipment incidents and identifies the maintenance contractor as CT-118, which the contractor registry maps to Halloran Services Ltd; these 6 incidents contribute to that contractor’s total.",
+   "provenance": [
+    3
+   ]
+  },
+  {
+   "summary": "An approved contractor registry mapping site-paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group, providing the authoritative name mapping for the Q3 incident records.",
+   "provenance": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "summary": "",
+   "provenance": []
+  }
+ ],
+ "schema": {
+  "code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count for a stated period.\"\"\"\n    site: str | None = Field(default=None, description=\"The site named in the report\")\n    period: str | None = Field(default=None, description=\"The reporting period, as stated\")\n    incident_type: str | None = Field(default=None, description=\"The type of incidents counted, as stated\")\n    incident_count: int | None = Field(default=None, description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(default=None, description=\"The maintenance contractor code associated with the incidents\")\n    contractor_name: str | None = Field(default=None, description=\"The contractor name, if stated in the report\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A contractor-code-to-name mapping stated in a registry or other document.\"\"\"\n    contractor_code: str | None = Field(default=None, description=\"The contractor code\")\n    contractor_name: str | None = Field(default=None, description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
+  "thought": "The answer requires summing Q3 equipment-incident counts across site reports by contractor, then resolving contractor codes to names. Separate report facts from registry mappings so each document can be parsed independently and the totals computed downstream."
+ },
+ "parsed": [
+  [
+   {
+    "field": "equipment_incident_reports",
+    "record": {
+     "site": "Northgate",
+     "period": "Q3",
+     "incident_type": "equipment incidents",
+     "incident_count": 5,
+     "contractor_code": "CT-118",
+     "contractor_name": null
+    }
+   }
+  ],
+  [
+   {
+    "field": "equipment_incident_reports",
+    "record": {
+     "site": "Eastfield",
+     "period": "Q3",
+     "incident_type": "equipment incidents",
+     "incident_count": 9,
+     "contractor_code": "CT-204",
+     "contractor_name": null
+    }
+   }
+  ],
+  [
+   {
+    "field": "equipment_incident_reports",
+    "record": {
+     "site": "Riverside",
+     "period": "Q3",
+     "incident_type": "equipment incidents",
+     "incident_count": 6,
+     "contractor_code": "CT-118",
+     "contractor_name": null
+    }
+   }
+  ],
+  [
+   {
+    "field": "contractor_mappings",
+    "record": {
+     "contractor_code": "CT-118",
+     "contractor_name": "Halloran Services Ltd"
+    }
+   },
+   {
+    "field": "contractor_mappings",
+    "record": {
+     "contractor_code": "CT-204",
+     "contractor_name": "Merrow Facilities Group"
+    }
+   },
+   {
+    "field": "contractor_mappings",
+    "record": {
+     "contractor_code": "CT-311",
+     "contractor_name": "Bellweather Grounds"
+    }
+   }
+  ],
+  []
+ ],
+ "answer": {
+  "text": "Halloran Services Ltd's sites logged the most equipment incidents in Q3, with 11 in total.",
+  "cites": [
+   0,
+   2,
+   1,
+   3
+  ]
+ },
+ "calls": {
+  "r1-4": {
+   "step": 1,
+   "tokens": 832,
+   "usd": 0.000106
+  },
+  "r1-0": {
+   "step": 2,
+   "tokens": 869,
+   "usd": 0.0001237
+  },
+  "r1-3": {
+   "step": 3,
+   "tokens": 891,
+   "usd": 0.0001283
+  },
+  "r1-2": {
+   "step": 4,
+   "tokens": 881,
+   "usd": 0.00012849999999999998
+  },
+  "r1-1": {
+   "step": 5,
+   "tokens": 870,
+   "usd": 0.0001246
+  },
+  "r2-4": {
+   "step": 6,
+   "tokens": 1340,
+   "usd": 0.000186175
+  },
+  "r2-0": {
+   "step": 7,
+   "tokens": 1513,
+   "usd": 0.0002768
+  },
+  "r2-2": {
+   "step": 8,
+   "tokens": 1580,
+   "usd": 0.0003073
+  },
+  "r2-1": {
+   "step": 9,
+   "tokens": 1479,
+   "usd": 0.000259425
+  },
+  "r2-3": {
+   "step": 10,
+   "tokens": 1586,
+   "usd": 0.00030992499999999996
+  },
+  "parsed-0": {
+   "step": 1,
+   "tokens": 1816,
+   "usd": 0.00026705
+  },
+  "parsed-4": {
+   "step": 2,
+   "tokens": 1739,
+   "usd": 3.978e-05
+  },
+  "parsed-1": {
+   "step": 3,
+   "tokens": 1813,
+   "usd": 7.640500000000001e-05
+  },
+  "parsed-2": {
+   "step": 4,
+   "tokens": 1827,
+   "usd": 8.190500000000001e-05
+  },
+  "parsed-3": {
+   "step": 5,
+   "tokens": 1819,
+   "usd": 7.303e-05
+  },
+  "schema": {
+   "step": 1,
+   "tokens": 2591,
+   "usd": 0.00060805
+  },
+  "answer": {
+   "step": 1,
+   "tokens": 3028,
+   "usd": 0.00042192499999999997
+  }
+ },
+ "totals": {
+  "tokens": 26474,
+  "usd": 0.00351887
+ }
+};
+
+  // Replay timing, in milliseconds. A stage's nodes appear one by one, then settle in the order the
+  // recorded run finished them.
+  const TIMING = {
+    start: 300,
+    appearStagger: 260,
+    settleFirst: 900,
+    settleStagger: 380,
+    minSettleGap: 150,
+    minWork: 500,
+    maxStageSpread: 1600,
+    phaseGap: 450,
+    schemaWork: 1400,
+    answerWork: 1700,
+    litDelay: 650,
+    followUpDelay: 700,
+  };
+  const SPIN_FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+  const SPIN_FRAME_MS = 110;
+
+  const GRID = { colGap: 210, rowGap: 100 };
+  const COLUMN = { r1: 0, r2: 1, schema: 2, parsed: 3, answer: 4 };
+  const ICON_HALF = 14;
+  const EDGE_GAP = 6;
+  const MIN_CURVE = 40;
+  const BOW = 44;
+  const LABEL_MAX = 24;
+  const LABEL_LINE_PX = 21;
+  const NODE_PAD_PX = 12;
+  const ZOOM = { min: 0.25, max: 2.5, fitMax: 1.15 };
+  const FIT_MARGIN = 28;
+  const WHEEL_ZOOM_RATE = 0.004;
+  const WHEEL_LINE_PX = 16;
+  const DRAG_THRESHOLD = 4;
+  const POPOVER_GAP = 12;
+  const POPOVER_MARGIN = 10;
+  const JUMP_MARGIN = 40;
+  const GLIDE_MS = 350;
+
+  const SUMMARY_CHARS = 140;
+  const EXCERPT_CHARS = 60;
+  const READ_BYTES = 20000;
+  const MAX_FILES = 40;
+  const MAX_SIMULATED_CITES = 4;
+  const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
+  const SIMULATED_SCHEMA = [
+    '# simulated — not connected to r3con yet',
+    'from pydantic import BaseModel',
+    '',
+    'class Excerpt(BaseModel):',
+    '    source: str',
+    '    excerpt: str',
+    '',
+    'class Parse(BaseModel):',
+    '    excerpts: list[Excerpt]',
+  ].join('\n');
+  const THEME_KEY = 'r3con-proto-theme';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  const ICONS = {
+    snippet: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M15.5 4.75h2.3a2 2 0 0 1 1.46.63l5.17 5.55a2 2 0 0 1 .54 1.37V25.5a2.5 2.5 0 0 1-2.5 2.5H10a2.5 2.5 0 0 1-2.5-2.5v-9"/>
+      <path d="M18.75 5.25V9.5a1.5 1.5 0 0 0 1.5 1.5h4.5"/>
+      <path d="M11.75 16.25h9M11.75 19.5h9M15.75 22.75h5"/>
+      <path d="M9 2.8c.45 3.15 1.25 3.95 4.4 4.4-3.15.45-3.95 1.25-4.4 4.4-.45-3.15-1.25-3.95-4.4-4.4 3.15-.45 3.95-1.25 4.4-4.4z" fill="currentColor" stroke-width="1"/>
+    </svg>`,
+    tree: (filled) => {
+      const f = (cls) => (filled ? ` class="${cls}"` : '');
+      return `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
+        <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
+        <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('f-b')}/>
+        <circle cx="7.8" cy="12" r="2.5"${f('f-a')}/>
+        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('f-a')}/>
+        <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
+        <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
+        <circle cx="23.6" cy="19.1" r="2.6"${f('f-b')}/>
+        <circle cx="18.4" cy="27.5" r="2.3"${f('f-c')}/>
+        <circle cx="23.6" cy="27.5" r="2.3"${f('f-c')}/>
+        <circle cx="28.8" cy="27.5" r="2.3"${f('f-c')}/>
+      </svg>`;
+    },
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const root = document.documentElement;
+  const panel = $('panel');
+  const world = $('world');
+  const nodesLayer = $('nodes');
+  const layers = { base: $('layer-base'), mid: $('layer-mid'), lit: $('layer-lit') };
+  const inspector = $('inspector');
+  const transcript = $('transcript');
+  const questionEl = $('question');
+  const side = $('side');
+
+  const state = {
+    files: SAMPLE.docs.map((d) => ({ ...d, sample: true })),
+    filesAreSample: true,
+    filesDirty: true,
+    run: null,
+    runTurn: null,
+    nodes: new Map(),
+    edges: new Map(),
+    timers: [],
+    selected: null,
+    hovered: null,
+    userMoved: false,
+    planned: null,
+  };
+  const view = { x: 0, y: 0, k: 1 };
+
+  // ---------- small helpers ----------
+
+  function h(tag, props = {}, ...children) {
+    const el = document.createElement(tag);
+    for (const [key, value] of Object.entries(props)) {
+      if (value == null || value === false) continue;
+      if (key === 'class') el.className = value;
+      else if (key === 'html') el.innerHTML = value;
+      else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
+      else el.setAttribute(key, value === true ? '' : value);
+    }
+    el.append(...children.flat(Infinity).filter((c) => c != null && c !== false));
+    return el;
+  }
+
+  function fill(el, ...children) {
+    el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+  }
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  const fmtInt = (n) => n.toLocaleString('en-US');
+  const fmtUsd = (n) => `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(2)}`;
+  const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
+  const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
+  const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function excerpt(text, max) {
+    const flat = text.replace(/\s+/g, ' ').trim();
+    if (flat.length <= max) return flat;
+    const cut = flat.slice(0, max);
+    const space = cut.lastIndexOf(' ');
+    return `${space > max * 0.6 ? cut.slice(0, space) : cut}…`;
+  }
+
+  function splitId(id) {
+    const [kind, doc] = id.split('-');
+    return [kind, doc === undefined ? null : Number(doc)];
+  }
+
+  function docLabel(run, i) {
+    return stripExt(run.docs[i].name);
+  }
+
+  function nodeName(id) {
+    const [kind, d] = splitId(id);
+    if (kind === 'schema') return 'structure';
+    if (kind === 'answer') return 'answer';
+    const label = docLabel(state.run, d);
+    if (kind === 'r2') return `${label} · round 2`;
+    if (kind === 'parsed') return `${label} · parsed`;
+    return label;
+  }
+
+  function titleName(id) {
+    return splitId(id)[0] === 'r1' ? `${nodeName(id)} · round 1` : nodeName(id);
+  }
+
+  function schemaClasses(code) {
+    return [...code.matchAll(/class (\w+)\(BaseModel\)/g)].map((m) => m[1]).filter((c) => c !== 'Parse');
+  }
+
+  // ---------- spinner ----------
+
+  let spinFrame = 0;
+  setInterval(() => {
+    if (reduceMotion()) return;
+    spinFrame = (spinFrame + 1) % SPIN_FRAMES.length;
+    for (const el of document.querySelectorAll('.spin-glyph')) el.textContent = SPIN_FRAMES[spinFrame];
+  }, SPIN_FRAME_MS);
+
+  // ---------- runs ----------
+
+  function sampleRun() {
+    const finishOrder = (prefix) =>
+      range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
+    return {
+      simulated: false,
+      question: SAMPLE.question,
+      docs: state.files,
+      r1: SAMPLE.r1,
+      r2: SAMPLE.r2,
+      schema: SAMPLE.schema,
+      parsed: SAMPLE.parsed,
+      answer: SAMPLE.answer,
+      calls: SAMPLE.calls,
+      totals: SAMPLE.totals,
+      model: SAMPLE.model,
+      order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
+    };
+  }
+
+  function madeUpCitations(i, n) {
+    if (n < 2) return [];
+    const cites = [(i + 1) % n];
+    if (i % 3 === 0 && n > 2) cites.push((i + 2) % n);
+    return cites;
+  }
+
+  function simulatedRun(files, question) {
+    const n = files.length;
+    const order = range(n);
+    const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
+    return {
+      simulated: true,
+      question,
+      docs: files,
+      r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
+      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUpCitations(i, n) })),
+      schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
+      parsed: files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [])),
+      answer: {
+        text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
+        cites: order.filter((i) => i % 2 === 0).slice(0, MAX_SIMULATED_CITES),
+      },
+      calls: null,
+      totals: null,
+      model: null,
+      order: { r1: order, r2: order, parsed: order },
+    };
+  }
+
+  function runSummary(run) {
+    if (run.simulated) return 'simulated run · nothing was sent to a model';
+    return `recorded run · ${run.model} · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
+  }
+
+  function criticalPath(run) {
+    const nodes = new Set(['answer']);
+    const edges = new Set();
+    for (const d of run.answer.cites) {
+      nodes.add(`parsed-${d}`).add(`r2-${d}`);
+      edges.add(`parsed-${d}>answer`).add(`r2-${d}>parsed-${d}`);
+      for (const p of run.r2[d].provenance) {
+        nodes.add(`r1-${p}`);
+        edges.add(`r1-${p}>r2-${d}`);
+      }
+    }
+    return { nodes, edges };
+  }
+
+  // ---------- panel: view ----------
+
+  function applyView() {
+    world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.k})`;
+    world.style.setProperty('--k', view.k);
+    $('zoom-level').textContent = `${Math.round(view.k * 100)}%`;
+    positionInspector();
+  }
+
+  function glide() {
+    if (reduceMotion()) return;
+    world.classList.add('glide');
+    setTimeout(() => world.classList.remove('glide'), GLIDE_MS);
+  }
+
+  function zoomAt(px, py, k) {
+    const next = clamp(k, ZOOM.min, ZOOM.max);
+    const wx = (px - view.x) / view.k;
+    const wy = (py - view.y) / view.k;
+    view.k = next;
+    view.x = px - wx * next;
+    view.y = py - wy * next;
+    applyView();
+  }
+
+  function charWidth() {
+    const probe = h('span', { class: 'probe' }, '0'.repeat(20));
+    document.body.append(probe);
+    const width = probe.getBoundingClientRect().width / 20;
+    probe.remove();
+    return width || 8;
+  }
+
+  function plannedPosition(kind, doc, n) {
+    const row = kind === 'schema' ? 0 : kind === 'answer' ? (n - 1) / 2 : doc;
+    return { x: COLUMN[kind] * GRID.colGap, y: row * GRID.rowGap };
+  }
+
+  function plannedBounds(run) {
+    const cw = charWidth();
+    const widest = Math.max('structure'.length, ...run.docs.map((d) => shortLabel(stripExt(d.name)).length)) * cw + NODE_PAD_PX;
+    const rows = Math.max(run.docs.length, 1);
+    return {
+      minX: -widest / 2,
+      maxX: Math.max(COLUMN.parsed * GRID.colGap + widest / 2, COLUMN.answer * GRID.colGap + 4 * cw),
+      minY: -BOW,
+      maxY: (rows - 1) * GRID.rowGap + ICON_HALF + 2 * LABEL_LINE_PX,
+    };
+  }
+
+  function contentBounds() {
+    const b = { ...(state.planned ?? { minX: 0, maxX: 1, minY: 0, maxY: 1 }) };
+    for (const n of state.nodes.values()) {
+      const halfW = n.el.offsetWidth / 2;
+      b.minX = Math.min(b.minX, n.x - halfW);
+      b.maxX = Math.max(b.maxX, n.x + halfW);
+      b.minY = Math.min(b.minY, n.y - ICON_HALF);
+      b.maxY = Math.max(b.maxY, n.y - ICON_HALF + n.el.offsetHeight);
+    }
+    return b;
+  }
+
+  function fit(animate = false) {
+    const pw = panel.clientWidth;
+    const ph = panel.clientHeight;
+    if (!pw || !ph) return;
+    const b = contentBounds();
+    const bw = Math.max(1, b.maxX - b.minX);
+    const bh = Math.max(1, b.maxY - b.minY);
+    const k = clamp(Math.min((pw - 2 * FIT_MARGIN) / bw, (ph - 2 * FIT_MARGIN) / bh), ZOOM.min, ZOOM.fitMax);
+    view.k = k;
+    view.x = (pw - bw * k) / 2 - b.minX * k;
+    view.y = (ph - bh * k) / 2 - b.minY * k;
+    if (animate) glide();
+    applyView();
+  }
+
+  // ---------- panel: nodes and edges ----------
+
+  function iconFor(kind, settled) {
+    if (kind === 'r1' || kind === 'r2') return ICONS.snippet;
+    if (kind === 'answer') return '<span class="glyph spin-glyph" aria-hidden="true">✻</span>';
+    return ICONS.tree(kind === 'parsed' && settled);
+  }
+
+  function nodeLabels(kind, doc) {
+    if (kind === 'schema') return ['structure'];
+    if (kind === 'answer') return ['answer'];
+    const label = shortLabel(docLabel(state.run, doc));
+    return kind === 'r2' ? [label, 'round 2'] : [label];
+  }
+
+  function ariaName(id) {
+    const [kind, d] = splitId(id);
+    const what = { r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' }[kind];
+    return `${d === null ? nodeName(id) : docLabel(state.run, d)}, ${what}`;
+  }
+
+  function addNode(id) {
+    const [kind, doc] = splitId(id);
+    const pos = plannedPosition(kind, doc, state.run.docs.length);
+    const el = h(
+      'div',
+      { class: `node ${kind} working${reduceMotion() ? '' : ' enter'}`, tabindex: '0', role: 'button', 'data-id': id, 'aria-label': ariaName(id) },
+      h('span', { class: 'icon', html: iconFor(kind, false) }),
+      kind === 'answer' ? null : h('span', { class: 'spin spin-glyph', 'aria-hidden': 'true' }, '✻'),
+      nodeLabels(kind, doc).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+    );
+    const node = { id, kind, doc, x: pos.x, y: pos.y, el };
+    state.nodes.set(id, node);
+    placeNode(node);
+    nodesLayer.append(el);
+    return node;
+  }
+
+  function placeNode(node) {
+    node.el.style.left = `${node.x}px`;
+    node.el.style.top = `${node.y}px`;
+  }
+
+  function settleNode(id, { empty = false } = {}) {
+    const node = state.nodes.get(id);
+    node.el.classList.remove('working');
+    node.el.classList.toggle('void', empty);
+    node.el.querySelectorAll('.spin-glyph').forEach((g) => {
+      g.classList.remove('spin-glyph');
+      g.textContent = '✻';
+    });
+    if (node.kind === 'parsed' && !empty) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    if (state.selected === id) renderInspector();
+  }
+
+  function isBlocked(a, b) {
+    const lo = Math.min(a.x, b.x) + ICON_HALF;
+    const hi = Math.max(a.x, b.x) - ICON_HALF;
+    for (const n of state.nodes.values()) {
+      if (n === a || n === b) continue;
+      if (n.x > lo && n.x < hi && Math.abs(n.y - (a.y + b.y) / 2) < ICON_HALF * 2) return true;
+    }
+    return false;
+  }
+
+  function edgePath(a, b) {
+    const sx = a.x + ICON_HALF + EDGE_GAP;
+    const tx = b.x - ICON_HALF - EDGE_GAP;
+    const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
+    const bow = Math.abs(a.y - b.y) < ICON_HALF && isBlocked(a, b) ? -BOW : 0;
+    return `M${sx} ${a.y} C${sx + c} ${a.y + bow} ${tx - c} ${b.y + bow} ${tx} ${b.y}`;
+  }
+
+  function layerFor(kind) {
+    return kind === 'context' || kind === 'self' ? layers.base : layers.mid;
+  }
+
+  function animateEdge(el, how) {
+    if (reduceMotion()) return;
+    el.classList.remove('draw', 'fade');
+    el.removeAttribute('pathLength');
+    if (how === 'draw') el.setAttribute('pathLength', '1');
+    el.classList.add(how);
+    el.addEventListener(
+      'animationend',
+      () => {
+        el.classList.remove(how);
+        el.removeAttribute('pathLength');
+      },
+      { once: true },
+    );
+  }
+
+  function addEdge(from, to, kind, how) {
+    const key = `${from}>${to}`;
+    let edge = state.edges.get(key);
+    if (!edge) {
+      edge = { key, from, to, kind, el: document.createElementNS(SVG_NS, 'path') };
+      edge.el.classList.add('edge');
+      state.edges.set(key, edge);
+    }
+    edge.el.classList.remove(edge.kind);
+    edge.kind = kind;
+    edge.el.classList.add(kind);
+    layerFor(kind).append(edge.el);
+    edge.el.setAttribute('d', edgePath(state.nodes.get(from), state.nodes.get(to)));
+    if (how) animateEdge(edge.el, how);
+    refreshHighlight();
+    return edge;
+  }
+
+  function redrawEdges() {
+    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to)));
+  }
+
+  function refreshHighlight() {
+    const id = state.hovered ?? state.selected;
+    for (const e of state.edges.values()) e.el.classList.toggle('hl', id !== null && (e.from === id || e.to === id));
+    for (const n of state.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
+  }
+
+  function lightPath(run) {
+    const path = criticalPath(run);
+    panel.classList.add('is-lit');
+    for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', path.nodes.has(id));
+    for (const e of state.edges.values()) {
+      const on = path.edges.has(e.key);
+      e.el.classList.toggle('lit', on);
+      if (on) layers.lit.append(e.el);
+    }
+  }
+
+  function clearPanel() {
+    closeInspector();
+    nodesLayer.replaceChildren();
+    for (const layer of Object.values(layers)) layer.replaceChildren();
+    state.nodes.clear();
+    state.edges.clear();
+    state.hovered = null;
+    panel.classList.remove('is-lit');
+  }
+
+  // ---------- inspector ----------
+
+  function refs(ids) {
+    if (!ids.length) return [h('span', { class: 'k' }, 'none')];
+    return ids.map((id, i) => [
+      i ? h('span', { class: 'k' }, ' · ') : null,
+      state.nodes.has(id)
+        ? h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, nodeName(id))
+        : h('span', { class: 'k' }, nodeName(id)),
+    ]);
+  }
+
+  function row(key, ...value) {
+    return h('div', { class: 'row' }, h('span', { class: 'k' }, key), value);
+  }
+
+  function textBlock(text, empty = 'nothing relevant') {
+    return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
+  }
+
+  function callMeta(run, id) {
+    const call = run.calls?.[id];
+    return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
+  }
+
+  function recordBlock(records) {
+    const block = h('div', { class: 'records' });
+    let field = null;
+    for (const { field: f, record } of records) {
+      if (f !== field) block.append(h('div', { class: 'k' }, f));
+      field = f;
+      const pairs = Object.entries(record).map(([k, v], i) => [
+        i ? '  ' : '',
+        h('span', { class: 'k' }, k),
+        ' ',
+        v === null ? h('span', { class: 'k' }, 'null') : String(v),
+      ]);
+      block.append(h('div', { class: 'rec' }, pairs));
+    }
+    return block;
+  }
+
+  function snippetBody(run, kind, d) {
+    const s = run[kind][d];
+    const parts = [textBlock(s.summary)];
+    if (kind === 'r1') {
+      parts.push(row('drew on', 'its own document only'));
+      const citedBy = range(run.docs.length).filter((i) => run.r2[i].provenance.includes(d) && state.nodes.has(`r2-${i}`) && !state.nodes.get(`r2-${i}`).el.classList.contains('working'));
+      parts.push(row('cited by', refs(citedBy.map((i) => `r2-${i}`))));
+    } else {
+      parts.push(row('saw', `round 1 summaries of the other ${plural(run.docs.length - 1, 'document')}`));
+      parts.push(row('drew on', refs(s.provenance.map((p) => `r1-${p}`))));
+    }
+    parts.push(callMeta(run, `${kind}-${d}`));
+    parts.push(h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'));
+    return parts;
+  }
+
+  function inspectorBody(id) {
+    const run = state.run;
+    const [kind, d] = splitId(id);
+    if (state.nodes.get(id).el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
+    if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
+    if (kind === 'schema') {
+      return [
+        textBlock(run.schema.thought, ''),
+        h('pre', { class: 'code' }, run.schema.code),
+        row('fills', plural(run.docs.length, 'parsed document')),
+        callMeta(run, 'schema'),
+      ];
+    }
+    if (kind === 'parsed') {
+      const records = run.parsed[d];
+      return [
+        records.length ? recordBlock(records) : textBlock('', 'no records'),
+        row('filled from', refs(['schema', `r2-${d}`])),
+        run.answer.cites.includes(d) && state.nodes.has('answer') ? row('cited by', refs(['answer'])) : null,
+        callMeta(run, id),
+        h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'),
+      ];
+    }
+    return [
+      run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
+      h('p', { class: 'insp-text strong' }, run.answer.text),
+      row('asked', run.question),
+      row('cites', refs(run.answer.cites.map((c) => `parsed-${c}`))),
+      h('div', { class: 'k' }, runSummary(run)),
+    ];
+  }
+
+  function renderInspector() {
+    const id = state.selected;
+    if (!id || !state.nodes.has(id)) return;
+    const [kind] = splitId(id);
+    inspector.setAttribute('aria-label', titleName(id));
+    inspector.classList.toggle('wide', kind === 'schema');
+    fill(
+      inspector,
+      h(
+        'div',
+        { class: 'insp-head' },
+        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), titleName(id)),
+        h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
+      ),
+      inspectorBody(id),
+    );
+    positionInspector();
+  }
+
+  function openInspector(id, { focus = false } = {}) {
+    state.selected = id;
+    inspector.hidden = false;
+    inspector.scrollTop = 0;
+    renderInspector();
+    refreshHighlight();
+    if (focus) inspector.focus({ preventScroll: true });
+  }
+
+  function closeInspector(restoreFocus = false) {
+    if (inspector.hidden) return;
+    const had = inspector.contains(document.activeElement);
+    const node = state.nodes.get(state.selected);
+    inspector.hidden = true;
+    state.selected = null;
+    refreshHighlight();
+    if (restoreFocus && had && node) node.el.focus({ preventScroll: true });
+  }
+
+  function positionInspector() {
+    if (inspector.hidden) return;
+    const node = state.nodes.get(state.selected);
+    if (!node) return;
+    const pw = panel.clientWidth;
+    const ph = panel.clientHeight;
+    const w = inspector.offsetWidth;
+    const ht = inspector.offsetHeight;
+    const halfW = (node.el.offsetWidth / 2) * view.k;
+    const cx = view.x + node.x * view.k;
+    const cy = view.y + node.y * view.k;
+    let left = cx + halfW + POPOVER_GAP;
+    if (left + w > pw - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
+    left = clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, pw - w - POPOVER_MARGIN));
+    const top = clamp(cy - ICON_HALF * view.k - 6, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, ph - ht - POPOVER_MARGIN));
+    inspector.style.left = `${left}px`;
+    inspector.style.top = `${top}px`;
+  }
+
+  function jumpTo(id) {
+    const node = state.nodes.get(id);
+    if (!node) return;
+    const pw = panel.clientWidth;
+    const ph = panel.clientHeight;
+    const sx = view.x + node.x * view.k;
+    const sy = view.y + node.y * view.k;
+    if (sx < JUMP_MARGIN || sx > pw - JUMP_MARGIN || sy < JUMP_MARGIN || sy > ph - JUMP_MARGIN) {
+      view.x = pw / 2 - node.x * view.k;
+      view.y = ph / 2 - node.y * view.k;
+      state.userMoved = true;
+      glide();
+      applyView();
+    }
+    openInspector(id);
+    node.el.focus({ preventScroll: true });
+  }
+
+  // ---------- chat ----------
+
+  function line(kind, text, { node = null, glyph = null, dim = false } = {}) {
+    const g = glyph ?? { sub: '⎿', user: '›', spin: '✻' }[kind] ?? '●';
+    const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
+    return h(
+      node ? 'button' : 'div',
+      { class: classes, type: node ? 'button' : null, onclick: node ? () => jumpTo(node) : null },
+      h('span', { class: kind === 'spin' ? 'g spin-glyph' : 'g', 'aria-hidden': 'true' }, g),
+      h('span', { class: 't' }, text),
+    );
+  }
+
+  function scrollTranscript() {
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function narrator(body, { status = true } = {}) {
+    let spinner = null;
+    return {
+      say(kind, text, opts) {
+        const el = line(kind, text, opts);
+        body.insertBefore(el, spinner);
+        scrollTranscript();
+        return el;
+      },
+      phase(text) {
+        if (!spinner) {
+          spinner = line('spin', text);
+          body.append(spinner);
+        } else {
+          spinner.querySelector('.t').textContent = text;
+        }
+        if (status) setStatus(`running · ${text}`);
+        scrollTranscript();
+      },
+      done() {
+        spinner?.remove();
+        spinner = null;
+      },
+    };
+  }
+
+  function addTurn(question) {
+    const body = h('div', { class: 'turn-body' });
+    transcript.append(h('div', { class: 'turn' }, line('user', question), body));
+    scrollTranscript();
+    return { body, question };
+  }
+
+  function setStatus(...content) {
+    $('run-status').replaceChildren(...content);
+  }
+
+  function doneStatus(run) {
+    setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`);
+  }
+
+  function readyStatus() {
+    setStatus(`${plural(state.files.length, 'document')} ready`);
+  }
+
+  function nextAction() {
+    if (state.run && !state.filesDirty) return 'follow-up';
+    return state.filesAreSample && questionEl.value.trim() === SAMPLE.question ? 'recorded' : 'simulated';
+  }
+
+  function updateAskFoot() {
+    const action = nextAction();
+    const mode = { recorded: 'recorded run', simulated: 'simulated run', 'follow-up': 'simulated reply' }[action];
+    $('ask-mode').textContent = `${plural(state.files.length, 'document')} · ${mode}`;
+    $('run-btn').textContent = action === 'follow-up' ? 'send ⏎' : 'run ⏎';
+  }
+
+  function updateEmpty() {
+    $('empty').hidden = Boolean(state.run);
+    $('empty-count').textContent = `${plural(state.files.length, 'document')} ready`;
+    $('empty-hint').textContent = state.filesAreSample ? 'press run to watch the recorded run here' : 'ask in the chat to run over them';
+  }
+
+  function submitQuestion() {
+    const question = questionEl.value.trim();
+    if (!question) {
+      questionEl.focus();
+      return;
+    }
+    questionEl.value = '';
+    if (!state.files.length) {
+      narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
+    } else if (state.run && !state.filesDirty) {
+      followUp(question);
+    } else {
+      startRun(question);
+    }
+    updateAskFoot();
+  }
+
+  function followUp(question) {
+    const narr = narrator(addTurn(question).body, { status: false });
+    const reply = () => {
+      narr.done();
+      narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
+      narr.say('sub', 'This prototype only replays the run in the panel, so it can’t answer follow-ups yet.');
+    };
+    if (reduceMotion()) return reply();
+    narr.phase('thinking');
+    setTimeout(reply, TIMING.followUpDelay);
+  }
+
+  // ---------- replay ----------
+
+  function cancelTimers() {
+    state.timers.forEach(clearTimeout);
+    state.timers = [];
+  }
+
+  function stage(at, t0, order, n, appear, settle) {
+    const spread = TIMING.maxStageSpread / Math.max(1, n - 1);
+    const appearGap = Math.min(TIMING.appearStagger, spread);
+    const settleGap = Math.min(TIMING.settleStagger, spread);
+    for (let i = 0; i < n; i++) at(t0 + i * appearGap, () => appear(i));
+    let last = t0;
+    order.forEach((doc, rank) => {
+      last = Math.max(last + TIMING.minSettleGap, t0 + TIMING.settleFirst + rank * settleGap, t0 + doc * appearGap + TIMING.minWork);
+      at(last, () => settle(doc, rank));
+    });
+    return last;
+  }
+
+  function roundTwoLine(run, i) {
+    const s = run.r2[i];
+    const name = docLabel(run, i);
+    if (!s.summary) return `round 2 · ${name} — nothing relevant`;
+    if (!s.provenance.length) return `round 2 · ${name} — cites no other document`;
+    return `round 2 · ${name} — drew on ${s.provenance.map((p) => docLabel(run, p)).join(', ')}`;
+  }
+
+  function buildTimeline(run, narr) {
+    const steps = [];
+    const at = (t, fn) => steps.push({ at: t, run: fn });
+    const n = run.docs.length;
+    const name = (i) => docLabel(run, i);
+    let t = TIMING.start;
+
+    at(t, () => {
+      narr.say('main', `reading ${plural(n, 'document')}`);
+      if (run.simulated) {
+        narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
+      }
+      narr.phase(`round 1 · 0 of ${n}`);
+    });
+    t = stage(at, t, run.order.r1, n, (i) => addNode(`r1-${i}`), (i, rank) => {
+      settleNode(`r1-${i}`, { empty: !run.r1[i].summary });
+      narr.say('sub', `round 1 · ${name(i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`, { node: `r1-${i}` });
+      narr.phase(`round 1 · ${rank + 1} of ${n}`);
+    });
+
+    t += TIMING.phaseGap;
+    let roundTwoHead;
+    at(t, () => {
+      roundTwoHead = narr.say('main', 'round 2 · each document beside the other summaries');
+      narr.phase(`round 2 · 0 of ${n}`);
+    });
+    t = stage(at, t, run.order.r2, n, (i) => {
+      addNode(`r2-${i}`);
+      addEdge(`r1-${i}`, `r2-${i}`, 'self', 'fade');
+      for (const j of range(n)) if (j !== i) addEdge(`r1-${j}`, `r2-${i}`, 'context', 'fade');
+    }, (i, rank) => {
+      const s = run.r2[i];
+      settleNode(`r2-${i}`, { empty: !s.summary });
+      for (const p of s.provenance) addEdge(`r1-${p}`, `r2-${i}`, 'cite', 'draw');
+      narr.say('sub', roundTwoLine(run, i), { node: `r2-${i}` });
+      narr.phase(`round 2 · ${rank + 1} of ${n}`);
+    });
+    const citing = run.r2.filter((s) => s.provenance.length).length;
+    at(t, () => {
+      roundTwoHead.querySelector('.t').textContent = `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`;
+    });
+
+    t += TIMING.phaseGap;
+    at(t, () => {
+      narr.say('main', 'proposing a structure');
+      narr.phase('proposing a structure');
+      addNode('schema');
+      addEdge('r2-0', 'schema', 'flow', 'draw');
+    });
+    t += TIMING.schemaWork;
+    at(t, () => {
+      settleNode('schema');
+      narr.say('sub', schemaClasses(run.schema.code).join(', ') || 'structure ready', { node: 'schema' });
+    });
+
+    t += TIMING.phaseGap;
+    at(t, () => {
+      narr.say('main', `parsing ${plural(n, 'document')}`);
+      narr.phase(`parsing · 0 of ${n}`);
+    });
+    t = stage(at, t, run.order.parsed, n, (i) => {
+      addNode(`parsed-${i}`);
+      addEdge('schema', `parsed-${i}`, 'flow', 'draw');
+      addEdge(`r2-${i}`, `parsed-${i}`, 'flow', 'draw');
+    }, (i, rank) => {
+      const count = run.parsed[i].length;
+      settleNode(`parsed-${i}`, { empty: count === 0 });
+      narr.say('sub', `${name(i)} — ${count ? plural(count, 'record') : 'no records'}`, { node: `parsed-${i}` });
+      narr.phase(`parsing · ${rank + 1} of ${n}`);
+    });
+
+    t += TIMING.phaseGap;
+    at(t, () => {
+      narr.phase('answering');
+      addNode('answer');
+    });
+    t += TIMING.answerWork;
+    at(t, () => {
+      settleNode('answer');
+      for (const d of run.answer.cites) addEdge(`parsed-${d}`, 'answer', 'cite', 'draw');
+      narr.done();
+      if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
+      narr.say('answer', run.answer.text, { node: 'answer' });
+      for (const d of run.answer.cites) narr.say('sub', `cites ${name(d)}`, { node: `parsed-${d}` });
+      narr.say('sub', runSummary(run));
+      doneStatus(run);
+    });
+    t += TIMING.litDelay;
+    at(t, () => lightPath(run));
+    return steps;
+  }
+
+  function playRun(run) {
+    cancelTimers();
+    clearPanel();
+    state.run = run;
+    state.runTurn.body.replaceChildren();
+    state.planned = plannedBounds(run);
+    state.userMoved = false;
+    $('replay-btn').hidden = false;
+    updateEmpty();
+    fit();
+    const steps = buildTimeline(run, narrator(state.runTurn.body));
+    if (reduceMotion()) {
+      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
+      return;
+    }
+    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
+  }
+
+  function startRun(question) {
+    const recorded = state.filesAreSample && question === SAMPLE.question;
+    const run = recorded ? sampleRun() : simulatedRun(state.files, question);
+    state.filesDirty = false;
+    state.runTurn = addTurn(question);
+    playRun(run);
+  }
+
+  // ---------- files ----------
+
+  function showTab(name) {
+    for (const tab of ['chat', 'files']) {
+      $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
+      $(`${tab}-pane`).hidden = tab !== name;
+    }
+  }
+
+  function renderFiles() {
+    const total = state.files.reduce((sum, f) => sum + f.size, 0);
+    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(total)} · ${state.filesAreSample ? 'sample memos' : 'your files'}`;
+    $('file-list').replaceChildren(
+      ...state.files.map((f) =>
+        h('li', {}, h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'size' }, fmtBytes(f.size)))),
+      ),
+    );
+    $('files-count').textContent = state.files.length;
+    $('sample-btn').hidden = state.filesAreSample;
+  }
+
+  function openFile(file) {
+    showTab('files');
+    const index = state.run ? state.run.docs.indexOf(file) : -1;
+    const fileView = $('file-view');
+    const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
+    if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    fill(
+      fileView,
+      h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
+      h('div', { class: 'insp-title' }, h('span', { class: 'g' }, '● '), file.name),
+      h('div', { class: 'k' }, meta.join(' · ')),
+      file.text ? h('pre', { class: 'code wrap' }, file.text) : h('p', { class: 'k' }, 'This file has no readable text.'),
+      index >= 0 && state.nodes.has(`r1-${index}`)
+        ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(`r1-${index}`) }, 'show in panel ›')
+        : null,
+    );
+    $('file-list-view').hidden = true;
+    fileView.hidden = false;
+    fileView.scrollTop = 0;
+  }
+
+  function closeFile() {
+    $('file-view').hidden = true;
+    $('file-list-view').hidden = false;
+  }
+
+  function readText(file) {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => resolve('');
+      reader.readAsText(file.slice(0, READ_BYTES));
+    });
+  }
+
+  async function addFiles(list) {
+    const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    const error = $('files-error');
+    if (!picked.length) {
+      error.textContent = 'No files found there. Try picking the files themselves.';
+      error.hidden = false;
+      return;
+    }
+    error.hidden = true;
+    const read = await Promise.all(picked.map(async (f) => ({ name: f.name, size: f.size, text: await readText(f), sample: false })));
+    read.sort((a, b) => a.name.localeCompare(b.name));
+    state.files = state.filesAreSample ? read : [...state.files, ...read].slice(0, MAX_FILES);
+    state.filesAreSample = false;
+    filesChanged(`${plural(read.length, 'file')} added. Your next question runs over ${plural(state.files.length, 'document')}.`);
+  }
+
+  function useSample() {
+    state.files = SAMPLE.docs.map((d) => ({ ...d, sample: true }));
+    state.filesAreSample = true;
+    if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
+    filesChanged('Back to the 5 sample memos.');
+  }
+
+  function filesChanged(message) {
+    state.filesDirty = true;
+    closeFile();
+    renderFiles();
+    updateAskFoot();
+    updateEmpty();
+    if (!state.run) readyStatus();
+    transcript.append(line('main', message, { dim: true }));
+    scrollTranscript();
+  }
+
+  async function filesFromDrop(dataTransfer) {
+    const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+    if (!entries.length) return [...dataTransfer.files];
+    const files = [];
+    const walk = async (entry) => {
+      if (entry.isFile) {
+        files.push(await new Promise((resolve) => entry.file(resolve, () => resolve(null))));
+        return;
+      }
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
+        if (!batch.length) return;
+        for (const child of batch) await walk(child);
+      }
+    };
+    for (const entry of entries) await walk(entry);
+    return files;
+  }
+
+  // ---------- theme ----------
+
+  function currentTheme() {
+    return root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  }
+
+  function updateThemeLabel() {
+    $('theme-btn').textContent = `theme · ${currentTheme()}`;
+  }
+
+  function toggleTheme() {
+    const next = currentTheme() === 'dark' ? 'light' : 'dark';
+    root.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch {
+      // Storage can be blocked; the toggle still works for this visit.
+    }
+    updateThemeLabel();
+  }
+
+  function restoreTheme() {
+    try {
+      const saved = localStorage.getItem(THEME_KEY);
+      if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
+    } catch {
+      // No stored theme; follow the system.
+    }
+    updateThemeLabel();
+  }
+
+  // ---------- gestures ----------
+
+  const gesture = { pointers: new Map(), mode: null, moved: false, origin: null, from: null, node: null, pinch: null };
+
+  function panelPoint(x, y) {
+    const r = panel.getBoundingClientRect();
+    return { x: x - r.left, y: y - r.top };
+  }
+
+  function startPinch() {
+    const [a, b] = [...gesture.pointers.values()];
+    gesture.mode = 'pinch';
+    gesture.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2), view: { ...view } };
+  }
+
+  function updatePinch() {
+    const [a, b] = [...gesture.pointers.values()];
+    const p = gesture.pinch;
+    const k = clamp((p.view.k * Math.hypot(a.x - b.x, a.y - b.y)) / p.dist, ZOOM.min, ZOOM.max);
+    const mid = panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
+    const wx = (p.mid.x - p.view.x) / p.view.k;
+    const wy = (p.mid.y - p.view.y) / p.view.k;
+    view.k = k;
+    view.x = mid.x - wx * k;
+    view.y = mid.y - wy * k;
+    state.userMoved = true;
+    applyView();
+  }
+
+  function onPointerDown(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.target.closest('.inspector, .panel-tools')) return;
+    gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    panel.setPointerCapture(e.pointerId);
+    if (gesture.pointers.size === 2) return startPinch();
+    if (gesture.pointers.size > 2) return;
+    const nodeEl = e.target.closest('.node');
+    gesture.node = nodeEl ? state.nodes.get(nodeEl.dataset.id) : null;
+    gesture.mode = gesture.node ? 'drag' : 'pan';
+    gesture.moved = false;
+    gesture.origin = { x: e.clientX, y: e.clientY };
+    gesture.from = gesture.node ? { x: gesture.node.x, y: gesture.node.y } : { x: view.x, y: view.y };
+  }
+
+  function onPointerMove(e) {
+    const p = gesture.pointers.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+    if (gesture.mode === 'pinch') return updatePinch();
+    if (!gesture.mode) return;
+    const dx = e.clientX - gesture.origin.x;
+    const dy = e.clientY - gesture.origin.y;
+    if (!gesture.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    gesture.moved = true;
+    if (gesture.mode === 'drag') {
+      gesture.node.x = gesture.from.x + dx / view.k;
+      gesture.node.y = gesture.from.y + dy / view.k;
+      placeNode(gesture.node);
+      redrawEdges();
+      if (state.selected === gesture.node.id) positionInspector();
+    } else {
+      panel.classList.add('panning');
+      view.x = gesture.from.x + dx;
+      view.y = gesture.from.y + dy;
+      state.userMoved = true;
+      applyView();
+    }
+  }
+
+  function onPointerEnd(e) {
+    if (!gesture.pointers.delete(e.pointerId)) return;
+    if (gesture.mode === 'pinch') {
+      if (!gesture.pointers.size) gesture.mode = null;
+      return;
+    }
+    if (e.type === 'pointerup' && !gesture.moved) {
+      if (gesture.mode === 'drag') openInspector(gesture.node.id);
+      else if (gesture.mode === 'pan') closeInspector();
+    }
+    gesture.mode = null;
+    panel.classList.remove('panning');
+  }
+
+  function onWheel(e) {
+    if (e.target.closest('.inspector')) return;
+    e.preventDefault();
+    const scale = e.deltaMode === 1 ? WHEEL_LINE_PX : 1;
+    if (e.ctrlKey || e.metaKey) {
+      const p = panelPoint(e.clientX, e.clientY);
+      zoomAt(p.x, p.y, view.k * Math.exp(-e.deltaY * scale * WHEEL_ZOOM_RATE));
+    } else {
+      view.x -= e.deltaX * scale;
+      view.y -= e.deltaY * scale;
+      applyView();
+    }
+    state.userMoved = true;
+  }
+
+  function hoverFrom(e) {
+    const el = e.target.closest('.node');
+    return el ? el.dataset.id : null;
+  }
+
+  // ---------- wiring ----------
+
+  function wire() {
+    panel.addEventListener('pointerdown', onPointerDown);
+    panel.addEventListener('pointermove', onPointerMove);
+    panel.addEventListener('pointerup', onPointerEnd);
+    panel.addEventListener('pointercancel', onPointerEnd);
+    panel.addEventListener('wheel', onWheel, { passive: false });
+
+    nodesLayer.addEventListener('pointerover', (e) => {
+      state.hovered = hoverFrom(e);
+      refreshHighlight();
+    });
+    nodesLayer.addEventListener('pointerout', (e) => {
+      if (e.relatedTarget && e.target.closest('.node')?.contains(e.relatedTarget)) return;
+      state.hovered = null;
+      refreshHighlight();
+    });
+    nodesLayer.addEventListener('focusin', (e) => {
+      state.hovered = hoverFrom(e);
+      refreshHighlight();
+    });
+    nodesLayer.addEventListener('focusout', () => {
+      state.hovered = null;
+      refreshHighlight();
+    });
+    nodesLayer.addEventListener('keydown', (e) => {
+      const id = hoverFrom(e);
+      if (id && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault();
+        openInspector(id, { focus: true });
+      }
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (!inspector.hidden) closeInspector(true);
+      else if (!$('file-view').hidden) closeFile();
+    });
+
+    $('fit-btn').addEventListener('click', () => {
+      state.userMoved = false;
+      fit(true);
+    });
+    $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
+    $('theme-btn').addEventListener('click', toggleTheme);
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
+
+    $('tab-chat').addEventListener('click', () => showTab('chat'));
+    $('tab-files').addEventListener('click', () => {
+      showTab('files');
+      closeFile();
+    });
+
+    $('ask-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      submitQuestion();
+    });
+    questionEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        $('ask-form').requestSubmit();
+      }
+    });
+    questionEl.addEventListener('input', updateAskFoot);
+
+    for (const id of ['file-input', 'folder-input']) {
+      const input = $(id);
+      input.addEventListener('change', () => {
+        if (input.files.length) addFiles(input.files);
+        input.value = '';
+      });
+    }
+    $('sample-btn').addEventListener('click', useSample);
+
+    const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+    side.addEventListener('dragover', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+      side.classList.add('dropping');
+    });
+    side.addEventListener('dragleave', (e) => {
+      if (!side.contains(e.relatedTarget)) side.classList.remove('dropping');
+    });
+    side.addEventListener('drop', async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      side.classList.remove('dropping');
+      showTab('files');
+      addFiles(await filesFromDrop(e.dataTransfer));
+    });
+    window.addEventListener('dragover', (e) => hasFiles(e) && e.preventDefault());
+    window.addEventListener('drop', (e) => hasFiles(e) && e.preventDefault());
+
+    new ResizeObserver(() => {
+      if (!state.userMoved) fit();
+      positionInspector();
+    }).observe(panel);
+  }
+
+  function init() {
+    restoreTheme();
+    questionEl.value = SAMPLE.question;
+    renderFiles();
+    updateAskFoot();
+    updateEmpty();
+    readyStatus();
+    transcript.append(line('main', 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.', { dim: true }));
+    applyView();
+    wire();
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
