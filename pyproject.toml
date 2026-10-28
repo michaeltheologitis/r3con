@@ -68,11 +68,13 @@ module-root = "src"
 extend-exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pyright]
-include = ["src"]
+include = ["src", "evals"]
 exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repo root, so the tests can import the evals package, which is not installed.
+pythonpath = ["."]
 addopts = [
     "-m",
     "not live",
