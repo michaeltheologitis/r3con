@@ -124,7 +124,10 @@ id to the document's 0-based index in `documents` (also `result.document_ids`). 
 `relevance/result.json`, every round lists its `snippets`, one per document or per part
 of a document read in parts, each with its `id` (the document's, or `<id>.<k>` for part
 `k` in that round), its `summary`, and its `provenance`: the ids of the previous round's
-snippets it used.
+snippets it used. In `structuring/parsing/result.json`, `source_docs` and `source_ids`
+give, for each list field of `parsed`, the 0-based index and the id of the document each
+record came from (also `result.source_docs` and `result.source_ids`); a record parsed
+from one part of a long document carries the document's id.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
@@ -139,7 +142,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   │   ├── calls.json
 │   │   └── transcript.yaml
 │   └── parsing/
-│       ├── result.json
+│       ├── result.json          <- parsed records, each one's document index and id
 │       └── calls.json
 └── reasoning/
     ├── result.json

@@ -30,8 +30,10 @@ Layout per ``logs/<run-folder>/``:
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
-  (``{parsed, source_docs, totals}``) + ``calls.json`` (one entry per ``parse-d{doc}``
-  call, or ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to a resend).
+  (``{parsed, source_docs, source_ids, totals}`` — for each list field of ``parsed``,
+  the 0-based index and the id of the document each record came from, a part's records
+  carrying their document's) + ``calls.json`` (one entry per ``parse-d{doc}`` call, or
+  ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to a resend).
 - ``reasoning/`` (stage 3) — ``result.json``
   (``{answer, terminated_by, n_turns, turns, totals}``) + ``calls.json`` +
   ``transcript.yaml``.
