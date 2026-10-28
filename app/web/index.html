@@ -18,11 +18,13 @@
   --ok: #3f7d4e;
   --err: #b1452f;
   --warn: #8f6113;
-  --fill-a: #ebc3b2;
-  --fill-b: #ecd59f;
-  --fill-c: #c1ccd5;
+  --fill-orange: #f27b45;
+  --fill-yellow: #f5cd55;
+  --fill-blue: #40bde8;
+  --tree-ink: #1f1e1c;
   --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --gutter: 16px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -36,9 +38,10 @@
     --ok: #7fb38a;
     --err: #e2806d;
     --warn: #d6a54c;
-    --fill-a: #7c4936;
-    --fill-b: #78642f;
-    --fill-c: #4b5862;
+    --fill-orange: #d96d3e;
+    --fill-yellow: #d8b24c;
+    --fill-blue: #3aa4cd;
+    --tree-ink: #0e0d0c;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
     color-scheme: dark;
   }
@@ -54,9 +57,10 @@
   --ok: #7fb38a;
   --err: #e2806d;
   --warn: #d6a54c;
-  --fill-a: #7c4936;
-  --fill-b: #78642f;
-  --fill-c: #4b5862;
+  --fill-orange: #d96d3e;
+  --fill-yellow: #d8b24c;
+  --fill-blue: #3aa4cd;
+  --tree-ink: #0e0d0c;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
@@ -107,9 +111,9 @@ p { margin: 0; }
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
-  padding-block: 0 16px;
+  padding-left: max(var(--gutter), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--gutter), env(safe-area-inset-right, 0px));
+  padding-block: 0 var(--gutter);
 }
 .topbar {
   display: flex;
@@ -127,7 +131,7 @@ p { margin: 0; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.top-actions { display: flex; gap: 2ch; }
+.top-actions { display: flex; gap: 2ch; margin-left: auto; }
 .frame {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 46ch;
@@ -142,6 +146,8 @@ p { margin: 0; }
     grid-template-rows: minmax(0, 55fr) minmax(0, 45fr);
   }
   .side { border-left: 0 !important; border-top: 1px solid var(--line); }
+  .topbar { flex-wrap: wrap; row-gap: 0.1em; }
+  .status { order: 3; flex-basis: 100%; }
 }
 
 /* ---- panel ---- */
@@ -209,22 +215,20 @@ p { margin: 0; }
 .panel.is-lit .node.on-path { opacity: 1; }
 .panel.is-lit .node.on-path .icon { color: var(--accent); }
 .panel.is-lit .node.on-path .label { color: var(--fg); }
-.f-a { fill: var(--fill-a); }
-.f-b { fill: var(--fill-b); }
-.f-c { fill: var(--fill-c); }
+.fill-orange { fill: var(--fill-orange); }
+.fill-yellow { fill: var(--fill-yellow); }
+.fill-blue { fill: var(--fill-blue); }
+.ink { stroke: var(--tree-ink); }
+.panel.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
+.node.pending .icon { opacity: 0.5; }
 
-.empty {
+.panel-hint {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  gap: 0.2em;
-  padding: 0 2ch;
-  text-align: center;
+  left: 1.5ch;
+  top: 0.7em;
   color: var(--dim);
   pointer-events: none;
 }
-.empty strong { color: var(--fg); font-weight: 600; }
 .panel-tools {
   position: absolute;
   left: 1.5ch;
@@ -234,24 +238,49 @@ p { margin: 0; }
   color: var(--dim);
 }
 
-.inspector {
-  position: absolute;
-  z-index: 5;
-  width: min(54ch, calc(100% - 20px));
-  max-height: calc(100% - 20px);
+.inspector, .settings {
   overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75em;
   padding: 0.9em 2ch 1em;
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 6px;
   box-shadow: var(--shadow);
-  cursor: auto;
   overscroll-behavior: contain;
+}
+.inspector {
+  position: absolute;
+  z-index: 5;
+  width: min(54ch, calc(100% - 20px));
+  max-height: calc(100% - 20px);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75em;
+  cursor: auto;
   touch-action: pan-x pan-y;
 }
+.settings {
+  --settings-width: min(52ch, calc(100vw - 2 * var(--gutter)));
+  inset: auto;
+  margin: 0;
+  width: var(--settings-width);
+  color: var(--fg);
+}
+.settings-body { display: flex; flex-direction: column; gap: 0.9em; }
+.field { display: flex; flex-direction: column; gap: 0.25em; }
+.field label { font-weight: 600; }
+.field input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.3em 1ch;
+  font: inherit;
+  color: var(--fg);
+  background: var(--code);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.field input:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+.field-row { display: flex; align-items: baseline; gap: 2ch; }
+.field-row input { flex: 1; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
@@ -377,7 +406,7 @@ p { margin: 0; }
   resize: none;
 }
 #question:placeholder-shown { padding-left: 0; }
-#question::placeholder { color: var(--dim); opacity: 1; }
+.field input::placeholder, #question::placeholder { color: var(--dim); opacity: 1; }
 .ask-foot { display: flex; justify-content: space-between; gap: 2ch; color: var(--dim); }
 .ask-foot span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-btn { font-weight: 600; }
@@ -450,9 +479,44 @@ p { margin: 0; }
     <span class="status" id="run-status" aria-live="polite"></span>
     <nav class="top-actions" aria-label="Run controls">
       <button class="btn" id="replay-btn" type="button" hidden>replay</button>
+      <button class="btn" id="settings-btn" type="button" popovertarget="settings">settings</button>
       <button class="btn" id="theme-btn" type="button">theme · light</button>
     </nav>
   </header>
+
+  <div class="settings" id="settings" popover role="dialog" aria-label="Settings">
+    <form id="settings-form" autocomplete="off"></form>
+    <div class="settings-body">
+      <div class="insp-head">
+        <div class="insp-title"><span class="g">● </span>settings</div>
+        <button class="btn" id="settings-close" type="button" popovertarget="settings" popovertargetaction="hide" aria-label="close settings">esc</button>
+      </div>
+      <div class="field">
+        <label for="setting-model">model</label>
+        <input id="setting-model" form="settings-form" type="text" required pattern=".*\S.*" spellcheck="false" autocapitalize="off" autofocus aria-describedby="setting-model-hint">
+        <span class="k" id="setting-model-hint">any LiteLLM model: openai/…, anthropic/…, hosted_vllm/…</span>
+      </div>
+      <div class="field">
+        <label for="setting-key">API key</label>
+        <div class="field-row">
+          <input id="setting-key" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" aria-describedby="setting-key-hint setting-key-note">
+          <button class="btn" id="setting-key-show" type="button" aria-controls="setting-key" aria-label="show key">show</button>
+        </div>
+        <span class="k" id="setting-key-hint">or set the provider's own variable, e.g. OPENAI_API_KEY</span>
+        <span class="k" id="setting-key-note">this prototype doesn't keep the key; the real app keeps it on your computer</span>
+      </div>
+      <div class="field">
+        <label for="setting-endpoint">endpoint</label>
+        <input id="setting-endpoint" form="settings-form" type="text" inputmode="url" pattern="https?://\S+" title="starts with http:// or https://" spellcheck="false" autocapitalize="off" placeholder="http://localhost:8000/v1" aria-describedby="setting-endpoint-hint">
+        <span class="k" id="setting-endpoint-hint">leave empty for the provider's default</span>
+      </div>
+      <p class="k">This prototype doesn't connect yet, so nothing is sent.</p>
+      <div class="field-row">
+        <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
+        <span class="k" id="settings-saved" aria-live="polite"></span>
+      </div>
+    </div>
+  </div>
 
   <div class="frame">
     <main class="panel" id="panel" aria-label="Run panel">
@@ -464,11 +528,9 @@ p { margin: 0; }
         </svg>
         <div id="nodes"></div>
       </div>
-      <div class="empty" id="empty">
-        <strong id="empty-count"></strong>
-        <span id="empty-hint"></span>
-      </div>
+      <div class="panel-hint" id="panel-hint" hidden></div>
       <div class="panel-tools">
+        <button class="btn" id="arrange-btn" type="button">arrange</button>
         <button class="btn" id="fit-btn" type="button">fit</button>
         <span id="zoom-level">100%</span>
       </div>
@@ -784,11 +846,7 @@ p { margin: 0; }
   // recorded run finished them.
   const TIMING = {
     start: 300,
-    appearStagger: 260,
-    settleFirst: 900,
-    settleStagger: 380,
     minSettleGap: 150,
-    minWork: 500,
     maxStageSpread: 1600,
     phaseGap: 450,
     schemaWork: 1400,
@@ -796,11 +854,15 @@ p { margin: 0; }
     litDelay: 650,
     followUpDelay: 700,
   };
+  const PACE = {
+    read: { appearStagger: 150, settleFirst: 450, settleStagger: 150, minWork: 350 },
+    model: { appearStagger: 260, settleFirst: 900, settleStagger: 380, minWork: 500 },
+  };
   const SPIN_FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
   const SPIN_FRAME_MS = 110;
 
-  const GRID = { colGap: 210, rowGap: 100 };
-  const COLUMN = { r1: 0, r2: 1, schema: 2, parsed: 3, answer: 4 };
+  const GRID = { colGap: 200, rowGap: 100 };
+  const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
   const ICON_HALF = 14;
   const EDGE_GAP = 6;
   const MIN_CURVE = 40;
@@ -836,9 +898,20 @@ p { margin: 0; }
     '    excerpts: list[Excerpt]',
   ].join('\n');
   const THEME_KEY = 'r3con-proto-theme';
+  const SETTINGS_KEY = 'r3con-proto-settings';
+  const DEFAULT_MODEL = 'openai/gpt-6-luna';
+  const SAVED_MS = 1800;
+  const ARRANGE_MS = 420;
   const SVG_NS = 'http://www.w3.org/2000/svg';
+  const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
+  const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
 
   const ICONS = {
+    document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M19.25 3H8.5a2 2 0 0 0-2 2v22a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V9.25z"/>
+      <path d="M19.25 3v5.25a1 1 0 0 0 1 1h5.25"/>
+      <path d="M10.75 13h7.5M10.75 17.25h10.25M10.75 21.5h7.5"/>
+    </svg>`,
     snippet: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M15.5 4.75h2.3a2 2 0 0 1 1.46.63l5.17 5.55a2 2 0 0 1 .54 1.37V25.5a2.5 2.5 0 0 1-2.5 2.5H10a2.5 2.5 0 0 1-2.5-2.5v-9"/>
       <path d="M18.75 5.25V9.5a1.5 1.5 0 0 0 1.5 1.5h4.5"/>
@@ -849,15 +922,17 @@ p { margin: 0; }
       const f = (cls) => (filled ? ` class="${cls}"` : '');
       return `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
         <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
-        <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('f-b')}/>
-        <circle cx="7.8" cy="12" r="2.5"${f('f-a')}/>
-        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('f-a')}/>
-        <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
-        <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
-        <circle cx="23.6" cy="19.1" r="2.6"${f('f-b')}/>
-        <circle cx="18.4" cy="27.5" r="2.3"${f('f-c')}/>
-        <circle cx="23.6" cy="27.5" r="2.3"${f('f-c')}/>
-        <circle cx="28.8" cy="27.5" r="2.3"${f('f-c')}/>
+        <g${f('ink')}>
+        <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('fill-yellow')}/>
+        <circle cx="7.8" cy="12" r="2.5"${f('fill-orange')}/>
+        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('fill-orange')}/>
+        <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
+        <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
+        <circle cx="23.6" cy="19.1" r="2.6"${f('fill-yellow')}/>
+        <circle cx="18.4" cy="27.5" r="2.3"${f('fill-blue')}/>
+        <circle cx="23.6" cy="27.5" r="2.3"${f('fill-blue')}/>
+        <circle cx="28.8" cy="27.5" r="2.3"${f('fill-blue')}/>
+        </g>
       </svg>`;
     },
   };
@@ -873,9 +948,18 @@ p { margin: 0; }
   const questionEl = $('question');
   const side = $('side');
 
+  let nextUid = 0;
+
+  function withUid(file) {
+    return { ...file, uid: nextUid++ };
+  }
+
+  const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
+
+  const docId = (file) => `doc-${file.uid}`;
+
   const state = {
-    files: SAMPLE.docs.map((d) => ({ ...d, sample: true })),
-    filesAreSample: true,
+    files: SAMPLE_FILES,
     filesDirty: true,
     run: null,
     runTurn: null,
@@ -885,9 +969,21 @@ p { margin: 0; }
     selected: null,
     hovered: null,
     userMoved: false,
-    planned: null,
+    layout: new Map(),
   };
   const view = { x: 0, y: 0, k: 1 };
+  // Model and endpoint may be remembered in this browser. The API key is never kept: the prototype
+  // sends nothing.
+  const settings = { model: DEFAULT_MODEL, endpoint: '' };
+
+  const filesAreSample = () => state.files === SAMPLE_FILES;
+  // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
+  const isPending = (file) => Boolean(state.run) && !state.run.docs.includes(file);
+
+  function panelFiles() {
+    const runDocs = state.run?.docs ?? [];
+    return [...runDocs, ...state.files.filter((f) => !runDocs.includes(f))];
+  }
 
   // ---------- small helpers ----------
 
@@ -916,7 +1012,25 @@ p { margin: 0; }
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
+  const fileLabel = (file) => shortLabel(stripExt(file.name));
+  const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function readStored(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStored(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Storage can be blocked; the page works without it for this visit.
+    }
+  }
 
   function excerpt(text, max) {
     const flat = text.replace(/\s+/g, ' ').trim();
@@ -937,16 +1051,11 @@ p { margin: 0; }
 
   function nodeName(id) {
     const [kind, d] = splitId(id);
+    if (kind === 'doc') return state.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
     if (kind === 'answer') return 'answer';
     const label = docLabel(state.run, d);
-    if (kind === 'r2') return `${label} · round 2`;
-    if (kind === 'parsed') return `${label} · parsed`;
-    return label;
-  }
-
-  function titleName(id) {
-    return splitId(id)[0] === 'r1' ? `${nodeName(id)} · round 1` : nodeName(id);
+    return `${label} · ${KIND_SUFFIX[kind]}`;
   }
 
   function schemaClasses(code) {
@@ -959,7 +1068,7 @@ p { margin: 0; }
   setInterval(() => {
     if (reduceMotion()) return;
     spinFrame = (spinFrame + 1) % SPIN_FRAMES.length;
-    for (const el of document.querySelectorAll('.spin-glyph')) el.textContent = SPIN_FRAMES[spinFrame];
+    for (const el of document.querySelectorAll('.node.working .spin, .node.working .glyph, .line.spin .g')) el.textContent = SPIN_FRAMES[spinFrame];
   }, SPIN_FRAME_MS);
 
   // ---------- runs ----------
@@ -1021,13 +1130,21 @@ p { margin: 0; }
   function criticalPath(run) {
     const nodes = new Set(['answer']);
     const edges = new Set();
+    const docs = new Set();
     for (const d of run.answer.cites) {
-      nodes.add(`parsed-${d}`).add(`r2-${d}`);
-      edges.add(`parsed-${d}>answer`).add(`r2-${d}>parsed-${d}`);
+      nodes.add(`parsed-${d}`).add(`r2-${d}`).add(`r1-${d}`);
+      edges.add(`parsed-${d}>answer`).add(`r2-${d}>parsed-${d}`).add(`r1-${d}>r2-${d}`);
+      docs.add(d);
       for (const p of run.r2[d].provenance) {
         nodes.add(`r1-${p}`);
         edges.add(`r1-${p}>r2-${d}`);
+        docs.add(p);
       }
+    }
+    for (const d of docs) {
+      const id = docId(run.docs[d]);
+      nodes.add(id);
+      edges.add(`${id}>r1-${d}`);
     }
     return { nodes, edges };
   }
@@ -1057,7 +1174,7 @@ p { margin: 0; }
     applyView();
   }
 
-  function charWidth() {
+  function measureCharWidth() {
     const probe = h('span', { class: 'probe' }, '0'.repeat(20));
     document.body.append(probe);
     const width = probe.getBoundingClientRect().width / 20;
@@ -1065,25 +1182,45 @@ p { margin: 0; }
     return width || 8;
   }
 
-  function plannedPosition(kind, doc, n) {
-    const row = kind === 'schema' ? 0 : kind === 'answer' ? (n - 1) / 2 : doc;
-    return { x: COLUMN[kind] * GRID.colGap, y: row * GRID.rowGap };
+  const charPx = measureCharWidth();
+
+  function gridLayout(files, origin) {
+    const layout = new Map();
+    const origins = files.map((f, i) => origin(i, f));
+    if (!origins.length) return layout;
+    files.forEach((f, i) => {
+      layout.set(docId(f), origins[i]);
+      for (const kind of ['r1', 'r2', 'parsed']) layout.set(`${kind}-${i}`, { x: origins[i].x + COLUMN[kind] * GRID.colGap, y: origins[i].y });
+    });
+    const ys = origins.map((o) => o.y);
+    layout.set('schema', { x: origins[0].x + COLUMN.schema * GRID.colGap, y: origins[0].y });
+    layout.set('answer', { x: Math.max(...origins.map((o) => o.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
+    return layout;
   }
 
-  function plannedBounds(run) {
-    const cw = charWidth();
-    const widest = Math.max('structure'.length, ...run.docs.map((d) => shortLabel(stripExt(d.name)).length)) * cw + NODE_PAD_PX;
-    const rows = Math.max(run.docs.length, 1);
-    return {
-      minX: -widest / 2,
-      maxX: Math.max(COLUMN.parsed * GRID.colGap + widest / 2, COLUMN.answer * GRID.colGap + 4 * cw),
-      minY: -BOW,
-      maxY: (rows - 1) * GRID.rowGap + ICON_HALF + 2 * LABEL_LINE_PX,
-    };
+  const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
+
+  function nodeOrigin(i, file) {
+    const node = state.nodes.get(docId(file));
+    return { x: node.x, y: node.y };
+  }
+
+  function plan(origin) {
+    const files = state.run?.docs ?? state.files;
+    const layout = gridLayout(files, origin);
+    if (state.run) state.files.filter(isPending).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    return layout;
   }
 
   function contentBounds() {
-    const b = { ...(state.planned ?? { minX: 0, maxX: 1, minY: 0, maxY: 1 }) };
+    const widest = Math.max('structure'.length, ...panelFiles().map((f) => fileLabel(f).length)) * charPx + NODE_PAD_PX;
+    const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+    for (const p of state.layout.values()) {
+      b.minX = Math.min(b.minX, p.x - widest / 2);
+      b.maxX = Math.max(b.maxX, p.x + widest / 2);
+      b.minY = Math.min(b.minY, p.y - BOW);
+      b.maxY = Math.max(b.maxY, p.y + ICON_HALF + 2 * LABEL_LINE_PX);
+    }
     for (const n of state.nodes.values()) {
       const halfW = n.el.offsetWidth / 2;
       b.minX = Math.min(b.minX, n.x - halfW);
@@ -1091,7 +1228,7 @@ p { margin: 0; }
       b.minY = Math.min(b.minY, n.y - ICON_HALF);
       b.maxY = Math.max(b.maxY, n.y - ICON_HALF + n.el.offsetHeight);
     }
-    return b;
+    return Number.isFinite(b.minX) ? b : { minX: 0, maxX: 1, minY: 0, maxY: 1 };
   }
 
   function fit(animate = false) {
@@ -1109,42 +1246,104 @@ p { margin: 0; }
     applyView();
   }
 
+  function refit() {
+    state.userMoved = false;
+    fit(true);
+  }
+
   // ---------- panel: nodes and edges ----------
 
   function iconFor(kind, settled) {
+    if (kind === 'doc') return ICONS.document;
     if (kind === 'r1' || kind === 'r2') return ICONS.snippet;
-    if (kind === 'answer') return '<span class="glyph spin-glyph" aria-hidden="true">✻</span>';
+    if (kind === 'answer') return '<span class="glyph" aria-hidden="true">✻</span>';
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
-  function nodeLabels(kind, doc) {
+  function nodeLabels(kind, file) {
     if (kind === 'schema') return ['structure'];
     if (kind === 'answer') return ['answer'];
-    const label = shortLabel(docLabel(state.run, doc));
-    return kind === 'r2' ? [label, 'round 2'] : [label];
+    if (kind === 'doc') return [fileLabel(file), isPending(file) ? 'not run' : null];
+    return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
-  function ariaName(id) {
-    const [kind, d] = splitId(id);
-    const what = { r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' }[kind];
-    return `${d === null ? nodeName(id) : docLabel(state.run, d)}, ${what}`;
+  function ariaName(node) {
+    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}`;
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}`;
+    return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
-  function addNode(id) {
-    const [kind, doc] = splitId(id);
-    const pos = plannedPosition(kind, doc, state.run.docs.length);
+  function createNode(id, kind, pos, { working = false, file = null, enter = true } = {}) {
+    const pending = kind === 'doc' && isPending(file);
+    const classes = ['node', kind, working && 'working', pending && 'pending', enter && !reduceMotion() && 'enter'].filter(Boolean).join(' ');
     const el = h(
       'div',
-      { class: `node ${kind} working${reduceMotion() ? '' : ' enter'}`, tabindex: '0', role: 'button', 'data-id': id, 'aria-label': ariaName(id) },
+      { class: classes, tabindex: '0', role: 'button', 'data-id': id },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
-      kind === 'answer' ? null : h('span', { class: 'spin spin-glyph', 'aria-hidden': 'true' }, '✻'),
-      nodeLabels(kind, doc).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
+      nodeLabels(kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
-    const node = { id, kind, doc, x: pos.x, y: pos.y, el };
+    const node = { id, kind, file, x: pos.x, y: pos.y, el };
     state.nodes.set(id, node);
+    el.setAttribute('aria-label', ariaName(node));
     placeNode(node);
     nodesLayer.append(el);
     return node;
+  }
+
+  function addNode(id) {
+    const [kind, d] = splitId(id);
+    return createNode(id, kind, state.layout.get(id), { working: true, file: d === null ? null : state.run.docs[d] });
+  }
+
+  function addDocNode(file, pos) {
+    let last = null;
+    for (const n of state.nodes.values()) if (n.kind === 'doc' && (!last || n.y > last.y)) last = n;
+    // A node redrawn at its old position (a run starting) is not new, so it doesn't animate in.
+    return createNode(docId(file), 'doc', pos ?? (last ? { x: last.x, y: last.y + GRID.rowGap } : tidyOrigin(0)), { file, enter: !pos });
+  }
+
+  function removeNode(id) {
+    if (state.selected === id) closeInspector();
+    if (state.hovered === id) state.hovered = null;
+    state.nodes.get(id)?.el.remove();
+    state.nodes.delete(id);
+  }
+
+  const easeOut = (t) => 1 - (1 - t) ** 3;
+
+  let arrangeFrame = 0;
+
+  function clearPanel() {
+    cancelAnimationFrame(arrangeFrame);
+    closeInspector();
+    for (const layer of Object.values(layers)) layer.replaceChildren();
+    state.edges.clear();
+    nodesLayer.replaceChildren();
+    state.nodes.clear();
+    state.hovered = null;
+    panel.classList.remove('is-lit');
+  }
+
+  // Document nodes are created only here: one per loaded or run file, at its position in `at` if
+  // it had one, else below the last document node. A run's grid is planned once, when it starts;
+  // later syncs only add or drop document entries.
+  function syncDocNodes({ at = new Map(), animate = false, replan = !state.run } = {}) {
+    const files = panelFiles();
+    const keep = new Set(files.map(docId));
+    for (const n of [...state.nodes.values()]) {
+      if (n.kind !== 'doc' || keep.has(n.id)) continue;
+      removeNode(n.id);
+      state.layout.delete(n.id);
+    }
+    for (const f of files) {
+      if (state.nodes.has(docId(f))) continue;
+      const node = addDocNode(f, at.get(docId(f)));
+      state.layout.set(node.id, { x: node.x, y: node.y });
+    }
+    if (replan) state.layout = plan(nodeOrigin);
+    updateHint();
+    if (!state.userMoved) fit(animate);
   }
 
   function placeNode(node) {
@@ -1152,34 +1351,86 @@ p { margin: 0; }
     node.el.style.top = `${node.y}px`;
   }
 
+  function drawnAt(node) {
+    return { x: parseFloat(node.el.style.left), y: parseFloat(node.el.style.top) };
+  }
+
+  // The model takes the final positions at once; only the drawing slides there.
+  function arrange() {
+    cancelAnimationFrame(arrangeFrame);
+    state.layout = plan(tidyOrigin);
+    state.userMoved = false;
+    const moves = [];
+    for (const node of state.nodes.values()) {
+      const to = state.layout.get(node.id);
+      if (!to) continue;
+      const from = drawnAt(node);
+      Object.assign(node, to);
+      if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
+    }
+    const finish = () => {
+      for (const { node } of moves) placeNode(node);
+      redrawEdges();
+      positionInspector();
+      if (!state.userMoved) refit();
+    };
+    if (!moves.length || reduceMotion()) return finish();
+    const start = performance.now();
+    const grabbed = new Set();
+    const step = (now) => {
+      const t = Math.min(1, (now - start) / ARRANGE_MS);
+      if (t === 1) return finish();
+      const drawn = new Map();
+      for (const { node, from } of moves) {
+        if (gesture.moved && node === gesture.node) grabbed.add(node);
+        if (grabbed.has(node)) continue;
+        const at = { x: from.x + (node.x - from.x) * easeOut(t), y: from.y + (node.y - from.y) * easeOut(t) };
+        drawn.set(node, at);
+        node.el.style.left = `${at.x}px`;
+        node.el.style.top = `${at.y}px`;
+      }
+      redrawEdges((n) => drawn.get(n) ?? n);
+      arrangeFrame = requestAnimationFrame(step);
+    };
+    arrangeFrame = requestAnimationFrame(step);
+  }
+
+  function markWorking(id) {
+    state.nodes.get(id).el.classList.add('working');
+  }
+
   function settleNode(id, { empty = false } = {}) {
     const node = state.nodes.get(id);
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
-    node.el.querySelectorAll('.spin-glyph').forEach((g) => {
-      g.classList.remove('spin-glyph');
+    node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = '✻';
     });
     if (node.kind === 'parsed' && !empty) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
     if (state.selected === id) renderInspector();
   }
 
-  function isBlocked(a, b) {
-    const lo = Math.min(a.x, b.x) + ICON_HALF;
-    const hi = Math.max(a.x, b.x) - ICON_HALF;
+  function isBlocked(a, b, at) {
+    const pa = at(a);
+    const pb = at(b);
+    const lo = Math.min(pa.x, pb.x) + ICON_HALF;
+    const hi = Math.max(pa.x, pb.x) - ICON_HALF;
     for (const n of state.nodes.values()) {
       if (n === a || n === b) continue;
-      if (n.x > lo && n.x < hi && Math.abs(n.y - (a.y + b.y) / 2) < ICON_HALF * 2) return true;
+      const p = at(n);
+      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < ICON_HALF * 2) return true;
     }
     return false;
   }
 
-  function edgePath(a, b) {
-    const sx = a.x + ICON_HALF + EDGE_GAP;
-    const tx = b.x - ICON_HALF - EDGE_GAP;
+  function edgePath(a, b, at = (n) => n) {
+    const pa = at(a);
+    const pb = at(b);
+    const sx = pa.x + ICON_HALF + EDGE_GAP;
+    const tx = pb.x - ICON_HALF - EDGE_GAP;
     const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
-    const bow = Math.abs(a.y - b.y) < ICON_HALF && isBlocked(a, b) ? -BOW : 0;
-    return `M${sx} ${a.y} C${sx + c} ${a.y + bow} ${tx - c} ${b.y + bow} ${tx} ${b.y}`;
+    const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, at) ? -BOW : 0;
+    return `M${sx} ${pa.y} C${sx + c} ${pa.y + bow} ${tx - c} ${pb.y + bow} ${tx} ${pb.y}`;
   }
 
   function layerFor(kind) {
@@ -1220,8 +1471,8 @@ p { margin: 0; }
     return edge;
   }
 
-  function redrawEdges() {
-    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to)));
+  function redrawEdges(at) {
+    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to), at));
   }
 
   function refreshHighlight() {
@@ -1239,16 +1490,6 @@ p { margin: 0; }
       e.el.classList.toggle('lit', on);
       if (on) layers.lit.append(e.el);
     }
-  }
-
-  function clearPanel() {
-    closeInspector();
-    nodesLayer.replaceChildren();
-    for (const layer of Object.values(layers)) layer.replaceChildren();
-    state.nodes.clear();
-    state.edges.clear();
-    state.hovered = null;
-    panel.classList.remove('is-lit');
   }
 
   // ---------- inspector ----------
@@ -1293,26 +1534,55 @@ p { margin: 0; }
     return block;
   }
 
+  function fileMeta(file) {
+    const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
+    if (isPending(file)) meta.push('not run yet');
+    if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    return meta.join(' · ');
+  }
+
+  function fileText(file) {
+    return file.text ? h('pre', { class: 'code wrap' }, file.text) : h('p', { class: 'k' }, 'This file has no readable text.');
+  }
+
+  function openFileButton(file, label) {
+    return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
+  }
+
+  function docBody(node) {
+    const index = state.run ? state.run.docs.indexOf(node.file) : -1;
+    return [
+      h('div', { class: 'k' }, fileMeta(node.file)),
+      fileText(node.file),
+      index >= 0 && state.nodes.has(`r1-${index}`) ? row('summary', refs([`r1-${index}`])) : null,
+      openFileButton(node.file, 'open in files ›'),
+    ];
+  }
+
   function snippetBody(run, kind, d) {
     const s = run[kind][d];
+    const own = docId(run.docs[d]);
     const parts = [textBlock(s.summary)];
     if (kind === 'r1') {
-      parts.push(row('drew on', 'its own document only'));
+      parts.push(row('drew on', refs([own])));
       const citedBy = range(run.docs.length).filter((i) => run.r2[i].provenance.includes(d) && state.nodes.has(`r2-${i}`) && !state.nodes.get(`r2-${i}`).el.classList.contains('working'));
       parts.push(row('cited by', refs(citedBy.map((i) => `r2-${i}`))));
     } else {
+      parts.push(row('read again', refs([own])));
       parts.push(row('saw', `round 1 summaries of the other ${plural(run.docs.length - 1, 'document')}`));
       parts.push(row('drew on', refs(s.provenance.map((p) => `r1-${p}`))));
     }
     parts.push(callMeta(run, `${kind}-${d}`));
-    parts.push(h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'));
+    parts.push(openFileButton(run.docs[d], 'open document ›'));
     return parts;
   }
 
   function inspectorBody(id) {
     const run = state.run;
     const [kind, d] = splitId(id);
-    if (state.nodes.get(id).el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
+    const node = state.nodes.get(id);
+    if (kind === 'doc') return docBody(node);
+    if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
@@ -1329,7 +1599,7 @@ p { margin: 0; }
         row('filled from', refs(['schema', `r2-${d}`])),
         run.answer.cites.includes(d) && state.nodes.has('answer') ? row('cited by', refs(['answer'])) : null,
         callMeta(run, id),
-        h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'),
+        openFileButton(run.docs[d], 'open document ›'),
       ];
     }
     return [
@@ -1345,14 +1615,14 @@ p { margin: 0; }
     const id = state.selected;
     if (!id || !state.nodes.has(id)) return;
     const [kind] = splitId(id);
-    inspector.setAttribute('aria-label', titleName(id));
+    inspector.setAttribute('aria-label', nodeName(id));
     inspector.classList.toggle('wide', kind === 'schema');
     fill(
       inspector,
       h(
         'div',
         { class: 'insp-head' },
-        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), titleName(id)),
+        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(id)),
         h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
       ),
       inspectorBody(id),
@@ -1424,7 +1694,7 @@ p { margin: 0; }
     return h(
       node ? 'button' : 'div',
       { class: classes, type: node ? 'button' : null, onclick: node ? () => jumpTo(node) : null },
-      h('span', { class: kind === 'spin' ? 'g spin-glyph' : 'g', 'aria-hidden': 'true' }, g),
+      h('span', { class: 'g', 'aria-hidden': 'true' }, g),
       h('span', { class: 't' }, text),
     );
   }
@@ -1475,12 +1745,12 @@ p { margin: 0; }
   }
 
   function readyStatus() {
-    setStatus(`${plural(state.files.length, 'document')} ready`);
+    if (!state.run) setStatus(`${plural(state.files.length, 'document')} ready · ${settings.model}`);
   }
 
   function nextAction() {
     if (state.run && !state.filesDirty) return 'follow-up';
-    return state.filesAreSample && questionEl.value.trim() === SAMPLE.question ? 'recorded' : 'simulated';
+    return filesAreSample() && questionEl.value.trim() === SAMPLE.question ? 'recorded' : 'simulated';
   }
 
   function updateAskFoot() {
@@ -1490,10 +1760,12 @@ p { margin: 0; }
     $('run-btn').textContent = action === 'follow-up' ? 'send ⏎' : 'run ⏎';
   }
 
-  function updateEmpty() {
-    $('empty').hidden = Boolean(state.run);
-    $('empty-count').textContent = `${plural(state.files.length, 'document')} ready`;
-    $('empty-hint').textContent = state.filesAreSample ? 'press run to watch the recorded run here' : 'ask in the chat to run over them';
+  function updateHint() {
+    const pending = state.files.filter(isPending).length;
+    const hint = $('panel-hint');
+    if (!state.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
+    else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
+    hint.hidden = !hint.textContent;
   }
 
   function submitQuestion() {
@@ -1532,14 +1804,14 @@ p { margin: 0; }
     state.timers = [];
   }
 
-  function stage(at, t0, order, n, appear, settle) {
+  function stage(at, t0, order, n, appear, settle, pace = PACE.model) {
     const spread = TIMING.maxStageSpread / Math.max(1, n - 1);
-    const appearGap = Math.min(TIMING.appearStagger, spread);
-    const settleGap = Math.min(TIMING.settleStagger, spread);
+    const appearGap = Math.min(pace.appearStagger, spread);
+    const settleGap = Math.min(pace.settleStagger, spread);
     for (let i = 0; i < n; i++) at(t0 + i * appearGap, () => appear(i));
     let last = t0;
     order.forEach((doc, rank) => {
-      last = Math.max(last + TIMING.minSettleGap, t0 + TIMING.settleFirst + rank * settleGap, t0 + doc * appearGap + TIMING.minWork);
+      last = Math.max(last + TIMING.minSettleGap, t0 + pace.settleFirst + rank * settleGap, t0 + doc * appearGap + pace.minWork);
       at(last, () => settle(doc, rank));
     });
     return last;
@@ -1565,9 +1837,24 @@ p { margin: 0; }
       if (run.simulated) {
         narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
       }
+      narr.phase(`reading · 0 of ${n}`);
+    });
+    const docAt = (i) => docId(run.docs[i]);
+    t = stage(at, t, range(n), n, (i) => markWorking(docAt(i)), (i, rank) => {
+      settleNode(docAt(i));
+      narr.phase(`reading · ${rank + 1} of ${n}`);
+    }, PACE.read);
+    at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`));
+
+    t += TIMING.phaseGap;
+    at(t, () => {
+      narr.say('main', 'round 1 · one summary per document');
       narr.phase(`round 1 · 0 of ${n}`);
     });
-    t = stage(at, t, run.order.r1, n, (i) => addNode(`r1-${i}`), (i, rank) => {
+    t = stage(at, t, run.order.r1, n, (i) => {
+      addNode(`r1-${i}`);
+      addEdge(docAt(i), `r1-${i}`, 'flow', 'draw');
+    }, (i, rank) => {
       settleNode(`r1-${i}`, { empty: !run.r1[i].summary });
       narr.say('sub', `round 1 · ${name(i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`, { node: `r1-${i}` });
       narr.phase(`round 1 · ${rank + 1} of ${n}`);
@@ -1647,14 +1934,13 @@ p { margin: 0; }
 
   function playRun(run) {
     cancelTimers();
+    const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
     clearPanel();
     state.run = run;
     state.runTurn.body.replaceChildren();
-    state.planned = plannedBounds(run);
-    state.userMoved = false;
     $('replay-btn').hidden = false;
-    updateEmpty();
-    fit();
+    state.userMoved = false;
+    syncDocNodes({ at: docPositions, animate: true, replan: true });
     const steps = buildTimeline(run, narrator(state.runTurn.body));
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
@@ -1664,7 +1950,7 @@ p { margin: 0; }
   }
 
   function startRun(question) {
-    const recorded = state.filesAreSample && question === SAMPLE.question;
+    const recorded = filesAreSample() && question === SAMPLE.question;
     const run = recorded ? sampleRun() : simulatedRun(state.files, question);
     state.filesDirty = false;
     state.runTurn = addTurn(question);
@@ -1681,32 +1967,27 @@ p { margin: 0; }
   }
 
   function renderFiles() {
-    const total = state.files.reduce((sum, f) => sum + f.size, 0);
-    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(total)} · ${state.filesAreSample ? 'sample memos' : 'your files'}`;
+    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(totalBytes(state.files))} · ${filesAreSample() ? 'sample memos' : 'your files'}`;
     $('file-list').replaceChildren(
       ...state.files.map((f) =>
         h('li', {}, h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'size' }, fmtBytes(f.size)))),
       ),
     );
     $('files-count').textContent = state.files.length;
-    $('sample-btn').hidden = state.filesAreSample;
+    $('sample-btn').hidden = filesAreSample();
   }
 
   function openFile(file) {
     showTab('files');
-    const index = state.run ? state.run.docs.indexOf(file) : -1;
     const fileView = $('file-view');
-    const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    const node = state.nodes.get(docId(file));
     fill(
       fileView,
       h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
       h('div', { class: 'insp-title' }, h('span', { class: 'g' }, '● '), file.name),
-      h('div', { class: 'k' }, meta.join(' · ')),
-      file.text ? h('pre', { class: 'code wrap' }, file.text) : h('p', { class: 'k' }, 'This file has no readable text.'),
-      index >= 0 && state.nodes.has(`r1-${index}`)
-        ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(`r1-${index}`) }, 'show in panel ›')
-        : null,
+      h('div', { class: 'k' }, fileMeta(file)),
+      fileText(file),
+      node ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(node.id) }, 'show in panel ›') : null,
     );
     $('file-list-view').hidden = true;
     fileView.hidden = false;
@@ -1736,16 +2017,14 @@ p { margin: 0; }
       return;
     }
     error.hidden = true;
-    const read = await Promise.all(picked.map(async (f) => ({ name: f.name, size: f.size, text: await readText(f), sample: false })));
+    const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
     read.sort((a, b) => a.name.localeCompare(b.name));
-    state.files = state.filesAreSample ? read : [...state.files, ...read].slice(0, MAX_FILES);
-    state.filesAreSample = false;
+    state.files = filesAreSample() ? read : [...state.files, ...read].slice(0, MAX_FILES);
     filesChanged(`${plural(read.length, 'file')} added. Your next question runs over ${plural(state.files.length, 'document')}.`);
   }
 
   function useSample() {
-    state.files = SAMPLE.docs.map((d) => ({ ...d, sample: true }));
-    state.filesAreSample = true;
+    state.files = SAMPLE_FILES;
     if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
     filesChanged('Back to the 5 sample memos.');
   }
@@ -1755,8 +2034,8 @@ p { margin: 0; }
     closeFile();
     renderFiles();
     updateAskFoot();
-    updateEmpty();
-    if (!state.run) readyStatus();
+    syncDocNodes();
+    readyStatus();
     transcript.append(line('main', message, { dim: true }));
     scrollTranscript();
   }
@@ -1794,22 +2073,67 @@ p { margin: 0; }
   function toggleTheme() {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
     root.dataset.theme = next;
-    try {
-      localStorage.setItem(THEME_KEY, next);
-    } catch {
-      // Storage can be blocked; the toggle still works for this visit.
-    }
+    writeStored(THEME_KEY, next);
     updateThemeLabel();
   }
 
   function restoreTheme() {
-    try {
-      const saved = localStorage.getItem(THEME_KEY);
-      if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
-    } catch {
-      // No stored theme; follow the system.
-    }
+    const saved = readStored(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
     updateThemeLabel();
+  }
+
+  // ---------- settings ----------
+
+  function restoreSettings() {
+    let saved = null;
+    try {
+      saved = JSON.parse(readStored(SETTINGS_KEY));
+    } catch {
+      // A corrupt entry is ignored; keep the defaults.
+    }
+    if (typeof saved?.model === 'string' && saved.model.trim()) settings.model = saved.model.trim();
+    if (typeof saved?.endpoint === 'string') settings.endpoint = saved.endpoint.trim();
+  }
+
+  function showKey(show) {
+    $('setting-key').type = show ? 'text' : 'password';
+    $('setting-key-show').textContent = show ? 'hide' : 'show';
+    $('setting-key-show').setAttribute('aria-label', show ? 'hide key' : 'show key');
+  }
+
+  // Right-aligned under the button; CSS owns the width, so nothing needs measuring before it opens.
+  function placeSettings() {
+    const button = $('settings-btn').getBoundingClientRect();
+    const popover = $('settings');
+    popover.style.left = `max(var(--gutter), ${button.right}px - var(--settings-width))`;
+    popover.style.top = `${button.bottom + POPOVER_GAP}px`;
+    popover.style.maxHeight = `${window.innerHeight - button.bottom - POPOVER_GAP - POPOVER_MARGIN}px`;
+  }
+
+  // beforetoggle, not toggle, so the popover is placed and filled before its first paint.
+  function onSettingsToggle(e) {
+    $('setting-key').value = '';
+    showKey(false);
+    if (e.newState !== 'open') return;
+    placeSettings();
+    $('setting-model').value = settings.model;
+    $('setting-endpoint').value = settings.endpoint;
+    $('settings-saved').textContent = '';
+  }
+
+  let savedTimer = 0;
+
+  function saveSettings() {
+    const key = $('setting-key');
+    settings.model = $('setting-model').value.trim();
+    settings.endpoint = $('setting-endpoint').value.trim();
+    key.value = '';
+    writeStored(SETTINGS_KEY, JSON.stringify({ model: settings.model, endpoint: settings.endpoint }));
+    readyStatus();
+    $('settings-saved').textContent = 'saved';
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => ($('settings-saved').textContent = ''), SAVED_MS);
   }
 
   // ---------- gestures ----------
@@ -1853,7 +2177,7 @@ p { margin: 0; }
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
     gesture.origin = { x: e.clientX, y: e.clientY };
-    gesture.from = gesture.node ? { x: gesture.node.x, y: gesture.node.y } : { x: view.x, y: view.y };
+    gesture.from = gesture.node ? drawnAt(gesture.node) : { x: view.x, y: view.y };
   }
 
   function onPointerMove(e) {
@@ -1893,6 +2217,7 @@ p { margin: 0; }
       else if (gesture.mode === 'pan') closeInspector();
     }
     gesture.mode = null;
+    gesture.node = null;
     panel.classList.remove('panning');
   }
 
@@ -1951,15 +2276,26 @@ p { margin: 0; }
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
+      // The platform closes an open settings popover on this same Escape.
+      if (e.key !== 'Escape' || $('settings').matches(':popover-open')) return;
       if (!inspector.hidden) closeInspector(true);
       else if (!$('file-view').hidden) closeFile();
     });
 
-    $('fit-btn').addEventListener('click', () => {
-      state.userMoved = false;
-      fit(true);
+    $('arrange-btn').addEventListener('click', arrange);
+    $('settings').addEventListener('beforetoggle', onSettingsToggle);
+    window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
+    $('setting-key-show').addEventListener('click', () => showKey($('setting-key').type === 'password'));
+    $('setting-key').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      $('settings-form').requestSubmit();
     });
+    $('settings-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      saveSettings();
+    });
+    $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
@@ -2019,13 +2355,14 @@ p { margin: 0; }
 
   function init() {
     restoreTheme();
+    restoreSettings();
     questionEl.value = SAMPLE.question;
     renderFiles();
     updateAskFoot();
-    updateEmpty();
     readyStatus();
     transcript.append(line('main', 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.', { dim: true }));
     applyView();
+    syncDocNodes();
     wire();
   }
 
