@@ -251,14 +251,39 @@ def test_only_the_shown_documents_ids_are_kept_in_order_once_each(
 @PATHS
 def test_an_unknown_id_is_dropped_with_a_warning(llm, caplog, path):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    reply = citing(path, ["ffffff", IDS[0], "Document 2"])
+    reply = citing(path, ["ffffff", IDS[0], "Document 2", "ffffff.2"])
     reasoning_prompt(llm.replies(reply), path, **TWO_DOCUMENTS)
     assert caplog.messages == [
         (
             f"{path}: dropped provenance id(s) the call did not show: "
-            "['ffffff', 'Document 2']"
+            "['ffffff', 'Document 2', 'ffffff']"
         )
     ]
+
+
+@pytest.mark.parametrize(
+    ("indices", "uncovered"), [([0, 2, 3], "[2, 3]"), ([-1, 1], "[-1]")]
+)
+def test_records_from_a_document_without_an_id_are_refused_before_any_request(
+    llm, indices, uncovered
+):
+    message = (
+        f"source_docs refers to document index(es) {uncovered}, but document_ids "
+        "names 2 document(s): give one id per document."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        reason(
+            task="?",
+            schema_code="",
+            parsed={"rows": [{"who": "x"} for _ in indices]},
+            source_docs={"rows": indices},
+            document_ids=IDS[:2],
+            model=MODEL,
+            prompts=PROMPTS,
+            path="direct",
+            completion=llm,
+        )
+    assert llm.requests == []
 
 
 @pytest.mark.parametrize(

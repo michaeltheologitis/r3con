@@ -235,11 +235,8 @@ def _documents_cited(
 ) -> list[str]:
     """The documents ``provenance`` cites, by :func:`r3con.stages.relevance.cited`, a
     part's id ``<id>.<k>`` read as its document's ``<id>``."""
-    whole = [
-        head if (head := id_.split(".", 1)[0]) in document_ids else id_
-        for id_ in provenance
-    ]
-    return cited(whole, document_ids, kind, log=_log)
+    whole = [id_.split(".", 1)[0] for id_ in provenance]
+    return cited(whole, set(document_ids), kind, log=_log)
 
 
 def _reason_with_code(
@@ -426,9 +423,19 @@ def reason(
     a prompt fits the model's window.
 
     Raises:
-        ValueError: if ``relevance_snippets`` is not one snippet per document id, or
+        ValueError: if ``relevance_snippets`` is not one snippet per document id,
+            ``source_docs`` names a document ``document_ids`` has no id for, or
             ``max_attempts`` is not positive.
     """
+    uncovered = sorted(
+        {i for idxs in (source_docs or {}).values() for i in idxs}
+        - set(range(len(document_ids)))
+    )
+    if uncovered:
+        raise ValueError(
+            f"source_docs refers to document index(es) {uncovered}, but document_ids "
+            f"names {len(document_ids)} document(s): give one id per document."
+        )
     if max_attempts is None:
         max_attempts = settings.REASONING_MAX_ATTEMPTS
     if max_attempts < 1:
