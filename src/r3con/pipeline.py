@@ -121,41 +121,55 @@ class Answer:
 
 @dataclass
 class _StageRecord:
-    """What one stage leaves in the run folder: its calls, its ``result.json``, and
-    whether it writes ``transcript.yaml``."""
+    """What one stage leaves in the run folder: its calls, and its ``result.json``."""
 
     run: StageRun | None
     result: dict[str, Any] = field(default_factory=dict)
-    transcript: bool = False
+
+
+def _agent_took_a_turn(run: StageRun) -> bool:
+    """Whether reasoning's coding loop recorded a turn (a ``turn-N`` call)."""
+    return any(step.kind.startswith("turn-") for step in run.steps)
 
 
 @contextmanager
 def _recorded_stage(
-    task_logger: TaskLogger | None, stage: str, model: str, *, transcript: bool
+    task_logger: TaskLogger | None,
+    stage: str,
+    model: str,
+    *,
+    transcript: bool | Callable[[StageRun], bool],
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
-    fields of its ``result.json``; ``record.transcript`` starts as ``transcript``, and
-    the body may change it. On a clean exit this writes ``calls.json`` (and, with
-    ``record.transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
-    token and cost ``totals``. On any exception, an interrupt included, it writes the calls
-    that completed and ``error.txt`` with the traceback, adds a note naming the run
-    folder to the exception, and re-raises. Without a logger it records nothing.
+    fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
+    with ``transcript``, or when ``transcript(run)`` holds once the body is done,
+    ``transcript.yaml``), then ``result.json`` with the stage's token and cost
+    ``totals``. On any exception, an interrupt included, it writes the calls that
+    completed (and the transcript, as on a clean exit) and ``error.txt`` with the
+    traceback, adds a note naming the run folder to the exception, and re-raises.
+    Without a logger it records nothing.
     """
     if task_logger is None:
         yield _StageRecord(run=None)
         return
     run = StageRun(stage=stage, task_logger=task_logger, model=model)
-    record = _StageRecord(run=run, transcript=transcript)
+    record = _StageRecord(run=run)
+
+    def flush() -> None:
+        run.flush(
+            write_transcript=transcript(run) if callable(transcript) else transcript
+        )
+
     try:
         yield record
-        run.flush(write_transcript=record.transcript)
+        flush()
         task_logger.write_json(
             f"{stage}/result", {**record.result, "totals": run.compute_totals()}
         )
     except BaseException as error:
-        run.flush(write_transcript=record.transcript)
+        flush()
         task_logger.write_text(f"{stage}/error", traceback.format_exc())
         error.add_note(f"r3con: partial artifacts in {task_logger.dir}")
         raise
@@ -327,7 +341,7 @@ def run_pipeline(
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
     with _recorded_stage(
-        task_logger, "reasoning", model, transcript=config.reasoning == "coding"
+        task_logger, "reasoning", model, transcript=_agent_took_a_turn
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -351,7 +365,6 @@ def run_pipeline(
             len(result.turns),
             _preview(result.answer),
         )
-        record.transcript = result.path == "coding"
         record.result = {
             "answer": result.answer,
             "path": result.path,

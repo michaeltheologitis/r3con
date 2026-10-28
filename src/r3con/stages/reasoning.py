@@ -207,12 +207,13 @@ def _reason_with_code(
     record per top-level field: when the parse is over
     ``settings.REASONING_PARSE_MAX_TOKS``, when ``splits`` estimates the first turn with
     it over the line, or when the provider refuses that turn as too long, which sends it
-    once more with the samples.
+    once more with the samples. A ``fallback`` from the direct path, whose prompt held
+    the whole parse and did not fit, starts with the samples.
     """
-    # The whole parse, unless it is over the flood guard (a parse that runs to
-    # thousands of records), or its first turn is over the line.
-    parse_tokens = count_tokens(parse_json)
-    whole = parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
+    # The whole parse, unless this is a fallback, it is over the flood guard (a parse
+    # that runs to thousands of records), or its first turn is over the line.
+    parse_tokens = 0 if fallback else count_tokens(parse_json)
+    whole = not fallback and parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
     system_prompt = render(
         parse_block=parse_json if whole else _sample_view(parse_dict)
     )
@@ -266,7 +267,7 @@ def reason(
     parsed: BaseModel | dict[str, Any],
     model: str,
     prompts: Mapping[str, str],
-    path: ReasoningPath = "direct",
+    path: ReasoningPath,
     relevance_snippets: Sequence[Snippet] | None = None,
     source_docs: dict[str, list[int]] | None = None,
     max_turns: int | None = None,

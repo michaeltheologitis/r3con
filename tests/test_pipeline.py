@@ -198,14 +198,6 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def too_long() -> litellm.ContextWindowExceededError:
-    return litellm.ContextWindowExceededError(
-        message="This model's maximum context length is 4000 tokens.",
-        model=MODEL,
-        llm_provider="openai",
-    )
-
-
 def system_message(stage: str, version: str = "v1") -> dict:
     """The system message of ``stage``'s prompt at ``version`` over DOCS' notes and
     their whole parse, stamped."""
@@ -351,19 +343,31 @@ def test_the_coding_path_sends_what_reasoning_v2_sent(answering_llm, tmp_path):
 
 
 def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_says_why(
-    answering_llm, tmp_path
+    answering_llm, tmp_path, refusal
 ):
-    refused = too_long()
+    refused = refusal()
     llm = answering_llm.answers(reasoning=[refused, COMMITS_THE_PARSE])
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger)
     assert ast.literal_eval(result.answer) == STAMPED
     direct, coding = (r["messages"][0] for r in llm.requests_for("reasoning"))
     assert direct == system_message("reasoning/direct")
-    assert coding == system_message("reasoning/coding")
+    assert SAMPLE in coding["content"] and "final_answer(" in coding["content"]
     reasoning = read_json(logger, "reasoning/result")
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {"cause": "refusal", "error": str(refused)}
+    assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
+
+
+def test_a_fallback_that_fails_after_a_turn_still_leaves_its_transcript(
+    answering_llm, tmp_path, refusal
+):
+    llm = answering_llm.answers(reasoning=[refusal(), NEVER_COMMITS, provider_down()])
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(litellm.APIConnectionError):
+        answer(llm, logger)
+    assert [call["kind"] for call in read_json(logger, "reasoning/calls")] == ["turn-1"]
+    assert (logger.dir / "reasoning" / "error.txt").is_file()
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
 
 

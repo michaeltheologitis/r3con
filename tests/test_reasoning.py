@@ -36,23 +36,16 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
 
 
 def ask(llm, *replies, **kwargs):
-    """``reason`` over ROWS on the default path, ``llm`` answering with ``replies``."""
+    """``reason`` over ROWS on the direct path, ``llm`` answering with ``replies``."""
     kwargs.setdefault("model", MODEL)
     return reason(
         task="Who?",
         schema_code="",
         parsed=ROWS,
         prompts=PROMPTS,
+        path="direct",
         completion=llm.replies(*replies),
         **kwargs,
-    )
-
-
-def too_long() -> litellm.ContextWindowExceededError:
-    return litellm.ContextWindowExceededError(
-        message="This model's maximum context length is 4000 tokens.",
-        model=MODEL,
-        llm_provider="openai",
     )
 
 
@@ -80,7 +73,7 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     )
 
 
-def test_by_default_one_call_answers_and_its_reply_is_the_answer(llm):
+def test_on_the_direct_path_one_call_answers_and_its_reply_is_the_answer(llm):
     result = ask(llm, "  Site 099 logged nothing unusual.\n")
     assert result.answer == "Site 099 logged nothing unusual."
     assert (result.path, result.fallback) == ("direct", None)
@@ -97,8 +90,9 @@ def test_by_default_one_call_answers_and_its_reply_is_the_answer(llm):
     ]
 
 
-def test_an_empty_direct_reply_is_sent_again(llm):
-    assert ask(llm, "", "Halloran.").answer == "Halloran."
+@pytest.mark.parametrize("empty", ["", "\n"])
+def test_an_empty_direct_reply_is_sent_again(llm, empty):
+    assert ask(llm, empty, "Halloran.").answer == "Halloran."
     first, again = llm.requests
     assert again["messages"] == first["messages"]
 
@@ -268,7 +262,7 @@ def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
 
 
 def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_samples(
-    llm, caplog
+    llm, caplog, refusal
 ):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     result = reason(
@@ -278,7 +272,7 @@ def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_sample
         model=MODEL,
         prompts=PROMPTS,
         path="coding",
-        completion=llm.replies(too_long(), PRINTS, COMMIT),
+        completion=llm.replies(refusal(), PRINTS, COMMIT),
     )
     assert result.answer == "ok"
     whole, samples = first_turn_prompts(llm)
@@ -293,16 +287,16 @@ def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_sample
     ]
 
 
-def test_a_later_turn_refused_is_raised_as_it_is(llm):
-    refused = too_long()
+def test_a_later_turn_refused_is_raised_as_it_is(llm, refusal):
+    refused = refusal()
     with pytest.raises(litellm.ContextWindowExceededError) as failure:
         reasoning_prompt(llm.replies(PRINTS, refused), parsed=ROWS)
     assert failure.value is refused
     assert len(llm.requests) == 2
 
 
-def test_a_first_turn_refused_with_samples_is_raised(llm):
-    whole, samples = too_long(), too_long()
+def test_a_first_turn_refused_with_samples_is_raised(llm, refusal):
+    whole, samples = refusal(), refusal()
     with pytest.raises(litellm.ContextWindowExceededError) as failure:
         reasoning_prompt(llm.replies(whole, samples, COMMIT), parsed=ROWS)
     assert failure.value is samples
@@ -322,24 +316,22 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
         (
             "reasoning's direct prompt would take about 3,452 tokens, over the "
             "3,400-token line; reasoning with code instead"
-        ),
-        (
-            "the whole parse (about 1,609 tokens) would put reasoning's first turn at "
-            "about 3,906 tokens, over the 3,400-token line; showing one sample record "
-            "per field"
-        ),
+        )
     ]
 
 
-def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path(llm, caplog):
+def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_samples(
+    llm, caplog
+):
+    # The direct prompt takes about 3,450 tokens, the coding one with samples 2,400.
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    refused = too_long()
-    result = ask(llm, refused, COMMIT)
+    result = ask(llm.refuses_over(tokens=3_000), COMMIT)
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "refusal", "error": str(refused)}
+    assert result.fallback is not None and result.fallback["cause"] == "refusal"
+    assert "maximum context length is 3000 tokens" in result.fallback["error"]
     direct, coding = (request["messages"][0]["content"] for request in llm.requests)
-    assert "final_answer(" not in direct
-    assert "final_answer(" in coding and LAST_ROW in coding
+    assert "final_answer(" not in direct and LAST_ROW in direct
+    assert "final_answer(" in coding and SAMPLE in coding and LAST_ROW not in coding
     assert caplog.messages == [
         "reasoning's direct prompt was refused as too long; reasoning with code instead"
     ]

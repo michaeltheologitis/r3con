@@ -348,6 +348,12 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
 
 
 @pytest.fixture
+def refusal() -> Callable[[], litellm.ContextWindowExceededError]:
+    """Makes a new error of the kind litellm raises for a request refused as too long."""
+    return lambda: too_long(4_000, 5_000, "openai/gpt-6-luna")
+
+
+@pytest.fixture
 def grown_registry() -> Callable[..., str]:
     return grow_registry
 
