@@ -93,6 +93,8 @@ The examples use five short memos arranged so that no single document contains t
 answer:
 
 - [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
+- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — tracing an answer back to the documents and
+  summaries it came from.
 - [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
   path, generation parameters, run configuration, custom connections, and artifact paths.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
@@ -104,53 +106,25 @@ built during the run:
 
 ```python
 result.answer  # str       — final answer
-result.provenance  # list[str] — ids of the documents the answer used
 result.relevant_context  # list[str] — final relevance snippets
 result.structured_context  # dict      — structured representation
 result.run_dir  # Path      — directory containing run artifacts
 ```
 
-`str(result)` returns the same value as `result.answer`. Each document gets an id for the
-run, and `result.document_ids[i]` is the id of `documents[i]`, so the documents the
-answer used are `[documents[result.document_ids.index(id_)] for id_ in result.provenance]`.
-Each record in `result.structured_context` names its document's id under `document`.
+r3con also records provenance, how the answer and each summary came to be; see
+[`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
 
 ## Run artifacts
 
-Every run writes its intermediate artifacts to a directory under `./logs`. This includes the
-relevance snippet produced for each document at every round, the generated schema, parsed
-records, model calls, and the final reasoning transcript. Each call in `calls.json` records
-its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
-each stage's `result.json` totals them.
-
-`reasoning/result.json` records the answer, its `provenance` (the ids of the documents it
-used, in the order it cited them), and the `path` that produced it: `direct`, one call
-over the relevance snippets and the parsed records, or `coding`, an agent that reads the
-records with code. A run takes the direct path unless its config, `--reasoning` or
-`reasoning=` says `coding`. A direct run whose prompt doesn't fit the model's window takes
-the coding path instead, and `fallback` says why: `cause` `estimate` (with `estimate` and
-`line`, in tokens) or `refusal` (with `error`). So does a direct run whose every reply
-fails its schema, with `cause` `invalid` (with `error`). Otherwise `fallback` is `null`.
-
-Each document gets a random id of 6 hex characters for the run, and `ids.json` maps each
-id to the document's 0-based index in `documents` (also `result.document_ids`). In
-`relevance/result.json`, every round lists its `snippets`, one per document or per part
-of a document read in parts, each with its `id` (the document's, or `<id>.<k>` for part
-`k` in that round), its `summary`, and its `provenance`: the ids of the previous round's
-snippets it used. In `structuring/parsing/result.json`, `source_docs` gives, for each
-list field of `parsed`, the 0-based index of the document each record came from, and
-`source_ids` lines up with it by position, giving that document's id (also
-`result.source_docs` and `result.source_ids`). A record parsed from one part of a long
-document carries the document's id. The id lets a record be matched against the ids in
-`relevance/result.json` and `result.relevance_provenance`, where a part's id is
-`<id>.<k>`: match on the part before the dot.
+Every run writes each stage's output and model calls, with their tokens and cost, to a
+folder under `./logs`.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
-├── ids.json                     <- document id -> index in documents
+├── ids.json                     <- each document's id
 ├── splits.json                  <- only when a document was read in parts
 ├── relevance/
-│   ├── result.json              <- each round's snippets: id, summary, provenance
+│   ├── result.json              <- each round's snippets
 │   └── calls.json
 ├── structuring/
 │   ├── schema/
@@ -158,10 +132,10 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   │   ├── calls.json
 │   │   └── transcript.yaml
 │   └── parsing/
-│       ├── result.json          <- parsed records, each one's document index and id
+│       ├── result.json          <- the parsed records
 │       └── calls.json
 └── reasoning/
-    ├── result.json              <- the answer, its provenance, its path, why it fell back
+    ├── result.json              <- the answer
     ├── calls.json
     └── transcript.yaml
 ```
