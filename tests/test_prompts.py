@@ -34,13 +34,15 @@ def examples(stage: str) -> list:
 
 
 def shown(example: str) -> tuple[list[str], dict]:
-    """An example's document ids, from its summaries' headings, and its parse, each
-    record of which names one of them."""
+    """An example's document ids, from its summaries' headings, and its parse."""
     ids = re.findall(r"^### Document ID: (\w+)$", example, re.MULTILINE)
     parse = json.loads(example.split("`parse`:\n", 1)[1].split("\n\nThought:", 1)[0])
-    records = [record for field in parse.values() for record in field]
-    assert {record["document"] for record in records} <= set(ids)
     return ids, parse
+
+
+def stamps(parse: dict) -> set[str]:
+    """The documents a parse's records name."""
+    return {record["document"] for field in parse.values() for record in field}
 
 
 @pytest.fixture
@@ -86,6 +88,7 @@ def test_the_coding_prompt_renders_as_the_old_reasoning_v2(context):
 @pytest.mark.parametrize("example", examples("reasoning/direct"))
 def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example):
     ids, parse = shown(example)
+    assert stamps(parse) <= set(ids)
     reply = json.loads(example.rsplit("\n", 1)[1])
     result = reason(
         task="?",
@@ -105,6 +108,7 @@ def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example
 @pytest.mark.parametrize("example", examples("reasoning/coding"))
 def test_each_coding_example_runs_and_commits_ids_it_shows(llm, example):
     ids, parse = shown(example)
+    assert stamps(parse) <= set(ids)
     turns = re.findall(r"^Thought:.*?</code>", example, re.MULTILINE | re.DOTALL)
     printed = re.findall(
         r"^<observation>\n(.*?)\n</observation>$", example, re.MULTILINE | re.DOTALL

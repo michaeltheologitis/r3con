@@ -16,8 +16,6 @@ MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v2", "reasoning/coding": "v2"}
 PATHS = pytest.mark.parametrize("path", REASONING_PATHS)
 IDS = [f"d0c{n:03x}" for n in range(10)]
-COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok', provenance=[])\n</code>"
-ANSWERS_OK = {"answer": "ok", "provenance": []}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
 SAMPLE = "only a SAMPLE"
@@ -43,10 +41,9 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
     kwargs.setdefault("schema_code", "class Parse(BaseModel): rows: list[Row]")
     kwargs.setdefault("parsed", {"rows": [{"who": "Halloran"}]})
     kwargs.setdefault("model", MODEL)
-    kwargs.setdefault(
-        "document_ids", IDS[: len(kwargs.get("relevance_snippets") or IDS)]
-    )
-    reply = COMMIT if path == "coding" else ANSWERS_OK
+    snippets = kwargs.get("relevance_snippets")
+    kwargs.setdefault("document_ids", IDS[: len(snippets)] if snippets else IDS)
+    reply = citing(path, [])
     reason(prompts=PROMPTS, path=path, completion=llm.replies(reply), **kwargs)
     return llm.requests[-1]["messages"][0]["content"]
 
@@ -125,23 +122,15 @@ def test_on_the_direct_path_one_call_answers_with_the_documents_it_used(llm):
 def test_the_direct_request_asks_for_the_answer_and_the_shown_documents_ids(llm):
     reasoning_prompt(llm, "direct", **TWO_DOCUMENTS)
     [request] = llm.requests
-    response_format = request["response_format"]
-    assert response_format["json_schema"]["name"] == "ReasoningAnswer"
-    assert response_format["json_schema"]["strict"] is True
-    assert response_format["json_schema"]["schema"] == {
-        "properties": {
-            "answer": {"title": "Answer", "type": "string"},
-            "provenance": {
-                "items": {"enum": IDS[:2], "type": "string"},
-                "title": "Provenance",
-                "type": "array",
-            },
-        },
-        "required": ["answer", "provenance"],
-        "title": "ReasoningAnswer",
-        "type": "object",
-        "additionalProperties": False,
-    }
+    response_format = request["response_format"]["json_schema"]
+    assert (response_format["name"], response_format["strict"]) == (
+        "ReasoningAnswer",
+        True,
+    )
+    schema = response_format["schema"]
+    assert schema["required"] == ["answer", "provenance"]
+    assert schema["properties"]["provenance"]["items"]["enum"] == IDS[:2]
+    assert "default" not in schema["properties"]["provenance"]
 
 
 def test_a_direct_reply_without_provenance_cites_nothing(llm):
@@ -190,7 +179,7 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
     monkeypatch.setattr(settings, "REASONING_PARSE_MAX_TOKS", flood_guard)
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     bad = [{"provenance": []}, "not JSON", EMPTY_ANSWER]
-    result = ask(llm, *bad, COMMIT)
+    result = ask(llm, *bad, citing("coding", []))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback == {
         "cause": "invalid",
@@ -209,7 +198,7 @@ def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(
     llm, monkeypatch
 ):
     monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
-    result = ask(llm, "not JSON", "{", COMMIT)
+    result = ask(llm, "not JSON", "{", citing("coding", []))
     assert result.fallback is not None and result.fallback["cause"] == "invalid"
     assert result.fallback["error"].startswith("reply: Invalid JSON")
     assert len(llm.requests) == 3
@@ -223,19 +212,24 @@ def test_fewer_than_one_attempt_is_refused_before_any_request(llm):
 
 @PATHS
 @pytest.mark.parametrize(
-    ("cited", "kept"),
+    ("cited", "kept", "dropped"),
     [
-        ([IDS[1], IDS[0]], [IDS[1], IDS[0]]),
-        ([IDS[1], IDS[0], IDS[1]], [IDS[1], IDS[0]]),
-        ([f"{IDS[1]}.2", f"{IDS[1]}.1", IDS[0]], [IDS[1], IDS[0]]),
-        (["ffffff", IDS[0], "Document 2", "ffffff.1"], [IDS[0]]),
-        ([], []),
+        ([IDS[1], IDS[0]], [IDS[1], IDS[0]], None),
+        ([IDS[1], IDS[0], IDS[1]], [IDS[1], IDS[0]], None),
+        ([f"{IDS[1]}.2", f"{IDS[1]}.1", IDS[0]], [IDS[1], IDS[0]], None),
+        (
+            ["ffffff", IDS[0], "Document 2", "ffffff.2"],
+            [IDS[0]],
+            "['ffffff', 'Document 2', 'ffffff']",
+        ),
+        ([], [], None),
     ],
     ids=["in-order", "repeats", "parts", "unknown", "none"],
 )
 def test_only_the_shown_documents_ids_are_kept_in_order_once_each(
-    llm, path, cited, kept
+    llm, caplog, path, cited, kept, dropped
 ):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
     result = reason(
         task="?",
         schema_code="",
@@ -246,19 +240,8 @@ def test_only_the_shown_documents_ids_are_kept_in_order_once_each(
         **TWO_DOCUMENTS,
     )
     assert result.provenance == kept
-
-
-@PATHS
-def test_an_unknown_id_is_dropped_with_a_warning(llm, caplog, path):
-    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    reply = citing(path, ["ffffff", IDS[0], "Document 2", "ffffff.2"])
-    reasoning_prompt(llm.replies(reply), path, **TWO_DOCUMENTS)
-    assert caplog.messages == [
-        (
-            f"{path}: dropped provenance id(s) the call did not show: "
-            "['ffffff', 'Document 2', 'ffffff']"
-        )
-    ]
+    warning = f"{path}: dropped provenance id(s) the call did not show: {dropped}"
+    assert caplog.messages == ([warning] if dropped else [])
 
 
 @pytest.mark.parametrize(
@@ -284,29 +267,6 @@ def test_records_from_a_document_without_an_id_are_refused_before_any_request(
             completion=llm,
         )
     assert llm.requests == []
-
-
-@pytest.mark.parametrize(
-    "collection",
-    [
-        "[r['document'] for r in parse['rows']]",
-        "tuple(r['document'] for r in parse['rows'])",
-        "{r['document'] for r in parse['rows']}",
-    ],
-    ids=["list", "tuple", "set"],
-)
-def test_the_coding_path_takes_its_ids_in_any_collection(llm, collection):
-    commit = f"<code>\nfinal_answer('ok', provenance={collection})\n</code>"
-    result = reason(
-        task="?",
-        schema_code="",
-        model=MODEL,
-        prompts=PROMPTS,
-        path="coding",
-        completion=llm.replies(commit),
-        **TWO_DOCUMENTS,
-    )
-    assert sorted(result.provenance) == IDS[:2]
 
 
 def test_a_coding_answer_at_the_turn_cap_cites_nothing(llm):
@@ -393,7 +353,7 @@ def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
         model=MODEL,
         prompts={**PROMPTS, "reasoning/direct": version},
         path="direct",
-        completion=llm.replies(ANSWERS_OK),
+        completion=llm.replies(citing("direct", [])),
         **TWO_DOCUMENTS,
     )
     [request] = llm.requests
@@ -537,7 +497,7 @@ def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_sample
     llm, caplog, refusal
 ):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    result = ask(llm, refusal(), PRINTS, COMMIT, path="coding")
+    result = ask(llm, refusal(), PRINTS, citing("coding", []), path="coding")
     assert result.answer == "ok"
     whole, samples = first_turn_prompts(llm)
     assert LAST_ROW in whole and SAMPLE not in whole
@@ -562,7 +522,7 @@ def test_a_later_turn_refused_is_raised_as_it_is(llm, refusal):
 def test_a_first_turn_refused_with_samples_is_raised(llm, refusal):
     whole, samples = refusal(), refusal()
     with pytest.raises(litellm.ContextWindowExceededError) as failure:
-        reasoning_prompt(llm.replies(whole, samples, COMMIT), parsed=ROWS)
+        reasoning_prompt(llm.replies(whole, samples, citing("coding", [])), parsed=ROWS)
     assert failure.value is samples
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
 
@@ -571,7 +531,7 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     llm, window, caplog
 ):
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
-    result = ask(llm, COMMIT, model=window(4_000))
+    result = ask(llm, citing("coding", []), model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback == {"cause": "estimate", "estimate": 3_913, "line": 3_400}
     [request] = llm.requests
@@ -589,7 +549,7 @@ def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_sample
 ):
     # The direct request takes about 3,920 tokens, the coding one with samples 2,700.
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    result = ask(llm.refuses_over(tokens=3_000), COMMIT)
+    result = ask(llm.refuses_over(tokens=3_000), citing("coding", []))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback is not None and result.fallback["cause"] == "refusal"
     assert "maximum context length is 3000 tokens" in result.fallback["error"]

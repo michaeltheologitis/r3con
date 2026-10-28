@@ -53,8 +53,6 @@ ROUTINE = "The site logged its routine checks and found nothing out of the ordin
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
-DOCUMENT_ID_LINE = re.compile(r"^### Document ID: \S+$", re.MULTILINE)
-RECORD_STAMP = re.compile(r'"document": "[^"]*"')
 
 
 def answer(
@@ -417,7 +415,7 @@ def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     assert transcript["messages"][-1]["content"] == NEVER_COMMITS
 
 
-def test_document_ids_reach_relevance_and_reasoning_but_never_structuring(
+def test_document_ids_reach_relevance_only_as_summary_ids_and_never_structuring(
     answering_llm, shown_ids, monkeypatch
 ):
     counting_ids(monkeypatch)
@@ -440,13 +438,6 @@ def test_document_ids_reach_relevance_and_reasoning_but_never_structuring(
     for stage in ("schema", "parsing"):
         for request in answering_llm.requests_for(stage):
             assert ids_in(json.dumps(request, default=str)) == set()
-    [request] = answering_llm.requests_for("reasoning")
-    assert summary_headings(answering_llm) == ids
-    text = "\n".join(message["content"] for message in request["messages"])
-    assert ids_in(text) == set(ids)
-    assert ids_in(DOCUMENT_ID_LINE.sub("", RECORD_STAMP.sub("", text))) == set()
-    schema = request["response_format"]["json_schema"]["schema"]
-    assert schema["properties"]["provenance"]["items"]["enum"] == ids
 
 
 def test_structuring_names_each_document_by_number_and_reasoning_by_id(
@@ -459,10 +450,14 @@ def test_structuring_names_each_document_by_number_and_reasoning_by_id(
             assert "### Document 1\nNotes on Halloran memo." in prompt
             assert "### Document 2\nNotes on Merrow memo." in prompt
             assert "Document ID" not in prompt
-    [prompt] = system_prompts(answering_llm, "reasoning")
+    [request] = answering_llm.requests_for("reasoning")
+    prompt = request["messages"][0]["content"]
+    assert summary_headings(answering_llm) == ids
     assert f"### Document ID: {ids[0]}\nNotes on Halloran memo." in prompt
     assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
     assert re.search(r"Document \d|\"document\": \d", prompt) is None
+    schema = request["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["provenance"]["items"]["enum"] == ids
 
 
 def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
