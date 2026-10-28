@@ -414,22 +414,22 @@ def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
 
 def test_a_malformed_reply_is_retried_with_the_validator_error(llm):
     parse, _ = parse_one(
-        llm.replies('{"rows": [{"who": 7}]}', '{"rows": [{"who": "Halloran"}]}')
+        llm.replies({"rows": [{"who": 7}]}, {"rows": [{"who": "Halloran"}]})
     )
     assert parse.rows[0].who == "Halloran"
     assert "validation error" in llm.requests[1]["messages"][1]["content"]
 
 
 def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
-    result = parse_one(llm.replies('{"rows": [{"who": "Halloran"}]}'))
+    result = parse_one(llm.replies({"rows": [{"who": "Halloran"}]}))
     assert result == (Parse(rows=[{"who": "Halloran"}]), [])
     sent = [request["messages"][1]["content"] for request in llm.requests]
     assert sent == [f"Document ID: {IDS[0]}\n\nmemo"]
-    assert reply_schema_name(llm.requests[0]) == "Parse"
+    assert reply_schema_name(llm.requests[0]) == "ParseReply"
 
 
 def test_a_document_that_never_validates_stops_after_max_attempts(llm):
-    llm.answers(parsing='{"rows": "not-a-list"}')
+    llm.answers(parsing={"rows": "not-a-list"})
     with pytest.raises(ValidationError, match="rows"):
         parse_one(llm, max_attempts=3)
     assert len(llm.requests) == 3
@@ -487,18 +487,38 @@ def test_the_reply_asks_for_the_parse_and_the_ids_of_exactly_the_notes_shown(llm
     [None, [], ["", " ", ""]],
     ids=["relevance-off", "no-rounds", "every-note-empty"],
 )
-def test_with_no_note_to_cite_the_reply_is_the_parse_alone_and_cites_nothing(
-    llm, snippets
+def test_with_no_note_to_cite_provenance_is_any_list_and_what_it_holds_is_dropped(
+    llm, snippets, caplog
 ):
-    llm.answers(parsing=NOTHING_PARSED)
-    result = parse_all(llm, DOCS, relevance_snippets=snippets, workers=3)
+    llm.answers(parsing={"parse": {"rows": []}, "provenance": ["0f0f0f"]})
+    with caplog.at_level(logging.WARNING, logger="r3con"):
+        result = parse_all(llm, DOCS, relevance_snippets=snippets, workers=3)
     assert result.provenance == [[], [], []]
+    assert "did not show: ['0f0f0f']" in caplog.text
     assert len(llm.requests) == len(DOCS)
     for request in llm.requests:
-        assert reply_schema_name(request) == "Parse"
-        system = request["messages"][0]["content"]
-        assert "## Output" not in system
-        assert "`provenance`" not in system.split("Examples:", 1)[0]
+        assert reply_schema_name(request) == "ParseReply"
+        schema = reply_schema(request)
+        assert schema["required"] == ["parse", "provenance"]
+        assert schema["properties"]["provenance"]["items"] == {"type": "string"}
+        assert "## Output" in request["messages"][0]["content"]
+
+
+def test_document_ids_that_are_not_one_per_document_are_refused_before_any_request(
+    llm,
+):
+    with pytest.raises(ValueError, match=r"got 2 for 3 document\(s\)"):
+        parse_documents(
+            documents=DOCS,
+            schema_code=SCHEMA,
+            parse_cls=Parse,
+            task="Who is mentioned?",
+            prompt_version="v2",
+            document_ids=IDS[:2],
+            model=MODEL,
+            completion=llm,
+        )
+    assert llm.requests == []
 
 
 def test_an_empty_notes_id_is_shown_but_cannot_be_cited(llm, caplog):
