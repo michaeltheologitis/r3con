@@ -11,7 +11,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 - No model call reads more than one document's text, or a part of it when the request would not fit the model's window; the other documents reach it as relevance notes and, in reasoning, as parsed records.
 - Show the work: by default a run writes every stage's output and model calls to `./logs/<run>/`, because the answer alone rarely says whether to trust it.
 - Not a provider layer: models, connections and credentials are LiteLLM's, and r3con adds no model registry or credential variable of its own.
-- Not the paper's evaluation: benchmarks, baselines and evaluation code live in [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
+- Not the paper's evaluation: benchmarks, baselines and evaluation code live in [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation); `evals/` is only a small regression check.
 
 ## Checks
 
@@ -19,6 +19,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 - `uv run pytest`: the unit tests, with sockets disabled and live tests deselected, so nothing reaches the network. CI also runs them on Python 3.11 to 3.14, at the lowest allowed dependency versions, and against the built wheel.
 - `uv run pytest -m "live and not experiment"`: an end-to-end run against OpenAI, billed to `OPENAI_API_KEY` and skipped without it. The unit tests fake the model, so run it when a change affects what the model is sent or how it is called. A manual CI dispatch runs it by default.
 - `uv run pytest -m experiment`: the experiments, measured live runs that cost far more. Run them only when Michael asks (in CI, a dispatch with `experiment` on); plain `-m live` includes them.
+- `uv run python -m evals`: the eval, r3con on 75 pinned Loong and CorpusQA tasks, judged by Luna, about $2.50–3 a run on `OPENAI_API_KEY` ([`evals/README.md`](evals/README.md)). Run it for a change that could move answers a lot, and when Michael asks; the line it writes to `evals/results.jsonl` goes in that change's PR.
 
 ## Conventions
 

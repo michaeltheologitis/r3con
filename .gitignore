@@ -22,3 +22,7 @@ logs/
 
 # OS
 .DS_Store
+
+# Eval data and runs (evals/README.md)
+evals/.cache/
+evals/runs/
