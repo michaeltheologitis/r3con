@@ -68,7 +68,7 @@ One JSON object per full run:
 | Field | Meaning |
 | --- | --- |
 | `date`, `commit`, `dirty` | When the run started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
-| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, generation params when set, and every prompt version |
+| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, generation params when set, and every prompt version |
 | `judge_model` | The judge |
 | `benchmarks.loong` | `n`, `errors`, `avg_score` (1–100), `perfect_rate` (0–1) |
 | `benchmarks.corpusqa` | `n`, `errors`, `accuracy` (0–1) |

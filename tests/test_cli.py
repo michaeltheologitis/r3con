@@ -13,6 +13,7 @@ from r3con.r3con import read_documents
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+STAGES_BUT_REASONING = {s: "v1" for s in PROMPT_STAGES if not s.startswith("reasoning")}
 
 
 def r3con(*argv: str) -> int:
@@ -50,10 +51,14 @@ def test_a_run_prints_the_answer_alone_on_stdout(answering, capsys):
 
 
 def test_the_flags_override_the_config_and_show_in_the_label(answering, capsys):
-    argv = ["--model", QWEN, "--relevance-rounds", "1"]
+    argv = ["--model", QWEN, "--relevance-rounds", "1", "--reasoning", "coding"]
     assert r3con("run", "Who?", str(MEMOS), *argv) == 0
-    assert "default[model=Qwen3.5-35B-A3B,rounds=1," in capsys.readouterr().err
+    out, err = capsys.readouterr()
+    assert out == f"{ANSWER}\n"
+    assert "default[model=Qwen3.5-35B-A3B,rounds=1,reasoning=coding," in err
     assert {r["model"] for r in answering.requests} == {QWEN}
+    [turn] = answering.requests_for("reasoning")
+    assert "final_answer(" in turn["messages"][0]["content"]
 
 
 def test_seed_is_not_an_option(scripted, capsys):
@@ -75,8 +80,9 @@ def test_sources_that_are_all_empty_exit_2(scripted, tmp_path, capsys):
     assert scripted.requests == []
 
 
-def test_a_usage_error_exits_2(scripted, capsys):
-    assert r3con("run", "Who?", str(MEMOS), "--config", "nope") == 2
+@pytest.mark.parametrize("option", ["--config", "--reasoning"])
+def test_a_usage_error_exits_2(scripted, capsys, option):
+    assert r3con("run", "Who?", str(MEMOS), option, "nope") == 2
     assert "invalid choice: 'nope'" in capsys.readouterr().err
     assert scripted.requests == []
 
@@ -99,29 +105,49 @@ def test_a_provider_failure_exits_1_and_points_at_the_partial_artifacts(
 def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
     scripted, configs, tmp_path, capsys
 ):
-    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
+    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
     configs(exp={"model": "openai/m", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "exp") == 2
     err = capsys.readouterr().err
-    assert err.startswith("r3con: No prompt for stage 'reasoning' version 'v9'")
+    assert err.startswith("r3con: No prompt for stage 'reasoning/coding' version 'v9'")
     assert err.count("\n") == 1
     assert scripted.requests == []
     assert not (tmp_path / "logs").exists()
 
 
+@pytest.mark.parametrize(
+    ("prompts", "old"),
+    [
+        ({**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}, "relevance"),
+        ({**STAGES_BUT_REASONING, "reasoning": "v2"}, "reasoning"),
+    ],
+)
 def test_a_config_pinning_a_stage_r3con_does_not_have_exits_2_in_one_line(
-    scripted, configs, capsys
+    scripted, configs, capsys, prompts, old
 ):
-    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}
     configs(old={"model": "openai/m", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "old") == 2
     err = capsys.readouterr().err
     assert err.startswith(
         "r3con: config 'old' pins a prompt for stage(s) r3con does not have: "
-        "['relevance']. The stages are ['relevance/first-round', "
+        f"[{old!r}]. The stages are ['relevance/first-round', "
         "'relevance/later-rounds',"
     )
+    assert err.endswith("'reasoning/direct', 'reasoning/coding'].\n")
     assert err.count("\n") == 1
+    assert scripted.requests == []
+
+
+def test_a_config_naming_a_reasoning_path_r3con_does_not_have_exits_2_in_one_line(
+    scripted, configs, capsys
+):
+    prompts = dict.fromkeys(PROMPT_STAGES, "v1")
+    configs(bad={"model": "openai/m", "reasoning": "agent", "prompts": prompts})
+    assert r3con("run", "Who?", str(MEMOS), "--config", "bad") == 2
+    assert capsys.readouterr().err == (
+        "r3con: config 'bad': `reasoning` must be one of ['direct', 'coding'], got "
+        "'agent'.\n"
+    )
     assert scripted.requests == []
 
 

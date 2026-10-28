@@ -1,4 +1,5 @@
 import importlib.metadata
+import json
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES
 from r3con.r3con import read_documents, run
 
-PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning": "v9"}
+PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
 
 
 def write_tree(root: Path) -> None:
@@ -117,14 +118,14 @@ def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
 @pytest.mark.parametrize(
     ("config", "error", "message"),
     [
-        ("exp", FileNotFoundError, "'reasoning' version 'v9'"),
+        ("exp", FileNotFoundError, "'reasoning/coding' version 'v9'"),
         (
             RunConfig(model="openai/m", prompts=PINS_A_MISSING_FILE),
             FileNotFoundError,
-            "'reasoning' version 'v9'",
+            "'reasoning/coding' version 'v9'",
         ),
         (
-            RunConfig(model="openai/m", prompts={"reasoning": "v1"}),
+            RunConfig(model="openai/m", prompts={"reasoning/direct": "v1"}),
             ValueError,
             "missing prompt versions",
         ),
@@ -148,6 +149,33 @@ def test_a_run_on_a_provider_that_takes_no_seed_completes(answering_llm, model):
     result = run("Who?", ["Halloran memo"], model=model, completion=answering_llm)
     assert result.answer == "Halloran memo"
     assert {request["model"] for request in answering_llm.requests} == {model}
+
+
+@pytest.mark.parametrize("reasoning", ["direct", "coding"])
+def test_the_reasoning_path_is_chosen_per_run_and_recorded(
+    answering_llm, tmp_path, reasoning
+):
+    result = run(
+        "Who?",
+        ["Halloran memo"],
+        reasoning=reasoning,
+        completion=answering_llm,
+        logs_dir=tmp_path,
+    )
+    assert result.answer == "Halloran memo"
+    manifest = json.loads((result.run_dir / "manifest.json").read_text())
+    assert manifest["config"]["reasoning"] == reasoning
+    folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
+    assert folder["path"] == reasoning
+
+
+def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
+    llm, tmp_path
+):
+    with pytest.raises(ValueError, match="`reasoning` must be one of"):
+        run("Who?", ["memo"], reasoning="agent", completion=llm, logs_dir=tmp_path)
+    assert llm.requests == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_run_answers_through_the_callers_completion(answering_llm):

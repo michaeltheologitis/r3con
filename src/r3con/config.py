@@ -1,11 +1,15 @@
 """The run config: every knob that shapes the OUTPUT, in one place.
 
 A :class:`RunConfig` is the **identity of a run** — the model, number of relevance
-rounds, the prompt version of each stage, and any generation params. It is loaded from a
-bundled ``configs/<name>.yaml`` (with optional overrides) and flows through the whole
-pipeline as one object, so nothing output-affecting is threaded ad-hoc. Runtime-only
-knobs (parallelism, paths, retry caps, timeouts) stay in :mod:`r3con.settings` — they
-don't change a correct answer.
+rounds, the reasoning path, the prompt version of each stage, and any generation params.
+It is loaded from a bundled ``configs/<name>.yaml`` (with optional overrides) and flows
+through the whole pipeline as one object, so nothing output-affecting is threaded ad-hoc.
+Runtime-only knobs (parallelism, paths, retry caps, timeouts) stay in
+:mod:`r3con.settings` — they don't change a correct answer.
+
+``reasoning`` picks how stage 3 answers: ``direct``, one completion over the summaries
+and the whole parse, or ``coding``, an agent that reads the parse with code. A direct
+run takes the coding path when the direct prompt does not fit the model's window.
 
 Two runs are the same run iff their :meth:`RunConfig.label` matches, so **every**
 output-shaping axis must appear in :meth:`RunConfig._identity_parts` — that function is
@@ -23,12 +27,14 @@ Config file shape (``configs/<name>.yaml``)::
 
     model: openai/gpt-6-luna
     relevance_rounds: 2
+    reasoning: direct            # or coding
     prompts:
       relevance/first-round: v1
       relevance/later-rounds: v1
       structuring/schema: v1
       structuring/parsing: v1
-      reasoning: v2
+      reasoning/direct: v1
+      reasoning/coding: v1
     params:                      # optional; passed straight to litellm.completion
       temperature: 0.7
 """
@@ -38,7 +44,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, get_args
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -52,13 +58,20 @@ PROMPT_STAGES: tuple[str, ...] = (
     "relevance/later-rounds",
     "structuring/schema",
     "structuring/parsing",
-    "reasoning",
+    "reasoning/direct",
+    "reasoning/coding",
 )
 
 DEFAULT_CONFIG = "default"
 
+# How reasoning answers: in one completion, or as a coding agent over the parse.
+ReasoningPath = Literal["direct", "coding"]
+REASONING_PATHS: tuple[ReasoningPath, ...] = get_args(ReasoningPath)
+
 # The fields a config file may set; any other is refused rather than dropped.
-_CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})
+_CONFIG_FIELDS = frozenset(
+    {"model", "relevance_rounds", "reasoning", "prompts", "params"}
+)
 
 # Compact per-stage abbreviations for the prompts tag in RunConfig.label().
 _PROMPT_STAGE_ABBR: dict[str, str] = {
@@ -66,7 +79,8 @@ _PROMPT_STAGE_ABBR: dict[str, str] = {
     "relevance/later-rounds": "rel2",
     "structuring/schema": "schema",
     "structuring/parsing": "parse",
-    "reasoning": "reason",
+    "reasoning/direct": "direct",
+    "reasoning/coding": "coding",
 }
 
 
@@ -97,6 +111,8 @@ class RunConfig(BaseModel):
     model: str
     # keep in sync with configs/default.yaml (the shipped default)
     relevance_rounds: int = 2
+    # keep in sync with configs/default.yaml
+    reasoning: ReasoningPath = "direct"
     prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
     # extra kwargs for litellm.completion
     params: dict[str, Any] = Field(default_factory=dict)
@@ -125,6 +141,7 @@ class RunConfig(BaseModel):
         parts = [
             f"model={normalize_model_name(self.model)}",
             f"rounds={self.relevance_rounds}",
+            f"reasoning={self.reasoning}",
         ]
         # Generation params are part of the identity only when set, so a provider-default
         # run carries no `params=` noise in its label.
@@ -143,7 +160,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v2)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
@@ -190,6 +207,17 @@ def _check_params(params: Any, where: str) -> dict[str, Any]:
     return dict(params)
 
 
+def _check_reasoning(reasoning: Any, where: str) -> ReasoningPath:
+    """``reasoning`` must name one of :data:`REASONING_PATHS`. Caught here with a
+    one-line message rather than as a validation error of the whole config."""
+    if reasoning not in REASONING_PATHS:
+        raise ValueError(
+            f"{where}: `reasoning` must be one of {list(REASONING_PATHS)}, got "
+            f"{reasoning!r}."
+        )
+    return reasoning
+
+
 def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
     """Refuse a prompt pinned for a stage not in :data:`PROMPT_STAGES`, naming the
     stages there are."""
@@ -215,6 +243,7 @@ def load_config(
     *,
     model: str | None = None,
     relevance_rounds: int | None = None,
+    reasoning: ReasoningPath | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> RunConfig:
     """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, then apply each override
@@ -223,8 +252,9 @@ def load_config(
 
     Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
     are not a mapping, ``ValueError`` if the config sets a field r3con does not read,
-    omits a required field or a prompt version for any stage, or pins a prompt for a
-    stage r3con does not have, and
+    omits a required field or a prompt version for any stage, pins a prompt for a
+    stage r3con does not have, or names a reasoning path not in
+    :data:`REASONING_PATHS`, and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -252,16 +282,24 @@ def load_config(
         name=name,
         model=raw["model"],
         relevance_rounds=int(raw.get("relevance_rounds", 2)),
+        reasoning=_check_reasoning(raw.get("reasoning", "direct"), f"config {name!r}"),
         prompts=dict(raw.get("prompts") or {}),
         params=_check_params(raw.get("params"), f"config {name!r}"),
     )
 
     # Overrides are recorded on the config as well as applied, so the manifest shows both
     # the resolved value and the fact that it was overridden.
-    overrides = {"model": model, "relevance_rounds": relevance_rounds, "params": params}
+    overrides = {
+        "model": model,
+        "relevance_rounds": relevance_rounds,
+        "reasoning": reasoning,
+        "params": params,
+    }
     applied = {k: v for k, v in overrides.items() if v is not None}
     if "params" in applied:
         applied["params"] = _check_params(applied["params"], "override")
+    if "reasoning" in applied:
+        _check_reasoning(applied["reasoning"], "override")
     if applied:
         cfg = cfg.model_copy(update={**applied, "overrides": applied})
     check_prompts(cfg)

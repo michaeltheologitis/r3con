@@ -12,7 +12,9 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document, in
    parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
-   the relevant context, in a multi-turn sandboxed Python loop.
+   the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
+   sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
+   fit the model's window).
 
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
@@ -119,10 +121,12 @@ class Answer:
 
 @dataclass
 class _StageRecord:
-    """What one stage leaves in the run folder: its calls, and its ``result.json``."""
+    """What one stage leaves in the run folder: its calls, its ``result.json``, and
+    whether it writes ``transcript.yaml``."""
 
     run: StageRun | None
     result: dict[str, Any] = field(default_factory=dict)
+    transcript: bool = False
 
 
 @contextmanager
@@ -132,8 +136,9 @@ def _recorded_stage(
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
-    fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
-    with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
+    fields of its ``result.json``; ``record.transcript`` starts as ``transcript``, and
+    the body may change it. On a clean exit this writes ``calls.json`` (and, with
+    ``record.transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the calls
     that completed and ``error.txt`` with the traceback, adds a note naming the run
     folder to the exception, and re-raises. Without a logger it records nothing.
@@ -142,15 +147,15 @@ def _recorded_stage(
         yield _StageRecord(run=None)
         return
     run = StageRun(stage=stage, task_logger=task_logger, model=model)
-    record = _StageRecord(run=run)
+    record = _StageRecord(run=run, transcript=transcript)
     try:
         yield record
-        run.flush(write_transcript=transcript)
+        run.flush(write_transcript=record.transcript)
         task_logger.write_json(
             f"{stage}/result", {**record.result, "totals": run.compute_totals()}
         )
     except BaseException as error:
-        run.flush(write_transcript=transcript)
+        run.flush(write_transcript=record.transcript)
         task_logger.write_text(f"{stage}/error", traceback.format_exc())
         error.add_note(f"r3con: partial artifacts in {task_logger.dir}")
         raise
@@ -321,7 +326,9 @@ def run_pipeline(
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
-    with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
+    with _recorded_stage(
+        task_logger, "reasoning", model, transcript=config.reasoning == "coding"
+    ) as record:
         result = reasoning.reason(
             task=task,
             schema_code=proposal.schema_code,
@@ -329,7 +336,8 @@ def run_pipeline(
             source_docs=extraction.source_docs,
             relevance_snippets=relevance_snippets,
             model=model,
-            prompt_version=config.prompts["reasoning"],
+            prompts=config.prompts,
+            path=config.reasoning,
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=record.run,
@@ -337,13 +345,17 @@ def run_pipeline(
             **llm_kwargs,
         )
         _log.info(
-            "reasoning done (%s, %d turn(s)): %s",
+            "reasoning done on the %s path (%s, %d turn(s)): %s",
+            result.path,
             result.terminated_by,
             len(result.turns),
             _preview(result.answer),
         )
+        record.transcript = result.path == "coding"
         record.result = {
             "answer": result.answer,
+            "path": result.path,
+            "fallback": result.fallback,
             "terminated_by": result.terminated_by,
             "n_turns": len(result.turns),
             "turns": [

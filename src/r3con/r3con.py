@@ -38,7 +38,13 @@ from typing import Any
 from dotenv import find_dotenv, load_dotenv
 from pypdf import PdfReader
 
-from r3con.config import DEFAULT_CONFIG, RunConfig, check_prompts, load_config
+from r3con.config import (
+    DEFAULT_CONFIG,
+    ReasoningPath,
+    RunConfig,
+    check_prompts,
+    load_config,
+)
 from r3con.logging_setup import get_logger
 from r3con.pipeline import Answer, run_pipeline
 from r3con.runs import TaskLogger, new_run_folder
@@ -203,6 +209,7 @@ def run(
     model: str | None = None,
     config: str | RunConfig = DEFAULT_CONFIG,
     relevance_rounds: int | None = None,
+    reasoning: ReasoningPath | None = None,
     params: dict[str, Any] | None = None,
     api_key: str | None = None,
     api_base: str | None = None,
@@ -225,6 +232,10 @@ def run(
             Defaults to the config's.
         config: a bundled config name, or a :class:`RunConfig` you built yourself.
         relevance_rounds: overrides the config's.
+        reasoning: overrides the config's reasoning path: ``"direct"``, one completion
+            over the relevant context and the whole parse, or ``"coding"``, an agent
+            that reads the parse with code. A direct run takes the coding path when its
+            prompt does not fit the model's window.
         params: extra keyword arguments passed straight to ``litellm.completion`` —
             ``temperature``, ``top_p``, ``seed``, ``extra_body``, anything it accepts.
         api_key, api_base: passed through to litellm. Usually unnecessary: litellm reads
@@ -239,7 +250,7 @@ def run(
         logs_dir: where the run folder goes. Defaults to ``./logs``
             (or ``R3CON_LOGS_DIR``).
         save_artifacts: write the per-stage artifacts — the relevance snippets, the
-            proposed schema, the parse, the reasoning transcript — into a run folder.
+            proposed schema, the parse, the reasoning calls — into a run folder.
             On by default: they are how you see what the run actually did. Set ``False``
             to run without touching the filesystem.
 
@@ -256,8 +267,8 @@ def run(
             not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
             given (which would be silently ignored), if the config pins no prompt
-            version for a stage, or if a setting in :mod:`r3con.settings` is below its
-            floor.
+            version for a stage, if ``reasoning`` is not a reasoning path, or if a
+            setting in :mod:`r3con.settings` is below its floor.
         FileNotFoundError: if the config, by name or as a :class:`RunConfig`, pins a
             prompt version that has no file.
         Each of these is raised before any request and before a run folder exists, as
@@ -275,6 +286,7 @@ def run(
     overrides = {
         "model": model,
         "relevance_rounds": relevance_rounds,
+        "reasoning": reasoning,
         "params": params,
     }
     given = {k: v for k, v in overrides.items() if v is not None}
