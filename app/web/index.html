@@ -592,8 +592,8 @@ p { margin: 0; }
  "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many? Give the contractor's name, not its code.",
  "model": "gpt-6-luna",
  "version": "0.4.0",
- "runFolder": "20261028T135104Z_96fe324b",
- "created": "2026-10-28T13:51:04+00:00",
+ "runFolder": "20261028T200629Z_9827afd2",
+ "created": "2026-10-28T20:06:29+00:00",
  "docs": [
   {
    "name": "01_northgate.txt",
@@ -623,47 +623,47 @@ p { margin: 0; }
  ],
  "r1": [
   {
-   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies the maintenance contractor only by code CT-118; it does not give the contractor’s name.",
+   "summary": "A Q3 operations memo for the Northgate site. It reports 5 equipment incidents, logged under maintenance contractor code CT-118; it does not give the contractor’s name.",
    "provenance": []
   },
   {
-   "summary": "A Q3 operations memo for the Eastfield site. It reports 9 equipment incidents, with planned maintenance handled by contractor code CT-204; it does not give the contractor’s name.",
+   "summary": "An Eastfield site Q3 operations memo. It reports 9 equipment incidents and says planned maintenance is carried out under contractor code CT-204; it does not identify the contractor by name or provide data for comparing contractors’ total incidents.",
    "provenance": []
   },
   {
-   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118; it does not give the contractor’s name.",
+   "summary": "A Q3 operations memo for the Riverside site. It reports 6 equipment incidents, all at a site maintained by contractor code CT-118; it does not give the contractor’s name.",
    "provenance": []
   },
   {
-   "summary": "An approved contractor registry extract mapping site-paperwork codes to contractor names. Relevant to the task, CT-118 is Halloran Services Ltd and CT-204 is Merrow Facilities Group; it provides no equipment-incident counts or Q3 totals.",
+   "summary": "An approved-contractor registry extract mapping contractor codes to names and maintenance specialties. It identifies CT-118 as Halloran Services Ltd (mechanical and electrical maintenance) and CT-204 as Merrow Facilities Group (HVAC and compressed air), which can translate incident records from these codes to contractor names.",
    "provenance": []
   },
   {
-   "summary": "A cafeteria refurbishment memo describing an October serving-counter replacement and temporary reduced service. It provides no information about maintenance contractors or Q3 equipment incidents.",
+   "summary": "A brief cafeteria refurbishment memo describing planned serving-counter replacement and increased seating capacity. It provides no information about maintenance contractors or Q3 equipment incidents.",
    "provenance": []
   }
  ],
  "r2": [
   {
-   "summary": "A Northgate Q3 operations memo reports 5 equipment incidents and identifies maintenance contractor code CT-118, which the registry maps to Halloran Services Ltd. These 5 incidents contribute to that contractor’s Q3 total.",
+   "summary": "A Q3 operations memo for the Northgate site. It reports 5 equipment incidents and identifies maintenance contractor code CT-118, which the registry maps to Halloran Services Ltd; this adds 5 incidents to that contractor’s total.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204, which the contractor registry maps to Merrow Facilities Group.",
+   "summary": "A Q3 operations memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204, which the contractor registry names as Merrow Facilities Group.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "A Q3 operations-review memo for the Riverside site. It logs 6 equipment incidents and identifies the maintenance contractor as CT-118, which the contractor registry maps to Halloran Services Ltd; these 6 incidents contribute to that contractor’s total.",
+   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents, all recorded at a site maintained under code CT-118, identified in the contractor registry as Halloran Services Ltd.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "An approved contractor registry mapping site-paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group, providing the authoritative name mapping for the Q3 incident records.",
+   "summary": "An approved contractor registry extract mapping maintenance codes to contractor names: CT-118 is Halloran Services Ltd, and CT-204 is Merrow Facilities Group. These mappings identify the contractors associated with the incident reports.",
    "provenance": [
     0,
     1,
@@ -676,173 +676,198 @@ p { margin: 0; }
   }
  ],
  "schema": {
-  "code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count for a stated period.\"\"\"\n    site: str | None = Field(default=None, description=\"The site named in the report\")\n    period: str | None = Field(default=None, description=\"The reporting period, as stated\")\n    incident_type: str | None = Field(default=None, description=\"The type of incidents counted, as stated\")\n    incident_count: int | None = Field(default=None, description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(default=None, description=\"The maintenance contractor code associated with the incidents\")\n    contractor_name: str | None = Field(default=None, description=\"The contractor name, if stated in the report\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A contractor-code-to-name mapping stated in a registry or other document.\"\"\"\n    contractor_code: str | None = Field(default=None, description=\"The contractor code\")\n    contractor_name: str | None = Field(default=None, description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
-  "thought": "The answer requires summing Q3 equipment-incident counts across site reports by contractor, then resolving contractor codes to names. Separate report facts from registry mappings so each document can be parsed independently and the totals computed downstream."
+  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"An incident count reported for a site and period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period, as stated\")\n    incident_type: str | None = Field(description=\"The type of incidents counted, as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    maintenance_contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site or incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping between a maintenance contractor code and its name.\"\"\"\n    maintenance_contractor_code: str | None = Field(description=\"The maintenance contractor code\")\n    contractor_name: str | None = Field(description=\"The contractor name associated with the code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
+  "thought": "The answer requires summing Q3 equipment-incident counts across sites by contractor, then resolving the winning contractor’s code to its name. Capture each site’s reported count and contractor code, along with registry code-to-name mappings; leave the aggregation to the inference agent."
  },
  "parsed": [
-  [
-   {
-    "field": "equipment_incident_reports",
-    "record": {
-     "site": "Northgate",
-     "period": "Q3",
-     "incident_type": "equipment incidents",
-     "incident_count": 5,
-     "contractor_code": "CT-118",
-     "contractor_name": null
+  {
+   "records": [
+    {
+     "field": "site_incident_reports",
+     "record": {
+      "site": "Northgate",
+      "period": "Q3",
+      "incident_type": "equipment incidents",
+      "incident_count": 5,
+      "maintenance_contractor_code": "CT-118"
+     }
     }
-   }
-  ],
-  [
-   {
-    "field": "equipment_incident_reports",
-    "record": {
-     "site": "Eastfield",
-     "period": "Q3",
-     "incident_type": "equipment incidents",
-     "incident_count": 9,
-     "contractor_code": "CT-204",
-     "contractor_name": null
+   ],
+   "provenance": []
+  },
+  {
+   "records": [
+    {
+     "field": "site_incident_reports",
+     "record": {
+      "site": "Eastfield",
+      "period": "Q3",
+      "incident_type": "equipment incidents",
+      "incident_count": 9,
+      "maintenance_contractor_code": "CT-204"
+     }
     }
-   }
-  ],
-  [
-   {
-    "field": "equipment_incident_reports",
-    "record": {
-     "site": "Riverside",
-     "period": "Q3",
-     "incident_type": "equipment incidents",
-     "incident_count": 6,
-     "contractor_code": "CT-118",
-     "contractor_name": null
+   ],
+   "provenance": []
+  },
+  {
+   "records": [
+    {
+     "field": "site_incident_reports",
+     "record": {
+      "site": "Riverside",
+      "period": "Q3",
+      "incident_type": "equipment incidents",
+      "incident_count": 6,
+      "maintenance_contractor_code": "CT-118"
+     }
+    },
+    {
+     "field": "site_incident_reports",
+     "record": {
+      "site": "Riverside",
+      "period": "Q3",
+      "incident_type": "electrical incidents",
+      "incident_count": 4,
+      "maintenance_contractor_code": "CT-118"
+     }
+    },
+    {
+     "field": "site_incident_reports",
+     "record": {
+      "site": "Riverside",
+      "period": "Q3",
+      "incident_type": "water ingress incidents",
+      "incident_count": 2,
+      "maintenance_contractor_code": "CT-118"
+     }
     }
-   }
-  ],
-  [
-   {
-    "field": "contractor_mappings",
-    "record": {
-     "contractor_code": "CT-118",
-     "contractor_name": "Halloran Services Ltd"
+   ],
+   "provenance": []
+  },
+  {
+   "records": [
+    {
+     "field": "contractor_mappings",
+     "record": {
+      "maintenance_contractor_code": "CT-118",
+      "contractor_name": "Halloran Services Ltd"
+     }
+    },
+    {
+     "field": "contractor_mappings",
+     "record": {
+      "maintenance_contractor_code": "CT-204",
+      "contractor_name": "Merrow Facilities Group"
+     }
     }
-   },
-   {
-    "field": "contractor_mappings",
-    "record": {
-     "contractor_code": "CT-204",
-     "contractor_name": "Merrow Facilities Group"
-    }
-   },
-   {
-    "field": "contractor_mappings",
-    "record": {
-     "contractor_code": "CT-311",
-     "contractor_name": "Bellweather Grounds"
-    }
-   }
-  ],
-  []
+   ],
+   "provenance": []
+  },
+  {
+   "records": [],
+   "provenance": []
+  }
  ],
  "answer": {
-  "text": "Halloran Services Ltd's sites logged the most equipment incidents in Q3, with 11 in total.",
+  "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
   "cites": [
    0,
    2,
-   1,
-   3
+   3,
+   1
   ]
  },
  "calls": {
-  "r1-4": {
+  "r1-2": {
    "step": 1,
-   "tokens": 832,
-   "usd": 0.000106
+   "tokens": 865,
+   "usd": 0.0001225
   },
   "r1-0": {
    "step": 2,
-   "tokens": 869,
-   "usd": 0.0001237
-  },
-  "r1-3": {
-   "step": 3,
-   "tokens": 891,
-   "usd": 0.0001283
-  },
-  "r1-2": {
-   "step": 4,
-   "tokens": 881,
-   "usd": 0.00012849999999999998
+   "tokens": 867,
+   "usd": 0.0001239
   },
   "r1-1": {
+   "step": 3,
+   "tokens": 881,
+   "usd": 0.00013209999999999999
+  },
+  "r1-3": {
+   "step": 4,
+   "tokens": 895,
+   "usd": 0.00014189999999999998
+  },
+  "r1-4": {
    "step": 5,
-   "tokens": 870,
-   "usd": 0.0001246
+   "tokens": 826,
+   "usd": 0.00010659999999999999
   },
   "r2-4": {
    "step": 6,
-   "tokens": 1340,
-   "usd": 0.000186175
+   "tokens": 1356,
+   "usd": 0.0001893
   },
   "r2-0": {
    "step": 7,
-   "tokens": 1513,
-   "usd": 0.0002768
+   "tokens": 1445,
+   "usd": 0.000234925
   },
   "r2-2": {
    "step": 8,
-   "tokens": 1580,
-   "usd": 0.0003073
+   "tokens": 1485,
+   "usd": 0.00025529999999999997
   },
   "r2-1": {
    "step": 9,
-   "tokens": 1479,
-   "usd": 0.000259425
+   "tokens": 1551,
+   "usd": 0.00029204999999999997
   },
   "r2-3": {
    "step": 10,
-   "tokens": 1586,
-   "usd": 0.00030992499999999996
-  },
-  "parsed-0": {
-   "step": 1,
-   "tokens": 1816,
-   "usd": 0.00026705
+   "tokens": 1580,
+   "usd": 0.000315175
   },
   "parsed-4": {
+   "step": 1,
+   "tokens": 2271,
+   "usd": 5.3689999999999996e-05
+  },
+  "parsed-0": {
    "step": 2,
-   "tokens": 1739,
-   "usd": 3.978e-05
-  },
-  "parsed-1": {
-   "step": 3,
-   "tokens": 1813,
-   "usd": 7.640500000000001e-05
-  },
-  "parsed-2": {
-   "step": 4,
-   "tokens": 1827,
-   "usd": 8.190500000000001e-05
+   "tokens": 2431,
+   "usd": 0.0003788
   },
   "parsed-3": {
+   "step": 3,
+   "tokens": 2546,
+   "usd": 0.00019119
+  },
+  "parsed-1": {
+   "step": 4,
+   "tokens": 2568,
+   "usd": 0.000200315
+  },
+  "parsed-2": {
    "step": 5,
-   "tokens": 1819,
-   "usd": 7.303e-05
+   "tokens": 2652,
+   "usd": 0.000240065
   },
   "schema": {
    "step": 1,
-   "tokens": 2591,
-   "usd": 0.00060805
+   "tokens": 2359,
+   "usd": 0.0004973
   },
   "answer": {
    "step": 1,
-   "tokens": 3028,
-   "usd": 0.00042192499999999997
+   "tokens": 3130,
+   "usd": 0.00045192499999999994
   }
  },
  "totals": {
-  "tokens": 26474,
-  "usd": 0.00351887
+  "tokens": 29708,
+  "usd": 0.003927035
  }
 };
 
@@ -1122,7 +1147,10 @@ p { margin: 0; }
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUpCitations(i, n) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [])),
+      parsed: files.map((f) => ({
+        records: f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [],
+        provenance: [],
+      })),
       answer: {
         text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
         cites: order.filter((i) => i % 2 === 0).slice(0, MAX_SIMULATED_CITES),
@@ -1139,24 +1167,25 @@ p { margin: 0; }
     return `recorded run · ${run.model} · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
   }
 
+  // What a node was made from: the answer from the parses it cites; a parse or a round-2 summary
+  // from its own row's previous step plus what it cited; a round-1 summary from its document.
+  function lineage(run, id) {
+    const [kind, i] = splitId(id);
+    if (kind === 'answer') return run.answer.cites.map((d) => `parsed-${d}`);
+    if (kind === 'parsed') return [`r2-${i}`, ...run.parsed[i].provenance.map((d) => `r2-${d}`)];
+    if (kind === 'r2') return [`r1-${i}`, ...run.r2[i].provenance.map((d) => `r1-${d}`)];
+    if (kind === 'r1') return [docId(run.docs[i])];
+    return [];
+  }
+
   function criticalPath(run) {
     const nodes = new Set(['answer']);
     const edges = new Set();
-    const docs = new Set();
-    for (const d of run.answer.cites) {
-      nodes.add(`parsed-${d}`).add(`r2-${d}`).add(`r1-${d}`);
-      edges.add(`parsed-${d}>answer`).add(`r2-${d}>parsed-${d}`).add(`r1-${d}>r2-${d}`);
-      docs.add(d);
-      for (const p of run.r2[d].provenance) {
-        nodes.add(`r1-${p}`);
-        edges.add(`r1-${p}>r2-${d}`);
-        docs.add(p);
+    for (const id of nodes) {
+      for (const from of lineage(run, id)) {
+        nodes.add(from);
+        edges.add(`${from}>${id}`);
       }
-    }
-    for (const d of docs) {
-      const id = docId(run.docs[d]);
-      nodes.add(id);
-      edges.add(`${id}>r1-${d}`);
     }
     return { nodes, edges };
   }
@@ -1471,6 +1500,7 @@ p { margin: 0; }
     if (!edge) {
       edge = { key, from, to, kind, el: document.createElementNS(SVG_NS, 'path') };
       edge.el.classList.add('edge');
+      edge.el.dataset.key = key;
       state.edges.set(key, edge);
     }
     edge.el.classList.remove(edge.kind);
@@ -1605,10 +1635,13 @@ p { margin: 0; }
       ];
     }
     if (kind === 'parsed') {
-      const records = run.parsed[d];
+      const { records, provenance } = run.parsed[d];
       return [
         records.length ? recordBlock(records) : textBlock('', 'no records'),
-        row('filled from', refs(['schema', `r2-${d}`])),
+        row('read', refs([docId(run.docs[d])])),
+        row('shown', `round 2 summaries of all ${plural(run.docs.length, 'document')}`),
+        row('drew on', refs(provenance.map((c) => `r2-${c}`))),
+        row('filled from', refs(['schema'])),
         run.answer.cites.includes(d) && state.nodes.has('answer') ? row('cited by', refs(['answer'])) : null,
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
@@ -1829,12 +1862,31 @@ p { margin: 0; }
     return last;
   }
 
+  const drewOn = (run, cites) => `drew on ${cites.map((d) => docLabel(run, d)).join(', ')}`;
+
   function roundTwoLine(run, i) {
     const s = run.r2[i];
     const name = docLabel(run, i);
     if (!s.summary) return `round 2 · ${name} — nothing relevant`;
     if (!s.provenance.length) return `round 2 · ${name} — cites no other document`;
-    return `round 2 · ${name} — drew on ${s.provenance.map((p) => docLabel(run, p)).join(', ')}`;
+    return `round 2 · ${name} — ${drewOn(run, s.provenance)}`;
+  }
+
+  function parseLine(run, i) {
+    const { records, provenance } = run.parsed[i];
+    const count = records.length ? plural(records.length, 'record') : 'no records';
+    return `${docLabel(run, i)} — ${count}${provenance.length ? ` · ${drewOn(run, provenance)}` : ''}`;
+  }
+
+  // A step was shown every output of the previous one: its own row's as a dotted line, the others
+  // as faint lines. What it cited is drawn solid when it settles.
+  function showInputs(prev, to, i, n) {
+    addEdge(`${prev}-${i}`, to, 'self', 'fade');
+    for (const j of range(n)) if (j !== i) addEdge(`${prev}-${j}`, to, 'context', 'fade');
+  }
+
+  function showCites(prev, to, cites) {
+    for (const d of cites) addEdge(`${prev}-${d}`, to, 'cite', 'draw');
   }
 
   function buildTimeline(run, narr) {
@@ -1880,12 +1932,11 @@ p { margin: 0; }
     });
     t = stage(at, t, run.order.r2, n, (i) => {
       addNode(`r2-${i}`);
-      addEdge(`r1-${i}`, `r2-${i}`, 'self', 'fade');
-      for (const j of range(n)) if (j !== i) addEdge(`r1-${j}`, `r2-${i}`, 'context', 'fade');
+      showInputs('r1', `r2-${i}`, i, n);
     }, (i, rank) => {
       const s = run.r2[i];
       settleNode(`r2-${i}`, { empty: !s.summary });
-      for (const p of s.provenance) addEdge(`r1-${p}`, `r2-${i}`, 'cite', 'draw');
+      showCites('r1', `r2-${i}`, s.provenance);
       narr.say('sub', roundTwoLine(run, i), { node: `r2-${i}` });
       narr.phase(`round 2 · ${rank + 1} of ${n}`);
     });
@@ -1915,11 +1966,11 @@ p { margin: 0; }
     t = stage(at, t, run.order.parsed, n, (i) => {
       addNode(`parsed-${i}`);
       addEdge('schema', `parsed-${i}`, 'flow', 'draw');
-      addEdge(`r2-${i}`, `parsed-${i}`, 'flow', 'draw');
+      showInputs('r2', `parsed-${i}`, i, n);
     }, (i, rank) => {
-      const count = run.parsed[i].length;
-      settleNode(`parsed-${i}`, { empty: count === 0 });
-      narr.say('sub', `${name(i)} — ${count ? plural(count, 'record') : 'no records'}`, { node: `parsed-${i}` });
+      settleNode(`parsed-${i}`, { empty: !run.parsed[i].records.length });
+      showCites('r2', `parsed-${i}`, run.parsed[i].provenance);
+      narr.say('sub', parseLine(run, i), { node: `parsed-${i}` });
       narr.phase(`parsing · ${rank + 1} of ${n}`);
     });
 
