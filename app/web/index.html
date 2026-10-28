@@ -201,7 +201,7 @@ p { margin: 0; }
 .node.doc { --node-icon: var(--doc-icon-size); }
 .node .icon { width: var(--node-icon); height: var(--node-icon); color: var(--fg); transition: color 0.4s; }
 .node .icon svg { display: block; width: var(--node-icon); height: var(--node-icon); overflow: visible; }
-.node .label { line-height: 1.5; }
+.node .label { line-height: 1.5; background: var(--panel); }
 .node .spin { position: absolute; top: -0.7em; left: calc(50% + var(--node-icon) / 2 - 2px); color: var(--accent); display: none; }
 .node.working .spin { display: block; }
 .node.working .icon { color: var(--dim); }
@@ -592,8 +592,8 @@ p { margin: 0; }
  "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many? Give the contractor's name, not its code.",
  "model": "gpt-6-luna",
  "version": "0.4.0",
- "runFolder": "20261028T200629Z_9827afd2",
- "created": "2026-10-28T20:06:29+00:00",
+ "runFolder": "20261028T223555Z_43b61722",
+ "created": "2026-10-28T22:35:55+00:00",
  "docs": [
   {
    "name": "01_northgate.txt",
@@ -623,47 +623,47 @@ p { margin: 0; }
  ],
  "r1": [
   {
-   "summary": "A Q3 operations memo for the Northgate site. It reports 5 equipment incidents, logged under maintenance contractor code CT-118; it does not give the contractor’s name.",
+   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies the maintenance contractor only by code, CT-118; it gives no contractor name or information for comparing totals across sites.",
    "provenance": []
   },
   {
-   "summary": "An Eastfield site Q3 operations memo. It reports 9 equipment incidents and says planned maintenance is carried out under contractor code CT-204; it does not identify the contractor by name or provide data for comparing contractors’ total incidents.",
+   "summary": "An Eastfield site Q3 operations memo. It reports 9 equipment incidents and says planned maintenance is performed by contractor CT-204, but does not give the contractor’s name.",
    "provenance": []
   },
   {
-   "summary": "A Q3 operations memo for the Riverside site. It reports 6 equipment incidents, all at a site maintained by contractor code CT-118; it does not give the contractor’s name.",
+   "summary": "A Q3 operations-review memo for the Riverside site. It records 6 equipment incidents and says the site’s planned maintenance is handled by contractor code CT-118; it does not give the contractor’s name or establish its total across sites.",
    "provenance": []
   },
   {
-   "summary": "An approved-contractor registry extract mapping contractor codes to names and maintenance specialties. It identifies CT-118 as Halloran Services Ltd (mechanical and electrical maintenance) and CT-204 as Merrow Facilities Group (HVAC and compressed air), which can translate incident records from these codes to contractor names.",
+   "summary": "An approved contractor registry extract mapping codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group; it contains no Q3 equipment-incident counts, so it cannot establish which contractor had the most or how many.",
    "provenance": []
   },
   {
-   "summary": "A brief cafeteria refurbishment memo describing planned serving-counter replacement and increased seating capacity. It provides no information about maintenance contractors or Q3 equipment incidents.",
+   "summary": "A brief cafeteria refurbishment memo describing a serving-counter replacement and increased seating capacity. It provides no information about maintenance contractors or Q3 equipment incidents.",
    "provenance": []
   }
  ],
  "r2": [
   {
-   "summary": "A Q3 operations memo for the Northgate site. It reports 5 equipment incidents and identifies maintenance contractor code CT-118, which the registry maps to Halloran Services Ltd; this adds 5 incidents to that contractor’s total.",
+   "summary": "A Northgate site Q3 operations-review memo. It records 5 equipment incidents and identifies contractor CT-118 for planned maintenance; the registry maps CT-118 to Halloran Services Ltd. This site’s count alone does not establish the contractor’s total across sites.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "A Q3 operations memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204, which the contractor registry names as Merrow Facilities Group.",
+   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204, which the contractor registry maps to Merrow Facilities Group.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents, all recorded at a site maintained under code CT-118, identified in the contractor registry as Halloran Services Ltd.",
+   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents (4 electrical and 2 storm-related water-ingress incidents) under maintenance contractor code CT-118. The contractor registry identifies CT-118 as Halloran Services Ltd.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "An approved contractor registry extract mapping maintenance codes to contractor names: CT-118 is Halloran Services Ltd, and CT-204 is Merrow Facilities Group. These mappings identify the contractors associated with the incident reports.",
+   "summary": "An approved-contractor registry extract mapping CT-118 to Halloran Services Ltd and CT-204 to Merrow Facilities Group. This supplies the contractor names for the codes listed in the Q3 site incident memos.",
    "provenance": [
     0,
     1,
@@ -676,8 +676,8 @@ p { margin: 0; }
   }
  ],
  "schema": {
-  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"An incident count reported for a site and period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period, as stated\")\n    incident_type: str | None = Field(description=\"The type of incidents counted, as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    maintenance_contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site or incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping between a maintenance contractor code and its name.\"\"\"\n    maintenance_contractor_code: str | None = Field(description=\"The maintenance contractor code\")\n    contractor_name: str | None = Field(description=\"The contractor name associated with the code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
-  "thought": "The answer requires summing Q3 equipment-incident counts across sites by contractor, then resolving the winning contractor’s code to its name. Capture each site’s reported count and contractor code, along with registry code-to-name mappings; leave the aggregation to the inference agent."
+  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"A site's equipment-incident count for a reported period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The period covered by the incident count\")\n    incident_count: int | None = Field(description=\"The total equipment incidents reported for this site and period\")\n    contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site\")\n\nclass ContractorRegistryEntry(BaseModel):\n    \"\"\"A contractor code-to-name mapping from a registry.\"\"\"\n    contractor_code: str | None = Field(description=\"The contractor code\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to this code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_registry_entries: list[ContractorRegistryEntry]",
+  "thought": "The answer requires summing incident counts across sites by contractor, then resolving the winning contractor’s code to its name. Capture each site’s incident count and contractor code, plus registry code-to-name mappings, without asking the parser to aggregate across documents."
  },
  "parsed": [
   {
@@ -687,9 +687,8 @@ p { margin: 0; }
      "record": {
       "site": "Northgate",
       "period": "Q3",
-      "incident_type": "equipment incidents",
       "incident_count": 5,
-      "maintenance_contractor_code": "CT-118"
+      "contractor_code": "CT-118"
      }
     }
    ],
@@ -702,9 +701,8 @@ p { margin: 0; }
      "record": {
       "site": "Eastfield",
       "period": "Q3",
-      "incident_type": "equipment incidents",
       "incident_count": 9,
-      "maintenance_contractor_code": "CT-204"
+      "contractor_code": "CT-204"
      }
     }
    ],
@@ -717,29 +715,8 @@ p { margin: 0; }
      "record": {
       "site": "Riverside",
       "period": "Q3",
-      "incident_type": "equipment incidents",
       "incident_count": 6,
-      "maintenance_contractor_code": "CT-118"
-     }
-    },
-    {
-     "field": "site_incident_reports",
-     "record": {
-      "site": "Riverside",
-      "period": "Q3",
-      "incident_type": "electrical incidents",
-      "incident_count": 4,
-      "maintenance_contractor_code": "CT-118"
-     }
-    },
-    {
-     "field": "site_incident_reports",
-     "record": {
-      "site": "Riverside",
-      "period": "Q3",
-      "incident_type": "water ingress incidents",
-      "incident_count": 2,
-      "maintenance_contractor_code": "CT-118"
+      "contractor_code": "CT-118"
      }
     }
    ],
@@ -748,16 +725,16 @@ p { margin: 0; }
   {
    "records": [
     {
-     "field": "contractor_mappings",
+     "field": "contractor_registry_entries",
      "record": {
-      "maintenance_contractor_code": "CT-118",
+      "contractor_code": "CT-118",
       "contractor_name": "Halloran Services Ltd"
      }
     },
     {
-     "field": "contractor_mappings",
+     "field": "contractor_registry_entries",
      "record": {
-      "maintenance_contractor_code": "CT-204",
+      "contractor_code": "CT-204",
       "contractor_name": "Merrow Facilities Group"
      }
     }
@@ -770,104 +747,112 @@ p { margin: 0; }
   }
  ],
  "answer": {
-  "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
-  "cites": [
-   0,
-   2,
-   3,
-   1
-  ]
+  "text": "Halloran Services Ltd's sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
+  "provenance": {
+   "summary_ids": [
+    0,
+    2,
+    3,
+    1
+   ],
+   "parse_ids": [
+    0,
+    2,
+    3,
+    1
+   ]
+  }
  },
  "calls": {
-  "r1-2": {
+  "r1-4": {
    "step": 1,
-   "tokens": 865,
-   "usd": 0.0001225
+   "tokens": 818,
+   "usd": 0.00010259999999999999
+  },
+  "r1-2": {
+   "step": 2,
+   "tokens": 880,
+   "usd": 0.00013000000000000002
   },
   "r1-0": {
-   "step": 2,
-   "tokens": 867,
-   "usd": 0.0001239
-  },
-  "r1-1": {
    "step": 3,
-   "tokens": 881,
-   "usd": 0.00013209999999999999
+   "tokens": 875,
+   "usd": 0.0001279
   },
   "r1-3": {
    "step": 4,
-   "tokens": 895,
-   "usd": 0.00014189999999999998
+   "tokens": 860,
+   "usd": 0.0001244
   },
-  "r1-4": {
+  "r1-1": {
    "step": 5,
-   "tokens": 826,
-   "usd": 0.00010659999999999999
+   "tokens": 857,
+   "usd": 0.00012009999999999999
   },
   "r2-4": {
    "step": 6,
-   "tokens": 1356,
-   "usd": 0.0001893
-  },
-  "r2-0": {
-   "step": 7,
-   "tokens": 1445,
-   "usd": 0.000234925
-  },
-  "r2-2": {
-   "step": 8,
-   "tokens": 1485,
-   "usd": 0.00025529999999999997
+   "tokens": 1360,
+   "usd": 0.00018680000000000001
   },
   "r2-1": {
+   "step": 7,
+   "tokens": 1469,
+   "usd": 0.000242425
+  },
+  "r2-0": {
+   "step": 8,
+   "tokens": 1437,
+   "usd": 0.000227925
+  },
+  "r2-2": {
    "step": 9,
-   "tokens": 1551,
-   "usd": 0.00029204999999999997
+   "tokens": 1535,
+   "usd": 0.0002788
   },
   "r2-3": {
    "step": 10,
-   "tokens": 1580,
-   "usd": 0.000315175
+   "tokens": 1614,
+   "usd": 0.00032205
   },
   "parsed-4": {
    "step": 1,
-   "tokens": 2271,
-   "usd": 5.3689999999999996e-05
+   "tokens": 2274,
+   "usd": 6.190500000000001e-05
   },
   "parsed-0": {
    "step": 2,
-   "tokens": 2431,
-   "usd": 0.0003788
-  },
-  "parsed-3": {
-   "step": 3,
-   "tokens": 2546,
-   "usd": 0.00019119
-  },
-  "parsed-1": {
-   "step": 4,
-   "tokens": 2568,
-   "usd": 0.000200315
+   "tokens": 2389,
+   "usd": 0.0003638
   },
   "parsed-2": {
+   "step": 3,
+   "tokens": 2348,
+   "usd": 9.553e-05
+  },
+  "parsed-3": {
+   "step": 4,
+   "tokens": 2426,
+   "usd": 0.00013978
+  },
+  "parsed-1": {
    "step": 5,
-   "tokens": 2652,
-   "usd": 0.000240065
+   "tokens": 2617,
+   "usd": 0.00023152999999999997
   },
   "schema": {
    "step": 1,
-   "tokens": 2359,
-   "usd": 0.0004973
+   "tokens": 2416,
+   "usd": 0.000519425
   },
   "answer": {
    "step": 1,
-   "tokens": 3130,
-   "usd": 0.00045192499999999994
+   "tokens": 3315,
+   "usd": 0.0004878
   }
  },
  "totals": {
-  "tokens": 29708,
-  "usd": 0.003927035
+  "tokens": 29490,
+  "usd": 0.00376277
  }
 };
 
@@ -921,6 +906,8 @@ p { margin: 0; }
   const READ_BYTES = 20000;
   const MAX_FILES = 40;
   const MAX_SIMULATED_CITES = 4;
+  const SIMULATED_SUMMARY_STRIDE = 2;
+  const SIMULATED_PARSE_STRIDE = 3;
   const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
   const SIMULATED_SCHEMA = [
     '# simulated — not connected to r3con yet',
@@ -1140,20 +1127,25 @@ p { margin: 0; }
     const n = files.length;
     const order = range(n);
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
+    const records = files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : []));
+    // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
+    const hasSummary = (j) => Boolean(summary(files[j]));
+    const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
+    const every = (stride, citable) => order.filter((i) => citable(i) && i % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
       simulated: true,
       question,
       docs: files,
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
-      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUpCitations(i, n) })),
+      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: files.map((f, i) => ({
-        records: f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [],
-        provenance: madeUpCitations(i, n),
-      })),
+      parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
       answer: {
         text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
-        cites: order.filter((i) => i % 2 === 0).slice(0, MAX_SIMULATED_CITES),
+        provenance: {
+          summary_ids: every(SIMULATED_SUMMARY_STRIDE, hasSummary),
+          parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => records[i].length > 0),
+        },
       },
       calls: null,
       totals: null,
@@ -1169,7 +1161,10 @@ p { margin: 0; }
 
   function cites(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'answer') return run.answer.cites.map((d) => `parsed-${d}`);
+    if (kind === 'answer') {
+      const { summary_ids, parse_ids } = run.answer.provenance;
+      return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
+    }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
     if (kind === 'r2') return run.r2[i].provenance.map((d) => `r1-${d}`);
     return [];
@@ -1657,7 +1652,9 @@ p { margin: 0; }
       run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, run.answer.text),
       row('asked', run.question),
-      row('cites', refs(cites(run, id))),
+      row('shown', `round 2 summaries and parses of all ${plural(run.docs.length, 'document')}`),
+      row('drew on summaries', refs(run.answer.provenance.summary_ids.map((d) => `r2-${d}`))),
+      row('drew on parses', refs(run.answer.provenance.parse_ids.map((d) => `parsed-${d}`))),
       h('div', { class: 'k' }, runSummary(run)),
     ];
   }
@@ -1884,11 +1881,28 @@ p { margin: 0; }
     return `${docLabel(run, i)} — ${count}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
   }
 
+  function answerCiteLines(run) {
+    const { summary_ids, parse_ids } = run.answer.provenance;
+    const view = (label, id) => h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, label);
+    return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
+      const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
+      return [`drew on ${docLabel(run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
+    });
+  }
+
+  function inputsOf(run, id) {
+    const every = (kind) => range(run.docs.length).map((j) => `${kind}-${j}`);
+    const [kind] = splitId(id);
+    if (kind === 'r2') return every('r1');
+    if (kind === 'parsed') return every('r2');
+    if (kind === 'answer') return [...every('r2'), ...every('parsed')];
+    return [];
+  }
+
   // Dotted: the same document, read again (round 2) or now structured (parse); faint: others shown.
   function showInputs(run, to) {
     const own = ownStep(run, to);
-    const [prev] = splitId(own);
-    for (const j of range(run.docs.length)) addEdge(`${prev}-${j}`, to, `${prev}-${j}` === own ? 'self' : 'context', 'fade');
+    for (const from of inputsOf(run, to)) addEdge(from, to, from === own ? 'self' : 'context', 'fade');
   }
 
   function showCites(run, to) {
@@ -1983,6 +1997,7 @@ p { margin: 0; }
     at(t, () => {
       narr.phase('answering');
       addNode('answer');
+      showInputs(run, 'answer');
     });
     t += TIMING.answerWork;
     at(t, () => {
@@ -1991,12 +2006,14 @@ p { margin: 0; }
       narr.done();
       if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
       narr.say('answer', run.answer.text, { node: 'answer' });
-      for (const id of cites(run, 'answer')) narr.say('sub', `cites ${idLabel(run, id)}`, { node: id });
+      const citeLines = answerCiteLines(run);
+      for (const text of citeLines) narr.say('sub', text);
+      if (!citeLines.length) narr.say('sub', 'cites no document');
       narr.say('sub', runSummary(run));
       doneStatus(run);
     });
     t += TIMING.litDelay;
-    at(t, () => lightPath(run));
+    if (cites(run, 'answer').length) at(t, () => lightPath(run));
     return steps;
   }
 
