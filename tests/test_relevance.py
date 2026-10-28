@@ -21,10 +21,10 @@ from r3con.stages.relevance import (
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
-PROMPTS = {"relevance/first-round": "v1", "relevance/later-rounds": "v1"}
+PROMPTS = {"relevance/first-round": "v1", "relevance/later-rounds": "v2"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 NOTE = re.compile(r"N\(\w+,r\d\)")
-MALFORMED = {"provenance": ["1b1b1b"]}
+MALFORMED = {"provenance_ids": ["1b1b1b"]}
 
 
 def paragraphs(n: int) -> str:
@@ -89,7 +89,7 @@ def sends_of(llm, document) -> list[dict]:
 def allowed_ids(request) -> dict:
     """The JSON schema of each id a request's reply may cite."""
     schema = request["response_format"]["json_schema"]["schema"]
-    return schema["properties"]["provenance"]["items"]
+    return schema["properties"]["provenance_ids"]["items"]
 
 
 def first_round_prompt() -> str:
@@ -264,7 +264,7 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(l
     [request] = reads_of(llm, "DOC0")[1:]
     assert request["messages"][0]["content"] == load_prompt(
         "relevance/later-rounds",
-        version="v1",
+        version="v2",
         task=TASK,
         other_snippets=(
             "### Summary ID: 1b1b1b\nN(DOC1,r1)\n\n### Summary ID: 2c2c2c\nN(DOC2,r1)"
@@ -272,9 +272,9 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(l
     )
     schema = request["response_format"]["json_schema"]
     assert (schema["name"], schema["strict"]) == ("RelevanceSummary", True)
-    assert list(schema["schema"]["properties"]) == ["summary", "provenance"]
-    assert schema["schema"]["required"] == ["summary", "provenance"]
-    assert "default" not in schema["schema"]["properties"]["provenance"]
+    assert list(schema["schema"]["properties"]) == ["summary", "provenance_ids"]
+    assert schema["schema"]["required"] == ["summary", "provenance_ids"]
+    assert "default" not in schema["schema"]["properties"]["provenance_ids"]
     assert schema["schema"]["properties"]["summary"]["anyOf"] == [
         {"type": "string"},
         {"type": "null"},
@@ -282,7 +282,7 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(l
     assert allowed_ids(request) == {"enum": ["1b1b1b", "2c2c2c"], "type": "string"}
 
 
-def test_a_later_rounds_reply_without_provenance_cites_nothing(llm):
+def test_a_later_rounds_reply_without_provenance_ids_cites_nothing(llm):
     def reply(request):
         if "response_format" not in request:
             return "A snippet."
@@ -293,13 +293,37 @@ def test_a_later_rounds_reply_without_provenance_cites_nothing(llm):
     assert len(llm.requests) == 4
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_the_reply_schema_does_not_depend_on_the_later_rounds_prompt_version(
+    llm, version
+):
+    def reply(request):
+        if "response_format" not in request:
+            return "A snippet."
+        return {"summary": "A snippet.", "provenance_ids": ["1b1b1b"]}
+
+    result = surface_relevance(
+        task=TASK,
+        documents=["DOC0", "DOC1"],
+        document_ids=IDS[:2],
+        model=MODEL,
+        prompts={**PROMPTS, "relevance/later-rounds": version},
+        rounds=2,
+        completion=llm.answers(relevance=reply),
+    )
+    assert result.provenance == [["1b1b1b"], []]
+    for request in llm.requests[2:]:
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert list(schema["properties"]) == ["summary", "provenance_ids"]
+
+
 def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):
     def reply(request):
         document = request["messages"][1]["content"]
         if "response_format" not in request:
             return f"{document} in round 1."
         cited = shown_ids(request)
-        return {"summary": f"  {document} in round 2.\n", "provenance": cited}
+        return {"summary": f"  {document} in round 2.\n", "provenance_ids": cited}
 
     result = surface(llm, ["DOC0", "DOC1", "DOC2"], rounds=2, reply=reply)
     assert result.snippets == [
@@ -322,7 +346,10 @@ def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog)
     def reply(request):
         if "response_format" not in request:
             return "A snippet."
-        return {"summary": "A snippet.", "provenance": ["1b1b1b", "0a0a0a", "1b1b1b"]}
+        return {
+            "summary": "A snippet.",
+            "provenance_ids": ["1b1b1b", "0a0a0a", "1b1b1b"],
+        }
 
     with caplog.at_level(logging.WARNING, logger="r3con.relevance"):
         result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply)
@@ -413,7 +440,7 @@ def test_a_null_summary_is_kept_empty_and_neither_shown_nor_citable(llm, shown_i
         summary = (
             None if document == "DOC1" else f"{document} in round {reads[document]}."
         )
-        return {"summary": summary, "provenance": []}
+        return {"summary": summary, "provenance_ids": []}
 
     result = surface(llm, ["DOC0", "DOC1", "DOC2"], rounds=3, reply=reply, workers=1)
     assert by_round(result, "summary")[1] == [

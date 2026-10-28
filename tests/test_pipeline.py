@@ -43,7 +43,8 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
-        "structuring/parsing": "v2",
+        "relevance/later-rounds": "v2",
+        "structuring/parsing": "v3",
         "reasoning/direct": "v2",
         "reasoning/coding": "v2",
     },
@@ -215,7 +216,7 @@ def citing_every_shown_id(shown_ids):
         note = f"Notes on {request['messages'][1]['content'][:20]}."
         if "response_format" not in request:
             return note
-        return {"summary": note, "provenance": shown_ids(request)[::-1]}
+        return {"summary": note, "provenance_ids": shown_ids(request)[::-1]}
 
     return reply
 
@@ -225,7 +226,7 @@ def citing_its_own_note(request) -> dict:
     message, its own."""
     user = request["messages"][1]["content"]
     own = re.match(r"Document ID: (\w+)\n", user)[1]
-    return {"parse": {"rows": [{"who": parsed(request)}]}, "provenance": [own]}
+    return {"parse": {"rows": [{"who": parsed(request)}]}, "provenance_ids": [own]}
 
 
 def first_turns(llm) -> list[dict]:
@@ -344,6 +345,27 @@ def test_a_config_that_pins_parsing_v1_still_runs(answering_llm, tmp_path):
         assert "provenance" not in prompt
     manifest = read_json(logger, "manifest")["config"]
     assert manifest["prompts"]["structuring/parsing"] == "v1"
+
+
+def test_a_config_that_pins_the_prompts_before_provenance_ids_still_records_them(
+    answering_llm, shown_ids, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    prompts = {
+        **CONFIG["prompts"],
+        "relevance/later-rounds": "v1",
+        "structuring/parsing": "v2",
+    }
+    llm = answering_llm.answers(
+        relevance=citing_every_shown_id(shown_ids), parsing=citing_its_own_note
+    )
+    result = answer(llm, logger, prompts=prompts)
+    ids = result.document_ids
+    assert result.relevance_provenance == [[ids[1]], [ids[0]]]
+    assert result.parsing_provenance == [[ids[0]], [ids[1]]]
+    assert "`provenance`:" in system_prompts(llm, "parsing")[0]
+    manifest = read_json(logger, "manifest")["config"]
+    assert manifest["prompts"]["relevance/later-rounds"] == "v1"
 
 
 def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
@@ -475,7 +497,7 @@ def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_sch
         assert ids_in(SUMMARY_ID_LINE.sub("", text)) == set()
     for request in later_rounds:
         schema = request["response_format"]["json_schema"]["schema"]
-        enum = schema["properties"]["provenance"]["items"]["enum"]
+        enum = schema["properties"]["provenance_ids"]["items"]["enum"]
         assert enum == shown_ids(request)
     for request in answering_llm.requests_for("parsing"):
         text = "\n".join(message["content"] for message in request["messages"])
@@ -483,7 +505,7 @@ def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_sch
         assert re.findall(r"^### Document ID: (\S+)$", shown, re.MULTILINE) == ids
         assert ids_in(DOCUMENT_ID_LINE.sub("", text)) == set()
         schema = request["response_format"]["json_schema"]["schema"]
-        assert schema["properties"]["provenance"]["items"]["enum"] == ids
+        assert schema["properties"]["provenance_ids"]["items"]["enum"] == ids
     for request in answering_llm.requests_for("schema"):
         assert ids_in(json.dumps(request, default=str)) == set()
 
@@ -776,7 +798,7 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
     def reply(request):
-        return {"provenance": []} if "response_format" in request else "A snippet."
+        return {"provenance_ids": []} if "response_format" in request else "A snippet."
 
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(ValidationError, match="summary"):

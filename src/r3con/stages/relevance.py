@@ -18,7 +18,7 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
   snippet — the document itself is in the user message), with the
   ``relevance/later-rounds`` prompt. Only the immediately-previous round is fed in, not
   the whole history. The reply is structured: the ``summary``, or null, and its
-  ``provenance``, the ids of the shown snippets it used. With nothing to show, the
+  ``provenance_ids``, the ids of the shown snippets it used. With nothing to show, the
   first-round prompt is used instead.
 
 Every document has an id for the run (:func:`draw_document_ids`), and each snippet
@@ -112,7 +112,7 @@ class RelevantContext:
 
 class _Reply(BaseModel):
     summary: str | None
-    provenance: list[str]
+    provenance_ids: list[str]
 
 
 class _Request(NamedTuple):
@@ -218,24 +218,34 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
+def list_of_ids(shown_ids: Sequence[str]) -> Any:
+    """The type of a reply's list of the ids a call shows. The shown ids reach only the
+    JSON schema, as an ``enum``, or, when there are none, as any string, since an empty
+    enum is refused; the reply itself is read as plain strings and checked by
+    :func:`cited`."""
+    if not shown_ids:
+        return list[str]
+    return list[Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]]
+
+
 def provenance_schema(
     name: str, base: type[_ReplyT], shown_ids: Sequence[str]
 ) -> type[_ReplyT]:
-    """``base``, named ``name``, with its ``provenance`` a list of the ids a call shows.
-    The shown ids reach only the JSON schema, as an ``enum``; the reply itself is read
-    as plain strings and checked by :func:`cited`. A reply without ``provenance`` cites
-    nothing, though the strict schema sent requires it."""
-    shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
+    """``base``, named ``name``, with its ``provenance_ids`` a :func:`list_of_ids` the
+    call shows. A reply without ``provenance_ids`` cites nothing, though the strict
+    schema sent requires it."""
     # A default_factory stays out of the schema; strict mode refuses a default.
     return create_model(
-        name, __base__=base, provenance=(list[shown_id], Field(default_factory=list))
+        name,
+        __base__=base,
+        provenance_ids=(list_of_ids(shown_ids), Field(default_factory=list)),
     )
 
 
 def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:
     """A document's request in one round, given the OTHER documents' non-empty snippets
     it shows, by id: the first-round prompt and plain text when there are none, else
-    the later-rounds prompt and its ``{summary, provenance}`` reply."""
+    the later-rounds prompt and its ``{summary, provenance_ids}`` reply."""
     if not shown:
         version = prompts["relevance/first-round"]
         prompt = load_prompt("relevance/first-round", version=version, task=task)
@@ -284,7 +294,8 @@ def _read(
     if request.schema is None:
         return cast(str, reply).strip(), []
     reply = cast(_Reply, reply)
-    return (reply.summary or "").strip(), cited(reply.provenance, request.shown, kind)
+    summary = (reply.summary or "").strip()
+    return summary, cited(reply.provenance_ids, request.shown, kind)
 
 
 def _attempts(max_attempts: int | None) -> int:
@@ -323,7 +334,7 @@ def relevance_snippet(
     the user message. ``prompts`` pins the version of ``relevance/first-round`` and
     ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet
     to show, the call uses the first-round prompt and reads back plain text; otherwise
-    the later-rounds prompt and a structured ``{summary, provenance}`` reply. A reply
+    the later-rounds prompt and a structured ``{summary, provenance_ids}`` reply. A reply
     that does not fit its schema is sent again with the validator's error, up to
     ``max_attempts`` sends (``None`` reads ``settings.RELEVANCE_MAX_ATTEMPTS``).
 

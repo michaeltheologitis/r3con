@@ -90,7 +90,7 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request for structured output gets a text reply as its
-    summary, citing nothing; a parsing request for ``{parse, provenance}`` gets a dict
+    summary, citing nothing; a parsing request for ``{parse, provenance_ids}`` gets a dict
     reply without ``parse`` as its parse, citing nothing; a direct reasoning request
     gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
@@ -160,13 +160,13 @@ class FakeLLM:
                 and "response_format" in snapshot
                 and stage_of(snapshot) == "relevance"
             ):
-                content = {"summary": content, "provenance": []}
+                content = {"summary": content, "provenance_ids": []}
             if (
                 isinstance(content, dict)
                 and "parse" not in content
                 and _schema_name(snapshot) == "ParseReply"
             ):
-                content = {"parse": content, "provenance": []}
+                content = {"parse": content, "provenance_ids": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
             # The dict form, because litellm treats mock_response="" as absent.

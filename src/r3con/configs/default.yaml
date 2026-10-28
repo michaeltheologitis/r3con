@@ -19,9 +19,9 @@ reasoning: direct
 
 prompts:
   relevance/first-round: v1
-  relevance/later-rounds: v1
+  relevance/later-rounds: v2
   structuring/schema: v1
-  structuring/parsing: v2
+  structuring/parsing: v3
   reasoning/direct: v2
   reasoning/coding: v2
 
