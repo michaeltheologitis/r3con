@@ -1326,13 +1326,22 @@ p { margin: 0; }
   }
 
   // Document nodes are created only here: one per loaded or run file, at its position in `at` if
-  // it had one, else below the last document node.
-  function syncDocNodes(at = new Map(), animate = false) {
+  // it had one, else below the last document node. A run's grid is planned once, when it starts;
+  // later syncs only add or drop document entries.
+  function syncDocNodes({ at = new Map(), animate = false, replan = !state.run } = {}) {
     const files = panelFiles();
     const keep = new Set(files.map(docId));
-    for (const n of [...state.nodes.values()]) if (n.kind === 'doc' && !keep.has(n.id)) removeNode(n.id);
-    for (const f of files) if (!state.nodes.has(docId(f))) addDocNode(f, at.get(docId(f)));
-    state.layout = plan(nodeOrigin);
+    for (const n of [...state.nodes.values()]) {
+      if (n.kind !== 'doc' || keep.has(n.id)) continue;
+      removeNode(n.id);
+      state.layout.delete(n.id);
+    }
+    for (const f of files) {
+      if (state.nodes.has(docId(f))) continue;
+      const node = addDocNode(f, at.get(docId(f)));
+      state.layout.set(node.id, { x: node.x, y: node.y });
+    }
+    if (replan) state.layout = plan(nodeOrigin);
     updateHint();
     if (!state.userMoved) fit(animate);
   }
@@ -1401,12 +1410,15 @@ p { margin: 0; }
     if (state.selected === id) renderInspector();
   }
 
-  function isBlocked(a, b, pa, pb) {
+  function isBlocked(a, b, at) {
+    const pa = at(a);
+    const pb = at(b);
     const lo = Math.min(pa.x, pb.x) + ICON_HALF;
     const hi = Math.max(pa.x, pb.x) - ICON_HALF;
     for (const n of state.nodes.values()) {
       if (n === a || n === b) continue;
-      if (n.x > lo && n.x < hi && Math.abs(n.y - (pa.y + pb.y) / 2) < ICON_HALF * 2) return true;
+      const p = at(n);
+      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < ICON_HALF * 2) return true;
     }
     return false;
   }
@@ -1417,7 +1429,7 @@ p { margin: 0; }
     const sx = pa.x + ICON_HALF + EDGE_GAP;
     const tx = pb.x - ICON_HALF - EDGE_GAP;
     const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
-    const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, pa, pb) ? -BOW : 0;
+    const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, at) ? -BOW : 0;
     return `M${sx} ${pa.y} C${sx + c} ${pa.y + bow} ${tx - c} ${pb.y + bow} ${tx} ${pb.y}`;
   }
 
@@ -1928,7 +1940,7 @@ p { margin: 0; }
     state.runTurn.body.replaceChildren();
     $('replay-btn').hidden = false;
     state.userMoved = false;
-    syncDocNodes(docPositions, true);
+    syncDocNodes({ at: docPositions, animate: true, replan: true });
     const steps = buildTimeline(run, narrator(state.runTurn.body));
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
@@ -2116,7 +2128,6 @@ p { margin: 0; }
     const key = $('setting-key');
     settings.model = $('setting-model').value.trim();
     settings.endpoint = $('setting-endpoint').value.trim();
-    if (key.value) key.placeholder = 'set for this tab';
     key.value = '';
     writeStored(SETTINGS_KEY, JSON.stringify({ model: settings.model, endpoint: settings.endpoint }));
     readyStatus();
@@ -2166,7 +2177,7 @@ p { margin: 0; }
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
     gesture.origin = { x: e.clientX, y: e.clientY };
-    gesture.from = gesture.node ? { x: gesture.node.x, y: gesture.node.y } : { x: view.x, y: view.y };
+    gesture.from = gesture.node ? drawnAt(gesture.node) : { x: view.x, y: view.y };
   }
 
   function onPointerMove(e) {
@@ -2275,6 +2286,11 @@ p { margin: 0; }
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('setting-key-show').addEventListener('click', () => showKey($('setting-key').type === 'password'));
+    $('setting-key').addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      e.preventDefault();
+      $('settings-form').requestSubmit();
+    });
     $('settings-form').addEventListener('submit', (e) => {
       e.preventDefault();
       saveSettings();
