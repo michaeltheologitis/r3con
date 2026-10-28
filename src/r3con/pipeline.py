@@ -70,7 +70,7 @@ class Answer:
     bare string. ``str(result)`` is the answer text, so printing one still does the
     obvious thing.
 
-    - ``answer`` — the committed answer text.
+    - ``answer`` — the answer text.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
@@ -199,8 +199,8 @@ def run_pipeline(
     the structured parse, and the schema that was proposed for this question.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
-    output — model, relevance rounds, the prompt version of each stage, and any
-    generation params — so nothing output-affecting is threaded ad-hoc.
+    output — model, relevance rounds, the reasoning path, the prompt version of each
+    stage, and any generation params — so nothing output-affecting is threaded ad-hoc.
 
     ``api_base``, ``api_key`` and ``completion`` are **transport**: routing, auth, and how
     the request is actually made. None of them changes what a correct answer is, so none
@@ -386,7 +386,7 @@ def run_pipeline(
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance_snippets],
-        # the parse exactly as the agent saw it: plain data, each record stamped with the
+        # the parse reasoning was given: plain data, each record stamped with the
         # 1-based document it came from
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,

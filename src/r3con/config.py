@@ -64,7 +64,6 @@ PROMPT_STAGES: tuple[str, ...] = (
 
 DEFAULT_CONFIG = "default"
 
-# How reasoning answers: in one completion, or as a coding agent over the parse.
 ReasoningPath = Literal["direct", "coding"]
 REASONING_PATHS: tuple[ReasoningPath, ...] = get_args(ReasoningPath)
 
