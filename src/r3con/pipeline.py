@@ -49,6 +49,16 @@ from r3con.stages.structuring.schema import propose_schema
 _log = get_logger("pipeline")
 
 
+def _sources_as_ids(
+    source_docs: dict[str, list[int]], document_ids: list[str]
+) -> dict[str, list[str]]:
+    """``source_docs`` with each document index replaced by that document's id."""
+    return {
+        name: [document_ids[i] for i in indices]
+        for name, indices in source_docs.items()
+    }
+
+
 @dataclass(frozen=True)
 class Answer:
     """What a run produced: the answer, and the two views it was derived from.
@@ -82,11 +92,12 @@ class Answer:
       document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in that
       previous round. A document read in parts has its parts' ids combined, in order,
       without repeats.
-    - ``source_ids`` — ``source_docs`` with each index replaced by that document's id
-      from ``document_ids``: for each list field of the parse, the id of the document
-      each record came from, so a record links to its document's ``provenance``. A
-      record parsed from one part of a document read in parts carries the document's
-      id.
+    - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
+      ``source_docs`` with each index replaced by that document's id, so it lines up
+      with ``source_docs`` by position. A record parsed from one part of a document read
+      in parts carries the document's id. The id lets a record be matched against the
+      ids in ``provenance`` and in the run folder's ``relevance/result.json``, where a
+      part's id is ``<id>.<k>`` and matching uses the part before the dot.
     """
 
     answer: str
@@ -97,7 +108,10 @@ class Answer:
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
     provenance: list[list[str]] = field(default_factory=list)
-    source_ids: dict[str, list[str]] = field(default_factory=dict)
+
+    @property
+    def source_ids(self) -> dict[str, list[str]]:
+        return _sources_as_ids(self.source_docs, self.document_ids)
 
     def __str__(self) -> str:
         return self.answer
@@ -298,14 +312,10 @@ def run_pipeline(
             splits=splits,
             **llm_kwargs,
         )
-        source_ids = {
-            name: [document_ids[i] for i in indices]
-            for name, indices in extraction.source_docs.items()
-        }
         record.result = {
             "parsed": extraction.parse,
             "source_docs": extraction.source_docs,
-            "source_ids": source_ids,
+            "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
         }
     parsed = extraction.parse
 
@@ -362,5 +372,4 @@ def run_pipeline(
         run_dir=task_logger.dir if task_logger is not None else None,
         document_ids=document_ids,
         provenance=relevance.provenance,
-        source_ids=source_ids,
     )

@@ -42,6 +42,7 @@ REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
+SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 
 
 def answer(
@@ -278,11 +279,12 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
             assert "Round 1 notes" not in prompt
 
 
+@pytest.mark.parametrize("version", ["v1", "v2"])
 def test_reasoning_is_sent_the_parse_stamped_with_document_numbers_and_no_ids(
-    answering_llm,
+    answering_llm, version
 ):
     llm = answering_llm.answers(reasoning="<code>\nfinal_answer(parse)\n</code>")
-    result = answer(llm)
+    result = answer(llm, prompts={**CONFIG["prompts"], "reasoning": version})
     stamped = {
         "rows": [
             {"document": 1, "who": "Halloran memo"},
@@ -295,14 +297,39 @@ def test_reasoning_is_sent_the_parse_stamped_with_document_numbers_and_no_ids(
             "role": "system",
             "content": load_prompt(
                 "reasoning",
-                version="v1",
+                version=version,
                 relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
+                read_in_parts=False,
                 parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
             ),
         },
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
     assert ast.literal_eval(result.answer) == stamped
+
+
+def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
+    answering_llm, shown_ids, monkeypatch
+):
+    counting_ids(monkeypatch)
+    result = answer(answering_llm, documents=[*DOCS, "Calder memo"])
+
+    def ids_in(text: str) -> set[str]:
+        return {id_ for id_ in result.document_ids if id_ in text}
+
+    relevance = answering_llm.requests_for("relevance")
+    later_rounds = [request for request in relevance if "response_format" in request]
+    assert [len(shown_ids(request)) for request in later_rounds] == [2, 2, 2]
+    for request in relevance:
+        text = "\n".join(message["content"] for message in request["messages"])
+        assert ids_in(SUMMARY_ID_LINE.sub("", text)) == set()
+    for request in later_rounds:
+        schema = request["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["provenance"]["items"]["enum"]
+        assert enum == shown_ids(request)
+    for stage in LATER_STAGES:
+        for request in answering_llm.requests_for(stage):
+            assert ids_in(json.dumps(request, default=str)) == set()
 
 
 def test_every_record_carries_its_documents_id_a_split_documents_parts_included(

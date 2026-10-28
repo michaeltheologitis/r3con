@@ -124,10 +124,13 @@ id to the document's 0-based index in `documents` (also `result.document_ids`). 
 `relevance/result.json`, every round lists its `snippets`, one per document or per part
 of a document read in parts, each with its `id` (the document's, or `<id>.<k>` for part
 `k` in that round), its `summary`, and its `provenance`: the ids of the previous round's
-snippets it used. In `structuring/parsing/result.json`, `source_docs` and `source_ids`
-give, for each list field of `parsed`, the 0-based index and the id of the document each
-record came from (also `result.source_docs` and `result.source_ids`); a record parsed
-from one part of a long document carries the document's id.
+snippets it used. In `structuring/parsing/result.json`, `source_docs` gives, for each
+list field of `parsed`, the 0-based index of the document each record came from, and
+`source_ids` lines up with it by position, giving that document's id (also
+`result.source_docs` and `result.source_ids`). A record parsed from one part of a long
+document carries the document's id. The id lets a record be matched against the ids in
+`relevance/result.json` and `result.provenance`, where a part's id is `<id>.<k>`: match
+on the part before the dot.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
