@@ -24,7 +24,8 @@ Config file shape (``configs/<name>.yaml``)::
     model: openai/gpt-6-luna
     relevance_rounds: 2
     prompts:
-      relevance: v1
+      relevance/first-round: v1
+      relevance/later-rounds: v1
       structuring/schema: v1
       structuring/parsing: v1
       reasoning: v2
@@ -47,7 +48,8 @@ from r3con.prompts import require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PROMPT_STAGES: tuple[str, ...] = (
-    "relevance",
+    "relevance/first-round",
+    "relevance/later-rounds",
     "structuring/schema",
     "structuring/parsing",
     "reasoning",
@@ -60,7 +62,8 @@ _CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})
 
 # Compact per-stage abbreviations for the prompts tag in RunConfig.label().
 _PROMPT_STAGE_ABBR: dict[str, str] = {
-    "relevance": "rel",
+    "relevance/first-round": "rel1",
+    "relevance/later-rounds": "rel2",
     "structuring/schema": "schema",
     "structuring/parsing": "parse",
     "reasoning": "reason",
@@ -134,7 +137,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v2)]
+            exp[model=gpt-6-luna,rounds=2,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v2)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
@@ -202,8 +205,9 @@ def load_config(
     label, because each of them shapes the output.
 
     Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
-    are not a mapping, ``ValueError`` if the config sets a field r3con does not read or
-    omits a required field or a prompt version for any stage, and
+    are not a mapping, ``ValueError`` if the config sets a field r3con does not read,
+    omits a required field or a prompt version for any stage, or pins the retired
+    ``relevance`` stage, and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -250,9 +254,15 @@ def check_prompts(config: RunConfig) -> None:
     """Refuse a config that cannot render every stage's prompt, before any request.
 
     Raises:
-        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned.
+        ValueError: if the config pins ``relevance``, now two stages, or a stage in
+            :data:`PROMPT_STAGES` has no version pinned.
         FileNotFoundError: if a pinned version has no file on the prompt search path.
     """
+    if "relevance" in config.prompts:
+        raise ValueError(
+            f"config {config.name!r} pins a prompt for `relevance`, which is now two "
+            "stages: pin `relevance/first-round` and `relevance/later-rounds` instead."
+        )
     missing = [s for s in PROMPT_STAGES if s not in config.prompts]
     if missing:
         raise ValueError(

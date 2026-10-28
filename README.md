@@ -119,11 +119,19 @@ records, model calls, and the final reasoning transcript. Each call in `calls.js
 its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
 each stage's `result.json` totals them.
 
+Each document gets a random id of 6 hex characters for the run, and `ids.json` maps each
+id to the document's 0-based index in `documents` (also `result.document_ids`). In
+`relevance/result.json`, every round lists its `summaries`, one per document or per part
+of a document read in parts, each with its `id` (the document's, or `<id>.<k>` for part
+`k` in that round), its `summary`, and its `provenance`: the ids of the previous round's
+summaries it used.
+
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
+├── ids.json                     <- document id -> index in documents
 ├── splits.json                  <- only when a document was read in parts
 ├── relevance/
-│   ├── result.json
+│   ├── result.json              <- each round's summaries: id, summary, provenance
 │   └── calls.json
 ├── structuring/
 │   ├── schema/

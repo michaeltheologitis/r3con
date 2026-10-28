@@ -1,0 +1,71 @@
+instructions: |-
+  You are given one document from a collection, and a single **task** (between `<task>` and `</task>` tags) that the whole collection will be used to answer. Write a **task-conditioned summary** of this one document: what does it contribute toward the task?
+
+  Produce a summary, **not an answer**. Even when the task is phrased as an instruction ("list…", "rank…", "construct the chain…", "how many…"), do not try to carry it out or commit to a final answer here — you are looking at only one document, and the answer is assembled later from all the summaries together. Just record, faithfully and in your own words, what THIS document offers toward the task; do not invent.
+
+  Open with a brief, high-level orientation of what this document broadly is (e.g. "a municipal budget memo", "a 10-Q filing", "a chapter of a noir novel", "a government press release") — this latent, big-picture read helps the collection be understood as a whole — then note the task-relevant specifics. Keep it tight: a larger document still gets a short summary; include only what is durable and bears on the task.
+
+  <task>
+  {{ task }}
+  </task>
+
+  ## Task-conditioned summaries of the other documents (previous round)
+
+  Below are the other documents' task-conditioned summaries for this same task, from the previous round. Use them to read THIS document in light of the collection — a document often only becomes useful and understandable for the task once you know information from the other documents. Still write only about THIS document (the one the user provides). Each summary is headed by its summary ID.
+
+  {{ other_snippets }}
+
+  ## Output
+  Reply in two fields:
+
+  - `summary`: the task-conditioned summary of this document only — no preamble, no restating the task. If this document contributes nothing relevant to the task, set it to null.
+  - `provenance`: The IDs of the other summaries above that you used in writing `summary` of this document — those who provided useful information in writing the summary for the current document. Leave out summaries that didn't contribute. Leave it an empty list if none contributed any info.
+
+examples:
+  - name: two-of-three-summaries-used
+    text: |-
+      Input:
+      <task>
+      Across the candidates' platform papers, who proposes the largest cut to the city transit budget?
+      </task>
+
+      Other documents' summaries (previous round):
+      ### Summary ID: a3c9e1
+      A candidate's platform paper (Councilmember Sam Lee). Lee proposes cutting the transit budget by $15M.
+
+      ### Summary ID: 9e04b7
+      A candidate's budget paper (Councilmember Priya Okafor). Okafor proposes cutting the transit budget by $9M.
+
+      ### Summary ID: 5b72d0
+      The city finance office's budget overview. The transit budget includes a $20M fare-subsidy line.
+
+      Document:
+      [Councilmember Dana Reyes — Platform on City Services]
+
+      Transit. I will match Councilmember Lee's proposed transit cut, and on top of it trim a quarter of the fare-subsidy line.
+
+      Parks. I support the downtown bike-lane pilot, funded from the parks reserve — not from transit.
+
+      Output:
+      {"summary": "A candidate's platform paper (Councilmember Dana Reyes). She proposes cutting transit by Lee's cut ($15M) plus a quarter of the $20M fare-subsidy line ($5M): $20M in total. Her bike-lane support is not a transit cut.", "provenance": ["a3c9e1", "5b72d0"]}
+  - name: no-summary-used
+    text: |-
+      Input:
+      <task>
+      Across the candidates' platform papers, who proposes the largest cut to the city transit budget?
+      </task>
+
+      Other documents' summaries (previous round):
+      ### Summary ID: a3c9e1
+      A candidate's platform paper (Councilmember Sam Lee). Lee proposes cutting the transit budget by $15M.
+
+      ### Summary ID: 5b72d0
+      The city finance office's budget overview. The transit budget includes a $20M fare-subsidy line.
+
+      Document:
+      [Councilmember Priya Okafor — Budget Priorities]
+
+      Transit. I propose a $9 million reduction in the transit budget, achieved by consolidating the two least-used bus routes.
+
+      Output:
+      {"summary": "A candidate's budget paper (Councilmember Priya Okafor). She proposes cutting the transit budget by $9M by consolidating two bus routes.", "provenance": []}

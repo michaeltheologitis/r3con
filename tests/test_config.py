@@ -10,8 +10,8 @@ FULL = {
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
-V1_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
-DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v2)"
+V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v1)"
+DEFAULT_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v2)"
 
 
 def test_the_default_config_loads_with_its_shipped_values():
@@ -69,7 +69,8 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
         f"exp[model=gpt-6-luna,rounds=3,params={{seed=7}},{V1_PROMPTS}]"
     )
     assert load_config("exp2").label() == (
-        "exp2[model=gpt-6-luna,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
+        "exp2[model=gpt-6-luna,rounds=3,"
+        "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v9)]"
     )
 
 
@@ -89,13 +90,30 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
     ("fields", "message"),
     [
         ({"prompts": PROMPTS}, "must define a `model`"),
-        ({**FULL, "prompts": {"relevance": "v1"}}, "missing prompt versions"),
+        ({**FULL, "prompts": {"reasoning": "v1"}}, "missing prompt versions"),
     ],
 )
 def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
     configs(bad=fields)
     with pytest.raises(ValueError, match=message):
         load_config("bad")
+
+
+@pytest.mark.parametrize(
+    "prompts",
+    [{**PROMPTS, "relevance": "v1"}, {"relevance": "v1"}],
+    ids=["beside-the-new-keys", "alone"],
+)
+def test_a_config_pinning_the_old_relevance_stage_names_the_two_that_replace_it(
+    configs, prompts
+):
+    configs(old={**FULL, "prompts": prompts})
+    with pytest.raises(ValueError) as refused:
+        load_config("old")
+    assert str(refused.value) == (
+        "config 'old' pins a prompt for `relevance`, which is now two stages: pin "
+        "`relevance/first-round` and `relevance/later-rounds` instead."
+    )
 
 
 @pytest.mark.parametrize(("name", "value"), [("relevence_rounds", 3), ("seed", 7)])

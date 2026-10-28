@@ -16,12 +16,16 @@ Layout per ``logs/<run-folder>/``:
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
   block (:meth:`r3con.config.RunConfig.label`).
+- ``ids.json`` — each document's id in this run, mapped to its 0-based index in
+  ``documents``. Written with the manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  rounds: [{round, snippets}], totals}`` — within a round the per-document relevance
-  snippets align to ``documents[i]``, a document read in parts holding a list of its
-  parts' notes; the last round is the relevant context that feeds downstream) +
-  ``calls.json`` (one per ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``,
-  or ``relevance-r{round}-d{doc}c{part}`` for a part).
+  rounds: [{round, summaries: [{id, summary, provenance}]}], totals}`` — within a round
+  every relevance snippet in document order, a document read in parts as one per part,
+  each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that round) and
+  the ids of the previous round's snippets it used; the last round is the relevant
+  context that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call,
+  tagged ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a
+  part).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``

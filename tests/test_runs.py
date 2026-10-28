@@ -312,17 +312,17 @@ def test_the_manifest_is_written_before_the_first_stage_fails(llm, logger):
 def test_the_manifest_names_the_file_each_prompt_and_the_config_came_from(
     logger, tmp_path, monkeypatch
 ):
-    overlay = tmp_path / "overlay"
-    (overlay / "relevance").mkdir(parents=True)
-    (overlay / "relevance" / "v1.yaml").write_text("instructions: |-\n  OVERLAID\n")
-    monkeypatch.setenv("R3CON_PROMPTS_DIR", str(overlay))
+    overlaid = tmp_path / "overlay" / "relevance" / "later-rounds" / "v1.yaml"
+    overlaid.parent.mkdir(parents=True)
+    overlaid.write_text("instructions: |-\n  OVERLAID\n")
+    monkeypatch.setenv("R3CON_PROMPTS_DIR", str(tmp_path / "overlay"))
     write_manifest(logger, task="q", config=config(), n_docs=1)
     sources = json.loads((logger.dir / "manifest.json").read_text())["sources"]
     assert sources["config"] == str(settings.CONFIGS_DIR / "default.yaml")
     assert sources["prompts"] == {
         stage: str(
-            overlay / "relevance" / "v1.yaml"
-            if stage == "relevance"
+            overlaid
+            if stage == "relevance/later-rounds"
             else settings.PROMPTS_DIR / stage / "v1.yaml"
         )
         for stage in PROMPT_STAGES
