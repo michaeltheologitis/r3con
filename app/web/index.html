@@ -25,6 +25,8 @@
   --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --gutter: 16px;
+  --icon-size: 28px;
+  --doc-icon-size: 46px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -183,7 +185,8 @@ p { margin: 0; }
 
 .node {
   position: absolute;
-  translate: -50% -14px;
+  --node-icon: var(--icon-size);
+  translate: -50% calc(var(--node-icon) / -2);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -195,10 +198,11 @@ p { margin: 0; }
   transition: opacity 0.4s;
 }
 .node.enter { animation: node-in 0.35s ease-out; }
-.node .icon { width: 28px; height: 28px; color: var(--fg); transition: color 0.4s; }
-.node .icon svg { display: block; width: 28px; height: 28px; overflow: visible; }
+.node.doc { --node-icon: var(--doc-icon-size); }
+.node .icon { width: var(--node-icon); height: var(--node-icon); color: var(--fg); transition: color 0.4s; }
+.node .icon svg { display: block; width: var(--node-icon); height: var(--node-icon); overflow: visible; }
 .node .label { line-height: 1.5; }
-.node .spin { position: absolute; top: -0.7em; left: calc(50% + 12px); color: var(--accent); display: none; }
+.node .spin { position: absolute; top: -0.7em; left: calc(50% + var(--node-icon) / 2 - 2px); color: var(--accent); display: none; }
 .node.working .spin { display: block; }
 .node.working .icon { color: var(--dim); }
 .node.void { opacity: 0.45; }
@@ -863,7 +867,14 @@ p { margin: 0; }
 
   const GRID = { colGap: 200, rowGap: 100 };
   const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
-  const ICON_HALF = 14;
+  const cssPx = (name) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
+  const ICON_PX = cssPx('--icon-size');
+  const DOC_ICON_PX = cssPx('--doc-icon-size');
+  const ICON_HALF = ICON_PX / 2;
+  const DOC_ICON_HALF = DOC_ICON_PX / 2;
+  const ICON_STROKE = 1.7;
+  // The document icon is drawn larger, so its stroke is thinned to the same on-screen weight.
+  const DOC_ICON_STROKE = (ICON_STROKE * ICON_PX) / DOC_ICON_PX;
   const EDGE_GAP = 6;
   const MIN_CURVE = 40;
   const BOW = 44;
@@ -907,12 +918,12 @@ p { margin: 0; }
   const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
 
   const ICONS = {
-    document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M19.25 3H8.5a2 2 0 0 0-2 2v22a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V9.25z"/>
       <path d="M19.25 3v5.25a1 1 0 0 0 1 1h5.25"/>
       <path d="M10.75 13h7.5M10.75 17.25h10.25M10.75 21.5h7.5"/>
     </svg>`,
-    snippet: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    snippet: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M15.5 4.75h2.3a2 2 0 0 1 1.46.63l5.17 5.55a2 2 0 0 1 .54 1.37V25.5a2.5 2.5 0 0 1-2.5 2.5H10a2.5 2.5 0 0 1-2.5-2.5v-9"/>
       <path d="M18.75 5.25V9.5a1.5 1.5 0 0 0 1.5 1.5h4.5"/>
       <path d="M11.75 16.25h9M11.75 19.5h9M15.75 22.75h5"/>
@@ -957,6 +968,7 @@ p { margin: 0; }
   const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
 
   const docId = (file) => `doc-${file.uid}`;
+  const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
 
   const state = {
     files: SAMPLE_FILES,
@@ -1215,18 +1227,18 @@ p { margin: 0; }
   function contentBounds() {
     const widest = Math.max('structure'.length, ...panelFiles().map((f) => fileLabel(f).length)) * charPx + NODE_PAD_PX;
     const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-    for (const p of state.layout.values()) {
+    for (const [id, p] of state.layout) {
       b.minX = Math.min(b.minX, p.x - widest / 2);
       b.maxX = Math.max(b.maxX, p.x + widest / 2);
       b.minY = Math.min(b.minY, p.y - BOW);
-      b.maxY = Math.max(b.maxY, p.y + ICON_HALF + 2 * LABEL_LINE_PX);
+      b.maxY = Math.max(b.maxY, p.y + iconHalf(splitId(id)[0]) + 2 * LABEL_LINE_PX);
     }
     for (const n of state.nodes.values()) {
       const halfW = n.el.offsetWidth / 2;
       b.minX = Math.min(b.minX, n.x - halfW);
       b.maxX = Math.max(b.maxX, n.x + halfW);
-      b.minY = Math.min(b.minY, n.y - ICON_HALF);
-      b.maxY = Math.max(b.maxY, n.y - ICON_HALF + n.el.offsetHeight);
+      b.minY = Math.min(b.minY, n.y - iconHalf(n.kind));
+      b.maxY = Math.max(b.maxY, n.y - iconHalf(n.kind) + n.el.offsetHeight);
     }
     return Number.isFinite(b.minX) ? b : { minX: 0, maxX: 1, minY: 0, maxY: 1 };
   }
@@ -1413,12 +1425,12 @@ p { margin: 0; }
   function isBlocked(a, b, at) {
     const pa = at(a);
     const pb = at(b);
-    const lo = Math.min(pa.x, pb.x) + ICON_HALF;
-    const hi = Math.max(pa.x, pb.x) - ICON_HALF;
+    const lo = Math.min(pa.x + iconHalf(a.kind), pb.x + iconHalf(b.kind));
+    const hi = Math.max(pa.x - iconHalf(a.kind), pb.x - iconHalf(b.kind));
     for (const n of state.nodes.values()) {
       if (n === a || n === b) continue;
       const p = at(n);
-      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < ICON_HALF * 2) return true;
+      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < iconHalf(n.kind) * 2) return true;
     }
     return false;
   }
@@ -1426,8 +1438,8 @@ p { margin: 0; }
   function edgePath(a, b, at = (n) => n) {
     const pa = at(a);
     const pb = at(b);
-    const sx = pa.x + ICON_HALF + EDGE_GAP;
-    const tx = pb.x - ICON_HALF - EDGE_GAP;
+    const sx = pa.x + iconHalf(a.kind) + EDGE_GAP;
+    const tx = pb.x - iconHalf(b.kind) - EDGE_GAP;
     const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
     const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, at) ? -BOW : 0;
     return `M${sx} ${pa.y} C${sx + c} ${pa.y + bow} ${tx - c} ${pb.y + bow} ${tx} ${pb.y}`;
@@ -1663,7 +1675,7 @@ p { margin: 0; }
     let left = cx + halfW + POPOVER_GAP;
     if (left + w > pw - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
     left = clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, pw - w - POPOVER_MARGIN));
-    const top = clamp(cy - ICON_HALF * view.k - 6, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, ph - ht - POPOVER_MARGIN));
+    const top = clamp(cy - iconHalf(node.kind) * view.k - 6, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, ph - ht - POPOVER_MARGIN));
     inspector.style.left = `${left}px`;
     inspector.style.top = `${top}px`;
   }
