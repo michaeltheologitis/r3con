@@ -7,6 +7,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import copy
 import json
 import logging
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -26,7 +27,8 @@ _completion = litellm.completion
 Stage = Literal["relevance", "schema", "parsing", "reasoning"]
 Request = dict[str, Any]
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
-Reply = str | BaseException | Callable[[Request], str]
+Content = str | dict[str, Any]
+Reply = Content | BaseException | Callable[[Request], Content]
 
 R3CON_VARIABLES = (
     "R3CON_LOGS_DIR",
@@ -57,7 +59,8 @@ class UnscriptedRequest(AssertionError):
 def stage_of(request: Request) -> Stage:
     """The pipeline stage that built ``request``, read from the shape r3con gives it."""
     if "response_format" in request:
-        return "parsing"
+        schema = request["response_format"]["json_schema"]["name"]
+        return "relevance" if schema == "RelevanceSummary" else "parsing"
     messages = request["messages"]
     if len(messages) > 2:
         return "reasoning"
@@ -72,8 +75,10 @@ class FakeLLM:
 
     ``replies(...)`` queues replies for whichever requests come next; ``answers(...)``
     sets each stage's reply for when the queue is empty (one reply for every request
-    of that stage, or a list consumed in order). A reply is the response's content, an
-    exception to raise, or a callable from the request to the content.
+    of that stage, or a list consumed in order). A reply is the response's content (a
+    dict is sent as its JSON), an exception to raise, or a callable from the request to
+    the content. A relevance request for structured output gets a text reply as its
+    summary, citing nothing.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
     request as a provider does, in tokens.
@@ -136,6 +141,14 @@ class FakeLLM:
             if isinstance(reply, BaseException):
                 raise reply
             content = reply(copy.deepcopy(snapshot)) if callable(reply) else reply
+            if (
+                isinstance(content, str)
+                and "response_format" in snapshot
+                and stage_of(snapshot) == "relevance"
+            ):
+                content = {"summary": content, "provenance": []}
+            if isinstance(content, dict):
+                content = json.dumps(content)
             # The dict form, because litellm treats mock_response="" as absent.
             choice = {
                 "index": 0,
@@ -279,6 +292,13 @@ def quiet_site_memos(n: int) -> list[str]:
     ]
 
 
+def summary_ids_shown(request: Request) -> list[str]:
+    """The ids a later-rounds relevance request shows, in order, without its
+    examples'."""
+    shown = request["messages"][0]["content"].split("\n## Output\n")[0]
+    return re.findall(r"^### Summary ID: (\S+)$", shown, re.MULTILINE)
+
+
 def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
@@ -323,6 +343,11 @@ def grown_registry() -> Callable[..., str]:
 @pytest.fixture
 def quiet_sites() -> Callable[[int], list[str]]:
     return quiet_site_memos
+
+
+@pytest.fixture
+def shown_ids() -> Callable[[Request], list[str]]:
+    return summary_ids_shown
 
 
 @pytest.fixture

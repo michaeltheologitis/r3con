@@ -1,4 +1,5 @@
 import json
+import random
 import re
 from collections import Counter
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 import litellm
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from r3con import read_documents, settings
 from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
@@ -163,6 +165,24 @@ def priced_model():
     litellm.get_model_info.cache_clear()
 
 
+def counting_ids(monkeypatch) -> None:
+    """Document ids drawn as 000000, 000001, and so on, the same in every run."""
+    monkeypatch.setattr(random, "sample", lambda population, k: list(population[:k]))
+
+
+def citing_every_shown_id(shown_ids):
+    """A relevance reply: a note naming the document, and, from round 2 on, every id
+    the call shows, last first."""
+
+    def reply(request):
+        note = f"Notes on {request['messages'][1]['content'][:20]}."
+        if "response_format" not in request:
+            return note
+        return {"summary": note, "provenance": shown_ids(request)[::-1]}
+
+    return reply
+
+
 def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
@@ -189,6 +209,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
     written = {str(p.relative_to(logger.dir)) for p in logger.dir.rglob("*.*")}
     assert written == {
         "manifest.json",
+        "ids.json",
         "relevance/calls.json",
         "relevance/result.json",
         "structuring/schema/calls.json",
@@ -208,6 +229,41 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "tokens": {"prompt": 40, "completion": 80, "total": 120},
         "usd": 40.0,
     }
+
+
+def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
+    answering_llm, shown_ids, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    documents = [*DOCS, "Calder memo"]
+    llm = answering_llm.answers(relevance=citing_every_shown_id(shown_ids))
+    result = answer(llm, logger, documents=documents)
+    ids = result.document_ids
+    assert read_json(logger, "ids") == {ids[0]: 0, ids[1]: 1, ids[2]: 2}
+    rounds = read_json(logger, "relevance/result")["rounds"]
+    notes = [f"Notes on {document}." for document in documents]
+    assert rounds == [
+        {
+            "round": 1,
+            "snippets": [
+                {"id": id_, "summary": note, "provenance": []}
+                for id_, note in zip(ids, notes, strict=True)
+            ],
+        },
+        {
+            "round": 2,
+            "snippets": [
+                {"id": ids[0], "summary": notes[0], "provenance": [ids[2], ids[1]]},
+                {"id": ids[1], "summary": notes[1], "provenance": [ids[2], ids[0]]},
+                {"id": ids[2], "summary": notes[2], "provenance": [ids[1], ids[0]]},
+            ],
+        },
+    ]
+    assert result.provenance == [
+        [ids[2], ids[1]],
+        [ids[2], ids[0]],
+        [ids[1], ids[0]],
+    ]
 
 
 def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
@@ -248,7 +304,7 @@ def test_no_request_carries_a_seed_unless_params_sets_one(answering_llm):
 
 
 def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tmp_path):
-    versions = dict(zip(PROMPT_STAGES, ["vA", "vB", "vC", "vD"], strict=True))
+    versions = dict(zip(PROMPT_STAGES, ["vA", "vB", "vC", "vD", "vE"], strict=True))
     for stage, version in versions.items():
         prompt = yaml.safe_load((settings.PROMPTS_DIR / stage / "v1.yaml").read_text())
         prompt["instructions"] += f"\nMARKER-{version}"
@@ -256,9 +312,18 @@ def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tm
         path.parent.mkdir(parents=True)
         path.write_text(yaml.safe_dump(prompt))
     answer(answering_llm, prompts=versions)
-    stages = dict(zip(PROMPT_STAGES, ["relevance", *LATER_STAGES], strict=True))
-    for stage, version in versions.items():
-        for prompt in system_prompts(answering_llm, stages[stage]):
+    relevance = system_prompts(answering_llm, "relevance")
+    sent = {
+        "vA": relevance[: len(DOCS)],
+        "vB": relevance[len(DOCS) :],
+        **{
+            version: system_prompts(answering_llm, stage)
+            for version, stage in zip(["vC", "vD", "vE"], LATER_STAGES, strict=True)
+        },
+    }
+    for version, prompts in sent.items():
+        assert prompts
+        for prompt in prompts:
             assert set(re.findall(r"MARKER-v\w", prompt)) == {f"MARKER-{version}"}
 
 
@@ -266,7 +331,7 @@ def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tm
     ("prompts", "error"),
     [
         ({**CONFIG["prompts"], "reasoning": "v9"}, FileNotFoundError),
-        ({"relevance": "v1"}, ValueError),
+        ({"reasoning": "v1"}, ValueError),
     ],
     ids=["missing-file", "missing-stage"],
 )
@@ -403,7 +468,11 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
     assert stamps == [1, 2, 3, 4, 4, 4, 4, 5]
-    part_notes = read_json(logger, "relevance/result")["rounds"][0]["snippets"][3]
+    snippets = read_json(logger, "relevance/result")["rounds"][0]["snippets"]
+    part_notes = [s["summary"] for s in snippets[3:7]]
+    assert [s["id"] for s in snippets[3:7]] == [
+        f"{result.document_ids[3]}.{k}" for k in range(1, 5)
+    ]
     for request in llm.requests_for("relevance"):
         part = request["messages"][1]["content"]
         if part in registry and part != registry:
@@ -418,6 +487,56 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
         ("refusal", "split"),
     ]
     assert record["parts"] == {"relevance-r1": 4, "relevance-r2": 4, "parse": 4}
+
+
+def test_identical_documents_get_distinct_ids_and_each_sees_the_others(
+    answering_llm, shown_ids, monkeypatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+    result = answer(answering_llm, documents=["Same memo"] * 3)
+    ids = result.document_ids
+    assert len(set(ids)) == 3
+    round_2 = [
+        r for r in answering_llm.requests_for("relevance") if "response_format" in r
+    ]
+    assert [set(shown_ids(request)) for request in round_2] == [
+        set(ids) - {id_} for id_ in ids
+    ]
+
+
+def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
+    answering_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "RELEVANCE_MAX_ATTEMPTS", 2)
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+
+    def reply(request):
+        return {"summary": "x"} if "response_format" in request else "A snippet."
+
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(ValidationError, match="provenance"):
+        answer(answering_llm.answers(relevance=reply), logger)
+    assert len(answering_llm.requests_for("relevance")) == len(DOCS) + 2
+    assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2
+
+
+def test_a_split_documents_provenance_joins_its_parts_without_repeats(
+    answering_llm, grown_registry, shown_ids
+):
+    llm = answering_llm.answers(relevance=citing_every_shown_id(shown_ids))
+    documents = memos_with(grown_registry(40_000))
+    result = answer(
+        llm.refuses_over(16_000), documents=documents, model=QWEN, prompts=V2
+    )
+    ids = result.document_ids
+    registry_parts = [f"{ids[3]}.{k}" for k in (4, 3, 2, 1)]
+    assert result.provenance == [
+        [ids[4], *registry_parts, ids[2], ids[1]],
+        [ids[4], *registry_parts, ids[2], ids[0]],
+        [ids[4], *registry_parts, ids[1], ids[0]],
+        [ids[4], ids[2], ids[1], ids[0]],
+        [*registry_parts, ids[2], ids[1], ids[0]],
+    ]
 
 
 def test_a_document_over_the_line_is_split_before_sending(
@@ -439,6 +558,7 @@ def test_an_unsplit_run_sends_what_a_v1_reasoning_run_sends(
     documents, model = read_documents(MEMOS), window(1_000_000)
     sent = {}
     for version in ("v1", "v2"):
+        counting_ids(monkeypatch)
         answering_llm.requests.clear()
         logger = TaskLogger(version, root=tmp_path)
         prompts = {**CONFIG["prompts"], "reasoning": version}

@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -10,8 +12,8 @@ FULL = {
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
-V1_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v1)"
-DEFAULT_PROMPTS = "prompts=(rel=v1,schema=v1,parse=v1,reason=v2)"
+V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v1)"
+DEFAULT_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v2)"
 
 
 def test_the_default_config_loads_with_its_shipped_values():
@@ -69,7 +71,8 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
         f"exp[model=gpt-6-luna,rounds=3,params={{seed=7}},{V1_PROMPTS}]"
     )
     assert load_config("exp2").label() == (
-        "exp2[model=gpt-6-luna,rounds=3,prompts=(rel=v1,schema=v1,parse=v1,reason=v9)]"
+        "exp2[model=gpt-6-luna,rounds=3,"
+        "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v9)]"
     )
 
 
@@ -89,13 +92,37 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
     ("fields", "message"),
     [
         ({"prompts": PROMPTS}, "must define a `model`"),
-        ({**FULL, "prompts": {"relevance": "v1"}}, "missing prompt versions"),
+        ({**FULL, "prompts": {"reasoning": "v1"}}, "missing prompt versions"),
     ],
 )
 def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
     configs(bad=fields)
     with pytest.raises(ValueError, match=message):
         load_config("bad")
+
+
+UNKNOWN_STAGE = (
+    "pins a prompt for stage(s) r3con does not have: ['relevance']. The stages are "
+    "['relevance/first-round', 'relevance/later-rounds', 'structuring/schema', "
+    "'structuring/parsing', 'reasoning']."
+)
+
+
+@pytest.mark.parametrize(
+    "prompts",
+    [{**PROMPTS, "relevance": "v1"}, {"relevance": "v1"}],
+    ids=["beside-the-stages", "alone"],
+)
+def test_a_config_pinning_a_stage_r3con_does_not_have_is_refused_with_the_stages(
+    configs, prompts
+):
+    configs(old={**FULL, "prompts": prompts})
+    with pytest.raises(ValueError) as refused:
+        load_config("old")
+    assert type(refused.value) is ValueError
+    assert str(refused.value) == f"config 'old' {UNKNOWN_STAGE}"
+    with pytest.raises(ValidationError, match=re.escape(f"RunConfig {UNKNOWN_STAGE}")):
+        RunConfig(model="openai/m", prompts=prompts)
 
 
 @pytest.mark.parametrize(("name", "value"), [("relevence_rounds", 3), ("seed", 7)])

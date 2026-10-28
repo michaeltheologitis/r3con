@@ -24,7 +24,8 @@ Config file shape (``configs/<name>.yaml``)::
     model: openai/gpt-6-luna
     relevance_rounds: 2
     prompts:
-      relevance: v1
+      relevance/first-round: v1
+      relevance/later-rounds: v1
       structuring/schema: v1
       structuring/parsing: v1
       reasoning: v2
@@ -40,14 +41,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from r3con import settings
 from r3con.prompts import require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PROMPT_STAGES: tuple[str, ...] = (
-    "relevance",
+    "relevance/first-round",
+    "relevance/later-rounds",
     "structuring/schema",
     "structuring/parsing",
     "reasoning",
@@ -60,7 +62,8 @@ _CONFIG_FIELDS = frozenset({"model", "relevance_rounds", "prompts", "params"})
 
 # Compact per-stage abbreviations for the prompts tag in RunConfig.label().
 _PROMPT_STAGE_ABBR: dict[str, str] = {
-    "relevance": "rel",
+    "relevance/first-round": "rel1",
+    "relevance/later-rounds": "rel2",
     "structuring/schema": "schema",
     "structuring/parsing": "parse",
     "reasoning": "reason",
@@ -100,6 +103,12 @@ class RunConfig(BaseModel):
     # the overrides applied on load, recorded with the config
     overrides: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("prompts")
+    @classmethod
+    def _only_known_stages(cls, prompts: dict[str, str]) -> dict[str, str]:
+        _check_stages(prompts, "RunConfig")
+        return prompts
+
     def _identity_parts(self) -> list[str]:
         """The output-shaping components that make up the run identity, in label
         order, each a ``key=value`` string. **This is the one place to extend the
@@ -134,7 +143,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,prompts=(rel=v1,schema=v1,parse=v1,reason=v2)]
+            exp[model=gpt-6-luna,rounds=2,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,reason=v2)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
@@ -181,6 +190,17 @@ def _check_params(params: Any, where: str) -> dict[str, Any]:
     return dict(params)
 
 
+def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
+    """Refuse a prompt pinned for a stage not in :data:`PROMPT_STAGES`, naming the
+    stages there are."""
+    unknown = sorted(set(prompts) - set(PROMPT_STAGES))
+    if unknown:
+        raise ValueError(
+            f"{where} pins a prompt for stage(s) r3con does not have: {unknown}. The "
+            f"stages are {list(PROMPT_STAGES)}."
+        )
+
+
 def _find(relative: str) -> Path | None:
     """First existing ``relative`` path across the config search path, else ``None``."""
     for root in config_search_path():
@@ -202,8 +222,9 @@ def load_config(
     label, because each of them shapes the output.
 
     Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
-    are not a mapping, ``ValueError`` if the config sets a field r3con does not read or
-    omits a required field or a prompt version for any stage, and
+    are not a mapping, ``ValueError`` if the config sets a field r3con does not read,
+    omits a required field or a prompt version for any stage, or pins a prompt for a
+    stage r3con does not have, and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -225,6 +246,7 @@ def load_config(
         raise ValueError(message)
     if "model" not in raw:
         raise ValueError(f"config {name!r} must define a `model`.")
+    _check_stages(raw.get("prompts") or {}, f"config {name!r}")
 
     cfg = RunConfig(
         name=name,

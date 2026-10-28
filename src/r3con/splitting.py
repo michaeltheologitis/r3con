@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import itertools
+import json
 import re
 import threading
 from collections.abc import Callable, Sequence
@@ -30,6 +31,7 @@ from typing import Any, NoReturn, TypeVar
 
 import litellm
 from litellm.exceptions import ContextWindowExceededError
+from pydantic import BaseModel
 
 from r3con import settings
 from r3con.logging_setup import get_logger
@@ -113,16 +115,23 @@ class Splits:
         return tokens if tokens > self.line else None
 
     def read_in_parts(
-        self, doc: int, *, call: str, rest: str, send: Callable[[str, str], T]
+        self,
+        doc: int,
+        *,
+        call: str,
+        rest: str,
+        send: Callable[[str, str], T],
+        schema: type[BaseModel] | None = None,
     ) -> list[T]:
         """One result of ``send(part, kind)`` per part of ``documents[doc]``, in order,
         after splitting it as far as it must.
 
         ``call`` names the call (``"relevance-r2"``, ``"parse"``); a part's ``kind`` is
         ``{call}-d{doc}`` while the document is whole and ``{call}-d{doc}c{k}`` once it
-        is split. ``rest`` is everything sent beside a part. ``send`` raises
-        ``litellm.ContextWindowExceededError`` when the provider refuses a part; any
-        other exception passes through untouched.
+        is split. ``rest`` is the text sent beside a part, and ``schema`` the reply's
+        structured-output schema, if any, whose JSON counts as part of the rest.
+        ``send`` raises ``litellm.ContextWindowExceededError`` when the provider refuses
+        a part; any other exception passes through untouched.
 
         With a known window: while the rest is under the line, halve until every part's
         estimate is under it, then send; a refusal halves again and starts over. With an
@@ -135,6 +144,8 @@ class Splits:
                 unknown window, a refused part is shorter than the rest; or a part of
                 one character still does not fit.
         """
+        if schema is not None:
+            rest += json.dumps(schema.model_json_schema())
         # The rest's tokens: counted once, and only when its size in bytes cannot settle
         # whether a request fits.
         count_rest = functools.cache(functools.partial(count_tokens, rest))

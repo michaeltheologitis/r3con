@@ -29,7 +29,7 @@ from __future__ import annotations
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +42,7 @@ from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
-from r3con.stages.relevance import join_parts, surface_relevance
+from r3con.stages.relevance import draw_document_ids, join_parts, surface_relevance
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
@@ -74,6 +74,14 @@ class Answer:
       index of each record, positionally aligned with it.
     - ``run_dir`` — the folder holding the full artifacts, or ``None`` if the run wasn't
       asked to write any.
+    - ``document_ids`` — each document's id in this run, aligned 1:1 with
+      ``documents``: random, drawn afresh for each run, and recorded in the run folder's
+      ``ids.json``.
+    - ``provenance`` — for each document, aligned 1:1 with ``relevant_context``, the ids
+      of the previous round's relevance snippets its final-round snippet used: each a
+      document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in that
+      previous round. A document read in parts has its parts' ids combined, in order,
+      without repeats.
     """
 
     answer: str
@@ -82,6 +90,8 @@ class Answer:
     schema_code: str
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
+    document_ids: list[str] = field(default_factory=list)
+    provenance: list[list[str]] = field(default_factory=list)
 
     def __str__(self) -> str:
         return self.answer
@@ -185,6 +195,7 @@ def run_pipeline(
         # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
 
+    document_ids = draw_document_ids(len(documents))
     # The identity card first, so even a run that dies in stage 1 says what it was.
     if task_logger is not None:
         write_manifest(
@@ -195,6 +206,7 @@ def run_pipeline(
             context_chars=sum(len(d) for d in documents),
             settings=caps,
         )
+        task_logger.write_json("ids", {id_: i for i, id_ in enumerate(document_ids)})
 
     # Where each document is cut into parts, shared by every stage that reads one.
     splits = Splits(
@@ -214,22 +226,25 @@ def run_pipeline(
         relevance = surface_relevance(
             task=task,
             documents=documents,
+            document_ids=document_ids,
             model=model,
-            prompt_version=config.prompts["relevance"],
+            prompts=config.prompts,
             rounds=rounds,
+            max_attempts=caps["relevance_max_attempts"],
             workers=caps["doc_workers"],
             run=record.run,
             splits=splits,
             **llm_kwargs,
         )
-        # Per-round, per-document — `round` is the refinement depth; the LAST round
-        # is what downstream stages consume. snippets[doc_i] aligns to documents[i].
         record.result = {
             "n_rounds": rounds,
             "n_docs": len(documents),
             "rounds": [
-                {"round": k + 1, "snippets": per_doc}
-                for k, per_doc in enumerate(relevance.rounds)
+                {
+                    "round": k + 1,
+                    "snippets": [asdict(r) for parts in per_doc for r in parts],
+                }
+                for k, per_doc in enumerate(relevance.records)
             ],
         }
     # the relevant context feeds every later stage
@@ -334,4 +349,6 @@ def run_pipeline(
         schema_code=proposal.schema_code,
         source_docs=extraction.source_docs,
         run_dir=task_logger.dir if task_logger is not None else None,
+        document_ids=document_ids,
+        provenance=relevance.provenance,
     )

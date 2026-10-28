@@ -17,7 +17,8 @@ a ``schema`` is given, re-rolling the same request if the model answers with emp
 content (a 200 with no JSON, which transport retries never see).
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
-Pydantic emits; :func:`_enforce_strict_objects` closes that gap.
+Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
+:func:`_drop_long_enums` keeps a schema within OpenAI's limit on enum values.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -78,6 +79,8 @@ _TEMPORARY_CLIENT_ERRORS = frozenset({408, 409, 429})
 _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
+# OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
+_MAX_ENUM_VALUES = 1000
 _sleep = time.sleep
 
 
@@ -105,6 +108,21 @@ def _enforce_strict_objects(schema: Any) -> Any:
     elif isinstance(schema, list):
         for item in schema:
             _enforce_strict_objects(item)
+    return schema
+
+
+def _drop_long_enums(schema: Any) -> Any:
+    """Remove from ``schema`` every ``enum`` of more than :data:`_MAX_ENUM_VALUES`
+    values, which OpenAI refuses; the field keeps its type, so the caller checks the
+    values once the reply is in."""
+    if isinstance(schema, dict):
+        if len(schema.get("enum") or []) > _MAX_ENUM_VALUES:
+            del schema["enum"]
+        for v in schema.values():
+            _drop_long_enums(v)
+    elif isinstance(schema, list):
+        for item in schema:
+            _drop_long_enums(item)
     return schema
 
 
@@ -174,7 +192,9 @@ def litellm_chat_completion_full(
             "type": "json_schema",
             "json_schema": {
                 "name": schema.__name__,
-                "schema": _enforce_strict_objects(schema.model_json_schema()),
+                "schema": _drop_long_enums(
+                    _enforce_strict_objects(schema.model_json_schema())
+                ),
                 "strict": True,
             },
         }

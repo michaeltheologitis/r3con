@@ -109,6 +109,22 @@ def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
     assert not (tmp_path / "logs").exists()
 
 
+def test_a_config_pinning_a_stage_r3con_does_not_have_exits_2_in_one_line(
+    scripted, configs, capsys
+):
+    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}
+    configs(old={"model": "openai/m", "prompts": prompts})
+    assert r3con("run", "Who?", str(MEMOS), "--config", "old") == 2
+    err = capsys.readouterr().err
+    assert err.startswith(
+        "r3con: config 'old' pins a prompt for stage(s) r3con does not have: "
+        "['relevance']. The stages are ['relevance/first-round', "
+        "'relevance/later-rounds',"
+    )
+    assert err.count("\n") == 1
+    assert scripted.requests == []
+
+
 def test_an_interrupt_exits_130(scripted, capsys):
     scripted.replies(KeyboardInterrupt())
     assert r3con("run", "Who?", str(MEMOS / "01_northgate.txt")) == 130

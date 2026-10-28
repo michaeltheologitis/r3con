@@ -14,7 +14,8 @@ model: openai/gpt-6-luna
 relevance_rounds: 2
 
 prompts:
-  relevance: v1
+  relevance/first-round: v1
+  relevance/later-rounds: v1
   structuring/schema: v1
   structuring/parsing: v1
   reasoning: v2

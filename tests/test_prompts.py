@@ -36,6 +36,12 @@ def test_every_prompt_the_default_config_pins_ships_and_renders(stage):
     assert load_prompt(stage, version=version, **CONTEXT).strip()
 
 
+def test_the_first_round_prompt_renders_as_the_old_relevance_prompts_round_one():
+    first_round = load_prompt("relevance/first-round", version="v1", task="T")
+    old = load_prompt("relevance", version="v1", task="T", other_snippets="")
+    assert first_round == old
+
+
 def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):
     monkeypatch.setenv("R3CON_PROMPTS_DIR", str(tmp_path))
     assert prompt_search_path() == [tmp_path, settings.PROMPTS_DIR]

@@ -124,7 +124,7 @@ def test_a_cap_below_its_floor_is_refused_before_a_run_folder_exists(
             "'reasoning' version 'v9'",
         ),
         (
-            RunConfig(model="openai/m", prompts={"relevance": "v1"}),
+            RunConfig(model="openai/m", prompts={"reasoning": "v1"}),
             ValueError,
             "missing prompt versions",
         ),
