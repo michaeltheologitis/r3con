@@ -630,17 +630,27 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
 
 
 @pytest.mark.parametrize(
-    ("cap", "stage", "reply"),
+    ("cap", "stage", "reply", "error"),
     [
-        ("SCHEMA_MAX_ATTEMPTS", "schema", "class Foo(BaseModel):\n    x: int"),
-        ("PARSING_MAX_ATTEMPTS", "parsing", '{"rows": [{"who": 7}]}'),
+        (
+            "SCHEMA_MAX_ATTEMPTS",
+            "schema",
+            "class Foo(BaseModel):\n    x: int",
+            pytest.raises(SchemaError, match="exhausted 2 attempts"),
+        ),
+        (
+            "PARSING_MAX_ATTEMPTS",
+            "parsing",
+            '{"rows": [{"who": 7}]}',
+            pytest.raises(ValidationError, match="who"),
+        ),
     ],
 )
 def test_an_attempt_cap_set_in_settings_bounds_its_stage(
-    answering_llm, monkeypatch, cap, stage, reply
+    answering_llm, monkeypatch, cap, stage, reply, error
 ):
     monkeypatch.setattr(settings, cap, 2)
-    with pytest.raises(SchemaError, match="exhausted 2 attempts"):
+    with error:
         answer(answering_llm.answers(**{stage: reply}), documents=DOCS[:1])
     assert len(answering_llm.requests_for(stage)) == 2
 

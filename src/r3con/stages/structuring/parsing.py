@@ -37,14 +37,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast, get_origin
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.llm import litellm_chat_completion
+from r3con.runtime.llm import send_until_valid
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
     InterpreterError,
@@ -56,6 +56,7 @@ from r3con.stages.relevance import Snippet, render_relevance
 
 _log = get_logger("structuring.parsing")
 
+_REWRITE = "Re-extract the same document"
 
 _SCHEMA_IMPORTS = ("pydantic", "typing", "datetime", "enum", "decimal")
 # Bound before a schema runs, so one that forgets its pydantic import still loads.
@@ -207,24 +208,6 @@ def _find_untyped_objects(schema: Any, path: str = "$") -> list[str]:
     return found
 
 
-def _parsing_retry_prompt(document: str, error: str) -> str:
-    """Build the next user prompt after a Pydantic validation failure.
-
-    The model's prior response was malformed enough that Pydantic couldn't
-    coerce it into the requested schema. Feed the document back along with the
-    validator's diagnostic so the next attempt can correct the specific
-    field(s) that broke — same shape as the schema-proposal retry feedback.
-    """
-    return (
-        f"{document}\n\n"
-        "---\n\n"
-        "Your previous response failed schema validation:\n\n"
-        f"{error}\n\n"
-        "Re-extract the same document, fixing only the offending field(s) so "
-        "the output validates against the schema. Output the corrected JSON."
-    )
-
-
 def _system_prompt(
     task: str,
     schema_code: str,
@@ -262,12 +245,13 @@ def parse_one_document(
     cross-document context); the document itself is the user message. One LLM
     call with ``schema=parse_cls``.
 
-    On Pydantic ``ValidationError`` (schema mismatch in the model's structured
-    output), retries up to ``max_attempts`` times — each retry feeds the
-    validator's error back to the model so it can fix the specific field that
-    broke (same pattern as the schema-proposal loop); ``None`` reads
-    ``settings.PARSING_MAX_ATTEMPTS`` when the call runs. Raises ``SchemaError`` if
-    every attempt fails. Non-validation exceptions bubble up immediately.
+    A reply that does not fit the schema is sent again with the validator's error, by
+    :func:`r3con.runtime.llm.send_until_valid`, up to ``max_attempts`` sends (``None``
+    reads ``settings.PARSING_MAX_ATTEMPTS`` when the call runs); the last send's
+    ``ValidationError`` is raised. Any other exception passes through at once.
+
+    Raises:
+        ValueError: if ``max_attempts`` is not positive.
     """
     if max_attempts is None:
         max_attempts = settings.PARSING_MAX_ATTEMPTS
@@ -277,34 +261,18 @@ def parse_one_document(
             f"Override via settings.PARSING_MAX_ATTEMPTS (current default: "
             f"{settings.PARSING_MAX_ATTEMPTS})."
         )
-
-    system_prompt = _system_prompt(
-        task, schema_code, relevance_snippets, prompt_version
+    reply = send_until_valid(
+        _system_prompt(task, schema_code, relevance_snippets, prompt_version),
+        document,
+        schema=parse_cls,
+        rewrite=_REWRITE,
+        kind=kind,
+        max_attempts=max_attempts,
+        model=model,
+        run=run,
+        **llm_kwargs,
     )
-    user_prompt = document
-    last_error: str = ""
-    for attempt_idx in range(max_attempts):
-        try:
-            return cast(
-                BaseModel,
-                litellm_chat_completion(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    model=model,
-                    schema=parse_cls,
-                    run=run,
-                    kind=kind if attempt_idx == 0 else f"{kind}-retry-{attempt_idx}",
-                    **llm_kwargs,
-                ),
-            )
-        except ValidationError as e:
-            last_error = f"{type(e).__name__}: {e}"
-            user_prompt = _parsing_retry_prompt(document, last_error)
-
-    raise SchemaError(
-        f"parse_one_document exhausted {max_attempts} attempts. "
-        f"Last validation error: {last_error}"
-    )
+    return cast(BaseModel, reply)
 
 
 @dataclass

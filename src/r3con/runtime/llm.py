@@ -260,7 +260,7 @@ def litellm_chat_completion(
     transient case where a reasoning model spent its budget on the thinking block; a
     *deterministic* empty still raises after the re-rolls. (A non-empty-but-malformed
     JSON raises a Pydantic ``ValidationError`` instead — that's the *caller's* retry to
-    handle, e.g. the parsing stage's per-document retry loop.)
+    handle, e.g. :func:`send_until_valid`.)
     """
     if max_empty_retries is None:
         max_empty_retries = settings.LLM_EMPTY_CONTENT_RETRIES
@@ -302,7 +302,7 @@ def litellm_chat_completion(
 def _retry_prompt(user_prompt: str, error: str, rewrite: str) -> str:
     """The user message that resends ``user_prompt`` after a reply failed its schema:
     the message again, the validator's error, and ``rewrite``, which asks for the reply
-    again, as parsing resends a document."""
+    again."""
     return (
         f"{user_prompt}\n\n"
         "---\n\n"

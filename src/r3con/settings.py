@@ -49,7 +49,7 @@ RELEVANCE_MAX_ATTEMPTS = 3
 # Cap on the schema-proposal validation retry loop.
 SCHEMA_MAX_ATTEMPTS = 5
 
-# Cap on the parsing structured-output retry loop (one document).
+# Cap on the sends of one parsing request whose reply does not fit its schema.
 PARSING_MAX_ATTEMPTS = 5
 
 # Cap on the sends of the direct reasoning request whose reply does not fit its schema.
