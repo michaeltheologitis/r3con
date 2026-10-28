@@ -14,6 +14,7 @@ from litellm.types.router import RetryPolicy
 from pydantic import BaseModel
 
 from r3con import settings
+from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
@@ -438,6 +439,45 @@ def test_a_callers_own_retry_setting_replaces_r3cons_resends(
     with pytest.raises(litellm.RateLimitError):
         ask_server(httpserver, **own_setting)
     assert len(httpserver.log) == requests
+
+
+def test_a_recorded_call_carries_litellms_price_for_it(llm, monkeypatch, tmp_path):
+    usd_in, usd_out = 1.0, 10.0
+    entry = {
+        "input_cost_per_token": usd_in,
+        "output_cost_per_token": usd_out,
+        "litellm_provider": "openai",
+        "mode": "chat",
+    }
+    monkeypatch.setitem(litellm.model_cost, "openai/priced", entry)
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model="openai/priced",
+        completion=llm.replies("ok"),
+        run=run,
+    )
+
+    [step] = run.steps
+    assert (
+        step.usd == step.tokens["prompt"] * usd_in + step.tokens["completion"] * usd_out
+    )
+
+
+def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, tmp_path):
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        completion=llm.replies("ok"),
+        run=run,
+    )
+
+    assert [step.usd for step in run.steps] == [None]
 
 
 def test_litellm_reads_its_bundled_price_map():

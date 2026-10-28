@@ -139,8 +139,8 @@ def litellm_chat_completion_full(
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
     If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
-    to it with the request messages, response content, tokens, and ``kind``
-    label. Pass ``kind="retry"`` (or another custom label) on retry attempts
+    to it with the request messages, response content, tokens, cost in USD, and
+    ``kind`` label. Pass ``kind="retry"`` (or another custom label) on retry attempts
     so the transcript renders them as a labeled block.
     """
 
@@ -191,6 +191,7 @@ def litellm_chat_completion_full(
             response=_extract_response_dict(response),
             schema=request.get("response_format"),
             tokens=_extract_tokens(response),
+            usd=_extract_usd(response),
         )
 
     return response
@@ -381,6 +382,12 @@ def _extract_response_dict(response: Any) -> dict[str, Any]:
         }
     except (AttributeError, IndexError):
         return {"role": "assistant", "content": "", "finish_reason": None}
+
+
+def _extract_usd(response: Any) -> float | None:
+    """The call's price in USD as litellm reckons it, cached input and long-request rates
+    included, or ``None`` when litellm cannot price it, as for a self-hosted model."""
+    return (getattr(response, "_hidden_params", None) or {}).get("response_cost")
 
 
 def _extract_tokens(response: Any) -> dict[str, int] | None:

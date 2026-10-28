@@ -46,9 +46,10 @@ Two layers in code:
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
   writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, finish_reason, prompt, output}``, where ``chunk`` is the part index of a
-  document read in parts) and, unless skipped, ``transcript.yaml``
-  (the readable message thread). Aggregate token totals are available via
+  tokens, usd, finish_reason, prompt, output}``, where ``chunk`` is the part index of
+  a document read in parts and ``usd`` is litellm's price for the call, or ``null``
+  when it cannot price it) and, unless skipped, ``transcript.yaml``
+  (the readable message thread). Aggregate token and cost totals are available via
   ``compute_totals()`` so callers fold them into the stage's ``result.json``.
 """
 
@@ -62,7 +63,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import BaseModel
@@ -238,6 +239,7 @@ class StepRecord:
     schema: dict[str, Any] | None = None
     # {"prompt": int, "completion": int, "total": int}
     tokens: dict[str, int] | None = None
+    usd: float | None = None
 
 
 class StageRun:
@@ -271,6 +273,7 @@ class StageRun:
         response: dict[str, Any],
         schema: dict[str, Any] | None = None,
         tokens: dict[str, int] | None = None,
+        usd: float | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
         completion order; each call's ``kind`` carries its own identity."""
@@ -282,6 +285,7 @@ class StageRun:
                 response=dict(response),
                 schema=schema,
                 tokens=tokens,
+                usd=usd,
             )
             self.steps.append(step)
         return step
@@ -309,7 +313,7 @@ class StageRun:
 
     def _write_calls(self) -> Path:
         """Write ``calls.json`` — one entry per LLM call: ``{step, kind, doc, chunk,
-        tokens, finish_reason, prompt, output}``. ``doc``/``chunk`` are read out of the
+        tokens, usd, finish_reason, prompt, output}``. ``doc``/``chunk`` are read out of the
         call ``kind`` (e.g. ``parse-d0``, ``relevance-r1-d2``) when present."""
         calls: list[dict[str, Any]] = []
         for s in self.steps:
@@ -322,6 +326,7 @@ class StageRun:
                     "doc": int(m.group(1)) if m else None,
                     "chunk": int(m.group(2)) if (m and m.group(2)) else None,
                     "tokens": s.tokens,
+                    "usd": s.usd,
                     "finish_reason": resp.get("finish_reason"),
                     "prompt": s.messages,
                     "output": resp.get("content"),
@@ -335,9 +340,12 @@ class StageRun:
         return path
 
     def compute_totals(self) -> dict[str, Any]:
-        """Aggregate per-step tokens / step-count for the stage's ``result.json``."""
+        """Aggregate per-step tokens / step-count for the stage's ``result.json``, and
+        the stage's ``usd``: the sum of its calls', or ``None`` when litellm could not
+        price one of them."""
         prompt = completion = total = 0
         any_tokens = False
+        costs = [s.usd for s in self.steps]
         for s in self.steps:
             if s.tokens is not None:
                 any_tokens = True
@@ -349,6 +357,7 @@ class StageRun:
             "tokens": {"prompt": prompt, "completion": completion, "total": total}
             if any_tokens
             else None,
+            "usd": None if None in costs else float(sum(cast("list[float]", costs))),
         }
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
