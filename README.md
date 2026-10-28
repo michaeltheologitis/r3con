@@ -111,8 +111,7 @@ result.structured_context  # dict      — structured representation
 result.run_dir  # Path      — directory containing run artifacts
 ```
 
-r3con also records provenance: the documents the answer drew on, and the other documents
-each relevance summary drew on. See
+r3con also records provenance, how the answer and each summary came to be; see
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
 
 ## Run artifacts
