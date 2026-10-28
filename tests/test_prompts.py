@@ -1,8 +1,17 @@
+import json
+import re
+
+import jsonschema
 import pytest
+import yaml
 
 from r3con import settings
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
+from r3con.runtime.codeact import run_codeact
+from r3con.stages.reasoning import reason
+
+MODEL = "openai/gpt-6-luna"
 
 # Enough to render any stage's template; Jinja ignores the names it does not use.
 CONTEXT = {
@@ -14,6 +23,22 @@ CONTEXT = {
     "samples_block": "",
     "parse_json": "",
 }
+
+
+def examples(stage: str) -> list:
+    """The text of each example of ``stage``'s v2 prompt, under its name."""
+    prompt = yaml.safe_load((settings.PROMPTS_DIR / stage / "v2.yaml").read_text())
+    return [pytest.param(e["text"], id=e["name"]) for e in prompt["examples"]]
+
+
+def shown(example: str) -> tuple[list[str], dict]:
+    """An example's document ids, from its summaries' headings, and its parse, each
+    record of which names one of them."""
+    ids = re.findall(r"^### Document ID: (\w+)$", example, re.MULTILINE)
+    parse = json.loads(example.split("`parse`:\n", 1)[1].split("\n\nThought:", 1)[0])
+    records = [record for field in parse.values() for record in field]
+    assert {record["document"] for record in records} <= set(ids)
+    return ids, parse
 
 
 @pytest.fixture
@@ -54,6 +79,47 @@ def test_the_first_round_prompt_renders_as_the_old_relevance_prompts_round_one()
 def test_the_coding_prompt_renders_as_the_old_reasoning_v2(context):
     coding = load_prompt("reasoning/coding", version="v1", **context)
     assert coding == load_prompt("reasoning", version="v2", **context)
+
+
+@pytest.mark.parametrize("example", examples("reasoning/direct"))
+def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example):
+    ids, parse = shown(example)
+    reply = json.loads(example.rsplit("\n", 1)[1])
+    result = reason(
+        task="?",
+        schema_code="",
+        parsed=parse,
+        model=MODEL,
+        prompts={"reasoning/direct": "v2", "reasoning/coding": "v2"},
+        path="direct",
+        document_ids=ids,
+        completion=llm.replies(reply),
+    )
+    jsonschema.validate(
+        reply, llm.requests[0]["response_format"]["json_schema"]["schema"]
+    )
+    assert (result.answer, result.provenance) == (reply["answer"], reply["provenance"])
+
+
+@pytest.mark.parametrize("example", examples("reasoning/coding"))
+def test_each_coding_example_runs_and_commits_ids_it_shows(llm, example):
+    ids, parse = shown(example)
+    turns = re.findall(r"^Thought:.*?</code>", example, re.MULTILINE | re.DOTALL)
+    printed = re.findall(
+        r"^<observation>\n(.*?)\n</observation>$", example, re.MULTILINE | re.DOTALL
+    )
+    result = run_codeact(
+        system_prompt="",
+        user_message="",
+        model=MODEL,
+        variables={"parse": parse},
+        completion=llm.replies(*turns),
+    )
+    assert (result.terminated_by, len(result.turns)) == ("final_answer", len(turns))
+    assert [turn.observation for turn in result.turns[:-1]] == [
+        f"<observation>\n{text}\n\n</observation>" for text in printed
+    ]
+    assert result.provenance and set(result.provenance) <= set(ids)
 
 
 def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):

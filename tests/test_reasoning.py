@@ -1,27 +1,41 @@
 import json
 import logging
+import re
 
 import litellm
 import pytest
+from pydantic import ValidationError
 
 from r3con import settings
 from r3con.config import REASONING_PATHS
 from r3con.prompts import load_prompt
+from r3con.runs import StageRun, TaskLogger
+from r3con.stages import reasoning
 from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
-PROMPTS = {"reasoning/direct": "v1", "reasoning/coding": "v1"}
+PROMPTS = {"reasoning/direct": "v2", "reasoning/coding": "v2"}
 PATHS = pytest.mark.parametrize("path", REASONING_PATHS)
-COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
+IDS = [f"d0c{n:03x}" for n in range(10)]
+COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok', provenance=[])\n</code>"
+ANSWERS_OK = {"answer": "ok", "provenance": []}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
 SAMPLE = "only a SAMPLE"
-# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 3,900
-# tokens with the whole parse and about 2,400 with one sample record per field; the
-# direct prompt about 3,450.
+NUMBERED = re.compile(r"Document \d|\"document\": \d")
+# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,200
+# tokens with the whole parse and about 2,700 with one sample record per field; the
+# direct request about 3,920 with its reply's schema.
 ROWS = {"rows": [{"who": f"Site {i:03d} logged nothing unusual"} for i in range(100)]}
 LAST_ROW = '"who": "Site 099 logged nothing unusual"'
+TWO_DOCUMENTS = {
+    "relevance_snippets": ["Halloran logged 5.", ["Merrow, part one.", "Part two."]],
+    "parsed": {"rows": [{"who": "Halloran"}, {"who": "Merrow"}, {"who": "Merrow"}]},
+    "source_docs": {"rows": [0, 1, 1]},
+    "document_ids": IDS[:2],
+}
+MALFORMED = {"answer": "An answer without its provenance."}
 
 
 def reasoning_prompt(llm, path="coding", **kwargs) -> str:
@@ -31,7 +45,10 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
     kwargs.setdefault("schema_code", "class Parse(BaseModel): rows: list[Row]")
     kwargs.setdefault("parsed", {"rows": [{"who": "Halloran"}]})
     kwargs.setdefault("model", MODEL)
-    reply = COMMIT if path == "coding" else "ok"
+    kwargs.setdefault(
+        "document_ids", IDS[: len(kwargs.get("relevance_snippets") or IDS)]
+    )
+    reply = COMMIT if path == "coding" else ANSWERS_OK
     reason(prompts=PROMPTS, path=path, completion=llm.replies(reply), **kwargs)
     return llm.requests[-1]["messages"][0]["content"]
 
@@ -39,6 +56,7 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
 def ask(llm, *replies, path="direct", **kwargs):
     """``reason`` over ROWS on ``path``, ``llm`` answering with ``replies``."""
     kwargs.setdefault("model", MODEL)
+    kwargs.setdefault("document_ids", IDS)
     return reason(
         task="Who?",
         schema_code="",
@@ -50,10 +68,22 @@ def ask(llm, *replies, path="direct", **kwargs):
     )
 
 
+def citing(path: str, provenance: list) -> str | dict:
+    """A reply on ``path`` that answers "ok" and cites ``provenance``."""
+    if path == "direct":
+        return {"answer": "ok", "provenance": provenance}
+    return f"Thought: commit.\n<code>\nfinal_answer('ok', provenance={provenance!r})\n</code>"
+
+
 def first_turn_prompts(llm) -> list[str]:
     return [
         r["messages"][0]["content"] for r in llm.requests if len(r["messages"]) == 2
     ]
+
+
+def summaries(prompt: str) -> str:
+    """The prompt's summaries and parse, without its examples'."""
+    return prompt.split("## Rules", 1)[0]
 
 
 def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
@@ -65,6 +95,7 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
         model=MODEL,
         prompts=PROMPTS,
         path="coding",
+        document_ids=[],
         completion=llm.replies(summing),
     )
     assert (result.answer, result.path, result.terminated_by) == (
@@ -74,9 +105,11 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     )
 
 
-def test_on_the_direct_path_one_call_answers_and_its_reply_is_the_answer(llm):
-    result = ask(llm, "  Site 099 logged nothing unusual.\n")
+def test_on_the_direct_path_one_call_answers_with_the_documents_it_used(llm):
+    reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance": [IDS[1]]}
+    result = ask(llm, reply)
     assert result.answer == "Site 099 logged nothing unusual."
+    assert result.provenance == [IDS[1]]
     assert (result.path, result.fallback) == ("direct", None)
     assert (result.turns, result.terminated_by) == ((), "reply")
     [request] = llm.requests
@@ -84,17 +117,128 @@ def test_on_the_direct_path_one_call_answers_and_its_reply_is_the_answer(llm):
         {
             "role": "system",
             "content": load_prompt(
-                "reasoning/direct", version="v1", parse_block=json.dumps(ROWS, indent=2)
+                "reasoning/direct", version="v2", parse_block=json.dumps(ROWS, indent=2)
             ),
         },
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
 
 
+def test_the_direct_request_asks_for_the_answer_and_the_shown_documents_ids(llm):
+    reasoning_prompt(llm, "direct", **TWO_DOCUMENTS)
+    [request] = llm.requests
+    response_format = request["response_format"]
+    assert response_format["json_schema"]["name"] == "ReasoningAnswer"
+    assert response_format["json_schema"]["strict"] is True
+    schema = response_format["json_schema"]["schema"]
+    assert schema["required"] == ["answer", "provenance"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["answer"]["type"] == "string"
+    assert schema["properties"]["provenance"]["items"] == {
+        "type": "string",
+        "enum": IDS[:2],
+    }
+
+
 def test_an_empty_direct_reply_is_sent_again(llm):
-    assert ask(llm, "", "Halloran.").answer == "Halloran."
+    result = ask(llm, "", {"answer": "Halloran.", "provenance": []})
+    assert result.answer == "Halloran."
     first, again = llm.requests
     assert again["messages"] == first["messages"]
+
+
+def test_a_malformed_direct_reply_is_sent_again_with_the_validators_error(
+    llm, tmp_path
+):
+    run = StageRun(stage="reasoning", task_logger=TaskLogger("run", root=tmp_path))
+    result = ask(llm, MALFORMED, {"answer": "Halloran.", "provenance": []}, run=run)
+    assert result.answer == "Halloran."
+    assert [step.kind for step in run.steps] == ["direct", "direct-retry-1"]
+    first, again = llm.requests
+    assert again["messages"][0] == first["messages"][0]
+    user = again["messages"][1]["content"]
+    assert user.startswith(
+        "Input:\n<task>\nWho?\n</task>\n\n---\n\n"
+        "Your previous response failed schema validation:\n\n"
+        "ValidationError: 1 validation error for ReasoningAnswer\nprovenance\n"
+        "  Field required"
+    )
+    assert user.endswith(
+        "Answer the same task again, fixing only the offending field(s) so the output "
+        "validates against the schema. Output the corrected JSON."
+    )
+
+
+def test_the_last_malformed_direct_reply_is_raised_once_the_attempts_run_out(llm):
+    with pytest.raises(ValidationError, match="provenance"):
+        ask(llm, *[MALFORMED] * reasoning.DIRECT_MAX_ATTEMPTS)
+    assert len(llm.requests) == reasoning.DIRECT_MAX_ATTEMPTS
+
+
+@PATHS
+@pytest.mark.parametrize(
+    ("cited", "kept"),
+    [
+        ([IDS[1], IDS[0]], [IDS[1], IDS[0]]),
+        ([IDS[1], IDS[0], IDS[1]], [IDS[1], IDS[0]]),
+        ([f"{IDS[1]}.2", f"{IDS[1]}.1", IDS[0]], [IDS[1], IDS[0]]),
+        (["ffffff", IDS[0], "Document 2", "ffffff.1"], [IDS[0]]),
+        ([], []),
+    ],
+    ids=["in-order", "repeats", "parts", "unknown", "none"],
+)
+def test_only_the_shown_documents_ids_are_kept_in_order_once_each(
+    llm, path, cited, kept
+):
+    result = reason(
+        task="?",
+        schema_code="",
+        model=MODEL,
+        prompts=PROMPTS,
+        path=path,
+        completion=llm.replies(citing(path, cited)),
+        **TWO_DOCUMENTS,
+    )
+    assert result.provenance == kept
+
+
+@PATHS
+def test_an_unknown_id_is_dropped_with_a_warning(llm, caplog, path):
+    caplog.set_level(logging.WARNING, logger="r3con.reasoning")
+    reply = citing(path, ["ffffff", IDS[0], "Document 2"])
+    reasoning_prompt(llm.replies(reply), path, **TWO_DOCUMENTS)
+    assert caplog.messages == [
+        (
+            f"{path}: dropped provenance id(s) the call did not show: "
+            "['ffffff', 'Document 2']"
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("replies", "ended_by"),
+    [
+        (["<code>\nfinal_answer('ok')\n</code>"], "final_answer"),
+        (["<code>\nfinal_answer('ok', provenance='d0c000')\n</code>"], "final_answer"),
+        ([PRINTS, "The answer is ok."], "max_turns"),
+    ],
+    ids=["without", "not-a-list", "turn-cap"],
+)
+def test_a_coding_answer_without_a_provenance_list_cites_nothing(
+    llm, caplog, replies, ended_by
+):
+    caplog.set_level(logging.INFO, logger="r3con.reasoning")
+    result = ask(llm, *replies, path="coding", max_turns=1)
+    assert (result.provenance, result.terminated_by) == ([], ended_by)
+    assert [(r.levelname, r.message) for r in caplog.records] == [
+        (
+            "INFO",
+            (
+                f"the answer came without a provenance list ({ended_by}); it cites "
+                "no documents"
+            ),
+        )
+    ]
 
 
 @PATHS
@@ -129,11 +273,62 @@ def test_the_relevance_notes_are_in_the_prompt_only_when_given(
 
 
 @PATHS
-def test_each_record_is_stamped_with_its_one_based_source_document(llm, path):
-    prompt = reasoning_prompt(
-        llm, path, parsed={"docs": [{"a": 1}]}, source_docs={"docs": [4]}
+def test_the_prompt_names_each_document_by_its_id_and_never_by_number(llm, path):
+    prompt = summaries(reasoning_prompt(llm, path, **TWO_DOCUMENTS))
+    assert re.findall(r"^### Document ID: (\S+)$", prompt, re.MULTILINE) == [
+        IDS[0],
+        f"{IDS[1]}.1",
+        f"{IDS[1]}.2",
+    ]
+    stamps = re.findall(r'"document": (.+?),', prompt)
+    assert stamps == [f'"{IDS[0]}"', f'"{IDS[1]}"', f'"{IDS[1]}"']
+    assert NUMBERED.search(prompt) is None
+
+
+def test_the_sandboxs_parse_carries_the_ids_the_prompt_shows(llm):
+    reads_a_stamp = "<code>\nfinal_answer(parse['rows'][1]['document'])\n</code>"
+    result = reason(
+        task="?",
+        schema_code="",
+        model=MODEL,
+        prompts=PROMPTS,
+        path="coding",
+        completion=llm.replies(reads_a_stamp),
+        **TWO_DOCUMENTS,
     )
-    assert '"document": 5' in prompt
+    assert result.answer == IDS[1]
+
+
+def test_a_sample_view_shows_the_records_ids(llm, monkeypatch):
+    monkeypatch.setattr(settings, "REASONING_PARSE_MAX_TOKS", 1_000)
+    rows = {"rows": [dict(row) for row in ROWS["rows"]]}
+    prompt = reasoning_prompt(
+        llm, parsed=rows, source_docs={"rows": [3] * 100}, document_ids=IDS
+    )
+    assert SAMPLE in prompt
+    assert f'"document": "{IDS[3]}"' in prompt
+    assert NUMBERED.search(summaries(prompt)) is None
+
+
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
+    llm, version
+):
+    reason(
+        task="?",
+        schema_code="",
+        model=MODEL,
+        prompts={**PROMPTS, "reasoning/direct": version},
+        path="direct",
+        completion=llm.replies(ANSWERS_OK),
+        **TWO_DOCUMENTS,
+    )
+    [request] = llm.requests
+    assert request["response_format"]["json_schema"]["name"] == "ReasoningAnswer"
+    assert (
+        f"### Document ID: {IDS[0]}\nHalloran logged 5."
+        in (request["messages"][0]["content"])
+    )
 
 
 @PATHS
@@ -150,7 +345,7 @@ def test_a_small_parse_is_shown_whole_and_the_schema_source_is_not(llm, path):
     assert "name_0" in prompt
     assert "name_7" in prompt
     assert "`document`" in prompt
-    assert '"document": 1' in prompt
+    assert f'"document": "{IDS[0]}"' in prompt
     assert "UNIQUE_SCHEMA_MARKER" not in prompt
     assert "## Schema used to extract" not in prompt
     assert "If the parse was too large" not in prompt
@@ -167,12 +362,15 @@ def test_a_small_parses_prompt_is_its_paths_template_with_the_parse_as_json(llm,
         relevance_snippets=notes,
     )
     stamped = {
-        "rows": [{"document": 1, "who": "Halloran"}, {"document": 2, "who": "Merrow"}]
+        "rows": [
+            {"document": IDS[0], "who": "Halloran"},
+            {"document": IDS[1], "who": "Merrow"},
+        ]
     }
     assert prompt == load_prompt(
         f"reasoning/{path}",
-        version="v1",
-        relevance=render_relevance(notes),
+        version="v2",
+        relevance=render_relevance(notes, IDS[:2]),
         parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
     )
 
@@ -235,7 +433,8 @@ def test_the_prompt_says_documents_were_read_in_parts_only_when_a_summary_is_a_p
 ):
     prompt = reasoning_prompt(llm, path, relevance_snippets=snippets)
     assert (READ_IN_PARTS in prompt) is in_parts
-    assert ("### Document 1.1\npart one\n\n### Document 1.2" in prompt) is in_parts
+    parts = f"### Document ID: {IDS[0]}.1\npart one\n\n### Document ID: {IDS[0]}.2"
+    assert (parts in prompt) is in_parts
 
 
 @pytest.mark.parametrize(("tokens", "whole"), [(4_000, False), (1_000_000, True)])
@@ -248,14 +447,14 @@ def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
     assert (SAMPLE in prompt) is not whole
     if whole:
         assert prompt == load_prompt(
-            "reasoning/coding", version="v1", parse_block=json.dumps(ROWS, indent=2)
+            "reasoning/coding", version="v2", parse_block=json.dumps(ROWS, indent=2)
         )
         assert caplog.messages == []
     else:
         assert caplog.messages == [
             (
                 "the whole parse (about 1,609 tokens) would put reasoning's first turn "
-                "at about 3,905 tokens, over the 3,400-token line; showing one sample "
+                "at about 4,195 tokens, over the 3,400-token line; showing one sample "
                 "record per field"
             )
         ]
@@ -301,12 +500,12 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     result = ask(llm, COMMIT, model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "estimate", "estimate": 3_452, "line": 3_400}
+    assert result.fallback == {"cause": "estimate", "estimate": 3_918, "line": 3_400}
     [request] = llm.requests
     assert SAMPLE in request["messages"][0]["content"]
     assert caplog.messages == [
         (
-            "reasoning's direct prompt would take about 3,452 tokens, over the "
+            "reasoning's direct prompt would take about 3,918 tokens, over the "
             "3,400-token line; reasoning with code instead"
         )
     ]
@@ -315,7 +514,7 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
 def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_samples(
     llm, caplog
 ):
-    # The direct prompt takes about 3,450 tokens, the coding one with samples 2,400.
+    # The direct request takes about 3,920 tokens, the coding one with samples 2,700.
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     result = ask(llm.refuses_over(tokens=3_000), COMMIT)
     assert (result.answer, result.path) == ("ok", "coding")

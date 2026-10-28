@@ -143,12 +143,14 @@ def test_the_system_prompt_holds_the_task_and_the_user_message_the_document(llm)
 
 
 @pytest.mark.parametrize(
-    ("snippets", "rendered"),
+    ("snippets", "ids", "rendered"),
     [
-        (None, ""),
-        ([], ""),
+        (None, None, ""),
+        ([], None, ""),
+        ([], IDS, ""),
         (
             ["first note", ""],
+            None,
             (
                 "### Document 1\nfirst note\n\n"
                 "### Document 2\n(no relevant summary for this task)"
@@ -156,16 +158,31 @@ def test_the_system_prompt_holds_the_task_and_the_user_message_the_document(llm)
         ),
         (
             [["a", ""], "c"],
+            None,
             (
                 "### Document 1.1\na\n\n"
                 "### Document 1.2\n(no relevant summary for this task)\n\n"
                 "### Document 2\nc"
             ),
         ),
+        (
+            [["a", ""], "c"],
+            IDS[:2],
+            (
+                "### Document ID: 0a0a0a.1\na\n\n"
+                "### Document ID: 0a0a0a.2\n(no relevant summary for this task)\n\n"
+                "### Document ID: 1b1b1b\nc"
+            ),
+        ),
     ],
 )
-def test_the_notes_render_as_one_labelled_section_per_document(snippets, rendered):
-    assert render_relevance(snippets) == rendered
+def test_the_notes_render_as_one_labelled_section_per_document(snippets, ids, rendered):
+    assert render_relevance(snippets, ids) == rendered
+
+
+def test_notes_and_ids_that_do_not_pair_up_are_refused():
+    with pytest.raises(ValueError):
+        render_relevance(["one", "two"], IDS[:1])
 
 
 @pytest.mark.parametrize(

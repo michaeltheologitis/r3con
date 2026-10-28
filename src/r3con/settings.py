@@ -61,8 +61,8 @@ LLM_RETRY_MAX_WAIT_SECONDS = 60
 # Seconds from a request's first attempt after which no resend starts.
 LLM_RETRY_MAX_TOTAL_SECONDS = 300
 
-# Re-rolls of an empty structured-output response or direct reasoning answer (a 200 with
-# no content, e.g. a reasoning model that spent its budget on thinking).
+# Re-rolls of an empty structured-output response (a 200 with no content, e.g. a
+# reasoning model that spent its budget on thinking).
 LLM_EMPTY_CONTENT_RETRIES = 3
 
 # On the coding path, show the WHOLE parse in the reasoning system prompt below this many

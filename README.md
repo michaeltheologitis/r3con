@@ -104,12 +104,15 @@ built during the run:
 
 ```python
 result.answer  # str       — final answer
+result.provenance  # list[str] — ids of the documents the answer used
 result.relevant_context  # list[str] — final relevance snippets
 result.structured_context  # dict      — structured representation
 result.run_dir  # Path      — directory containing run artifacts
 ```
 
-`str(result)` returns the same value as `result.answer`.
+`str(result)` returns the same value as `result.answer`. Each document gets an id for the
+run, and `result.document_ids[i]` is the id of `documents[i]`, so the documents the
+answer used are `[documents[result.document_ids.index(id_)] for id_ in result.provenance]`.
 
 ## Run artifacts
 
@@ -119,9 +122,10 @@ records, model calls, and the final reasoning transcript. Each call in `calls.js
 its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
 each stage's `result.json` totals them.
 
-`reasoning/result.json` records the answer and the `path` that produced it: `direct`, one
-call over the relevance snippets and the parsed records, or `coding`, an agent that reads
-the records with code. A run takes the direct path unless its config, `--reasoning` or
+`reasoning/result.json` records the answer, its `provenance` (the ids of the documents it
+used, in the order it cited them), and the `path` that produced it: `direct`, one call
+over the relevance snippets and the parsed records, or `coding`, an agent that reads the
+records with code. A run takes the direct path unless its config, `--reasoning` or
 `reasoning=` says `coding`. A direct run whose prompt doesn't fit the model's window takes
 the coding path instead, and `fallback` says why: `cause` `estimate` (with `estimate` and
 `line`, in tokens) or `refusal` (with `error`). Otherwise `fallback` is `null`.
@@ -136,8 +140,8 @@ list field of `parsed`, the 0-based index of the document each record came from,
 `source_ids` lines up with it by position, giving that document's id (also
 `result.source_docs` and `result.source_ids`). A record parsed from one part of a long
 document carries the document's id. The id lets a record be matched against the ids in
-`relevance/result.json` and `result.provenance`, where a part's id is `<id>.<k>`: match
-on the part before the dot.
+`relevance/result.json` and `result.relevance_provenance`, where a part's id is
+`<id>.<k>`: match on the part before the dot.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
@@ -155,7 +159,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │       ├── result.json          <- parsed records, each one's document index and id
 │       └── calls.json
 └── reasoning/
-    ├── result.json              <- the answer, its path, and why it fell back
+    ├── result.json              <- the answer, its provenance, its path, why it fell back
     ├── calls.json
     └── transcript.yaml
 ```

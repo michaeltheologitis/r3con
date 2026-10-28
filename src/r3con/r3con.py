@@ -256,7 +256,8 @@ def run(
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the relevant context (``.relevant_context``), the
+        ``str()`` of the result), the ids of the documents it used (``.provenance``,
+        from ``.document_ids``), the relevant context (``.relevant_context``), the
         structured parse (``.structured_context``), the schema proposed for this question
         (``.schema_code``), and where the artifacts were written (``.run_dir``).
 

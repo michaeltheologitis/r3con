@@ -3,11 +3,18 @@
 :func:`reason` answers on one of two paths, the run config's ``reasoning``:
 
 - **direct**: one completion. The ``reasoning/direct`` prompt carries the summaries and
-  the whole parse, the user message is the task, and the reply is the answer.
+  the whole parse, the user message is the task, and the reply is structured: the
+  ``answer`` and its ``provenance``.
 - **coding**: the multi-turn CodeAct loop. The merged parse is bound as the Python
   variable ``parse`` in a sandboxed interpreter, the ``reasoning/coding`` prompt is
   rendered with a view of the records, and the agent writes and runs code until it
-  commits with ``final_answer(x)``.
+  commits with ``final_answer(answer, provenance=[...])``.
+
+Either way the prompt names each document by its id for the run: a summary is headed
+``### Document ID: <id>`` (``<id>.<k>`` for part ``k`` of a document read in parts), and
+each record says ``"document": "<id>"``. The answer's provenance is the ids of the
+documents it used, read leniently: a part's id counts as its document's, and an id no
+document has is dropped with a warning.
 
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
 it over the line or the provider refuses it as too long, takes the coding path instead,
@@ -28,7 +35,7 @@ from __future__ import annotations
 import functools
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
@@ -40,11 +47,26 @@ from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S, CodeActTurn, run_codeact
-from r3con.runtime.llm import count_tokens, litellm_chat_completion
+from r3con.runtime.llm import count_tokens
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, render_relevance
+from r3con.stages.relevance import (
+    Snippet,
+    cited,
+    provenance_schema,
+    render_relevance,
+    send_until_valid,
+)
 
 _log = get_logger("reasoning")
+
+# The most sends of the direct request when its replies do not fit their schema.
+DIRECT_MAX_ATTEMPTS = 3
+_REWRITE = "Answer the same task again"
+
+
+class _DirectReply(BaseModel):
+    answer: str
+    provenance: list[str]
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -89,29 +111,35 @@ def _sample_record_per_field(parse_dict: Any) -> str:
 
 
 def tag_source_documents(
-    parse_dict: Any, source_docs: dict[str, list[int]] | None
+    parse_dict: Any,
+    source_docs: dict[str, list[int]] | None,
+    document_ids: Sequence[str] | None = None,
 ) -> Any:
-    """Stamp each list-field record with the 1-based document it was parsed from
-    (``"document": N``), from the parsing step's ``source_docs`` provenance.
+    """Stamp each list-field record with the document it was parsed from, from the
+    parsing step's ``source_docs`` provenance: ``"document": N``, 1-based, or, with
+    ``document_ids``, that document's id, ``"document": "<id>"``.
 
-    Each record aligns 1:1 with ``source_docs[field]``; without the stamp the model
-    cannot say *which* document a fact came from. The label matches
-    :func:`r3con.stages.relevance.render_relevance`'s "Document N", so the parse
-    and the relevant context share **one** document-id space and the agent can
-    cross-reference a record against the note its document contributed. That identity rests
-    on both views being built over the documents in the same order — reorder the collection
-    between stages and the ids stop meaning the same thing. No-op without ``source_docs`` or
-    for a non-dict parse. Mutates and returns ``parse_dict`` (``document`` first, so it reads
+    Each record aligns 1:1 with ``source_docs[name]``; without the stamp the model
+    cannot say *which* document a fact came from. The label matches the heading
+    :func:`r3con.stages.relevance.render_relevance` gives the same document with the
+    same ``document_ids`` (or without), so the parse and the relevant context share
+    **one** document-id space and the agent can cross-reference a record against the
+    note its document contributed. That identity rests on both views being built over
+    the documents in the same order — reorder the collection between stages and the
+    ids stop meaning the same thing. No-op without ``source_docs`` or for a non-dict
+    parse. Mutates and returns ``parse_dict`` (``document`` first, so it reads
     first)."""
     if not source_docs or not isinstance(parse_dict, dict):
         return parse_dict
-    for field, idxs in source_docs.items():
-        recs = parse_dict.get(field)
+    for name, idxs in source_docs.items():
+        recs = parse_dict.get(name)
         if not isinstance(recs, list):
             continue
         for k in range(min(len(recs), len(idxs))):
             if isinstance(recs[k], dict) and "document" not in recs[k]:
-                recs[k] = {"document": idxs[k] + 1, **recs[k]}
+                i = idxs[k]
+                label = i + 1 if document_ids is None else document_ids[i]
+                recs[k] = {"document": label, **recs[k]}
     return parse_dict
 
 
@@ -139,6 +167,9 @@ class ReasoningResult:
 
     - ``answer``: the answer text.
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
+    - ``provenance``: the ids of the documents the answer used, in the order it cited
+      them, without repeats; empty when it cited none, or, on the coding path, when
+      ``final_answer`` got no ``provenance`` list or the loop hit its turn cap.
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -149,6 +180,7 @@ class ReasoningResult:
 
     answer: str
     path: ReasoningPath
+    provenance: list[str] = field(default_factory=list)
     turns: Sequence[CodeActTurn] = ()
     terminated_by: str = "reply"
     fallback: dict[str, Any] | None = None
@@ -161,6 +193,7 @@ def _system_prompt(
     task: str,
     schema_code: str,
     relevance_snippets: Sequence[Snippet] | None,
+    document_ids: Sequence[str],
     parse_json: str,
     samples_block: str,
     parse_block: str,
@@ -170,7 +203,7 @@ def _system_prompt(
     included; Jinja renders only the ones its template references:
 
     - ``task``, ``schema_code``, ``relevance``: the question, the schema source, the
-      summaries;
+      summaries, each headed by its document's id;
     - ``parse_block``: the whole parse, or samples and a note;
     - ``samples_block``: one sample record per field;
     - ``parse_json``: the whole parse as JSON;
@@ -181,12 +214,24 @@ def _system_prompt(
         version=version,
         task=task,
         schema_code=schema_code,
-        relevance=render_relevance(relevance_snippets),
+        relevance=render_relevance(relevance_snippets, document_ids),
         parse_json=parse_json,
         samples_block=samples_block,
         parse_block=parse_block,
         read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
     )
+
+
+def _documents_cited(
+    provenance: Sequence[str], document_ids: Sequence[str], kind: str
+) -> list[str]:
+    """The documents ``provenance`` cites, by :func:`r3con.stages.relevance.cited`, a
+    part's id ``<id>.<k>`` read as its document's ``<id>``."""
+    whole = [
+        head if (head := id_.split(".", 1)[0]) in document_ids else id_
+        for id_ in provenance
+    ]
+    return cited(whole, document_ids, kind, log=_log)
 
 
 def _reason_with_code(
@@ -197,11 +242,13 @@ def _reason_with_code(
     user_message: str,
     model: str,
     splits: Splits,
+    document_ids: Sequence[str],
     whole: bool = True,
     **codeact_kwargs: Any,
 ) -> ReasoningResult:
     """The coding path: the CodeAct loop over the parse, under the system prompt
-    ``render(parse_block=...)``.
+    ``render(parse_block=...)``, its provenance the documents of ``document_ids`` that
+    ``final_answer``'s ``provenance`` cites.
 
     With ``whole``, the view of the parse is the whole parse when its first turn fits,
     else one sample record per top-level field: when the parse is over
@@ -250,9 +297,15 @@ def _reason_with_code(
         on_first_turn_too_long=with_samples,
         **codeact_kwargs,
     )
+    if result.provenance is None:
+        _log.info(
+            "the answer came without a provenance list (%s); it cites no documents",
+            result.terminated_by,
+        )
     return ReasoningResult(
         answer=result.answer,
         path="coding",
+        provenance=_documents_cited(result.provenance or [], document_ids, "coding"),
         turns=result.turns,
         terminated_by=result.terminated_by,
     )
@@ -265,13 +318,20 @@ def _reason_directly(
     user_message: str,
     model: str,
     splits: Splits,
+    document_ids: Sequence[str],
     run: StageRun | None,
     **llm_kwargs: Any,
 ) -> ReasoningResult | dict[str, Any]:
     """The direct path's answer, or, when its prompt does not fit, why not: the
-    ``fallback`` of a :class:`ReasoningResult`."""
+    ``fallback`` of a :class:`ReasoningResult`.
+
+    The reply is ``{answer, provenance}``, ``provenance`` an ``enum`` of
+    ``document_ids``; a reply that does not fit it is sent again with the validator's
+    error, up to ``DIRECT_MAX_ATTEMPTS`` sends, and the last send's error is raised."""
     system_prompt = render(parse_block=parse_json)
-    if estimate := splits.over_line(system_prompt, user_message):
+    schema = provenance_schema("ReasoningAnswer", _DirectReply, document_ids)
+    schema_json = json.dumps(schema.model_json_schema())
+    if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(
             "reasoning's direct prompt would take about %s tokens, over the %s-token "
             "line; reasoning with code instead",
@@ -280,13 +340,16 @@ def _reason_directly(
         )
         return {"cause": "estimate", "estimate": estimate, "line": splits.line}
     try:
-        reply = litellm_chat_completion(
-            system_prompt=system_prompt,
-            user_prompt=user_message,
+        reply = send_until_valid(
+            system_prompt,
+            user_message,
+            schema=schema,
+            rewrite=_REWRITE,
+            kind="direct",
+            max_attempts=DIRECT_MAX_ATTEMPTS,
+            log=_log,
             model=model,
             run=run,
-            kind="direct",
-            reroll_empty=True,
             **llm_kwargs,
         )
     except ContextWindowExceededError as refusal:
@@ -295,7 +358,12 @@ def _reason_directly(
             "instead"
         )
         return {"cause": "refusal", "error": str(refusal)}
-    return ReasoningResult(answer=cast(str, reply).strip(), path="direct")
+    reply = cast(_DirectReply, reply)
+    return ReasoningResult(
+        answer=reply.answer.strip(),
+        path="direct",
+        provenance=_documents_cited(reply.provenance, document_ids, "direct"),
+    )
 
 
 def reason(
@@ -306,6 +374,7 @@ def reason(
     model: str,
     prompts: Mapping[str, str],
     path: ReasoningPath,
+    document_ids: Sequence[str],
     relevance_snippets: Sequence[Snippet] | None = None,
     source_docs: dict[str, list[int]] | None = None,
     max_turns: int | None = None,
@@ -315,18 +384,26 @@ def reason(
     splits: Splits | None = None,
     **llm_kwargs: Any,
 ) -> ReasoningResult:
-    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``.
+    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``, with the
+    ids of the documents the answer used.
 
     ``prompts`` pins the versions of ``reasoning/direct`` and ``reasoning/coding`` (a
     run config's ``prompts``), and ``path`` is a run config's ``reasoning``:
-    ``"direct"`` or ``"coding"``. ``max_turns``, ``timeout_s`` and
-    ``additional_authorized_imports`` apply only to the coding path. ``splits``
-    (``None`` builds one for ``model``) says whether a prompt fits the model's window.
+    ``"direct"`` or ``"coding"``. ``document_ids`` is each document's id for the run
+    (:func:`r3con.stages.relevance.draw_document_ids`), aligned with
+    ``relevance_snippets`` and the indices in ``source_docs``: the prompt names each
+    document by its id, and the answer's provenance cites them. ``max_turns``,
+    ``timeout_s`` and ``additional_authorized_imports`` apply only to the coding path.
+    ``splits`` (``None`` builds one for ``model``) says whether a prompt fits the
+    model's window.
+
+    Raises:
+        ValueError: if ``relevance_snippets`` is not one snippet per document id.
     """
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
     )
-    parse_dict = tag_source_documents(parse_dict, source_docs)
+    parse_dict = tag_source_documents(parse_dict, source_docs, document_ids)
     parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
     splits = splits if splits is not None else Splits([], model=model)
     render = functools.partial(
@@ -334,6 +411,7 @@ def reason(
         task=task,
         schema_code=schema_code,
         relevance_snippets=relevance_snippets,
+        document_ids=document_ids,
         parse_json=parse_json,
         samples_block=_sample_record_per_field(parse_dict),
     )
@@ -348,6 +426,7 @@ def reason(
         user_message=user_message,
         model=model,
         splits=splits,
+        document_ids=document_ids,
         max_turns=max_turns,
         timeout_s=timeout_s,
         additional_authorized_imports=additional_authorized_imports,
@@ -364,6 +443,7 @@ def reason(
         user_message=user_message,
         model=model,
         splits=splits,
+        document_ids=document_ids,
         run=run,
         **llm_kwargs,
     )

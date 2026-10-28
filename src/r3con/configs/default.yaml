@@ -22,8 +22,8 @@ prompts:
   relevance/later-rounds: v1
   structuring/schema: v1
   structuring/parsing: v1
-  reasoning/direct: v1
-  reasoning/coding: v1
+  reasoning/direct: v2
+  reasoning/coding: v2
 
 # Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
 # it accepts. Empty means provider defaults.

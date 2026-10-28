@@ -14,6 +14,10 @@ FULL = {
     "prompts": PROMPTS,
 }
 V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)"
+DEFAULT_PROMPTS = {**PROMPTS, "reasoning/direct": "v2", CODING: "v2"}
+DEFAULT_LABEL_PROMPTS = (
+    "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v2,coding=v2)"
+)
 # The prompts the default config pinned before reasoning had two paths.
 OLD_DEFAULT_PROMPTS = {
     "relevance/first-round": "v1",
@@ -33,10 +37,10 @@ def test_the_default_config_loads_with_its_shipped_values():
         "direct",
         {},
     )
-    assert config.prompts == PROMPTS
+    assert config.prompts == DEFAULT_PROMPTS
     assert "seed" not in config.model_dump()
     assert config.label() == (
-        f"default[model=gpt-6-luna,rounds=2,reasoning=direct,{V1_PROMPTS}]"
+        f"default[model=gpt-6-luna,rounds=2,reasoning=direct,{DEFAULT_LABEL_PROMPTS}]"
     )
 
 

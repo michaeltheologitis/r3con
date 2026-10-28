@@ -169,6 +169,24 @@ def test_the_reasoning_path_is_chosen_per_run_and_recorded(
     assert folder["path"] == reasoning
 
 
+@pytest.mark.parametrize("reasoning", REASONING_PATHS)
+def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder(
+    answering_llm, tmp_path, reasoning
+):
+    result = run(
+        "Who?",
+        ["Halloran memo", "Merrow memo"],
+        reasoning=reasoning,
+        completion=answering_llm,
+        logs_dir=tmp_path,
+    )
+    assert result.answer == "Halloran memo; Merrow memo"
+    assert result.provenance == result.document_ids
+    assert result.relevance_provenance == [[], []]
+    folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
+    assert (folder["path"], folder["provenance"]) == (reasoning, result.provenance)
+
+
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
     llm, tmp_path
 ):

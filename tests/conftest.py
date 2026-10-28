@@ -48,7 +48,8 @@ class Parse(BaseModel):
     rows: list[Row]
 </schema>"""
 ANSWERING_CODE = (
-    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]))\n</code>'
+    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
+    'provenance=[r["document"] for r in parse["rows"]])\n</code>'
 )
 
 
@@ -60,7 +61,11 @@ def stage_of(request: Request) -> Stage:
     """The pipeline stage that built ``request``, read from the shape r3con gives it."""
     if "response_format" in request:
         schema = request["response_format"]["json_schema"]["name"]
-        return "relevance" if schema == "RelevanceSummary" else "parsing"
+        by_schema: dict[str, Stage] = {
+            "RelevanceSummary": "relevance",
+            "ReasoningAnswer": "reasoning",
+        }
+        return by_schema.get(schema, "parsing")
     messages = request["messages"]
     if len(messages) > 2:
         return "reasoning"
@@ -78,7 +83,7 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request for structured output gets a text reply as its
-    summary, citing nothing.
+    summary, citing nothing; a direct reasoning request gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
     request as a provider does, in tokens.
@@ -303,15 +308,19 @@ def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
 
-def _joined_rows(request: Request) -> str:
-    """A reasoning reply that joins the parse's rows: on the coding path, code that
-    joins them; on the direct path, the rows of the parse its prompt shows, joined."""
-    system = request["messages"][0]["content"]
-    if "final_answer(" in system:
+def _joined_rows(request: Request) -> Content:
+    """A reasoning reply that joins the parse's rows and cites their documents: on the
+    coding path, code that does; on the direct path, the rows of the parse its prompt
+    shows, joined, and their documents' ids."""
+    if "response_format" not in request:
         return ANSWERING_CODE
+    system = request["messages"][0]["content"]
     shown = system.split("## The parsed data (`parse`)", 1)[1].split("\n## Rules")[0]
     rows = json.loads(shown[shown.index("{") : shown.rindex("}") + 1])["rows"]
-    return "; ".join(row["who"] for row in rows)
+    return {
+        "answer": "; ".join(row["who"] for row in rows),
+        "provenance": [row["document"] for row in rows],
+    }
 
 
 @pytest.fixture
