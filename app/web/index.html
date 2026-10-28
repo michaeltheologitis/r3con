@@ -24,6 +24,7 @@
   --tree-ink: #1f1e1c;
   --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --gutter: 16px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -111,9 +112,9 @@ p { margin: 0; }
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  padding-left: max(16px, env(safe-area-inset-left, 0px));
-  padding-right: max(16px, env(safe-area-inset-right, 0px));
-  padding-block: 0 16px;
+  padding-left: max(var(--gutter), env(safe-area-inset-left, 0px));
+  padding-right: max(var(--gutter), env(safe-area-inset-right, 0px));
+  padding-block: 0 var(--gutter);
 }
 .topbar {
   display: flex;
@@ -215,12 +216,12 @@ p { margin: 0; }
 .panel.is-lit .node.on-path { opacity: 1; }
 .panel.is-lit .node.on-path .icon { color: var(--accent); }
 .panel.is-lit .node.on-path .label { color: var(--fg); }
-.f-a { fill: var(--fill-orange); }
-.f-b { fill: var(--fill-yellow); }
-.f-c { fill: var(--fill-blue); }
+.fill-orange { fill: var(--fill-orange); }
+.fill-yellow { fill: var(--fill-yellow); }
+.fill-blue { fill: var(--fill-blue); }
 .ink { stroke: var(--tree-ink); }
 .panel.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
-.node.pending { opacity: 0.5; }
+.node.pending .icon { opacity: 0.5; }
 
 .panel-hint {
   position: absolute;
@@ -257,14 +258,12 @@ p { margin: 0; }
   touch-action: pan-x pan-y;
 }
 .settings {
-  position: absolute;
-  z-index: 20;
-  top: 2.9em;
-  right: max(16px, env(safe-area-inset-right, 0px));
-  width: min(52ch, calc(100% - 32px));
-  max-height: calc(100% - 4em);
+  position: fixed;
+  inset: auto;
+  margin: 0;
   overflow: auto;
   padding: 0.9em 2ch 1em;
+  color: var(--fg);
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -272,6 +271,7 @@ p { margin: 0; }
   overscroll-behavior: contain;
 }
 .settings-form { display: flex; flex-direction: column; gap: 0.9em; }
+#settings-form { display: contents; }
 .field { display: flex; flex-direction: column; gap: 0.25em; }
 .field label { font-weight: 600; }
 .field input {
@@ -486,43 +486,43 @@ p { margin: 0; }
     <span class="status" id="run-status" aria-live="polite"></span>
     <nav class="top-actions" aria-label="Run controls">
       <button class="btn" id="replay-btn" type="button" hidden>replay</button>
-      <button class="btn" id="settings-btn" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="settings">settings</button>
+      <button class="btn" id="settings-btn" type="button" popovertarget="settings">settings</button>
       <button class="btn" id="theme-btn" type="button">theme · light</button>
     </nav>
   </header>
 
-  <div class="settings" id="settings" role="dialog" aria-label="Settings" hidden>
-    <form class="settings-form" id="settings-form" autocomplete="off">
+  <div class="settings" id="settings" popover role="dialog" aria-label="Settings">
+    <div class="settings-form">
+      <form id="settings-form" autocomplete="off"></form>
       <div class="insp-head">
         <div class="insp-title"><span class="g">● </span>settings</div>
-        <button class="btn" id="settings-close" type="button">esc</button>
+        <button class="btn" id="settings-close" type="button" popovertarget="settings" popovertargetaction="hide" aria-label="close settings">esc</button>
       </div>
       <div class="field">
         <label for="setting-model">model</label>
-        <input id="setting-model" name="model" type="text" spellcheck="false" autocapitalize="off">
-        <span class="k">any LiteLLM model: openai/…, anthropic/…, hosted_vllm/…</span>
+        <input id="setting-model" form="settings-form" type="text" required pattern=".*\S.*" spellcheck="false" autocapitalize="off" autofocus aria-describedby="setting-model-hint">
+        <span class="k" id="setting-model-hint">any LiteLLM model: openai/…, anthropic/…, hosted_vllm/…</span>
       </div>
       <div class="field">
         <label for="setting-key">API key</label>
         <div class="field-row">
-          <input id="setting-key" name="api_key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off">
-          <button class="btn" id="setting-key-show" type="button" aria-pressed="false" aria-controls="setting-key">show</button>
+          <input id="setting-key" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" aria-describedby="setting-key-hint setting-key-note">
+          <button class="btn" id="setting-key-show" type="button" aria-controls="setting-key" aria-label="show key">show</button>
         </div>
-        <span class="k">or set the provider's own variable, e.g. OPENAI_API_KEY</span>
-        <span class="k">the key stays in this tab; the real app keeps it on your computer</span>
+        <span class="k" id="setting-key-hint">or set the provider's own variable, e.g. OPENAI_API_KEY</span>
+        <span class="k" id="setting-key-note">this prototype doesn't keep the key; the real app keeps it on your computer</span>
       </div>
       <div class="field">
         <label for="setting-endpoint">endpoint</label>
-        <input id="setting-endpoint" name="api_base" type="text" inputmode="url" spellcheck="false" autocapitalize="off" placeholder="http://localhost:8000/v1">
-        <span class="k">leave empty for the provider's default</span>
+        <input id="setting-endpoint" form="settings-form" type="text" inputmode="url" pattern="https?://\S+" title="starts with http:// or https://" spellcheck="false" autocapitalize="off" placeholder="http://localhost:8000/v1" aria-describedby="setting-endpoint-hint">
+        <span class="k" id="setting-endpoint-hint">leave empty for the provider's default</span>
       </div>
       <p class="k">This prototype doesn't connect yet, so nothing is sent.</p>
-      <p class="err" id="settings-error" hidden></p>
       <div class="field-row">
-        <button class="btn run-btn" id="settings-save" type="submit">save</button>
+        <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
         <span class="k" id="settings-saved" aria-live="polite"></span>
       </div>
-    </form>
+    </div>
   </div>
 
   <div class="frame">
@@ -909,6 +909,8 @@ p { margin: 0; }
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
+  const SETTINGS_WIDTH_CH = 52;
+  const SETTINGS_GAP = 6;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
 
@@ -929,15 +931,15 @@ p { margin: 0; }
       return `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
         <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
         <g${filled ? ' class="ink"' : ''}>
-        <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('f-b')}/>
-        <circle cx="7.8" cy="12" r="2.5"${f('f-a')}/>
-        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('f-a')}/>
-        <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
-        <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('f-c')}/>
-        <circle cx="23.6" cy="19.1" r="2.6"${f('f-b')}/>
-        <circle cx="18.4" cy="27.5" r="2.3"${f('f-c')}/>
-        <circle cx="23.6" cy="27.5" r="2.3"${f('f-c')}/>
-        <circle cx="28.8" cy="27.5" r="2.3"${f('f-c')}/>
+        <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('fill-yellow')}/>
+        <circle cx="7.8" cy="12" r="2.5"${f('fill-orange')}/>
+        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('fill-orange')}/>
+        <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
+        <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
+        <circle cx="23.6" cy="19.1" r="2.6"${f('fill-yellow')}/>
+        <circle cx="18.4" cy="27.5" r="2.3"${f('fill-blue')}/>
+        <circle cx="23.6" cy="27.5" r="2.3"${f('fill-blue')}/>
+        <circle cx="28.8" cy="27.5" r="2.3"${f('fill-blue')}/>
         </g>
       </svg>`;
     },
@@ -956,11 +958,11 @@ p { margin: 0; }
 
   let nextUid = 0;
 
-  function track(file) {
+  function withUid(file) {
     return { ...file, uid: nextUid++ };
   }
 
-  const SAMPLE_FILES = SAMPLE.docs.map((d) => track({ ...d, sample: true }));
+  const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
 
   function sampleFiles() {
     return [...SAMPLE_FILES];
@@ -984,8 +986,9 @@ p { margin: 0; }
     layout: new Map(),
   };
   const view = { x: 0, y: 0, k: 1 };
-  // Model and endpoint may be remembered in this browser; the API key lives only in this object.
-  const settings = { model: DEFAULT_MODEL, endpoint: '', apiKey: '' };
+  // Model and endpoint may be remembered in this browser. The API key itself is never kept: the
+  // prototype sends nothing, so it only remembers, for this tab, that one was entered.
+  const settings = { model: DEFAULT_MODEL, endpoint: '', keySet: false };
 
   // ---------- small helpers ----------
 
@@ -1166,7 +1169,6 @@ p { margin: 0; }
     return width || 8;
   }
 
-  // The run's column grid, with each document's row starting at origin(i, file).
   function gridLayout(files, origin) {
     const layout = new Map();
     const origins = files.map((f, i) => origin(i, f));
@@ -1248,7 +1250,9 @@ p { margin: 0; }
 
   function ariaName(id) {
     const [kind, d] = splitId(id);
-    const what = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' }[kind];
+    const what = state.nodes.get(id)?.pending
+      ? 'document, not run yet'
+      : { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' }[kind];
     const name = kind === 'doc' || d === null ? nodeName(id) : docLabel(state.run, d);
     return `${name}, ${what}`;
   }
@@ -1284,6 +1288,7 @@ p { margin: 0; }
 
   function resetDocNode(node) {
     node.pending = false;
+    node.el.setAttribute('aria-label', ariaName(node.id));
     node.el.classList.remove('working', 'void', 'pending', 'on-path', 'selected');
     node.el.querySelectorAll('.label:not(.name)').forEach((l) => l.remove());
   }
@@ -1300,8 +1305,6 @@ p { margin: 0; }
     }
   }
 
-  // Before any run the panel holds only the current files' document nodes; after a run, files added
-  // since then join the bottom of the documents column, marked as not run yet.
   function syncDocNodes(animate = false) {
     const keep = new Set([...state.files, ...(state.run ? state.run.docs : [])].map(docId));
     for (const n of [...state.nodes.values()]) if (n.kind === 'doc' && !keep.has(n.id)) removeNode(n.id);
@@ -1316,7 +1319,6 @@ p { margin: 0; }
     node.el.style.top = `${node.y}px`;
   }
 
-  // The tidy grid: the run's documents in their run order, then any other document nodes below them.
   function tidyLayout() {
     const runDocs = state.run ? state.run.docs : [];
     const layout = gridLayout(runDocs, tidyOrigin);
@@ -1324,6 +1326,8 @@ p { margin: 0; }
     others.forEach((f, j) => layout.set(docId(f), tidyOrigin(runDocs.length + j)));
     return layout;
   }
+
+  const easeOut = (t) => 1 - (1 - t) ** 3;
 
   let arrangeTween = null;
 
@@ -1340,10 +1344,10 @@ p { margin: 0; }
     if (state.run) state.layout = layout;
     state.planned = boundsOfLayout(layout, [...state.files, ...(state.run ? state.run.docs : [])]);
     const moves = [...state.nodes.values()].filter((n) => layout.has(n.id)).map((n) => ({ node: n, from: { x: n.x, y: n.y }, to: layout.get(n.id) }));
-    const moveTo = (e) => {
+    const moveTo = (progress) => {
       for (const m of moves) {
-        m.node.x = m.from.x + (m.to.x - m.from.x) * e;
-        m.node.y = m.from.y + (m.to.y - m.from.y) * e;
+        m.node.x = m.from.x + (m.to.x - m.from.x) * progress;
+        m.node.y = m.from.y + (m.to.y - m.from.y) * progress;
         placeNode(m.node);
       }
       redrawEdges();
@@ -1362,7 +1366,7 @@ p { margin: 0; }
     const tween = { moveTo, frame: 0 };
     const step = (now) => {
       const t = Math.min(1, (now - start) / ARRANGE_MS);
-      moveTo(1 - (1 - t) ** 3);
+      moveTo(easeOut(t));
       if (t < 1) {
         tween.frame = requestAnimationFrame(step);
         return;
@@ -1999,7 +2003,7 @@ p { margin: 0; }
       return;
     }
     error.hidden = true;
-    const read = await Promise.all(picked.map(async (f) => track({ name: f.name, size: f.size, text: await readText(f), sample: false })));
+    const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
     read.sort((a, b) => a.name.localeCompare(b.name));
     state.files = state.filesAreSample ? read : [...state.files, ...read].slice(0, MAX_FILES);
     state.filesAreSample = false;
@@ -2090,49 +2094,44 @@ p { margin: 0; }
   function showKey(show) {
     $('setting-key').type = show ? 'text' : 'password';
     $('setting-key-show').textContent = show ? 'hide' : 'show';
-    $('setting-key-show').setAttribute('aria-pressed', String(show));
+    $('setting-key-show').setAttribute('aria-label', show ? 'hide key' : 'show key');
   }
 
-  function openSettings() {
-    $('setting-model').value = settings.model;
-    $('setting-key').value = settings.apiKey;
-    $('setting-endpoint').value = settings.endpoint;
-    $('settings-error').hidden = true;
-    $('settings-saved').textContent = '';
-    $('settings').hidden = false;
-    $('settings-btn').setAttribute('aria-expanded', 'true');
-    $('setting-model').focus();
+  function placeSettings() {
+    const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--gutter'));
+    const button = $('settings-btn').getBoundingClientRect();
+    const viewW = root.clientWidth;
+    const width = Math.min(SETTINGS_WIDTH_CH * charWidth(), viewW - 2 * gutter);
+    const popover = $('settings');
+    popover.style.width = `${width}px`;
+    popover.style.left = `${clamp(button.right - width, gutter, viewW - width - gutter)}px`;
+    popover.style.top = `${button.bottom + SETTINGS_GAP}px`;
+    popover.style.maxHeight = `${window.innerHeight - button.bottom - SETTINGS_GAP - gutter}px`;
   }
 
-  function closeSettings(restoreFocus = false) {
-    if ($('settings').hidden) return;
-    $('settings').hidden = true;
+  // beforetoggle, not toggle, so the popover is placed and filled before its first paint.
+  function onSettingsToggle(e) {
     $('setting-key').value = '';
     showKey(false);
-    $('settings-btn').setAttribute('aria-expanded', 'false');
-    if (restoreFocus) $('settings-btn').focus();
-  }
-
-  function settingsError(model, endpoint) {
-    if (!model) return `Enter a model, for example ${DEFAULT_MODEL}.`;
-    if (endpoint && !/^https?:\/\/\S+$/.test(endpoint)) return 'The endpoint should start with http:// or https://.';
-    return '';
+    if (e.newState !== 'open') return;
+    placeSettings();
+    $('setting-model').value = settings.model;
+    $('setting-endpoint').value = settings.endpoint;
+    $('setting-key').placeholder = settings.keySet ? 'set for this tab' : '';
+    $('settings-saved').textContent = '';
   }
 
   let savedTimer = 0;
 
   function saveSettings() {
-    const model = $('setting-model').value.trim();
-    const endpoint = $('setting-endpoint').value.trim();
-    const error = settingsError(model, endpoint);
-    $('settings-error').textContent = error;
-    $('settings-error').hidden = !error;
-    if (error) return;
-    settings.model = model;
-    settings.endpoint = endpoint;
-    settings.apiKey = $('setting-key').value;
+    const key = $('setting-key');
+    settings.model = $('setting-model').value.trim();
+    settings.endpoint = $('setting-endpoint').value.trim();
+    settings.keySet ||= key.value !== '';
+    key.value = '';
+    key.placeholder = settings.keySet ? 'set for this tab' : '';
     try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ model, endpoint }));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ model: settings.model, endpoint: settings.endpoint }));
     } catch {
       // Storage is blocked; the settings still apply for this visit.
     }
@@ -2282,22 +2281,19 @@ p { margin: 0; }
     });
 
     document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
-      if (!$('settings').hidden) closeSettings(true);
-      else if (!inspector.hidden) closeInspector(true);
+      // The platform closes an open settings popover on this same Escape.
+      if (e.key !== 'Escape' || $('settings').matches(':popover-open')) return;
+      if (!inspector.hidden) closeInspector(true);
       else if (!$('file-view').hidden) closeFile();
     });
 
     $('arrange-btn').addEventListener('click', arrange);
-    $('settings-btn').addEventListener('click', () => ($('settings').hidden ? openSettings() : closeSettings()));
-    $('settings-close').addEventListener('click', () => closeSettings(true));
+    $('settings').addEventListener('beforetoggle', onSettingsToggle);
+    window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('setting-key-show').addEventListener('click', () => showKey($('setting-key').type === 'password'));
     $('settings-form').addEventListener('submit', (e) => {
       e.preventDefault();
       saveSettings();
-    });
-    document.addEventListener('pointerdown', (e) => {
-      if (!$('settings').hidden && !e.target.closest('#settings, #settings-btn')) closeSettings();
     });
     $('fit-btn').addEventListener('click', () => {
       state.userMoved = false;
