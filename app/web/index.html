@@ -910,6 +910,7 @@ p { margin: 0; }
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
   const SVG_NS = 'http://www.w3.org/2000/svg';
+  const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -959,8 +960,10 @@ p { margin: 0; }
     return { ...file, uid: nextUid++ };
   }
 
+  const SAMPLE_FILES = SAMPLE.docs.map((d) => track({ ...d, sample: true }));
+
   function sampleFiles() {
-    return SAMPLE.docs.map((d) => track({ ...d, sample: true }));
+    return [...SAMPLE_FILES];
   }
 
   const docId = (file) => `doc-${file.uid}`;
@@ -1036,7 +1039,7 @@ p { margin: 0; }
     if (kind === 'schema') return 'structure';
     if (kind === 'answer') return 'answer';
     const label = docLabel(state.run, d);
-    return { r1: `${label} · round 1`, r2: `${label} · round 2`, parsed: `${label} · parsed` }[kind];
+    return `${label} · ${KIND_SUFFIX[kind]}`;
   }
 
   function schemaClasses(code) {
@@ -1163,18 +1166,28 @@ p { margin: 0; }
     return width || 8;
   }
 
-  function layoutFor(files) {
+  // The run's column grid, with each document's row starting at origin(i, file).
+  function gridLayout(files, origin) {
     const layout = new Map();
-    const rows = files.map((f) => state.nodes.get(docId(f)));
-    if (!rows.length) return layout;
-    rows.forEach((n, i) => {
-      layout.set(n.id, { x: n.x, y: n.y });
-      for (const kind of ['r1', 'r2', 'parsed']) layout.set(`${kind}-${i}`, { x: n.x + COLUMN[kind] * GRID.colGap, y: n.y });
+    const origins = files.map((f, i) => origin(i, f));
+    if (!origins.length) return layout;
+    files.forEach((f, i) => {
+      layout.set(docId(f), origins[i]);
+      for (const kind of ['r1', 'r2', 'parsed']) layout.set(`${kind}-${i}`, { x: origins[i].x + COLUMN[kind] * GRID.colGap, y: origins[i].y });
     });
-    const ys = rows.map((n) => n.y);
-    layout.set('schema', { x: rows[0].x + COLUMN.schema * GRID.colGap, y: rows[0].y });
-    layout.set('answer', { x: Math.max(...rows.map((n) => n.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
+    const ys = origins.map((o) => o.y);
+    layout.set('schema', { x: origins[0].x + COLUMN.schema * GRID.colGap, y: origins[0].y });
+    layout.set('answer', { x: Math.max(...origins.map((o) => o.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
     return layout;
+  }
+
+  const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
+
+  function layoutFor(files) {
+    return gridLayout(files, (i, f) => {
+      const node = state.nodes.get(docId(f));
+      return { x: node.x, y: node.y };
+    });
   }
 
   function boundsOfLayout(layout, files) {
@@ -1230,9 +1243,7 @@ p { margin: 0; }
     if (kind === 'schema') return ['structure'];
     if (kind === 'answer') return ['answer'];
     const label = shortLabel(docLabel(state.run, doc));
-    if (kind === 'r1') return [label, 'round 1'];
-    if (kind === 'r2') return [label, 'round 2'];
-    return [label];
+    return kind === 'parsed' ? [label] : [label, KIND_SUFFIX[kind]];
   }
 
   function ariaName(id) {
@@ -1278,6 +1289,8 @@ p { margin: 0; }
   }
 
   function removeNode(id) {
+    if (state.selected === id) closeInspector();
+    if (state.hovered === id) state.hovered = null;
     state.nodes.get(id)?.el.remove();
     state.nodes.delete(id);
     for (const [key, e] of state.edges) {
@@ -1289,15 +1302,13 @@ p { margin: 0; }
 
   // Before any run the panel holds only the current files' document nodes; after a run, files added
   // since then join the bottom of the documents column, marked as not run yet.
-  function syncDocNodes() {
-    const current = new Set(state.files.map(docId));
-    if (!state.run) {
-      for (const n of [...state.nodes.values()]) if (n.kind === 'doc' && !current.has(n.id)) removeNode(n.id);
-    }
+  function syncDocNodes(animate = false) {
+    const keep = new Set([...state.files, ...(state.run ? state.run.docs : [])].map(docId));
+    for (const n of [...state.nodes.values()]) if (n.kind === 'doc' && !keep.has(n.id)) removeNode(n.id);
     for (const f of state.files) if (!state.nodes.has(docId(f))) addDocNode(f, { pending: Boolean(state.run) });
     if (!state.run) state.planned = boundsOfLayout(layoutFor(state.files), state.files);
     updateHint();
-    if (!state.userMoved) fit();
+    if (!state.userMoved) fit(animate);
   }
 
   function placeNode(node) {
@@ -1307,26 +1318,24 @@ p { margin: 0; }
 
   // The tidy grid: the run's documents in their run order, then any other document nodes below them.
   function tidyLayout() {
-    const layout = new Map();
     const runDocs = state.run ? state.run.docs : [];
-    const rows = new Map(runDocs.map((f, i) => [docId(f), i]));
-    for (const f of state.files) if (state.nodes.has(docId(f)) && !rows.has(docId(f))) rows.set(docId(f), rows.size);
-    for (const n of state.nodes.values()) if (n.kind === 'doc' && !rows.has(n.id)) rows.set(n.id, rows.size);
-    for (const [id, row] of rows) layout.set(id, { x: COLUMN.doc * GRID.colGap, y: row * GRID.rowGap });
-    if (state.run) {
-      const n = runDocs.length;
-      for (let i = 0; i < n; i++) {
-        for (const kind of ['r1', 'r2', 'parsed']) layout.set(`${kind}-${i}`, { x: COLUMN[kind] * GRID.colGap, y: i * GRID.rowGap });
-      }
-      layout.set('schema', { x: COLUMN.schema * GRID.colGap, y: 0 });
-      layout.set('answer', { x: COLUMN.answer * GRID.colGap, y: ((n - 1) / 2) * GRID.rowGap });
-    }
+    const layout = gridLayout(runDocs, tidyOrigin);
+    const others = state.files.filter((f) => !runDocs.includes(f) && state.nodes.has(docId(f)));
+    others.forEach((f, j) => layout.set(docId(f), tidyOrigin(runDocs.length + j)));
     return layout;
   }
 
-  let arrangeFrame = 0;
+  let arrangeTween = null;
+
+  function stopArrange() {
+    if (!arrangeTween) return;
+    cancelAnimationFrame(arrangeTween.frame);
+    arrangeTween.moveTo(1);
+    arrangeTween = null;
+  }
 
   function arrange() {
+    stopArrange();
     const layout = tidyLayout();
     if (state.run) state.layout = layout;
     state.planned = boundsOfLayout(layout, [...state.files, ...(state.run ? state.run.docs : [])]);
@@ -1344,20 +1353,25 @@ p { margin: 0; }
       state.userMoved = false;
       fit(true);
     };
-    cancelAnimationFrame(arrangeFrame);
     if (reduceMotion()) {
       moveTo(1);
       finish();
       return;
     }
     const start = performance.now();
+    const tween = { moveTo, frame: 0 };
     const step = (now) => {
       const t = Math.min(1, (now - start) / ARRANGE_MS);
       moveTo(1 - (1 - t) ** 3);
-      if (t < 1) arrangeFrame = requestAnimationFrame(step);
-      else finish();
+      if (t < 1) {
+        tween.frame = requestAnimationFrame(step);
+        return;
+      }
+      arrangeTween = null;
+      finish();
     };
-    arrangeFrame = requestAnimationFrame(step);
+    tween.frame = requestAnimationFrame(step);
+    arrangeTween = tween;
   }
 
   function markWorking(id) {
@@ -1692,24 +1706,16 @@ p { margin: 0; }
     return { body, question };
   }
 
-  let statusContent = [];
-
   function setStatus(...content) {
-    statusContent = content;
-    renderStatus();
-  }
-
-  function renderStatus() {
-    $('run-status').replaceChildren(...statusContent, ` · ${settings.model}`);
+    $('run-status').replaceChildren(...content);
   }
 
   function doneStatus(run) {
-    const summary = run.simulated ? 'simulated run' : `recorded run · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
-    setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${summary}`);
+    setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`);
   }
 
   function readyStatus() {
-    setStatus(`${plural(state.files.length, 'document')} ready`);
+    setStatus(`${plural(state.files.length, 'document')} ready · ${settings.model}`);
   }
 
   function nextAction() {
@@ -1898,6 +1904,7 @@ p { margin: 0; }
 
   function playRun(run) {
     cancelTimers();
+    stopArrange();
     closeInspector();
     const keep = new Set(run.docs.map(docId));
     for (const id of [...state.nodes.keys()]) if (!keep.has(id)) removeNode(id);
@@ -1914,8 +1921,7 @@ p { margin: 0; }
     state.runTurn.body.replaceChildren();
     $('replay-btn').hidden = false;
     state.userMoved = false;
-    syncDocNodes();
-    fit(true);
+    syncDocNodes(true);
     const steps = buildTimeline(run, narrator(state.runTurn.body));
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
@@ -2108,7 +2114,7 @@ p { margin: 0; }
   }
 
   function settingsError(model, endpoint) {
-    if (!model) return 'Enter a model, for example openai/gpt-6-luna.';
+    if (!model) return `Enter a model, for example ${DEFAULT_MODEL}.`;
     if (endpoint && !/^https?:\/\/\S+$/.test(endpoint)) return 'The endpoint should start with http:// or https://.';
     return '';
   }
@@ -2130,7 +2136,7 @@ p { margin: 0; }
     } catch {
       // Storage is blocked; the settings still apply for this visit.
     }
-    renderStatus();
+    if (!state.run) readyStatus();
     $('settings-saved').textContent = 'saved';
     clearTimeout(savedTimer);
     savedTimer = setTimeout(() => ($('settings-saved').textContent = ''), SAVED_MS);
@@ -2173,6 +2179,7 @@ p { margin: 0; }
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
     const nodeEl = e.target.closest('.node');
+    if (nodeEl) stopArrange();
     gesture.node = nodeEl ? state.nodes.get(nodeEl.dataset.id) : null;
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
