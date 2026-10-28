@@ -31,6 +31,11 @@ DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
 NEVER_COMMITS = "<code>\nprint(1)\n</code>"
 COMMITS_THE_PARSE = "<code>\nfinal_answer(parse)\n</code>"
+# A commit as the coding v2 prompt asks for it, citing documents in a flat list.
+COMMITS_IN_THE_V2_STYLE = (
+    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
+    'provenance=[r["document"] for r in parse["rows"]])\n</code>'
+)
 STAGE_FOLDERS = {
     "relevance": "relevance",
     "schema": "structuring/schema",
@@ -45,8 +50,8 @@ CONFIG = {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
         "relevance/later-rounds": "v2",
         "structuring/parsing": "v3",
-        "reasoning/direct": "v2",
-        "reasoning/coding": "v2",
+        "reasoning/direct": "v3",
+        "reasoning/coding": "v3",
     },
 }
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
@@ -103,6 +108,12 @@ def memos_with(registry: str) -> list[str]:
     documents = read_documents(MEMOS)
     documents[3] = registry
     return documents
+
+
+def citable_lists(request) -> dict:
+    """The JSON schema of each list of ids a direct reasoning reply may cite."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    return schema["$defs"]["ProvenanceIds"]["properties"]
 
 
 def summary_headings(llm) -> list[str]:
@@ -234,11 +245,11 @@ def first_turns(llm) -> list[dict]:
 
 
 def system_message(stage: str, ids: list[str]) -> dict:
-    """The system message of ``stage``'s v2 prompt over DOCS' notes and their whole
+    """The system message of ``stage``'s v3 prompt over DOCS' notes and their whole
     parse, under the documents' ``ids``."""
     content = load_prompt(
         stage,
-        version="v2",
+        version="v3",
         relevance=render_relevance([f"Notes on {d}." for d in DOCS], ids),
         read_in_parts=False,
         parse_block=json.dumps(stamped(ids), indent=2, ensure_ascii=False),
@@ -334,6 +345,25 @@ def test_the_run_folder_and_the_answer_record_which_notes_each_parse_used(
     assert [row["who"] for row in parsing["parsed"]["rows"]] == documents
 
 
+@pytest.mark.parametrize(
+    ("path", "reply", "cites_the_parse"),
+    [("direct", None, True), ("coding", COMMITS_IN_THE_V2_STYLE, False)],
+)
+def test_a_config_that_pins_reasoning_v2_still_answers(
+    answering_llm, tmp_path, path, reply, cites_the_parse
+):
+    logger = TaskLogger("run", root=tmp_path)
+    prompts = {**CONFIG["prompts"], "reasoning/direct": "v2", "reasoning/coding": "v2"}
+    llm = answering_llm.answers(reasoning=reply) if reply else answering_llm
+    result = answer(llm, logger, prompts=prompts, reasoning=path)
+    assert result.answer == "Halloran memo; Merrow memo"
+    [prompt] = system_prompts(llm, "reasoning")
+    assert "- `provenance`: The IDs of the documents above" in prompt
+    parse_ids = result.document_ids if cites_the_parse else []
+    assert result.provenance == {"summary_ids": [], "parse_ids": parse_ids}
+    assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
+
+
 def test_a_config_that_pins_parsing_v1_still_runs(answering_llm, tmp_path):
     logger = TaskLogger("run", root=tmp_path)
     prompts = {**CONFIG["prompts"], "structuring/parsing": "v1"}
@@ -380,14 +410,17 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
 def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     answering_llm, tmp_path
 ):
-    def cites_the_second(request):
-        ids = request["response_format"]["json_schema"]["schema"]["properties"]
+    def cites_the_first_summary_and_the_second_parse(request):
+        lists = citable_lists(request)
         return {
             "answer": "Halloran and Merrow.",
-            "provenance": ids["provenance"]["items"]["enum"][1:],
+            "provenance_ids": {
+                "summary_ids": lists["summary_ids"]["items"]["enum"][:1],
+                "parse_ids": lists["parse_ids"]["items"]["enum"][1:],
+            },
         }
 
-    llm = answering_llm.answers(reasoning=cites_the_second)
+    llm = answering_llm.answers(reasoning=cites_the_first_summary_and_the_second_parse)
     logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
@@ -395,11 +428,12 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
         system_message("reasoning/direct", ids),
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
-    assert (result.answer, result.provenance) == ("Halloran and Merrow.", [ids[1]])
+    cited = {"summary_ids": [ids[0]], "parse_ids": [ids[1]]}
+    assert (result.answer, result.provenance) == ("Halloran and Merrow.", cited)
     reasoning = read_json(logger, "reasoning/result")
     assert (reasoning["answer"], reasoning["provenance"]) == (
         "Halloran and Merrow.",
-        [ids[1]],
+        cited,
     )
     assert (reasoning["path"], reasoning["fallback"]) == ("direct", None)
     assert reasoning["totals"]["n_steps"] == 1
@@ -421,7 +455,7 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
     assert ast.literal_eval(result.answer) == stamped(ids)
-    assert result.provenance == []
+    assert result.provenance == {"summary_ids": [], "parse_ids": []}
     reasoning = read_json(logger, "reasoning/result")
     assert (reasoning["path"], reasoning["fallback"]) == ("coding", None)
     assert (reasoning["terminated_by"], reasoning["n_turns"]) == ("final_answer", 1)
@@ -450,7 +484,7 @@ def test_direct_replies_that_never_fit_reason_with_code_and_the_folder_says_why(
     answering_llm, tmp_path, monkeypatch
 ):
     monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
-    no_answer = {"provenance": []}
+    no_answer = {"provenance_ids": {"summary_ids": [], "parse_ids": []}}
     llm = answering_llm.answers(reasoning=[no_answer, no_answer, COMMITS_THE_PARSE])
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger)
@@ -525,8 +559,8 @@ def test_the_schema_names_each_document_by_number_and_reasoning_by_id(
     assert f"### Document ID: {ids[0]}\nNotes on Halloran memo." in prompt
     assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
     assert re.search(r"Document \d|\"document\": \d", prompt) is None
-    schema = request["response_format"]["json_schema"]["schema"]
-    assert schema["properties"]["provenance"]["items"]["enum"] == ids
+    lists = citable_lists(request)
+    assert [lists[key]["items"]["enum"] for key in lists] == [ids, ids]
 
 
 def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
@@ -962,7 +996,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "estimate",
-        "estimate": 10_130,
+        "estimate": 10_669,
         "line": LINE_8192,
     }
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()

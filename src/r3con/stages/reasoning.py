@@ -4,16 +4,17 @@
 
 - **direct**: one completion. The ``reasoning/direct`` prompt carries the summaries and
   the whole parse, the user message is the task, and the reply is structured: the
-  ``answer`` and its ``provenance``.
+  ``answer`` and its ``provenance_ids``, ``{"summary_ids": [...], "parse_ids": [...]}``.
 - **coding**: the multi-turn CodeAct loop. The merged parse is bound as the Python
   variable ``parse`` in a sandboxed interpreter, the ``reasoning/coding`` prompt is
   rendered with a view of the records, and the agent writes and runs code until it
-  commits with ``final_answer(answer, provenance=[...])``.
+  commits with ``final_answer(answer, provenance_ids={...})``, the same mapping.
 
 Either way the prompt names each document by its id for the run: a summary is headed
 ``### Document ID: <id>`` (``<id>.<k>`` for part ``k`` of a document read in parts), and
-each record says ``"document": "<id>"``. The answer cites the ids of the documents it
-used (:func:`_documents_cited`).
+each record says ``"document": "<id>"``. The answer cites the two views separately: the
+ids of the summaries it used, and the ids of the documents whose records it used, each
+from among those the prompt shows (:func:`_cited`).
 
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
 it over the line or the provider refuses it as too long, takes the coding path instead,
@@ -46,19 +47,32 @@ from r3con.config import ReasoningPath
 from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S, CodeActTurn, run_codeact
+from r3con.runtime.codeact import (
+    DEFAULT_EXEC_TIMEOUT_S,
+    PROVENANCE_IDS,
+    CodeActTurn,
+    run_codeact,
+)
 from r3con.runtime.llm import count_tokens, send_until_valid
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, cited, list_of_ids, render_relevance
+from r3con.stages.relevance import (
+    Snippet,
+    citable_ids,
+    cited,
+    list_of_ids,
+    render_relevance,
+)
 
 _log = get_logger("reasoning")
 
 _REWRITE = "Answer the same task again"
+# The answer's two views, as its provenance names them.
+_VIEWS = ("summary_ids", "parse_ids")
 
 
 class _DirectReply(BaseModel):
     answer: str
-    provenance: list[str]
+    provenance_ids: BaseModel
 
     @field_validator("answer")
     @classmethod
@@ -66,6 +80,89 @@ class _DirectReply(BaseModel):
         if not answer.strip():
             raise ValueError("the answer is empty")
         return answer
+
+
+def cites_nothing() -> dict[str, list[str]]:
+    """Provenance that cites nothing: no id under either view."""
+    return {view: [] for view in _VIEWS}
+
+
+def _documents_with_records(parse_dict: Any, document_ids: Sequence[str]) -> list[str]:
+    """The ids in ``document_ids`` that a record of ``parse_dict`` names as its
+    ``document``, in order: the documents an answer can cite for their records."""
+    if not isinstance(parse_dict, dict):
+        return []
+    named = {
+        record["document"]
+        for records in parse_dict.values()
+        if isinstance(records, list)
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("document"), str)
+    }
+    return [id_ for id_ in document_ids if id_ in named]
+
+
+def _provenance_ids_model(citable: Mapping[str, Sequence[str]]) -> type[BaseModel]:
+    """The ``provenance_ids`` an answer gives, on either path: under each of
+    ``citable``'s keys, a list of its ids (:func:`~r3con.stages.relevance.list_of_ids`).
+    A missing list cites nothing, and another key is ignored."""
+    lists: dict[str, Any] = {
+        key: (list_of_ids(ids), Field(default_factory=list))
+        for key, ids in citable.items()
+    }
+    return create_model("ProvenanceIds", **lists)
+
+
+def _reply_schema(citable: Mapping[str, Sequence[str]]) -> type[_DirectReply]:
+    """The direct reply's schema: the ``answer``, and its ``provenance_ids``
+    (:func:`_provenance_ids_model`). A reply without them cites nothing."""
+    provenance_ids = _provenance_ids_model(citable)
+    return create_model(
+        "ReasoningAnswer",
+        __base__=_DirectReply,
+        provenance_ids=(provenance_ids, Field(default_factory=provenance_ids)),
+    )
+
+
+def _cited(
+    given: Mapping[str, Sequence[str]],
+    citable: Mapping[str, Sequence[str]],
+    kind: str,
+) -> dict[str, list[str]]:
+    """``given``'s ids under each of ``citable``'s keys, less those it does not hold,
+    by :func:`~r3con.stages.relevance.cited`, which warns as ``<kind> <key>``."""
+    return {
+        key: cited(given[key], ids, f"{kind} {key}") for key, ids in citable.items()
+    }
+
+
+def _committed_ids(
+    arguments: Mapping[str, Any], citable: Mapping[str, Sequence[str]]
+) -> dict[str, list[str]]:
+    """What ``final_answer``'s ``provenance_ids`` cites, read as
+    :func:`_provenance_ids_model` and checked by :func:`_cited`: nothing when it was
+    not given, and nothing, with a warning, when it is not a mapping of lists of ids.
+    Another argument is ignored with a warning."""
+    others = {
+        name: value for name, value in arguments.items() if name != PROVENANCE_IDS
+    }
+    if others:
+        _log.warning(
+            "coding: ignored final_answer argument(s) other than provenance_ids: %r",
+            others,
+        )
+    given = arguments.get(PROVENANCE_IDS)
+    try:
+        ids = _provenance_ids_model(citable).model_validate(given or {})
+    except ValidationError:
+        _log.warning(
+            "coding: provenance_ids must map %s to lists of ids; got %r, which cites "
+            "nothing",
+            " and ".join(_VIEWS),
+            given,
+        )
+        return cites_nothing()
+    return _cited(ids.model_dump(), citable, "coding")
 
 
 def _sample_record_per_field(parse_dict: Any) -> str:
@@ -155,7 +252,9 @@ class ReasoningResult:
 
     - ``answer``: the answer text.
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
-    - ``provenance``: the ids of the documents the answer used.
+    - ``provenance``: the ids the answer used, by view: under ``"summary_ids"``, those
+      of the summaries it used (``<id>.<k>`` for a part of a document read in parts),
+      and under ``"parse_ids"``, those of the documents whose records it used.
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -167,7 +266,7 @@ class ReasoningResult:
 
     answer: str
     path: ReasoningPath
-    provenance: list[str] = field(default_factory=list)
+    provenance: dict[str, list[str]] = field(default_factory=cites_nothing)
     turns: Sequence[CodeActTurn] = ()
     terminated_by: str = "reply"
     fallback: dict[str, Any] | None = None
@@ -209,15 +308,6 @@ def _system_prompt(
     )
 
 
-def _documents_cited(
-    provenance: Sequence[str], document_ids: Sequence[str], kind: str
-) -> list[str]:
-    """The documents ``provenance`` cites, by :func:`r3con.stages.relevance.cited`, a
-    part's id ``<id>.<k>`` read as its document's ``<id>``."""
-    whole = [id_.split(".", 1)[0] for id_ in provenance]
-    return cited(whole, set(document_ids), kind)
-
-
 def _reason_with_code(
     *,
     render: Callable[..., str],
@@ -226,12 +316,12 @@ def _reason_with_code(
     user_message: str,
     model: str,
     splits: Splits,
-    document_ids: Sequence[str],
+    citable: Mapping[str, Sequence[str]],
     whole: bool = True,
     **codeact_kwargs: Any,
 ) -> ReasoningResult:
     """The coding path: the CodeAct loop over the parse, under the system prompt
-    ``render(parse_block=...)``.
+    ``render(parse_block=...)``, its answer citing from among ``citable``'s ids.
 
     With ``whole``, the view of the parse is the whole parse when its first turn fits,
     else one sample record per top-level field: when the parse is over
@@ -283,7 +373,7 @@ def _reason_with_code(
     return ReasoningResult(
         answer=result.answer,
         path="coding",
-        provenance=_documents_cited(result.provenance, document_ids, "coding"),
+        provenance=_committed_ids(result.arguments, citable),
         turns=result.turns,
         terminated_by=result.terminated_by,
     )
@@ -303,20 +393,16 @@ def _reason_directly(
     user_message: str,
     model: str,
     splits: Splits,
-    document_ids: Sequence[str],
+    citable: Mapping[str, Sequence[str]],
     max_attempts: int,
     run: StageRun | None,
     **llm_kwargs: Any,
 ) -> ReasoningResult | dict[str, Any]:
-    """The direct path's answer, or, when its prompt does not fit or no reply fits its
-    schema in ``max_attempts`` sends, why not: the ``fallback`` of a
-    :class:`ReasoningResult`."""
+    """The direct path's answer, citing from among ``citable``'s ids, or, when its
+    prompt does not fit or no reply fits its schema in ``max_attempts`` sends, why not:
+    the ``fallback`` of a :class:`ReasoningResult`."""
     system_prompt = render(parse_block=parse_json)
-    schema = create_model(
-        "ReasoningAnswer",
-        __base__=_DirectReply,
-        provenance=(list_of_ids(document_ids), Field(default_factory=list)),
-    )
+    schema = _reply_schema(citable)
     schema_json = json.dumps(schema.model_json_schema())
     if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(
@@ -355,7 +441,7 @@ def _reason_directly(
     return ReasoningResult(
         answer=reply.answer.strip(),
         path="direct",
-        provenance=_documents_cited(reply.provenance, document_ids, "direct"),
+        provenance=_cited(reply.provenance_ids.model_dump(), citable, "direct"),
     )
 
 
@@ -413,6 +499,16 @@ def reason(
     )
     parse_dict = tag_source_documents(parse_dict, source_docs, document_ids)
     parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
+    citable: dict[str, list[str]] = dict(
+        zip(
+            _VIEWS,
+            [
+                citable_ids(relevance_snippets, document_ids),
+                _documents_with_records(parse_dict, document_ids),
+            ],
+            strict=True,
+        )
+    )
     splits = splits if splits is not None else Splits([], model=model)
     render = functools.partial(
         _system_prompt,
@@ -434,7 +530,7 @@ def reason(
         user_message=user_message,
         model=model,
         splits=splits,
-        document_ids=document_ids,
+        citable=citable,
         max_turns=max_turns,
         timeout_s=timeout_s,
         additional_authorized_imports=additional_authorized_imports,
@@ -451,7 +547,7 @@ def reason(
         user_message=user_message,
         model=model,
         splits=splits,
-        document_ids=document_ids,
+        citable=citable,
         max_attempts=max_attempts,
         run=run,
         **llm_kwargs,

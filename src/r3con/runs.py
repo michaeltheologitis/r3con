@@ -37,10 +37,11 @@ Layout per ``logs/<run-folder>/``:
   ``parse-d{doc}`` call, or ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to
   a resend).
 - ``reasoning/`` (stage 3) — ``result.json`` (``{answer, provenance, path, fallback,
-  terminated_by, n_turns, turns, totals}`` — ``provenance`` is the ids of the documents
-  the answer used, ``path`` is ``direct`` or ``coding``, and ``fallback`` says why the
-  coding path ran when the config asked for direct, else ``null``) + ``calls.json`` +
-  ``transcript.yaml``.
+  terminated_by, n_turns, turns, totals}`` — ``provenance`` is ``{summary_ids,
+  parse_ids}``, the ids of the relevance snippets the answer used (``<id>.<k>`` for a
+  part) and of the documents whose records it used, ``path`` is ``direct`` or
+  ``coding``, and ``fallback`` says why the coding path ran when the config asked for
+  direct, else ``null``) + ``calls.json`` + ``transcript.yaml``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.

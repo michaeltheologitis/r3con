@@ -28,6 +28,7 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning
     result = run(QUESTION, documents, reasoning=reasoning, logs_dir=tmp_path)
     assert "halloran" in result.answer.lower()
     assert re.search(r"\b11\b", result.answer)
-    cited = [documents[result.document_ids.index(id_)] for id_ in result.provenance]
+    used = {id_.split(".")[0] for ids in result.provenance.values() for id_ in ids}
+    cited = [documents[result.document_ids.index(id_)] for id_ in used]
     assert cited
     assert not any("Cafeteria refurbishment" in document for document in cited)

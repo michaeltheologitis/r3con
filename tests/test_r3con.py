@@ -181,7 +181,7 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         logs_dir=tmp_path,
     )
     assert result.answer == "Halloran memo; Merrow memo"
-    assert result.provenance == result.document_ids
+    assert result.provenance == {"summary_ids": [], "parse_ids": result.document_ids}
     assert result.relevance_provenance == [[], []]
     assert result.parsing_provenance == [[], []]
     folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())

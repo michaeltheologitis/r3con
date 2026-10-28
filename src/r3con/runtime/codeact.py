@@ -3,9 +3,10 @@
 A CodeAct agent solves a task by writing Python in ``<code>...</code>`` blocks
 that run in a persistent, sandboxed in-process interpreter; the runtime feeds
 the captured ``print`` output back as ``<observation>...</observation>`` on the
-next turn, and the agent commits by calling ``final_answer(answer)``, optionally with
-``provenance=[...]``, the ids of what the answer used, from inside the sandbox. This
-module owns that loop and nothing task-specific:
+next turn, and the agent commits by calling ``final_answer(answer)`` from inside the
+sandbox, optionally with ``provenance_ids``, the ids of what the answer used, and any
+other keyword arguments, all handed back as given. This module owns that loop and
+nothing task-specific:
 
 - Each turn: call the LLM with the running message history, clip any
   hallucinated tail past ``</code>``, extract the code, run it, and feed the
@@ -33,7 +34,7 @@ from __future__ import annotations
 import ast
 import functools
 import re
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -54,6 +55,14 @@ from r3con.runtime.python_executor import (
 _log = get_logger("codeact")
 
 DEFAULT_EXEC_TIMEOUT_S: float = 30.0
+
+# The name ``final_answer`` takes the ids of what the answer used by, as its second
+# argument or by keyword.
+PROVENANCE_IDS = "provenance_ids"
+
+# How much of each argument's repr the committing turn's observation shows, so a whole
+# parse passed by mistake does not fill the run folder.
+_SHOWN_ARGUMENT_CHARS = 300
 
 
 # Matches the smolagents/CodeAct convention: the model emits prose ("thought")
@@ -255,18 +264,32 @@ class CodeActResult:
     ``answer`` is a final synthesized best-effort (one plain-prose call over the whole
     conversation), or the last non-empty observation if that synthesis comes back empty.
 
-    ``provenance`` is the ids passed as ``final_answer``'s ``provenance``.
+    ``arguments`` is what ``final_answer`` was given besides the answer, by name, as
+    given: its ``provenance_ids``, by position or keyword, and any other keyword
+    argument; empty when it was given none, or never called.
     """
 
     answer: str
     turns: list[CodeActTurn] = field(default_factory=list)
     terminated_by: str = "final_answer"  # "final_answer" | "max_turns"
-    provenance: list[str] = field(default_factory=list)
+    arguments: dict[str, Any] = field(default_factory=dict)
 
 
 # Registered as ``final_answer``; what it returns comes back as ``CodeOutput.output``.
-def _final_answer(answer: Any = None, provenance: Any = None) -> tuple[Any, Any]:
-    return answer, provenance
+def _final_answer(
+    answer: Any = None, provenance_ids: Any = None, **rest: Any
+) -> tuple[Any, dict[str, Any]]:
+    given = {} if provenance_ids is None else {PROVENANCE_IDS: provenance_ids}
+    return answer, {**given, **rest}
+
+
+def _shown(value: Any) -> str:
+    """``value``'s repr, cut to ``_SHOWN_ARGUMENT_CHARS`` characters and an ellipsis
+    when longer."""
+    text = repr(value)
+    if len(text) <= _SHOWN_ARGUMENT_CHARS:
+        return text
+    return text[:_SHOWN_ARGUMENT_CHARS] + "…"
 
 
 def _format_observation(text: str) -> str:
@@ -281,15 +304,6 @@ def _stringify_final_answer(value: Any) -> str:
     ``str()`` returns a string unchanged, so this also passes strings through.
     """
     return str(value)
-
-
-def _provenance_ids(value: Any) -> list[str]:
-    """What was passed as ``final_answer``'s ``provenance``: each item of a collection
-    (a list, tuple, set, …) as a string, in its order, unchecked; ``[]`` for anything
-    else, a string included, or nothing."""
-    if isinstance(value, Collection) and not isinstance(value, (str, bytes)):
-        return [str(id_) for id_ in value]
-    return []
 
 
 def run_codeact(
@@ -312,8 +326,9 @@ def run_codeact(
     we execute the code in a persistent sandbox and feed the captured ``print``
     output back as the next user message wrapped in
     ``<observation>...</observation>``. The agent commits by calling
-    ``final_answer(answer, provenance=[...])`` inside its code, ``provenance``
-    optional; that returns control here.
+    ``final_answer(answer, provenance_ids)`` inside its code, ``provenance_ids`` and any
+    other keyword argument optional (:attr:`CodeActResult.arguments`); that returns
+    control here.
 
     Variable bindings persist across turns inside the executor — the agent can
     ``rows = [...]`` in turn 1 and refer to ``rows`` in turn 2.
@@ -511,11 +526,12 @@ def run_codeact(
             _log.info(
                 "codeact: committed final_answer on turn %d/%d", turn_idx + 1, max_turns
             )
-            committed, provenance = out.output
+            committed, arguments = out.output
             answer = _stringify_final_answer(committed)
-            observation = _format_observation(
-                f"final_answer received: {answer}\nprovenance received: {provenance!r}"
-            )
+            received = [f"final_answer received: {answer}"] + [
+                f"{name} received: {_shown(value)}" for name, value in arguments.items()
+            ]
+            observation = _format_observation("\n".join(received))
             turns.append(
                 CodeActTurn(
                     response=response,
@@ -531,7 +547,7 @@ def run_codeact(
                 answer=answer,
                 turns=turns,
                 terminated_by="final_answer",
-                provenance=_provenance_ids(provenance),
+                arguments=arguments,
             )
 
         observation = _format_observation(execution.stdout)
