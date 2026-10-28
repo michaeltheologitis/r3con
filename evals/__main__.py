@@ -47,16 +47,17 @@ SAMPLE_SIZES = {"loong": 40, "corpusqa": 35}
 SEED = 20261028
 DEFAULT_WORKERS = 32
 USD_DIGITS = 4
-# Failures of the connection rather than of r3con, as is any provider server error: the
-# task is left to retry, not scored.
+# Not r3con's failure but the connection's or the provider's: left to retry, not scored.
 INFRASTRUCTURE_ERRORS = (
     exceptions.AuthenticationError,
     exceptions.PermissionDeniedError,
     exceptions.APIConnectionError,
     exceptions.Timeout,
     exceptions.RateLimitError,
+    exceptions.ServiceUnavailableError,
+    exceptions.InternalServerError,
+    exceptions.BadGatewayError,
 )
-FIRST_SERVER_ERROR = 500
 
 
 def sample(ids: Iterable[str], n: int) -> list[str]:
@@ -162,17 +163,18 @@ def _answer(
     benchmark: ModuleType, row: dict[str, Any], task_dir: Path, config: RunConfig
 ) -> dict[str, Any]:
     """r3con's answer to one task, from a fresh folder. A run that raises leaves its
-    error and an empty answer, which the judge scores worst, unless the connection
-    failed: then the error propagates, no answer is saved, and a resume retries it."""
+    error and an empty answer, which the judge scores worst, unless the connection or
+    the provider's server failed: then the error propagates, no answer is saved, and a
+    resume retries it."""
     question, documents = benchmark.inputs(row)
     shutil.rmtree(task_dir, ignore_errors=True)
     started = time.monotonic()
     answer, error = "", None
     try:
         answer = r3con.run(question, documents, config=config, logs_dir=task_dir).answer
-    except Exception as e:
-        if _is_infrastructure(e):
-            raise
+    except INFRASTRUCTURE_ERRORS:
+        raise
+    except Exception as e:  # noqa: BLE001 — a failed task is scored, not fatal
         error = f"{type(e).__name__}: {e}"
         log.warning("%s raised %s", row["id"], error)
     run_dir = next((path.parent for path in task_dir.glob("*/manifest.json")), None)
@@ -182,13 +184,6 @@ def _answer(
         "seconds": round(time.monotonic() - started, 1),
         "run_dir": str(run_dir) if run_dir else None,
     }
-
-
-def _is_infrastructure(error: Exception) -> bool:
-    status = getattr(error, "status_code", None)
-    return isinstance(error, INFRASTRUCTURE_ERRORS) or (
-        isinstance(status, int) and status >= FIRST_SERVER_ERROR
-    )
 
 
 def spend(folder: Path) -> dict[str, Any]:
