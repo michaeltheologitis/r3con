@@ -14,7 +14,7 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
    sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
-   fit the model's window).
+   fit the model's window). The answer cites the ids of the documents it used.
 
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
@@ -71,14 +71,15 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
+    - ``provenance`` — the ids of the documents the answer used.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
       its parts' notes joined. A document that contributes nothing is an empty string,
       which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every document,
-      as plain JSON-able data. Each record carries a ``document`` key naming the 1-based
-      document it came from.
+      as plain JSON-able data. Each record carries a ``document`` key naming the id of the
+      document it came from, as reasoning saw it.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
       most characteristic artifact of the method: it is what the question was decided to
       be *about*.
@@ -89,17 +90,18 @@ class Answer:
     - ``document_ids`` — each document's id in this run, aligned 1:1 with
       ``documents``: random, drawn afresh for each run, and recorded in the run folder's
       ``ids.json``.
-    - ``provenance`` — for each document, aligned 1:1 with ``relevant_context``, the ids
-      of the previous round's relevance snippets its final-round snippet used: each a
-      document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in that
-      previous round. A document read in parts has its parts' ids combined, in order,
-      without repeats.
+    - ``relevance_provenance`` — for each document, aligned 1:1 with
+      ``relevant_context``, the ids of the previous round's relevance snippets its
+      final-round snippet used: each a document's id, or ``<id>.<k>`` for part ``k`` of
+      a document read in parts in that previous round. A document read in parts has its
+      parts' ids combined, in order, without repeats.
     - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
       ``source_docs`` with each index replaced by that document's id, so it lines up
       with ``source_docs`` by position. A record parsed from one part of a document read
       in parts carries the document's id. The id lets a record be matched against the
-      ids in ``provenance`` and in the run folder's ``relevance/result.json``, where a
-      part's id is ``<id>.<k>`` and matching uses the part before the dot.
+      ids in ``provenance``, in ``relevance_provenance`` and in the run folder's
+      ``relevance/result.json``, where a part's id is ``<id>.<k>`` and matching uses the
+      part before the dot.
     """
 
     answer: str
@@ -109,7 +111,8 @@ class Answer:
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
-    provenance: list[list[str]] = field(default_factory=list)
+    provenance: list[str] = field(default_factory=list)
+    relevance_provenance: list[list[str]] = field(default_factory=list)
 
     @property
     def source_ids(self) -> dict[str, list[str]]:
@@ -333,6 +336,8 @@ def run_pipeline(
             model=model,
             prompts=config.prompts,
             path=config.reasoning,
+            document_ids=document_ids,
+            max_attempts=caps["reasoning_max_attempts"],
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=record.run,
@@ -348,6 +353,7 @@ def run_pipeline(
         )
         record.result = {
             "answer": result.answer,
+            "provenance": result.provenance,
             "path": result.path,
             "fallback": result.fallback,
             "terminated_by": result.terminated_by,
@@ -367,15 +373,16 @@ def run_pipeline(
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance_snippets],
-        # the parse reasoning was given: plain data, each record stamped with the
-        # 1-based document it came from
+        # the parse reasoning saw, as plain data
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
             extraction.source_docs,
+            document_ids,
         ),
         schema_code=proposal.schema_code,
         source_docs=extraction.source_docs,
         run_dir=task_logger.dir if task_logger is not None else None,
         document_ids=document_ids,
-        provenance=relevance.provenance,
+        provenance=result.provenance,
+        relevance_provenance=relevance.provenance,
     )

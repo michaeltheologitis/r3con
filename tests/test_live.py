@@ -24,8 +24,10 @@ pytestmark = [
 
 @pytest.mark.parametrize("reasoning", REASONING_PATHS)
 def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning):
-    result = run(
-        QUESTION, read_documents(MEMOS), reasoning=reasoning, logs_dir=tmp_path
-    )
+    documents = read_documents(MEMOS)
+    result = run(QUESTION, documents, reasoning=reasoning, logs_dir=tmp_path)
     assert "halloran" in result.answer.lower()
     assert re.search(r"\b11\b", result.answer)
+    cited = [documents[result.document_ids.index(id_)] for id_ in result.provenance]
+    assert cited
+    assert not any("Cafeteria refurbishment" in document for document in cited)

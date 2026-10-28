@@ -36,24 +36,27 @@ for inspection.
 from __future__ import annotations
 
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, NamedTuple, cast
+from typing import Annotated, Any, NamedTuple, TypeVar, cast
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, Field, create_model
 
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.llm import litellm_chat_completion
+from r3con.runtime.llm import send_until_valid
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
 
 _log = get_logger("relevance")
 
 _ID_HEX_DIGITS = 6
+_REWRITE = "Write the summary of the same document again"
+
+_ReplyT = TypeVar("_ReplyT", bound=BaseModel)
 
 Snippet = str | list[str]
 """A document's relevance snippet, or, for a document read in parts, one per part."""
@@ -144,25 +147,39 @@ def join_parts(snippet: Snippet) -> str:
     return "\n\n".join(note.strip() for note in snippet if note.strip())
 
 
-def render_relevance(relevance_snippets: Sequence[Snippet] | None) -> str:
+def render_relevance(
+    relevance_snippets: Sequence[Snippet] | None,
+    document_ids: Sequence[str] | None = None,
+) -> str:
     """Render the final-round relevance snippets into the labeled block a prompt embeds
     as the relevant context.
 
     Each document gets a ``### Document N`` heading, and each part of a document read in
-    parts a ``### Document N.k`` heading, ``k`` from 1. A note with nothing relevant
-    renders as ``(no relevant summary for this task)``. An empty / ``None`` list renders
-    to ``""`` so the consuming prompt omits the block.
+    parts a ``### Document N.k`` heading, ``k`` from 1. With ``document_ids``, one per
+    snippet, the headings name each document, and each part, by its id instead
+    (:func:`_part_ids`): ``### Document ID: <id>``. A note with nothing relevant renders
+    as ``(no relevant summary for this task)``. An empty / ``None`` list renders to
+    ``""`` so the consuming prompt omits the block.
+
+    Raises:
+        ValueError: if ``document_ids`` is not one id per snippet.
     """
+    if not relevance_snippets:
+        return ""
+    numbers = [str(n) for n in range(1, len(relevance_snippets) + 1)]
+    names, label = (
+        (numbers, "Document")
+        if document_ids is None
+        else (document_ids, "Document ID:")
+    )
     nothing = "(no relevant summary for this task)"
     sections: list[str] = []
-    for n, snippet in enumerate(relevance_snippets or [], start=1):
-        if isinstance(snippet, list):
-            sections += [
-                f"### Document {n}.{k}\n{(note or '').strip() or nothing}"
-                for k, note in enumerate(snippet, start=1)
-            ]
-        else:
-            sections.append(f"### Document {n}\n{(snippet or '').strip() or nothing}")
+    for name, snippet in zip(names, relevance_snippets, strict=True):
+        notes = snippet if isinstance(snippet, list) else [snippet]
+        sections += [
+            f"### {label} {part}\n{(note or '').strip() or nothing}"
+            for part, note in zip(_part_ids(name, len(notes)), notes, strict=True)
+        ]
     return "\n\n".join(sections)
 
 
@@ -172,20 +189,24 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
-def _reply_schema(shown_ids: Sequence[str]) -> type[_Reply]:
-    """The later-rounds reply: the summary, or null, then the ids it used. The shown
-    ids reach only the JSON schema, as an ``enum``; the reply itself is read as plain
-    strings and checked by :func:`_cited`."""
+def provenance_schema(
+    name: str, base: type[_ReplyT], shown_ids: Sequence[str]
+) -> type[_ReplyT]:
+    """``base``, named ``name``, with its ``provenance`` a list of the ids a call shows.
+    The shown ids reach only the JSON schema, as an ``enum``; the reply itself is read
+    as plain strings and checked by :func:`cited`. A reply without ``provenance`` cites
+    nothing, though the strict schema sent requires it."""
     shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
+    # A default_factory stays out of the schema; strict mode refuses a default.
     return create_model(
-        "RelevanceSummary", __base__=_Reply, provenance=(list[shown_id], ...)
+        name, __base__=base, provenance=(list[shown_id], Field(default_factory=list))
     )
 
 
 def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:
     """A document's request in one round, given the OTHER documents' non-empty snippets
     it shows, by id: the first-round prompt and plain text when there are none, else
-    the later-rounds prompt and :func:`_reply_schema`."""
+    the later-rounds prompt and its ``{summary, provenance}`` reply."""
     if not shown:
         version = prompts["relevance/first-round"]
         prompt = load_prompt("relevance/first-round", version=version, task=task)
@@ -196,10 +217,11 @@ def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _R
         task=task,
         other_snippets=_render_other_snippets(shown),
     )
-    return _Request(prompt, _reply_schema(list(shown)), shown)
+    schema = provenance_schema("RelevanceSummary", _Reply, list(shown))
+    return _Request(prompt, schema, shown)
 
 
-def _cited(provenance: list[str], shown: Mapping[str, str], kind: str) -> list[str]:
+def cited(provenance: Sequence[str], shown: Collection[str], kind: str) -> list[str]:
     """The ids a reply cites, in order and without repeats, less those the call did not
     show, which are dropped with a warning."""
     unshown = [id_ for id_ in provenance if id_ not in shown]
@@ -210,59 +232,24 @@ def _cited(provenance: list[str], shown: Mapping[str, str], kind: str) -> list[s
     return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown))
 
 
-def _ask(
-    request: _Request, user_prompt: str, *, kind: str, attempt: int, **llm_call: Any
+def _read(
+    request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
 ) -> tuple[str, list[str]]:
-    """One send of ``user_prompt`` (a document or one part of one, with any retry
-    feedback): its snippet, stripped, and the shown ids it used."""
-    reply = litellm_chat_completion(
-        system_prompt=request.system_prompt,
-        user_prompt=user_prompt,
+    """``part`` (a document or one part of one) read under ``request`` by
+    :func:`send_until_valid`: its snippet, stripped, and the shown ids it used."""
+    reply = send_until_valid(
+        request.system_prompt,
+        part,
         schema=request.schema,
-        kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
+        rewrite=_REWRITE,
+        kind=kind,
+        max_attempts=max_attempts,
         **llm_call,
     )
     if request.schema is None:
         return cast(str, reply).strip(), []
     reply = cast(_Reply, reply)
-    return (reply.summary or "").strip(), _cited(reply.provenance, request.shown, kind)
-
-
-def _retry_prompt(part: str, error: str) -> str:
-    """The user message that resends ``part`` after a reply failed its schema: the
-    part again and the validator's error, as parsing resends a document."""
-    return (
-        f"{part}\n\n"
-        "---\n\n"
-        "Your previous response failed schema validation:\n\n"
-        f"{error}\n\n"
-        "Write the summary of the same document again, fixing only the offending "
-        "field(s) so the output validates against the schema. Output the corrected "
-        "JSON."
-    )
-
-
-def _read(
-    request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
-) -> tuple[str, list[str]]:
-    """:func:`_ask`, sending ``part`` again with the validator's error when a reply does
-    not fit its schema (invalid JSON, a missing field), up to ``max_attempts`` sends;
-    the last send's error is raised."""
-    user_prompt = part
-    for attempt in range(1, max_attempts):
-        try:
-            return _ask(request, user_prompt, kind=kind, attempt=attempt, **llm_call)
-        except ValidationError as e:
-            error = f"{type(e).__name__}: {e}"
-            _log.warning(
-                "%s: sending again (%d/%d) after %s",
-                kind,
-                attempt,
-                max_attempts - 1,
-                error,
-            )
-            user_prompt = _retry_prompt(part, error)
-    return _ask(request, user_prompt, kind=kind, attempt=max_attempts, **llm_call)
+    return (reply.summary or "").strip(), cited(reply.provenance, request.shown, kind)
 
 
 def _attempts(max_attempts: int | None) -> int:

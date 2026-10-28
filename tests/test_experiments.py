@@ -63,14 +63,14 @@ def strings(value) -> list[str]:
     return []
 
 
-def mapping_records(structured_context: dict) -> list[dict]:
-    """The records from the registry (Document 4) that map CT-118 to Halloran."""
+def mapping_records(structured_context: dict, registry_id: str) -> list[dict]:
+    """The records from the registry, by its id, that map CT-118 to Halloran."""
     return [
         record
         for records in structured_context.values()
         if isinstance(records, list)
         for record in records
-        if isinstance(record, dict) and record.get("document") == 4
+        if isinstance(record, dict) and record.get("document") == registry_id
         if "CT-118" in " ".join(strings(record))
         and "halloran" in " ".join(strings(record)).lower()
     ]
@@ -98,7 +98,7 @@ def test_a_document_read_in_parts_still_answers(tmp_path, grown_registry, parts,
         for stage in STAGES
     ]
     tokens = [total["tokens"] or {"prompt": 0, "completion": 0} for total in totals]
-    records = mapping_records(result.structured_context)
+    records = mapping_records(result.structured_context, result.document_ids[3])
     # The measurement, one line per case in the job's log, before anything is asserted.
     print(
         "E6",

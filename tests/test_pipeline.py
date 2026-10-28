@@ -41,13 +41,11 @@ CONFIG = {
     "name": "test",
     "model": MODEL,
     "relevance_rounds": 2,
-    "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
-}
-STAMPED = {
-    "rows": [
-        {"document": 1, "who": "Halloran memo"},
-        {"document": 2, "who": "Merrow memo"},
-    ]
+    "prompts": {
+        **dict.fromkeys(PROMPT_STAGES, "v1"),
+        "reasoning/direct": "v2",
+        "reasoning/coding": "v2",
+    },
 }
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
@@ -105,10 +103,25 @@ def memos_with(registry: str) -> list[str]:
 
 
 def summary_headings(llm) -> list[str]:
-    """The headings of the reasoning prompt's summaries, without its examples'."""
+    """The ids heading the reasoning prompt's summaries, without its examples'."""
     [prompt, *_] = system_prompts(llm, "reasoning")
     section = prompt.split("## Document summaries", 1)[1].split("## The parsed", 1)[0]
-    return re.findall(r"^### Document ([\d.]+)$", section, re.MULTILINE)
+    return re.findall(r"^### Document ID: (\S+)$", section, re.MULTILINE)
+
+
+def as_ids(ids: list[str], labels: list[str]) -> list[str]:
+    """``labels`` such as ``"4.1"``, document 4's part 1, with each document's number
+    replaced by its id."""
+    return [re.sub(r"^\d+", lambda n: ids[int(n[0]) - 1], label) for label in labels]
+
+
+def stamped(ids: list[str]) -> dict:
+    """DOCS' parse, each row stamped with its document's id."""
+    return {
+        "rows": [
+            {"document": id_, "who": who} for id_, who in zip(ids, DOCS, strict=True)
+        ]
+    }
 
 
 def chars(request) -> int:
@@ -204,15 +217,15 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def system_message(stage: str) -> dict:
-    """The system message of ``stage``'s v1 prompt over DOCS' notes and their whole
-    parse, stamped."""
+def system_message(stage: str, ids: list[str]) -> dict:
+    """The system message of ``stage``'s v2 prompt over DOCS' notes and their whole
+    parse, under the documents' ``ids``."""
     content = load_prompt(
         stage,
-        version="v1",
-        relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
+        version="v2",
+        relevance=render_relevance([f"Notes on {d}." for d in DOCS], ids),
         read_in_parts=False,
-        parse_block=json.dumps(STAMPED, indent=2, ensure_ascii=False),
+        parse_block=json.dumps(stamped(ids), indent=2, ensure_ascii=False),
     )
     return {"role": "system", "content": content}
 
@@ -227,12 +240,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "Notes on Halloran memo.",
         "Notes on Merrow memo.",
     ]
-    assert result.structured_context == {
-        "rows": [
-            {"document": 1, "who": "Halloran memo"},
-            {"document": 2, "who": "Merrow memo"},
-        ]
-    }
+    assert result.structured_context == stamped(result.document_ids)
     assert "class Parse(BaseModel)" in result.schema_code
     assert result.source_docs == {"rows": [0, 1]}
     assert result.run_dir == logger.dir
@@ -289,7 +297,7 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
             ],
         },
     ]
-    assert result.provenance == [
+    assert result.relevance_provenance == [
         [ids[2], ids[1]],
         [ids[2], ids[0]],
         [ids[1], ids[0]],
@@ -308,20 +316,28 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
 def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     answering_llm, tmp_path
 ):
-    llm = answering_llm.answers(reasoning="Halloran and Merrow.")
+    def cites_the_second(request):
+        ids = request["response_format"]["json_schema"]["schema"]["properties"]
+        return {
+            "answer": "Halloran and Merrow.",
+            "provenance": ids["provenance"]["items"]["enum"][1:],
+        }
+
+    llm = answering_llm.answers(reasoning=cites_the_second)
     logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
+    ids = result.document_ids
     [request] = llm.requests_for("reasoning")
     assert request["messages"] == [
-        system_message("reasoning/direct"),
+        system_message("reasoning/direct", ids),
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
-    assert result.answer == "Halloran and Merrow."
+    assert (result.answer, result.provenance) == ("Halloran and Merrow.", [ids[1]])
     reasoning = read_json(logger, "reasoning/result")
-    assert (reasoning["answer"], reasoning["path"], reasoning["fallback"]) == (
+    assert (reasoning["answer"], reasoning["provenance"]) == (
         "Halloran and Merrow.",
-        "direct",
-        None,
+        [ids[1]],
     )
+    assert (reasoning["path"], reasoning["fallback"]) == ("direct", None)
     assert reasoning["totals"]["n_steps"] == 1
     transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
     roles = [message["role"] for message in transcript["messages"]]
@@ -334,12 +350,14 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
     llm = answering_llm.answers(reasoning=COMMITS_THE_PARSE)
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger, reasoning="coding")
+    ids = result.document_ids
     [request] = llm.requests_for("reasoning")
     assert request["messages"] == [
-        system_message("reasoning/coding"),
+        system_message("reasoning/coding", ids),
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
-    assert ast.literal_eval(result.answer) == STAMPED
+    assert ast.literal_eval(result.answer) == stamped(ids)
+    assert result.provenance == []
     reasoning = read_json(logger, "reasoning/result")
     assert (reasoning["path"], reasoning["fallback"]) == ("coding", None)
     assert (reasoning["terminated_by"], reasoning["n_turns"]) == ("final_answer", 1)
@@ -353,14 +371,35 @@ def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_s
     llm = answering_llm.answers(reasoning=[refused, COMMITS_THE_PARSE])
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger)
-    assert ast.literal_eval(result.answer) == STAMPED
+    ids = result.document_ids
+    assert ast.literal_eval(result.answer) == stamped(ids)
     direct, coding = (r["messages"][0] for r in llm.requests_for("reasoning"))
-    assert direct == system_message("reasoning/direct")
+    assert direct == system_message("reasoning/direct", ids)
     assert SAMPLE in coding["content"] and "final_answer(" in coding["content"]
     reasoning = read_json(logger, "reasoning/result")
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {"cause": "refusal", "error": str(refused)}
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
+
+
+def test_direct_replies_that_never_fit_reason_with_code_and_the_folder_says_why(
+    answering_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
+    no_answer = {"provenance": []}
+    llm = answering_llm.answers(reasoning=[no_answer, no_answer, COMMITS_THE_PARSE])
+    logger = TaskLogger("run", root=tmp_path)
+    result = answer(llm, logger)
+    assert ast.literal_eval(result.answer) == stamped(result.document_ids)
+    reasoning = read_json(logger, "reasoning/result")
+    assert reasoning["path"] == "coding"
+    assert reasoning["fallback"] == {
+        "cause": "invalid",
+        "error": "answer: Field required",
+    }
+    kinds = [call["kind"] for call in read_json(logger, "reasoning/calls")]
+    assert kinds == ["direct", "direct-retry-1", "turn-1"]
+    assert read_json(logger, "manifest")["settings"]["reasoning_max_attempts"] == 2
 
 
 def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
@@ -376,14 +415,15 @@ def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     assert transcript["messages"][-1]["content"] == NEVER_COMMITS
 
 
-def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
+def test_document_ids_reach_relevance_only_as_summary_ids_and_never_structuring(
     answering_llm, shown_ids, monkeypatch
 ):
     counting_ids(monkeypatch)
     result = answer(answering_llm, documents=[*DOCS, "Calder memo"])
+    ids = result.document_ids
 
     def ids_in(text: str) -> set[str]:
-        return {id_ for id_ in result.document_ids if id_ in text}
+        return {id_ for id_ in ids if id_ in text}
 
     relevance = answering_llm.requests_for("relevance")
     later_rounds = [request for request in relevance if "response_format" in request]
@@ -395,9 +435,29 @@ def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
         schema = request["response_format"]["json_schema"]["schema"]
         enum = schema["properties"]["provenance"]["items"]["enum"]
         assert enum == shown_ids(request)
-    for stage in LATER_STAGES:
+    for stage in ("schema", "parsing"):
         for request in answering_llm.requests_for(stage):
             assert ids_in(json.dumps(request, default=str)) == set()
+
+
+def test_structuring_names_each_document_by_number_and_reasoning_by_id(
+    answering_llm,
+):
+    result = answer(answering_llm)
+    ids = result.document_ids
+    for stage in ("schema", "parsing"):
+        for prompt in system_prompts(answering_llm, stage):
+            assert "### Document 1\nNotes on Halloran memo." in prompt
+            assert "### Document 2\nNotes on Merrow memo." in prompt
+            assert "Document ID" not in prompt
+    [request] = answering_llm.requests_for("reasoning")
+    prompt = request["messages"][0]["content"]
+    assert summary_headings(answering_llm) == ids
+    assert f"### Document ID: {ids[0]}\nNotes on Halloran memo." in prompt
+    assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
+    assert re.search(r"Document \d|\"document\": \d", prompt) is None
+    schema = request["response_format"]["json_schema"]["schema"]
+    assert schema["properties"]["provenance"]["items"]["enum"] == ids
 
 
 def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
@@ -416,7 +476,7 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
     assert result.source_docs == {"rows": [0, 2, 3, 3, 3, 3, 4]}
     assert result.source_ids == {"rows": [ids[0], ids[2], *[ids[3]] * 4, ids[4]]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
-    assert [ids[n - 1] for n in stamps] == result.source_ids["rows"]
+    assert stamps == result.source_ids["rows"]
     parsing = read_json(logger, "structuring/parsing/result")
     assert parsing["source_docs"] == result.source_docs
     assert parsing["source_ids"] == result.source_ids
@@ -609,11 +669,13 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
     llm = answering_llm.refuses_over(16_000)
     result = answer(llm, logger, documents=memos_with(registry), model=QWEN)
     assert len(result.relevant_context) == 5
-    assert summary_headings(llm) == REGISTRY_IN_4_PARTS
+    assert summary_headings(llm) == as_ids(result.document_ids, REGISTRY_IN_4_PARTS)
     assert READ_IN_PARTS in system_prompts(llm, "reasoning")[0]
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
-    assert stamps == [1, 2, 3, 4, 4, 4, 4, 5]
+    assert stamps == as_ids(
+        result.document_ids, ["1", "2", "3", "4", "4", "4", "4", "5"]
+    )
     snippets = read_json(logger, "relevance/result")["rounds"][0]["snippets"]
     part_notes = [s["summary"] for s in snippets[3:7]]
     assert [s["id"] for s in snippets[3:7]] == [
@@ -657,10 +719,10 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
     def reply(request):
-        return {"summary": "x"} if "response_format" in request else "A snippet."
+        return {"provenance": []} if "response_format" in request else "A snippet."
 
     logger = TaskLogger("run", root=tmp_path)
-    with pytest.raises(ValidationError, match="provenance"):
+    with pytest.raises(ValidationError, match="summary"):
         answer(answering_llm.answers(relevance=reply), logger)
     assert len(answering_llm.requests_for("relevance")) == len(DOCS) + 2
     assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2
@@ -674,7 +736,7 @@ def test_a_split_documents_provenance_joins_its_parts_without_repeats(
     result = answer(llm.refuses_over(16_000), documents=documents, model=QWEN)
     ids = result.document_ids
     registry_parts = [f"{ids[3]}.{k}" for k in (4, 3, 2, 1)]
-    assert result.provenance == [
+    assert result.relevance_provenance == [
         [ids[4], *registry_parts, ids[2], ids[1]],
         [ids[4], *registry_parts, ids[2], ids[0]],
         [ids[4], *registry_parts, ids[1], ids[0]],
@@ -688,8 +750,9 @@ def test_a_document_over_the_line_is_split_before_sending(
 ):
     logger = TaskLogger("run", root=tmp_path)
     documents = memos_with(grown_registry(40_000))
-    answer(answering_llm, logger, documents=documents, model=window(5_000))
-    assert summary_headings(answering_llm) == REGISTRY_IN_4_PARTS
+    result = answer(answering_llm, logger, documents=documents, model=window(5_000))
+    ids = result.document_ids
+    assert summary_headings(answering_llm) == as_ids(ids, REGISTRY_IN_4_PARTS)
     assert max(tokens(request) for request in answering_llm.requests) <= 4_250
     events = read_json(logger, "splits")["documents"]["3"]["events"]
     assert {event["cause"] for event in events} == {"estimate"}
@@ -733,7 +796,9 @@ def test_a_later_stage_splits_further_without_renumbering(
     result = answer(llm, logger, documents=memos_with(registry), model=model)
     record = read_json(logger, "splits")["documents"]["3"]
     assert record["parts"] == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}
-    assert summary_headings(llm) == ["1", "2", "3", "4.1", "4.2", "5"]
+    assert summary_headings(llm) == as_ids(
+        result.document_ids, ["1", "2", "3", "4.1", "4.2", "5"]
+    )
     kinds = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
     assert sorted(kind for kind in kinds if "-d3" in kind) == [
         f"parse-d3c{k}" for k in range(4)
@@ -803,8 +868,9 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
 
 
 def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
-    answering_llm, quiet_sites, window, tmp_path
+    answering_llm, quiet_sites, window, tmp_path, monkeypatch
 ):
+    counting_ids(monkeypatch)
     documents = read_documents(MEMOS) + quiet_sites(55)
     llm = answering_llm.answers(relevance=memo_note, parsing=whole_document_row)
     logger, result = memos_run(llm, documents, window(8_192), tmp_path)
@@ -817,7 +883,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "estimate",
-        "estimate": 9_182,
+        "estimate": 10_130,
         "line": LINE_8192,
     }
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()

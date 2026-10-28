@@ -3,8 +3,9 @@
 A CodeAct agent solves a task by writing Python in ``<code>...</code>`` blocks
 that run in a persistent, sandboxed in-process interpreter; the runtime feeds
 the captured ``print`` output back as ``<observation>...</observation>`` on the
-next turn, and the agent commits by calling ``final_answer(x)`` from inside the
-sandbox. This module owns that loop and nothing task-specific:
+next turn, and the agent commits by calling ``final_answer(answer)``, optionally with
+``provenance=[...]``, the ids of what the answer used, from inside the sandbox. This
+module owns that loop and nothing task-specific:
 
 - Each turn: call the LLM with the running message history, clip any
   hallucinated tail past ``</code>``, extract the code, run it, and feed the
@@ -32,7 +33,7 @@ from __future__ import annotations
 import ast
 import functools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -249,24 +250,23 @@ class CodeActTurn:
 class CodeActResult:
     """Full record of one CodeAct solve.
 
-    ``answer`` is the value the agent committed via ``final_answer(x)``
+    ``answer`` is the value the agent committed via ``final_answer(answer)``
     (stringified). When the loop exhausts ``max_turns`` without a commit,
     ``answer`` is a final synthesized best-effort (one plain-prose call over the whole
     conversation), or the last non-empty observation if that synthesis comes back empty.
+
+    ``provenance`` is the ids passed as ``final_answer``'s ``provenance``.
     """
 
     answer: str
     turns: list[CodeActTurn] = field(default_factory=list)
     terminated_by: str = "final_answer"  # "final_answer" | "max_turns"
+    provenance: list[str] = field(default_factory=list)
 
 
-# Sentinel registered with the executor. Calling ``final_answer(x)`` from
-# inside the sandbox raises ``FinalAnswerException`` (upstream behavior),
-# which surfaces here as ``CodeOutput.is_final_answer=True``. The function
-# itself just returns its argument unchanged — the exception is what
-# carries the value out.
-def _identity_final_answer(x: Any = None) -> Any:
-    return x
+# Registered as ``final_answer``; what it returns comes back as ``CodeOutput.output``.
+def _final_answer(answer: Any = None, provenance: Any = None) -> tuple[Any, Any]:
+    return answer, provenance
 
 
 def _format_observation(text: str) -> str:
@@ -281,6 +281,15 @@ def _stringify_final_answer(value: Any) -> str:
     ``str()`` returns a string unchanged, so this also passes strings through.
     """
     return str(value)
+
+
+def _provenance_ids(value: Any) -> list[str]:
+    """What was passed as ``final_answer``'s ``provenance``: each item of a collection
+    (a list, tuple, set, …) as a string, in its order, unchecked; ``[]`` for anything
+    else, a string included, or nothing."""
+    if isinstance(value, Collection) and not isinstance(value, (str, bytes)):
+        return [str(id_) for id_ in value]
+    return []
 
 
 def run_codeact(
@@ -303,7 +312,8 @@ def run_codeact(
     we execute the code in a persistent sandbox and feed the captured ``print``
     output back as the next user message wrapped in
     ``<observation>...</observation>``. The agent commits by calling
-    ``final_answer(x)`` inside its code; that returns control here.
+    ``final_answer(answer, provenance=[...])`` inside its code, ``provenance``
+    optional; that returns control here.
 
     Variable bindings persist across turns inside the executor — the agent can
     ``rows = [...]`` in turn 1 and refer to ``rows`` in turn 2.
@@ -373,7 +383,7 @@ def run_codeact(
         # Typed int upstream; it is only added to time.monotonic(), so a float works.
         timeout_seconds=timeout_s,  # pyright: ignore[reportArgumentType]
         # final_answer is registered last so it can never be shadowed by a tool.
-        additional_functions={**(tools or {}), "final_answer": _identity_final_answer},
+        additional_functions={**(tools or {}), "final_answer": _final_answer},
     )
     if variables:
         executor.send_variables(variables)
@@ -497,13 +507,15 @@ def run_codeact(
         execution = ExecutionResult(stdout=out.logs)
 
         if out.is_final_answer:
-            # The model committed. ``out.output`` is the value handed to
-            # final_answer (carried out via FinalAnswerException upstream).
+            # The model committed: ``out.output`` is what final_answer returned.
             _log.info(
                 "codeact: committed final_answer on turn %d/%d", turn_idx + 1, max_turns
             )
-            answer = _stringify_final_answer(out.output)
-            observation = _format_observation(f"final_answer received: {answer}")
+            committed, provenance = out.output
+            answer = _stringify_final_answer(committed)
+            observation = _format_observation(
+                f"final_answer received: {answer}\nprovenance received: {provenance!r}"
+            )
             turns.append(
                 CodeActTurn(
                     response=response,
@@ -519,6 +531,7 @@ def run_codeact(
                 answer=answer,
                 turns=turns,
                 terminated_by="final_answer",
+                provenance=_provenance_ids(provenance),
             )
 
         observation = _format_observation(execution.stdout)

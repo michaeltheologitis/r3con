@@ -6,6 +6,7 @@ answering it is built *per question*, at the moment you ask:
     >>> from r3con import r3con
     >>> result = r3con.run("Which supplier missed the most delivery windows?", docs)
     >>> print(result)                 # the answer
+    >>> result.provenance                    # the ids of the documents it used
     >>> result.relevant_context              # what each document contributed
     >>> result.structured_context            # the structured parse behind it
 
@@ -21,7 +22,7 @@ Three moves, in order:
 3. **reasoning** — one call answers over the structured records and the relevance
    snippets together; or, when the run asks for it or that prompt does not fit the
    model's window, the merged parse is loaded into a sandboxed Python runtime and an
-   agent reasons there with code.
+   agent reasons there with code. Either way the answer cites the documents it used.
 
 The whole collection is never placed in a single prompt: each document is read on its
 own, in parts when it is too long for the model's window, and information crosses

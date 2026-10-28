@@ -8,6 +8,7 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
+    result.provenance             # the ids of the documents the answer used
     result.schema_code            # the schema proposed for this question
 
 (``from r3con import run`` works too — same function, imported from the package root.)
@@ -120,8 +121,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     should not sink a run. Empty documents are dropped — an empty document contributes
     nothing and costs a relevance call.
 
-    Document order is preserved end to end (it is what ``Document N`` refers to
-    throughout the artifacts), so a stable, sorted walk matters.
+    Document order is preserved end to end (it is what ``Document N`` refers to in the
+    structuring prompts, and ``document_ids`` aligns with it), so a stable, sorted walk
+    matters.
 
     Raises:
         FileNotFoundError: if a source matches nothing.
@@ -162,9 +164,10 @@ def _check_documents(documents: Any) -> list[str]:
     filename or a document means a one-line document that happens to match a file on disk
     gets silently replaced by that file's contents. Dropping a blank entry is the same
     mistake one step later: every index downstream is positional — ``relevant_context[i]``,
-    the ``source_docs`` indices, and the ``"document": N`` the agent cites *in its own
-    answer text* — so a silent drop renumbers the caller's collection without telling them,
-    and the wrong number has already left the library by the time anyone could notice.
+    the ``source_docs`` indices, and ``document_ids[i]``, which the answer's
+    ``provenance`` cites — so a silent drop renumbers the caller's collection without
+    telling them, and the wrong document has already left the library by the time anyone
+    could notice.
 
     :func:`read_documents` drops blank *files*, which is a different thing: it drops them
     before the list ever reaches the caller, where no index can shift yet. Here the list is
@@ -193,9 +196,10 @@ def _check_documents(documents: Any) -> list[str]:
         raise ValueError(
             f"`documents` item {blank} is blank. Every entry must be a document — the "
             "indices are positional, so dropping it would silently renumber the rest: "
-            'relevant_context[i], the source_docs indices and the "document" number cited '
-            "in the answer all refer to documents[i]. Drop the blanks yourself, or build "
-            "the list with r3con.read_documents(...), which skips empty files."
+            "relevant_context[i], the source_docs indices and document_ids[i], which the "
+            "answer's provenance cites, all refer to documents[i]. Drop the blanks "
+            "yourself, or build the list with r3con.read_documents(...), which skips "
+            "empty files."
         )
     if not docs:
         raise ValueError("`documents` is empty — there is nothing to read.")
@@ -256,7 +260,8 @@ def run(
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the relevant context (``.relevant_context``), the
+        ``str()`` of the result), the ids of the documents it used (``.provenance``,
+        from ``.document_ids``), the relevant context (``.relevant_context``), the
         structured parse (``.structured_context``), the schema proposed for this question
         (``.schema_code``), and where the artifacts were written (``.run_dir``).
 

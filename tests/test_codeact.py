@@ -155,6 +155,43 @@ def test_a_commit_is_run_whatever_shape_its_code_arrives_in(llm, response, answe
     assert (result.answer, result.terminated_by) == (answer, "final_answer")
 
 
+@pytest.mark.parametrize(
+    ("call", "provenance"),
+    [
+        ("final_answer('a', provenance=['x', 'y'])", ["x", "y"]),
+        ("final_answer('a', ['x'])", ["x"]),
+        ("final_answer(answer='a', provenance=[])", []),
+        ("final_answer('a', provenance=[7, 'x'])", ["7", "x"]),
+        ("final_answer('a', provenance=('x', 'y'))", ["x", "y"]),
+        ("final_answer('a', provenance={r for r in ['x']})", ["x"]),
+        ("final_answer('a', provenance=frozen)", ["x"]),
+        ("final_answer('a')", []),
+        ("final_answer('a', provenance='x')", []),
+        ("final_answer('a', provenance=7)", []),
+    ],
+)
+def test_final_answer_hands_back_the_collection_of_ids_it_is_given(
+    llm, call, provenance
+):
+    variables = {"frozen": frozenset(["x"])}
+    result = solve(llm, f"<code>\n{call}\n</code>", variables=variables)
+    assert (result.answer, result.provenance) == ("a", provenance)
+
+
+@pytest.mark.parametrize(
+    ("call", "shown"),
+    [
+        ("final_answer('a', provenance={'x'})", "provenance received: {'x'}"),
+        ("final_answer('a')", "provenance received: None"),
+    ],
+)
+def test_the_committing_turn_records_the_provenance_as_given(llm, call, shown):
+    result = solve(llm, f"<code>\n{call}\n</code>")
+    assert result.turns[-1].observation == (
+        f"<observation>\nfinal_answer received: a\n{shown}\n</observation>"
+    )
+
+
 def test_what_a_turn_prints_is_fed_back_as_the_next_observation(llm):
     parse = {"x": "spotted-value"}
     result = solve(llm, prints("parse['x']"), final("done"), variables={"parse": parse})
@@ -224,6 +261,7 @@ def test_running_out_of_turns_asks_once_for_an_answer_in_prose(
 ):
     result = solve(llm, turn, turn, synthesis, model="openai/gpt-4o", max_turns=2)
     assert (result.answer, result.terminated_by) == (answer, "max_turns")
+    assert result.provenance == []
     assert len(result.turns) == 2
     synthesis_request = llm.requests[2]
     assert "out of code turns" in synthesis_request["messages"][-1]["content"]
