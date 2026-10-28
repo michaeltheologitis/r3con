@@ -42,6 +42,20 @@ def test_the_first_round_prompt_renders_as_the_old_relevance_prompts_round_one()
     assert first_round == old
 
 
+@pytest.mark.parametrize(
+    "context",
+    [
+        CONTEXT,
+        {**CONTEXT, "relevance": "### Document 1\nA note.", "read_in_parts": False},
+        {**CONTEXT, "relevance": "### Document 1.1\nA part.", "read_in_parts": True},
+    ],
+    ids=["no-summaries", "summaries", "a-part"],
+)
+def test_the_coding_prompt_renders_as_the_old_reasoning_v2(context):
+    coding = load_prompt("reasoning/coding", version="v1", **context)
+    assert coding == load_prompt("reasoning", version="v2", **context)
+
+
 def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):
     monkeypatch.setenv("R3CON_PROMPTS_DIR", str(tmp_path))
     assert prompt_search_path() == [tmp_path, settings.PROMPTS_DIR]

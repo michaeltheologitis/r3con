@@ -1,39 +1,46 @@
 """Stage 3 — reasoning over the structured parse.
 
-:func:`reason` runs the multi-turn CodeAct loop: the merged parse is bound as the Python
-variable ``parse`` in a sandboxed interpreter, the ``reasoning`` prompt is rendered with
-the schema and a view of the records, and the agent writes and runs code until it commits
-with ``final_answer(x)``.
+:func:`reason` answers on one of two paths, the run config's ``reasoning``:
 
-It reasons over the parse *together with* the relevant context from stage 1 —
+- **direct**: one completion. The ``reasoning/direct`` prompt carries the summaries and
+  the whole parse, the user message is the task, and the reply is the answer.
+- **coding**: the multi-turn CodeAct loop. The merged parse is bound as the Python
+  variable ``parse`` in a sandboxed interpreter, the ``reasoning/coding`` prompt is
+  rendered with a view of the records, and the agent writes and runs code until it
+  commits with ``final_answer(x)``.
+
+A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
+it over the line or the provider refuses it as too long, takes the coding path instead,
+starting from one sample record per field.
+
+Either way it reasons over the parse *together with* the relevant context from stage 1 —
 the two are co-equal views, and the parse alone is lossy. It never sees the source
 documents.
 
 The loop itself lives in :mod:`r3con.runtime.codeact`; this module holds only the
-reasoning-specific glue — prompt rendering, the ``parse`` binding, and the sample-record
-helper that feeds the prompt when the parse is too large to embed whole.
+reasoning-specific glue — prompt rendering, the choice of path, the ``parse`` binding,
+and the sample-record helper that feeds the coding prompt when the parse is too large to
+embed whole.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
 from pydantic import BaseModel
 
 from r3con import settings
+from r3con.config import ReasoningPath
 from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.codeact import (
-    DEFAULT_EXEC_TIMEOUT_S,
-    CodeActResult,
-    run_codeact,
-)
-from r3con.runtime.llm import count_tokens
+from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S, CodeActTurn, run_codeact
+from r3con.runtime.llm import count_tokens, litellm_chat_completion
 from r3con.splitting import Splits
 from r3con.stages.relevance import Snippet, render_relevance
 
@@ -126,18 +133,41 @@ def _sample_view(parse_dict: Any) -> str:
     return note + "\n\n" + _sample_record_per_field(parse_dict)
 
 
+@dataclass
+class ReasoningResult:
+    """What reasoning produced.
+
+    - ``answer``: the answer text.
+    - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
+    - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
+      loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
+      path, no turns and ``"reply"``.
+    - ``fallback``: why a direct run took the coding path, else ``None``:
+      ``{"cause": "estimate", "estimate": tokens, "line": tokens}`` or
+      ``{"cause": "refusal", "error": message}``.
+    """
+
+    answer: str
+    path: ReasoningPath
+    turns: Sequence[CodeActTurn] = ()
+    terminated_by: str = "reply"
+    fallback: dict[str, Any] | None = None
+
+
 def _system_prompt(
     *,
+    stage: str,
+    version: str,
     task: str,
     schema_code: str,
     relevance_snippets: Sequence[Snippet] | None,
-    prompt_version: str,
     parse_json: str,
     samples_block: str,
     parse_block: str,
 ) -> str:
-    """The reasoning system prompt, from the variables a reasoning prompt version may
-    use, a user's overlay included; Jinja renders only the ones its template references:
+    """The system prompt of ``stage`` (``reasoning/direct`` or ``reasoning/coding``) at
+    ``version``, from the variables a reasoning prompt version may use, a user's overlay
+    included; Jinja renders only the ones its template references:
 
     - ``task``, ``schema_code``, ``relevance``: the question, the schema source, the
       summaries;
@@ -147,8 +177,8 @@ def _system_prompt(
     - ``read_in_parts``: whether a summary is one part of a document read in parts.
     """
     return load_prompt(
-        "reasoning",
-        version=prompt_version,
+        stage,
+        version=version,
         task=task,
         schema_code=schema_code,
         relevance=render_relevance(relevance_snippets),
@@ -159,62 +189,30 @@ def _system_prompt(
     )
 
 
-def reason(
+def _reason_with_code(
     *,
-    task: str,
-    schema_code: str,
-    parsed: BaseModel | dict[str, Any],
+    render: Callable[..., str],
+    parse_dict: Any,
+    parse_json: str,
+    user_message: str,
     model: str,
-    prompt_version: str,
-    relevance_snippets: Sequence[Snippet] | None = None,
-    source_docs: dict[str, list[int]] | None = None,
-    max_turns: int | None = None,
-    timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
-    additional_authorized_imports: list[str] | None = None,
-    run: StageRun | None = None,
-    splits: Splits | None = None,
-    **llm_kwargs: Any,
-) -> CodeActResult:
-    """Answer ``task`` over ``parsed`` with the multi-turn CodeAct loop.
+    splits: Splits,
+    whole: bool = True,
+    **codeact_kwargs: Any,
+) -> ReasoningResult:
+    """The coding path: the CodeAct loop over the parse, under the system prompt
+    ``render(parse_block=...)``.
 
-    The LLM never sees the long source text — only the task, the schema
-    source (so it knows the parse's shape), a view of the parse itself, and the
-    **relevant context** from stage 1.
-    The full parse is bound as the Python variable ``parse`` in the sandbox; the
-    agent inspects it via ``print(...)`` across turns and commits via
-    ``final_answer(x)``.
-
-    The view of the parse is the whole parse when its first turn fits, else one sample
-    record per top-level field: when the parse is over
-    ``settings.REASONING_PARSE_MAX_TOKS``, when ``splits`` (``None`` builds one for
-    ``model``) estimates the first turn with it over the line, or when the provider
-    refuses that turn as too long, which sends it once more with the samples.
-
-    The system prompt carries everything immutable across the loop's turns; the
-    user message is the bare task. Loop mechanics live in
-    :func:`r3con.runtime.codeact.run_codeact`.
+    With ``whole``, the view of the parse is the whole parse when its first turn fits,
+    else one sample record per top-level field: when the parse is over
+    ``settings.REASONING_PARSE_MAX_TOKS``, when ``splits`` estimates the first turn with
+    it over the line, or when the provider refuses that turn as too long, which sends it
+    once more with the samples. Without ``whole``, it is the samples from the start.
     """
-    parse_dict = (
-        parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
+    parse_tokens = count_tokens(parse_json) if whole else None
+    whole = parse_tokens is not None and (
+        parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
     )
-    parse_dict = tag_source_documents(parse_dict, source_docs)
-    parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
-    splits = splits if splits is not None else Splits([], model=model)
-    render = functools.partial(
-        _system_prompt,
-        task=task,
-        schema_code=schema_code,
-        relevance_snippets=relevance_snippets,
-        prompt_version=prompt_version,
-        parse_json=parse_json,
-        samples_block=_sample_record_per_field(parse_dict),
-    )
-    user_message = f"Input:\n<task>\n{task}\n</task>"
-
-    # The whole parse, unless it is over the flood guard (a parse that runs to
-    # thousands of records), or its first turn is over the line.
-    parse_tokens = count_tokens(parse_json)
-    whole = parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
     system_prompt = render(
         parse_block=parse_json if whole else _sample_view(parse_dict)
     )
@@ -244,15 +242,131 @@ def reason(
         whole = False
         return render(parse_block=_sample_view(parse_dict))
 
-    return run_codeact(
+    result = run_codeact(
         system_prompt=system_prompt,
         user_message=user_message,
         model=model,
         variables={"parse": parse_dict},
+        on_first_turn_too_long=with_samples,
+        **codeact_kwargs,
+    )
+    return ReasoningResult(
+        answer=result.answer,
+        path="coding",
+        turns=result.turns,
+        terminated_by=result.terminated_by,
+    )
+
+
+def _reason_directly(
+    *,
+    render: Callable[..., str],
+    parse_json: str,
+    user_message: str,
+    model: str,
+    splits: Splits,
+    run: StageRun | None,
+    **llm_kwargs: Any,
+) -> ReasoningResult | dict[str, Any]:
+    """The direct path's answer, or, when its prompt does not fit, why not: the
+    ``fallback`` of a :class:`ReasoningResult`."""
+    system_prompt = render(parse_block=parse_json)
+    if estimate := splits.over_line(system_prompt, user_message):
+        _log.info(
+            "reasoning's direct prompt would take about %s tokens, over the %s-token "
+            "line; reasoning with code instead",
+            f"{estimate:,}",
+            f"{splits.line:,}",
+        )
+        return {"cause": "estimate", "estimate": estimate, "line": splits.line}
+    try:
+        reply = litellm_chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_message,
+            model=model,
+            run=run,
+            kind="direct",
+            reroll_empty=True,
+            **llm_kwargs,
+        )
+    except ContextWindowExceededError as refusal:
+        _log.warning(
+            "reasoning's direct prompt was refused as too long; reasoning with code "
+            "instead"
+        )
+        return {"cause": "refusal", "error": str(refusal)}
+    return ReasoningResult(answer=cast(str, reply).strip(), path="direct")
+
+
+def reason(
+    *,
+    task: str,
+    schema_code: str,
+    parsed: BaseModel | dict[str, Any],
+    model: str,
+    prompts: Mapping[str, str],
+    path: ReasoningPath,
+    relevance_snippets: Sequence[Snippet] | None = None,
+    source_docs: dict[str, list[int]] | None = None,
+    max_turns: int | None = None,
+    timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
+    additional_authorized_imports: list[str] | None = None,
+    run: StageRun | None = None,
+    splits: Splits | None = None,
+    **llm_kwargs: Any,
+) -> ReasoningResult:
+    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``.
+
+    ``prompts`` pins the versions of ``reasoning/direct`` and ``reasoning/coding`` (a
+    run config's ``prompts``), and ``path`` is a run config's ``reasoning``:
+    ``"direct"`` or ``"coding"``. ``max_turns``, ``timeout_s`` and
+    ``additional_authorized_imports`` apply only to the coding path. ``splits``
+    (``None`` builds one for ``model``) says whether a prompt fits the model's window.
+    """
+    parse_dict = (
+        parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
+    )
+    parse_dict = tag_source_documents(parse_dict, source_docs)
+    parse_json = json.dumps(parse_dict, indent=2, ensure_ascii=False, default=repr)
+    splits = splits if splits is not None else Splits([], model=model)
+    render = functools.partial(
+        _system_prompt,
+        task=task,
+        schema_code=schema_code,
+        relevance_snippets=relevance_snippets,
+        parse_json=parse_json,
+        samples_block=_sample_record_per_field(parse_dict),
+    )
+    user_message = f"Input:\n<task>\n{task}\n</task>"
+    with_code = functools.partial(
+        _reason_with_code,
+        render=functools.partial(
+            render, stage="reasoning/coding", version=prompts["reasoning/coding"]
+        ),
+        parse_dict=parse_dict,
+        parse_json=parse_json,
+        user_message=user_message,
+        model=model,
+        splits=splits,
         max_turns=max_turns,
         timeout_s=timeout_s,
         additional_authorized_imports=additional_authorized_imports,
         run=run,
-        on_first_turn_too_long=with_samples,
         **llm_kwargs,
     )
+    if path == "coding":
+        return with_code()
+    outcome = _reason_directly(
+        render=functools.partial(
+            render, stage="reasoning/direct", version=prompts["reasoning/direct"]
+        ),
+        parse_json=parse_json,
+        user_message=user_message,
+        model=model,
+        splits=splits,
+        run=run,
+        **llm_kwargs,
+    )
+    if isinstance(outcome, ReasoningResult):
+        return outcome
+    return replace(with_code(whole=False), fallback=outcome)

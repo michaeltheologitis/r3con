@@ -204,9 +204,14 @@ def test_a_supplied_completion_is_called_once_per_request_without_retry_settings
     assert CALLER_RETRY_SETTINGS.isdisjoint(llm.requests[0])
 
 
-def test_an_empty_structured_reply_is_rerolled_with_the_same_request(llm):
-    out = ask(llm.replies("", "", '{"x": 7}'), schema=Number)
-    assert out == Number(x=7)
+@pytest.mark.parametrize(
+    ("asking", "answer"),
+    [({"schema": Number}, Number(x=7)), ({"reroll_empty": True}, '{"x": 7}')],
+    ids=["structured", "plain"],
+)
+def test_an_empty_reply_is_rerolled_with_the_same_request(llm, asking, answer):
+    out = ask(llm.replies("", "\n", '{"x": 7}'), **asking)
+    assert out == answer
     first, *rerolls = llm.requests
     assert len(rerolls) == 2
     assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
@@ -218,10 +223,13 @@ def test_a_seed_the_caller_sends_is_resent_unchanged_on_a_reroll(llm):
     assert [request["seed"] for request in llm.requests] == [5, 5, 5]
 
 
-def test_empty_structured_replies_raise_once_the_rerolls_run_out(llm):
+@pytest.mark.parametrize(
+    "asking", [{"schema": Number}, {"reroll_empty": True}], ids=["structured", "plain"]
+)
+def test_empty_replies_raise_once_the_rerolls_run_out(llm, asking):
     llm.replies("", "", "", "")
     with pytest.raises(ValueError, match=r"empty text after 4 attempt\(s\)\. For a"):
-        ask(llm, schema=Number, max_empty_retries=3)
+        ask(llm, max_empty_retries=3, **asking)
     assert len(llm.requests) == 4
 
 

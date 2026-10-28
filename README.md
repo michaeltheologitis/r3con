@@ -93,8 +93,8 @@ The examples use five short memos arranged so that no single document contains t
 answer:
 
 - [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
-- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, generation
-  parameters, run configuration, custom connections, and artifact paths.
+- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
+  path, generation parameters, run configuration, custom connections, and artifact paths.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
 
 ## Output
@@ -118,6 +118,13 @@ relevance snippet produced for each document at every round, the generated schem
 records, model calls, and the final reasoning transcript. Each call in `calls.json` records
 its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
 each stage's `result.json` totals them.
+
+`reasoning/result.json` records the answer and the `path` that produced it: `direct`, one
+call over the relevance snippets and the parsed records, or `coding`, an agent that reads
+the records with code. A run takes the direct path unless its config, `--reasoning` or
+`reasoning=` says `coding`. A direct run whose prompt doesn't fit the model's window takes
+the coding path instead, and `fallback` says why: `cause` `estimate` (with `estimate` and
+`line`, in tokens) or `refusal` (with `error`). Otherwise `fallback` is `null`.
 
 Each document gets a random id of 6 hex characters for the run, and `ids.json` maps each
 id to the document's 0-based index in `documents` (also `result.document_ids`). In
@@ -148,7 +155,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │       ├── result.json          <- parsed records, each one's document index and id
 │       └── calls.json
 └── reasoning/
-    ├── result.json
+    ├── result.json              <- the answer, its path, and why it fell back
     ├── calls.json
     └── transcript.yaml
 ```

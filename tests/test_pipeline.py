@@ -11,7 +11,13 @@ import yaml
 from pydantic import ValidationError
 
 from r3con import read_documents, settings
-from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
+from r3con.config import (
+    PROMPT_STAGES,
+    REASONING_PATHS,
+    RunConfig,
+    load_config,
+    normalize_model_name,
+)
 from r3con.pipeline import run_pipeline
 from r3con.prompts import load_prompt
 from r3con.runs import TaskLogger
@@ -24,6 +30,7 @@ MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 DOCS = ["Halloran memo", "Merrow memo"]
 LATER_STAGES = ("schema", "parsing", "reasoning")
 NEVER_COMMITS = "<code>\nprint(1)\n</code>"
+COMMITS_THE_PARSE = "<code>\nfinal_answer(parse)\n</code>"
 STAGE_FOLDERS = {
     "relevance": "relevance",
     "schema": "structuring/schema",
@@ -36,7 +43,12 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": dict.fromkeys(PROMPT_STAGES, "v1"),
 }
-V2 = {**CONFIG["prompts"], "reasoning": "v2"}
+STAMPED = {
+    "rows": [
+        {"document": 1, "who": "Halloran memo"},
+        {"document": 2, "who": "Merrow memo"},
+    ]
+}
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
@@ -140,13 +152,14 @@ def whole_document_row(request) -> str:
     return json.dumps({"rows": [{"who": request["messages"][1]["content"]}]})
 
 
-def memos_run(llm, documents, model, tmp_path):
-    """A run of the default config over ``documents`` on ``model``, ``llm`` answering."""
+def memos_run(llm, documents, model, tmp_path, **overrides):
+    """A run of the default config over ``documents`` on ``model`` with ``overrides``,
+    ``llm`` answering."""
     logger = TaskLogger("run", root=tmp_path)
     result = run_pipeline(
         task="Who?",
         documents=documents,
-        config=load_config("default", model=model),
+        config=load_config("default", model=model, **overrides),
         task_logger=logger,
         completion=llm,
     )
@@ -189,6 +202,19 @@ def citing_every_shown_id(shown_ids):
 
 def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
+
+
+def system_message(stage: str) -> dict:
+    """The system message of ``stage``'s v1 prompt over DOCS' notes and their whole
+    parse, stamped."""
+    content = load_prompt(
+        stage,
+        version="v1",
+        relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
+        read_in_parts=False,
+        parse_block=json.dumps(STAMPED, indent=2, ensure_ascii=False),
+    )
+    return {"role": "system", "content": content}
 
 
 def test_a_run_answers_and_leaves_every_stages_artifacts(
@@ -279,33 +305,75 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
             assert "Round 1 notes" not in prompt
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_reasoning_is_sent_the_parse_stamped_with_document_numbers_and_no_ids(
-    answering_llm, version
+def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
+    answering_llm, tmp_path
 ):
-    llm = answering_llm.answers(reasoning="<code>\nfinal_answer(parse)\n</code>")
-    result = answer(llm, prompts={**CONFIG["prompts"], "reasoning": version})
-    stamped = {
-        "rows": [
-            {"document": 1, "who": "Halloran memo"},
-            {"document": 2, "who": "Merrow memo"},
-        ]
-    }
+    llm = answering_llm.answers(reasoning="Halloran and Merrow.")
+    logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
     [request] = llm.requests_for("reasoning")
     assert request["messages"] == [
-        {
-            "role": "system",
-            "content": load_prompt(
-                "reasoning",
-                version=version,
-                relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
-                read_in_parts=False,
-                parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
-            ),
-        },
+        system_message("reasoning/direct"),
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
-    assert ast.literal_eval(result.answer) == stamped
+    assert result.answer == "Halloran and Merrow."
+    reasoning = read_json(logger, "reasoning/result")
+    assert (reasoning["answer"], reasoning["path"], reasoning["fallback"]) == (
+        "Halloran and Merrow.",
+        "direct",
+        None,
+    )
+    assert reasoning["totals"]["n_steps"] == 1
+    transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
+    roles = [message["role"] for message in transcript["messages"]]
+    assert roles == ["system", "user", "assistant"]
+
+
+def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
+    answering_llm, tmp_path
+):
+    llm = answering_llm.answers(reasoning=COMMITS_THE_PARSE)
+    logger = TaskLogger("run", root=tmp_path)
+    result = answer(llm, logger, reasoning="coding")
+    [request] = llm.requests_for("reasoning")
+    assert request["messages"] == [
+        system_message("reasoning/coding"),
+        {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
+    ]
+    assert ast.literal_eval(result.answer) == STAMPED
+    reasoning = read_json(logger, "reasoning/result")
+    assert (reasoning["path"], reasoning["fallback"]) == ("coding", None)
+    assert (reasoning["terminated_by"], reasoning["n_turns"]) == ("final_answer", 1)
+    assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
+
+
+def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_says_why(
+    answering_llm, tmp_path, refusal
+):
+    refused = refusal()
+    llm = answering_llm.answers(reasoning=[refused, COMMITS_THE_PARSE])
+    logger = TaskLogger("run", root=tmp_path)
+    result = answer(llm, logger)
+    assert ast.literal_eval(result.answer) == STAMPED
+    direct, coding = (r["messages"][0] for r in llm.requests_for("reasoning"))
+    assert direct == system_message("reasoning/direct")
+    assert SAMPLE in coding["content"] and "final_answer(" in coding["content"]
+    reasoning = read_json(logger, "reasoning/result")
+    assert reasoning["path"] == "coding"
+    assert reasoning["fallback"] == {"cause": "refusal", "error": str(refused)}
+    assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
+
+
+def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
+    answering_llm, tmp_path, refusal
+):
+    llm = answering_llm.answers(reasoning=[refusal(), NEVER_COMMITS, provider_down()])
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(litellm.APIConnectionError):
+        answer(llm, logger)
+    assert [call["kind"] for call in read_json(logger, "reasoning/calls")] == ["turn-1"]
+    assert (logger.dir / "reasoning" / "error.txt").is_file()
+    transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
+    assert transcript["messages"][-1]["content"] == NEVER_COMMITS
 
 
 def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
@@ -343,7 +411,7 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
 
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(parsing=rows).refuses_over(16_000)
-    result = answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
+    result = answer(llm, logger, documents=documents, model=QWEN)
     ids = result.document_ids
     assert result.source_docs == {"rows": [0, 2, 3, 3, 3, 3, 4]}
     assert result.source_ids == {"rows": [ids[0], ids[2], *[ids[3]] * 4, ids[4]]}
@@ -375,22 +443,28 @@ def test_no_request_carries_a_seed_unless_params_sets_one(answering_llm):
     assert [request["seed"] for request in answering_llm.requests] == [7] * 8
 
 
-def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tmp_path):
-    versions = dict(zip(PROMPT_STAGES, ["vA", "vB", "vC", "vD", "vE"], strict=True))
+@pytest.mark.parametrize("reasoning", REASONING_PATHS)
+def test_each_stage_renders_the_prompt_version_its_config_pins(
+    answering_llm, tmp_path, reasoning
+):
+    versions = dict(
+        zip(PROMPT_STAGES, ["vA", "vB", "vC", "vD", "vE", "vF"], strict=True)
+    )
     for stage, version in versions.items():
         prompt = yaml.safe_load((settings.PROMPTS_DIR / stage / "v1.yaml").read_text())
         prompt["instructions"] += f"\nMARKER-{version}"
         path = tmp_path / "prompts" / stage / f"{version}.yaml"
         path.parent.mkdir(parents=True)
         path.write_text(yaml.safe_dump(prompt))
-    answer(answering_llm, prompts=versions)
+    answer(answering_llm, prompts=versions, reasoning=reasoning)
     relevance = system_prompts(answering_llm, "relevance")
+    later = ["vC", "vD", versions[f"reasoning/{reasoning}"]]
     sent = {
         "vA": relevance[: len(DOCS)],
         "vB": relevance[len(DOCS) :],
         **{
             version: system_prompts(answering_llm, stage)
-            for version, stage in zip(["vC", "vD", "vE"], LATER_STAGES, strict=True)
+            for version, stage in zip(later, LATER_STAGES, strict=True)
         },
     }
     for version, prompts in sent.items():
@@ -402,8 +476,8 @@ def test_each_stage_renders_the_prompt_version_its_config_pins(answering_llm, tm
 @pytest.mark.parametrize(
     ("prompts", "error"),
     [
-        ({**CONFIG["prompts"], "reasoning": "v9"}, FileNotFoundError),
-        ({"reasoning": "v1"}, ValueError),
+        ({**CONFIG["prompts"], "reasoning/coding": "v9"}, FileNotFoundError),
+        ({"reasoning/direct": "v1"}, ValueError),
     ],
     ids=["missing-file", "missing-stage"],
 )
@@ -489,7 +563,7 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
     monkeypatch.setattr(settings, "REASONING_MAX_TURNS", setting)
     logger = TaskLogger("run", root=tmp_path)
     answering_llm.answers(reasoning=NEVER_COMMITS)
-    answer(answering_llm, logger, max_reasoning_turns=explicit)
+    answer(answering_llm, logger, max_reasoning_turns=explicit, reasoning="coding")
     assert len(answering_llm.requests_for("reasoning")) == 3
     assert read_json(logger, "reasoning/result")["n_turns"] == 2
     assert read_json(logger, "manifest")["settings"]["reasoning_max_turns"] == 2
@@ -533,7 +607,7 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
     registry = grown_registry(40_000)
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.refuses_over(16_000)
-    result = answer(llm, logger, documents=memos_with(registry), model=QWEN, prompts=V2)
+    result = answer(llm, logger, documents=memos_with(registry), model=QWEN)
     assert len(result.relevant_context) == 5
     assert summary_headings(llm) == REGISTRY_IN_4_PARTS
     assert READ_IN_PARTS in system_prompts(llm, "reasoning")[0]
@@ -597,9 +671,7 @@ def test_a_split_documents_provenance_joins_its_parts_without_repeats(
 ):
     llm = answering_llm.answers(relevance=citing_every_shown_id(shown_ids))
     documents = memos_with(grown_registry(40_000))
-    result = answer(
-        llm.refuses_over(16_000), documents=documents, model=QWEN, prompts=V2
-    )
+    result = answer(llm.refuses_over(16_000), documents=documents, model=QWEN)
     ids = result.document_ids
     registry_parts = [f"{ids[3]}.{k}" for k in (4, 3, 2, 1)]
     assert result.provenance == [
@@ -616,31 +688,36 @@ def test_a_document_over_the_line_is_split_before_sending(
 ):
     logger = TaskLogger("run", root=tmp_path)
     documents = memos_with(grown_registry(40_000))
-    answer(answering_llm, logger, documents=documents, model=window(5_000), prompts=V2)
+    answer(answering_llm, logger, documents=documents, model=window(5_000))
     assert summary_headings(answering_llm) == REGISTRY_IN_4_PARTS
     assert max(tokens(request) for request in answering_llm.requests) <= 4_250
     events = read_json(logger, "splits")["documents"]["3"]["events"]
     assert {event["cause"] for event in events} == {"estimate"}
 
 
-def test_an_unsplit_run_sends_what_a_v1_reasoning_run_sends(
+def test_the_reasoning_path_changes_only_what_reasoning_sends(
     answering_llm, window, tmp_path, monkeypatch
 ):
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
     documents, model = read_documents(MEMOS), window(1_000_000)
-    sent = {}
-    for version in ("v1", "v2"):
+    sent = []
+    for path in REASONING_PATHS:
         counting_ids(monkeypatch)
         answering_llm.requests.clear()
-        logger = TaskLogger(version, root=tmp_path)
-        prompts = {**CONFIG["prompts"], "reasoning": version}
-        answer(answering_llm, logger, documents=documents, model=model, prompts=prompts)
-        sent[version] = [
-            (r["messages"], r.get("response_format")) for r in answering_llm.requests
-        ]
+        logger = TaskLogger(path, root=tmp_path)
+        answer(answering_llm, logger, documents=documents, model=model, reasoning=path)
+        sent.append(
+            [
+                (r["messages"], r.get("response_format"))
+                for stage in ("relevance", "schema", "parsing")
+                for r in answering_llm.requests_for(stage)
+            ]
+        )
+        assert len(answering_llm.requests_for("reasoning")) == 1
         assert not (logger.dir / "splits.json").exists()
-    assert len(sent["v2"]) == 17
-    assert sent["v2"] == sent["v1"]
+    first, *others = sent
+    assert len(first) == 16
+    assert all(other == first for other in others)
 
 
 @pytest.mark.parametrize("measured", [False, True], ids=["by-refusal", "by-estimate"])
@@ -653,9 +730,7 @@ def test_a_later_stage_splits_further_without_renumbering(
         llm.refuses_over(25_000)
     logger = TaskLogger("run", root=tmp_path)
     model = window(6_000) if measured else QWEN
-    result = answer(
-        llm, logger, documents=memos_with(registry), model=model, prompts=V2
-    )
+    result = answer(llm, logger, documents=memos_with(registry), model=model)
     record = read_json(logger, "splits")["documents"]["3"]
     assert record["parts"] == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}
     assert summary_headings(llm) == ["1", "2", "3", "4.1", "4.2", "5"]
@@ -686,7 +761,7 @@ def test_splitting_stops_at_the_relevant_contexts_line(
     logger = TaskLogger("run", root=tmp_path)
     model = window(6_000) if measured else QWEN
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=reports, model=model, prompts=V2)
+        answer(llm, logger, documents=reports, model=model)
     note, folder = stop.value.__notes__
     assert note.startswith(
         "r3con: reading documents[0] (Document 1) in more parts cannot help in "
@@ -712,7 +787,7 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
     llm = answering_llm.answers(relevance=(ROUTINE * 41)[:3_000]).refuses_over(13_500)
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(litellm.ContextWindowExceededError) as stop:
-        answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
+        answer(llm, logger, documents=documents, model=QWEN)
     assert "in more parts cannot help in parse-d0" in stop.value.__notes__[0]
     written = {str(p.relative_to(logger.dir)) for p in logger.dir.rglob("*.*")}
     assert {
@@ -727,17 +802,25 @@ def test_a_stopped_run_keeps_its_calls_and_splits(answering_llm, tmp_path):
     assert [(e["call"], e["action"]) for e in events] == [("parse-d0", "stop")]
 
 
-def test_reasoning_shows_samples_when_the_whole_parse_would_not_fit(
+def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     answering_llm, quiet_sites, window, tmp_path
 ):
     documents = read_documents(MEMOS) + quiet_sites(55)
     llm = answering_llm.answers(relevance=memo_note, parsing=whole_document_row)
-    _, result = memos_run(llm, documents, window(8_192), tmp_path)
+    logger, result = memos_run(llm, documents, window(8_192), tmp_path)
     assert result.answer == "; ".join(documents)
     assert len(llm.requests) == 182
     assert max(tokens(request) for request in llm.requests) <= LINE_8192
     [turn] = first_turns(llm)
     assert SAMPLE in turn["messages"][0]["content"]
+    reasoning = read_json(logger, "reasoning/result")
+    assert reasoning["path"] == "coding"
+    assert reasoning["fallback"] == {
+        "cause": "estimate",
+        "estimate": 9_182,
+        "line": LINE_8192,
+    }
+    assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
 
 
 def test_a_refused_first_turn_goes_again_once_with_samples(
@@ -747,7 +830,7 @@ def test_a_refused_first_turn_goes_again_once_with_samples(
     llm = answering_llm.answers(
         relevance=memo_note, parsing=whole_document_row
     ).refuses_over(tokens=8_192)
-    _, result = memos_run(llm, documents, QWEN, tmp_path)
+    _, result = memos_run(llm, documents, QWEN, tmp_path, reasoning="coding")
     assert result.answer == "; ".join(documents)
     assert len(llm.requests) == 183
     whole, samples = first_turns(llm)

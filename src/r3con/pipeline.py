@@ -12,7 +12,9 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document, in
    parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
-   the relevant context, in a multi-turn sandboxed Python loop.
+   the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
+   sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
+   fit the model's window).
 
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
@@ -68,7 +70,7 @@ class Answer:
     bare string. ``str(result)`` is the answer text, so printing one still does the
     obvious thing.
 
-    - ``answer`` — the committed answer text.
+    - ``answer`` — the answer text.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
@@ -180,8 +182,8 @@ def run_pipeline(
     the structured parse, and the schema that was proposed for this question.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
-    output — model, relevance rounds, the prompt version of each stage, and any
-    generation params — so nothing output-affecting is threaded ad-hoc.
+    output — model, relevance rounds, the reasoning path, the prompt version of each
+    stage, and any generation params — so nothing output-affecting is threaded ad-hoc.
 
     ``api_base``, ``api_key`` and ``completion`` are **transport**: routing, auth, and how
     the request is actually made. None of them changes what a correct answer is, so none
@@ -329,7 +331,8 @@ def run_pipeline(
             source_docs=extraction.source_docs,
             relevance_snippets=relevance_snippets,
             model=model,
-            prompt_version=config.prompts["reasoning"],
+            prompts=config.prompts,
+            path=config.reasoning,
             max_turns=caps["reasoning_max_turns"],
             timeout_s=reasoning_timeout_s,
             run=record.run,
@@ -337,13 +340,16 @@ def run_pipeline(
             **llm_kwargs,
         )
         _log.info(
-            "reasoning done (%s, %d turn(s)): %s",
+            "reasoning done on the %s path (%s, %d turn(s)): %s",
+            result.path,
             result.terminated_by,
             len(result.turns),
             _preview(result.answer),
         )
         record.result = {
             "answer": result.answer,
+            "path": result.path,
+            "fallback": result.fallback,
             "terminated_by": result.terminated_by,
             "n_turns": len(result.turns),
             "turns": [
@@ -361,7 +367,7 @@ def run_pipeline(
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance_snippets],
-        # the parse exactly as the agent saw it: plain data, each record stamped with the
+        # the parse reasoning was given: plain data, each record stamped with the
         # 1-based document it came from
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,

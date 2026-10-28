@@ -61,13 +61,14 @@ LLM_RETRY_MAX_WAIT_SECONDS = 60
 # Seconds from a request's first attempt after which no resend starts.
 LLM_RETRY_MAX_TOTAL_SECONDS = 300
 
-# Re-rolls of an empty structured-output response (a 200 with no JSON, e.g. a
-# reasoning model that spent its budget on thinking).
+# Re-rolls of an empty structured-output response or direct reasoning answer (a 200 with
+# no content, e.g. a reasoning model that spent its budget on thinking).
 LLM_EMPTY_CONTENT_RETRIES = 3
 
-# Show the WHOLE parse in the reasoning system prompt below this many cl100k_base
-# tokens; above it (a record flood — e.g. a 1735-row catalog) fall back to one sample
-# per field + a prominent note, so the prompt can't blow up.
+# On the coding path, show the WHOLE parse in the reasoning system prompt below this many
+# cl100k_base tokens; above it (a record flood — e.g. a 1735-row catalog) fall back to
+# one sample per field + a prominent note, so the prompt can't blow up. The direct path
+# always shows the whole parse.
 REASONING_PARSE_MAX_TOKS = 16000
 
 # The share of the model's input window kept free when r3con estimates whether a

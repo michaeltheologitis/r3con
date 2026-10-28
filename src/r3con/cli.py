@@ -16,7 +16,7 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
-from r3con.config import available_configs, load_config
+from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.pipeline import run_pipeline
 from r3con.r3con import read_documents
@@ -54,7 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         choices=available_configs() or None,
         default="default",
-        help="Run config: model, relevance rounds, prompt versions, generation params.",
+        help="Run config: model, relevance rounds, reasoning path, prompt versions, "
+        "generation params.",
     )
     run_cmd.add_argument(
         "--model",
@@ -68,6 +69,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Override how many rounds of relevance surfacing to run "
         "(1 = each document read alone; 2+ = re-read in light of the others).",
+    )
+    run_cmd.add_argument(
+        "--reasoning",
+        choices=REASONING_PATHS,
+        default=None,
+        help="Override how reasoning answers (direct = one call over the summaries and "
+        "the whole parse; coding = an agent that reads the parse with code, which a "
+        "direct run also uses when its prompt does not fit the model's window).",
     )
     # --- transport (not part of the run identity) ---
     run_cmd.add_argument(
@@ -118,6 +127,7 @@ def _run(args: argparse.Namespace) -> int:
             args.config,
             model=args.model,
             relevance_rounds=args.relevance_rounds,
+            reasoning=args.reasoning,
         )
         if args.doc_workers is not None:
             check_cap("doc_workers", args.doc_workers, name="--doc-workers")

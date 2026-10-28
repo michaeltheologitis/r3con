@@ -303,6 +303,17 @@ def _first_line(request: Request) -> str:
     return request["messages"][1]["content"].splitlines()[0]
 
 
+def _joined_rows(request: Request) -> str:
+    """A reasoning reply that joins the parse's rows: on the coding path, code that
+    joins them; on the direct path, the rows of the parse its prompt shows, joined."""
+    system = request["messages"][0]["content"]
+    if "final_answer(" in system:
+        return ANSWERING_CODE
+    shown = system.split("## The parsed data (`parse`)", 1)[1].split("\n## Rules")[0]
+    rows = json.loads(shown[shown.index("{") : shown.rindex("}") + 1])["rows"]
+    return "; ".join(row["who"] for row in rows)
+
+
 @pytest.fixture
 def llm() -> FakeLLM:
     return FakeLLM()
@@ -311,12 +322,13 @@ def llm() -> FakeLLM:
 @pytest.fixture
 def answering_llm(llm: FakeLLM) -> FakeLLM:
     """``llm``, answering every stage so that any run completes: each document's
-    first line is its note and its one parsed row, and the answer joins the rows."""
+    first line is its note and its one parsed row, and the answer joins the rows, on
+    either reasoning path."""
     return llm.answers(
         relevance=lambda request: f"Notes on {_first_line(request)}.",
         schema=ANSWERING_SCHEMA,
         parsing=lambda request: json.dumps({"rows": [{"who": _first_line(request)}]}),
-        reasoning=ANSWERING_CODE,
+        reasoning=_joined_rows,
     )
 
 
@@ -333,6 +345,12 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
         return model
 
     return register
+
+
+@pytest.fixture
+def refusal() -> Callable[[], litellm.ContextWindowExceededError]:
+    """Makes a new error of the kind litellm raises for a request refused as too long."""
+    return lambda: too_long(4_000, 5_000, "openai/gpt-6-luna")
 
 
 @pytest.fixture

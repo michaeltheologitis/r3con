@@ -18,8 +18,10 @@ Three moves, in order:
    the collection, so it cannot be settled from a document in isolation.
 2. **structuring** — a Pydantic schema is proposed for exactly what this question needs,
    then every document is parsed into instances of it.
-3. **reasoning** — the merged parse is loaded into a sandboxed Python runtime and the
-   agent reasons there, over the structured records and the relevance snippets together.
+3. **reasoning** — one call answers over the structured records and the relevance
+   snippets together; or, when the run asks for it or that prompt does not fit the
+   model's window, the merged parse is loaded into a sandboxed Python runtime and an
+   agent reasons there with code.
 
 The whole collection is never placed in a single prompt: each document is read on its
 own, in parts when it is too long for the model's window, and information crosses
@@ -36,7 +38,7 @@ from r3con.r3con import read_documents, run
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
 from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
-from r3con.stages.reasoning import reason
+from r3con.stages.reasoning import ReasoningResult, reason
 from r3con.stages.relevance import (
     RelevantContext,
     relevance_snippet,
@@ -68,6 +70,7 @@ __all__ = [
     "ParseResult",
     "ProposalAttempt",
     "ProposalResult",
+    "ReasoningResult",
     "RelevantContext",
     "RunConfig",
     "SchemaError",
