@@ -1147,9 +1147,9 @@ p { margin: 0; }
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUpCitations(i, n) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: files.map((f) => ({
+      parsed: files.map((f, i) => ({
         records: f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [],
-        provenance: [],
+        provenance: madeUpCitations(i, n),
       })),
       answer: {
         text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
@@ -1167,27 +1167,37 @@ p { margin: 0; }
     return `recorded run · ${run.model} · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
   }
 
-  // What a node was made from: the answer from the parses it cites; a parse or a round-2 summary
-  // from its own row's previous step plus what it cited; a round-1 summary from its document.
-  function lineage(run, id) {
+  function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') return run.answer.cites.map((d) => `parsed-${d}`);
-    if (kind === 'parsed') return [`r2-${i}`, ...run.parsed[i].provenance.map((d) => `r2-${d}`)];
-    if (kind === 'r2') return [`r1-${i}`, ...run.r2[i].provenance.map((d) => `r1-${d}`)];
-    if (kind === 'r1') return [docId(run.docs[i])];
+    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
+    if (kind === 'r2') return run.r2[i].provenance.map((d) => `r1-${d}`);
     return [];
   }
 
-  function criticalPath(run) {
+  function ownStep(run, id) {
+    const [kind, i] = splitId(id);
+    if (kind === 'parsed') return `r2-${i}`;
+    if (kind === 'r2') return `r1-${i}`;
+    if (kind === 'r1') return docId(run.docs[i]);
+    return null;
+  }
+
+  function answerLineage(run) {
     const nodes = new Set(['answer']);
     const edges = new Set();
     for (const id of nodes) {
-      for (const from of lineage(run, id)) {
+      for (const from of [ownStep(run, id), ...cites(run, id)].filter(Boolean)) {
         nodes.add(from);
         edges.add(`${from}>${id}`);
       }
     }
     return { nodes, edges };
+  }
+
+  // Only settled nodes count: a node still working hasn't cited anything yet.
+  function citedBy(run, id) {
+    return [...state.nodes.values()].filter((n) => !n.el.classList.contains('working') && cites(run, n.id).includes(id)).map((n) => n.id);
   }
 
   // ---------- panel: view ----------
@@ -1509,7 +1519,8 @@ p { margin: 0; }
     layerFor(kind).append(edge.el);
     edge.el.setAttribute('d', edgePath(state.nodes.get(from), state.nodes.get(to)));
     if (how) animateEdge(edge.el, how);
-    refreshHighlight();
+    const id = state.hovered ?? state.selected;
+    edge.el.classList.toggle('hl', id !== null && (id === from || id === to));
     return edge;
   }
 
@@ -1524,7 +1535,7 @@ p { margin: 0; }
   }
 
   function lightPath(run) {
-    const path = criticalPath(run);
+    const path = answerLineage(run);
     panel.classList.add('is-lit');
     for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', path.nodes.has(id));
     for (const e of state.edges.values()) {
@@ -1602,19 +1613,14 @@ p { margin: 0; }
   }
 
   function snippetBody(run, kind, d) {
-    const s = run[kind][d];
-    const own = docId(run.docs[d]);
-    const parts = [textBlock(s.summary)];
-    if (kind === 'r1') {
-      parts.push(row('drew on', refs([own])));
-      const citedBy = range(run.docs.length).filter((i) => run.r2[i].provenance.includes(d) && state.nodes.has(`r2-${i}`) && !state.nodes.get(`r2-${i}`).el.classList.contains('working'));
-      parts.push(row('cited by', refs(citedBy.map((i) => `r2-${i}`))));
-    } else {
-      parts.push(row('read again', refs([own])));
-      parts.push(row('saw', `round 1 summaries of the other ${plural(run.docs.length - 1, 'document')}`));
-      parts.push(row('drew on', refs(s.provenance.map((p) => `r1-${p}`))));
+    const id = `${kind}-${d}`;
+    const parts = [textBlock(run[kind][d].summary), row('read', refs([docId(run.docs[d])]))];
+    if (kind === 'r2') {
+      parts.push(row('shown', `round 1 summaries of the other ${plural(run.docs.length - 1, 'document')}`));
+      parts.push(row('drew on', refs(cites(run, id))));
     }
-    parts.push(callMeta(run, `${kind}-${d}`));
+    parts.push(row('cited by', refs(citedBy(run, id))));
+    parts.push(callMeta(run, id));
     parts.push(openFileButton(run.docs[d], 'open document ›'));
     return parts;
   }
@@ -1635,14 +1641,14 @@ p { margin: 0; }
       ];
     }
     if (kind === 'parsed') {
-      const { records, provenance } = run.parsed[d];
+      const { records } = run.parsed[d];
       return [
         records.length ? recordBlock(records) : textBlock('', 'no records'),
         row('read', refs([docId(run.docs[d])])),
         row('shown', `round 2 summaries of all ${plural(run.docs.length, 'document')}`),
-        row('drew on', refs(provenance.map((c) => `r2-${c}`))),
+        row('drew on', refs(cites(run, id))),
         row('filled from', refs(['schema'])),
-        run.answer.cites.includes(d) && state.nodes.has('answer') ? row('cited by', refs(['answer'])) : null,
+        row('cited by', refs(citedBy(run, id))),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
       ];
@@ -1651,7 +1657,7 @@ p { margin: 0; }
       run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, run.answer.text),
       row('asked', run.question),
-      row('cites', refs(run.answer.cites.map((c) => `parsed-${c}`))),
+      row('cites', refs(cites(run, id))),
       h('div', { class: 'k' }, runSummary(run)),
     ];
   }
@@ -1862,31 +1868,31 @@ p { margin: 0; }
     return last;
   }
 
-  const drewOn = (run, cites) => `drew on ${cites.map((d) => docLabel(run, d)).join(', ')}`;
+  const idLabel = (run, id) => docLabel(run, splitId(id)[1]);
+  const drewOn = (run, id) => `drew on ${cites(run, id).map((c) => idLabel(run, c)).join(', ')}`;
 
   function roundTwoLine(run, i) {
-    const s = run.r2[i];
     const name = docLabel(run, i);
-    if (!s.summary) return `round 2 · ${name} — nothing relevant`;
-    if (!s.provenance.length) return `round 2 · ${name} — cites no other document`;
-    return `round 2 · ${name} — ${drewOn(run, s.provenance)}`;
+    if (!run.r2[i].summary) return `round 2 · ${name} — nothing relevant`;
+    if (!cites(run, `r2-${i}`).length) return `round 2 · ${name} — cites no other document`;
+    return `round 2 · ${name} — ${drewOn(run, `r2-${i}`)}`;
   }
 
   function parseLine(run, i) {
-    const { records, provenance } = run.parsed[i];
+    const { records } = run.parsed[i];
     const count = records.length ? plural(records.length, 'record') : 'no records';
-    return `${docLabel(run, i)} — ${count}${provenance.length ? ` · ${drewOn(run, provenance)}` : ''}`;
+    return `${docLabel(run, i)} — ${count}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
   }
 
-  // A step was shown every output of the previous one: its own row's as a dotted line, the others
-  // as faint lines. What it cited is drawn solid when it settles.
-  function showInputs(prev, to, i, n) {
-    addEdge(`${prev}-${i}`, to, 'self', 'fade');
-    for (const j of range(n)) if (j !== i) addEdge(`${prev}-${j}`, to, 'context', 'fade');
+  // Dotted: the same document, read again (round 2) or now structured (parse); faint: others shown.
+  function showInputs(run, to) {
+    const own = ownStep(run, to);
+    const [prev] = splitId(own);
+    for (const j of range(run.docs.length)) addEdge(`${prev}-${j}`, to, `${prev}-${j}` === own ? 'self' : 'context', 'fade');
   }
 
-  function showCites(prev, to, cites) {
-    for (const d of cites) addEdge(`${prev}-${d}`, to, 'cite', 'draw');
+  function showCites(run, to) {
+    for (const from of cites(run, to)) addEdge(from, to, 'cite', 'draw');
   }
 
   function buildTimeline(run, narr) {
@@ -1932,15 +1938,14 @@ p { margin: 0; }
     });
     t = stage(at, t, run.order.r2, n, (i) => {
       addNode(`r2-${i}`);
-      showInputs('r1', `r2-${i}`, i, n);
+      showInputs(run, `r2-${i}`);
     }, (i, rank) => {
-      const s = run.r2[i];
-      settleNode(`r2-${i}`, { empty: !s.summary });
-      showCites('r1', `r2-${i}`, s.provenance);
+      settleNode(`r2-${i}`, { empty: !run.r2[i].summary });
+      showCites(run, `r2-${i}`);
       narr.say('sub', roundTwoLine(run, i), { node: `r2-${i}` });
       narr.phase(`round 2 · ${rank + 1} of ${n}`);
     });
-    const citing = run.r2.filter((s) => s.provenance.length).length;
+    const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
     at(t, () => {
       roundTwoHead.querySelector('.t').textContent = `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`;
     });
@@ -1966,10 +1971,10 @@ p { margin: 0; }
     t = stage(at, t, run.order.parsed, n, (i) => {
       addNode(`parsed-${i}`);
       addEdge('schema', `parsed-${i}`, 'flow', 'draw');
-      showInputs('r2', `parsed-${i}`, i, n);
+      showInputs(run, `parsed-${i}`);
     }, (i, rank) => {
       settleNode(`parsed-${i}`, { empty: !run.parsed[i].records.length });
-      showCites('r2', `parsed-${i}`, run.parsed[i].provenance);
+      showCites(run, `parsed-${i}`);
       narr.say('sub', parseLine(run, i), { node: `parsed-${i}` });
       narr.phase(`parsing · ${rank + 1} of ${n}`);
     });
@@ -1982,11 +1987,11 @@ p { margin: 0; }
     t += TIMING.answerWork;
     at(t, () => {
       settleNode('answer');
-      for (const d of run.answer.cites) addEdge(`parsed-${d}`, 'answer', 'cite', 'draw');
+      showCites(run, 'answer');
       narr.done();
       if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
       narr.say('answer', run.answer.text, { node: 'answer' });
-      for (const d of run.answer.cites) narr.say('sub', `cites ${name(d)}`, { node: `parsed-${d}` });
+      for (const id of cites(run, 'answer')) narr.say('sub', `cites ${idLabel(run, id)}`, { node: id });
       narr.say('sub', runSummary(run));
       doneStatus(run);
     });
