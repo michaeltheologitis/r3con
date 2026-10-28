@@ -38,6 +38,9 @@ INFRASTRUCTURE_FAILURES = [
     exceptions.RateLimitError(**LITELLM_ERROR),
     exceptions.ServiceUnavailableError(**LITELLM_ERROR),
     exceptions.InternalServerError(**LITELLM_ERROR),
+    exceptions.BadGatewayError(**LITELLM_ERROR),
+    # litellm's catch-all for a status it has no class for, such as Cloudflare's 520
+    exceptions.APIError(status_code=520, **LITELLM_ERROR),
 ]
 TASK_FAILURES = [
     exceptions.ContextWindowExceededError(**LITELLM_ERROR),
@@ -202,15 +205,25 @@ def test_a_task_whose_r3con_run_raises_is_recorded_with_its_error_and_scored_wor
 @pytest.mark.parametrize(
     "failure", INFRASTRUCTURE_FAILURES, ids=lambda e: type(e).__name__
 )
-def test_a_task_the_connection_fails_saves_no_answer_and_fails_the_run(
-    loong_cache, corpusqa_cache, judging_llm, tmp_path, failure
+def test_a_task_the_connection_fails_is_unrecorded_and_reruns_on_resume(
+    loong_cache, corpusqa_cache, judging_llm, cli_paths, monkeypatch, failure
 ):
-    judging_llm.answers(schema=failure)
-    folder, results = tmp_path / "run", tmp_path / "results.jsonl"
+    def provider_down(**request):
+        raise failure
 
-    assert evaluate(PINNED, folder, results) is None
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    results = cli_paths / "results_path"
+    monkeypatch.setattr(litellm, "completion", provider_down)
+    assert main([]) == 1
+    [folder] = (cli_paths / "runs_dir").iterdir()
     assert not list(folder.rglob("answer.json"))
+    assert not list(folder.rglob("record.json"))
     assert not results.exists()
+
+    monkeypatch.setattr(litellm, "completion", judging_llm)
+    assert main(["--resume", str(folder)]) == 0
+    line = json.loads(results.read_text())
+    assert [group["errors"] for group in line["benchmarks"].values()] == [0, 0]
 
 
 def test_a_run_with_a_call_litellm_could_not_price_has_no_cost(
