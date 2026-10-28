@@ -270,6 +270,7 @@ class StageRun:
         self.task_logger = task_logger
         self.model = model
         self.steps: list[StepRecord] = []
+        self._closing: dict[str, Any] | None = None
         self._lock = threading.Lock()
         self.dir = task_logger.dir / stage
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -298,6 +299,11 @@ class StageRun:
             )
             self.steps.append(step)
         return step
+
+    def close_transcript(self, message: dict[str, Any]) -> None:
+        """End ``transcript.yaml`` with ``message``, which no call sent: the
+        observation of a loop's committing turn, say."""
+        self._closing = message
 
     def flush(self, *, write_transcript: bool = True) -> Path:
         """Write ``calls.json`` (always) and, unless ``write_transcript=False``,
@@ -374,14 +380,17 @@ class StageRun:
         response. For a multi-turn loop (codeact) the last step's ``messages`` already
         contain the whole grown conversation; for a retry loop (the schema proposal)
         they are the final (successful) attempt — earlier attempts live in ``calls.json``. Empty
-        run → ``[]``. (Stages with many parallel calls flush with
-        ``write_transcript=False`` and never reach here.)"""
+        run → ``[]``. A message given to :meth:`close_transcript` comes last. (Stages with
+        many parallel calls flush with ``write_transcript=False`` and never reach
+        here.)"""
         if not self.steps:
             return []
         last = self.steps[-1]
         thread = list(last.messages)
         if last.response.get("content"):
             thread.append(last.response)
+        if self._closing is not None:
+            thread.append(self._closing)
         return thread
 
 

@@ -1,7 +1,9 @@
 import litellm
 import pytest
+import yaml
 
 from r3con import settings
+from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import (
     CodeExecutionError,
     _clip_assistant_response,
@@ -162,13 +164,41 @@ def test_a_commit_is_run_whatever_shape_its_code_arrives_in(llm, response, answe
         ("final_answer('a', ['x'])", ["x"]),
         ("final_answer(answer='a', provenance=[])", []),
         ("final_answer('a', provenance=[7, 'x'])", ["7", "x"]),
+        ("final_answer('a', provenance=('x', 'y'))", ["x", "y"]),
+        ("final_answer('a', provenance={r for r in ['x']})", ["x"]),
+        ("final_answer('a', provenance=frozen)", ["x"]),
         ("final_answer('a')", None),
         ("final_answer('a', provenance='x')", None),
+        ("final_answer('a', provenance=7)", None),
     ],
 )
-def test_final_answer_hands_back_the_provenance_list_it_is_given(llm, call, provenance):
-    result = solve(llm, f"<code>\n{call}\n</code>")
+def test_final_answer_hands_back_the_collection_of_ids_it_is_given(
+    llm, call, provenance
+):
+    variables = {"frozen": frozenset(["x"])}
+    result = solve(llm, f"<code>\n{call}\n</code>", variables=variables)
     assert (result.answer, result.provenance) == ("a", provenance)
+
+
+@pytest.mark.parametrize(
+    ("call", "shown"),
+    [
+        ("final_answer('a', provenance={'x'})", "provenance received: {'x'}"),
+        ("final_answer('a')", "provenance received: None"),
+    ],
+)
+def test_the_transcript_ends_with_the_commit_and_the_provenance_as_given(
+    llm, tmp_path, call, shown
+):
+    run = StageRun(stage="reasoning", task_logger=TaskLogger("run", root=tmp_path))
+    result = solve(llm, prints("1"), f"<code>\n{call}\n</code>", run=run)
+    run.flush()
+    transcript = yaml.safe_load((run.dir / "transcript.yaml").read_text())
+    last = transcript["messages"][-1]
+    assert last == {"role": "user", "content": result.turns[-1].observation}
+    assert last["content"] == (
+        f"<observation>\nfinal_answer received: a\n{shown}\n</observation>"
+    )
 
 
 def test_what_a_turn_prints_is_fed_back_as_the_next_observation(llm):

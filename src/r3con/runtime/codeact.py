@@ -33,7 +33,7 @@ from __future__ import annotations
 import ast
 import functools
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -255,9 +255,10 @@ class CodeActResult:
     ``answer`` is a final synthesized best-effort (one plain-prose call over the whole
     conversation), or the last non-empty observation if that synthesis comes back empty.
 
-    ``provenance`` is the list the agent passed as ``final_answer``'s ``provenance``,
-    each item as a string, unchecked; ``None`` when it passed none or something other
-    than a list, and when the loop exhausted ``max_turns``.
+    ``provenance`` is the collection the agent passed as ``final_answer``'s
+    ``provenance`` (a list, tuple, set, …), each item as a string in its order,
+    unchecked; ``None`` when it passed none, a string, or something other than a
+    collection, and when the loop exhausted ``max_turns``.
     """
 
     answer: str
@@ -266,10 +267,7 @@ class CodeActResult:
     provenance: list[str] | None = None
 
 
-# Registered with the executor as ``final_answer``. Calling it from inside the sandbox
-# raises ``FinalAnswerException`` (upstream behavior) carrying what it returns, which
-# surfaces here as ``CodeOutput.output`` with ``is_final_answer=True``: the answer and
-# the provenance, as given.
+# Registered as ``final_answer``; what it returns comes back as ``CodeOutput.output``.
 def _final_answer(answer: Any = None, provenance: Any = None) -> tuple[Any, Any]:
     return answer, provenance
 
@@ -289,9 +287,11 @@ def _stringify_final_answer(value: Any) -> str:
 
 
 def _provenance_ids(value: Any) -> list[str] | None:
-    """What was passed as ``final_answer``'s ``provenance``, each item as a string, or
-    ``None`` when it is not a list."""
-    return [str(id_) for id_ in value] if isinstance(value, list) else None
+    """What was passed as ``final_answer``'s ``provenance``, each item as a string in
+    its order, or ``None`` when it is a string or not a collection."""
+    if isinstance(value, Collection) and not isinstance(value, (str, bytes)):
+        return [str(id_) for id_ in value]
+    return None
 
 
 def run_codeact(
@@ -509,15 +509,17 @@ def run_codeact(
         execution = ExecutionResult(stdout=out.logs)
 
         if out.is_final_answer:
-            # The model committed. ``out.output`` is what final_answer returned:
-            # the answer and the provenance (carried out via FinalAnswerException
-            # upstream).
+            # The model committed: ``out.output`` is what final_answer returned.
             _log.info(
                 "codeact: committed final_answer on turn %d/%d", turn_idx + 1, max_turns
             )
             committed, provenance = out.output
             answer = _stringify_final_answer(committed)
-            observation = _format_observation(f"final_answer received: {answer}")
+            observation = _format_observation(
+                f"final_answer received: {answer}\nprovenance received: {provenance!r}"
+            )
+            if run is not None:
+                run.close_transcript({"role": "user", "content": observation})
             turns.append(
                 CodeActTurn(
                     response=response,

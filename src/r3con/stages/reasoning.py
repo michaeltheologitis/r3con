@@ -169,7 +169,8 @@ class ReasoningResult:
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
     - ``provenance``: the ids of the documents the answer used, in the order it cited
       them, without repeats; empty when it cited none, or, on the coding path, when
-      ``final_answer`` got no ``provenance`` list or the loop hit its turn cap.
+      ``final_answer`` got no collection as ``provenance`` or the loop hit its turn
+      cap.
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -299,7 +300,7 @@ def _reason_with_code(
     )
     if result.provenance is None:
         _log.info(
-            "the answer came without a provenance list (%s); it cites no documents",
+            "the answer came without a collection of ids (%s); it cites no documents",
             result.terminated_by,
         )
     return ReasoningResult(

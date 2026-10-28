@@ -216,15 +216,38 @@ def test_an_unknown_id_is_dropped_with_a_warning(llm, caplog, path):
 
 
 @pytest.mark.parametrize(
+    "collection",
+    [
+        "[r['document'] for r in parse['rows']]",
+        "tuple(r['document'] for r in parse['rows'])",
+        "{r['document'] for r in parse['rows']}",
+    ],
+    ids=["list", "tuple", "set"],
+)
+def test_the_coding_path_takes_its_ids_in_any_collection(llm, collection):
+    commit = f"<code>\nfinal_answer('ok', provenance={collection})\n</code>"
+    result = reason(
+        task="?",
+        schema_code="",
+        model=MODEL,
+        prompts=PROMPTS,
+        path="coding",
+        completion=llm.replies(commit),
+        **TWO_DOCUMENTS,
+    )
+    assert sorted(result.provenance) == IDS[:2]
+
+
+@pytest.mark.parametrize(
     ("replies", "ended_by"),
     [
         (["<code>\nfinal_answer('ok')\n</code>"], "final_answer"),
         (["<code>\nfinal_answer('ok', provenance='d0c000')\n</code>"], "final_answer"),
         ([PRINTS, "The answer is ok."], "max_turns"),
     ],
-    ids=["without", "not-a-list", "turn-cap"],
+    ids=["without", "a-string", "turn-cap"],
 )
-def test_a_coding_answer_without_a_provenance_list_cites_nothing(
+def test_a_coding_answer_without_a_collection_of_ids_cites_nothing(
     llm, caplog, replies, ended_by
 ):
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
@@ -234,8 +257,8 @@ def test_a_coding_answer_without_a_provenance_list_cites_nothing(
         (
             "INFO",
             (
-                f"the answer came without a provenance list ({ended_by}); it cites "
-                "no documents"
+                f"the answer came without a collection of ids ({ended_by}); it "
+                "cites no documents"
             ),
         )
     ]
