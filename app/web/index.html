@@ -201,7 +201,7 @@ p { margin: 0; }
 .node.doc { --node-icon: var(--doc-icon-size); }
 .node .icon { width: var(--node-icon); height: var(--node-icon); color: var(--fg); transition: color 0.4s; }
 .node .icon svg { display: block; width: var(--node-icon); height: var(--node-icon); overflow: visible; }
-.node .label { line-height: 1.5; }
+.node .label { line-height: 1.5; background: var(--panel); }
 .node .spin { position: absolute; top: -0.7em; left: calc(50% + var(--node-icon) / 2 - 2px); color: var(--accent); display: none; }
 .node.working .spin { display: block; }
 .node.working .icon { color: var(--dim); }
@@ -749,13 +749,13 @@ p { margin: 0; }
  "answer": {
   "text": "Halloran Services Ltd's sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
   "provenance": {
-   "summaries": [
+   "summary_ids": [
     0,
     2,
     3,
     1
    ],
-   "parses": [
+   "parse_ids": [
     0,
     2,
     3,
@@ -906,6 +906,8 @@ p { margin: 0; }
   const READ_BYTES = 20000;
   const MAX_FILES = 40;
   const MAX_SIMULATED_CITES = 4;
+  const SIMULATED_SUMMARY_STRIDE = 2;
+  const SIMULATED_PARSE_STRIDE = 3;
   const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
   const SIMULATED_SCHEMA = [
     '# simulated — not connected to r3con yet',
@@ -1125,22 +1127,24 @@ p { margin: 0; }
     const n = files.length;
     const order = range(n);
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
+    const records = files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : []));
+    // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
+    const hasSummary = (j) => Boolean(summary(files[j]));
+    const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
+    const every = (stride, citable) => order.filter((i) => citable(i) && i % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
       simulated: true,
       question,
       docs: files,
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
-      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUpCitations(i, n) })),
+      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: files.map((f, i) => ({
-        records: f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : [],
-        provenance: madeUpCitations(i, n),
-      })),
+      parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
       answer: {
         text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
         provenance: {
-          summaries: order.filter((i) => i % 2 === 0).slice(0, MAX_SIMULATED_CITES),
-          parses: order.filter((i) => i % 3 === 0).slice(0, MAX_SIMULATED_CITES),
+          summary_ids: every(SIMULATED_SUMMARY_STRIDE, hasSummary),
+          parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => records[i].length > 0),
         },
       },
       calls: null,
@@ -1158,8 +1162,8 @@ p { margin: 0; }
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
-      const { summaries, parses } = run.answer.provenance;
-      return [...summaries.map((d) => `r2-${d}`), ...parses.map((d) => `parsed-${d}`)];
+      const { summary_ids, parse_ids } = run.answer.provenance;
+      return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
     if (kind === 'r2') return run.r2[i].provenance.map((d) => `r1-${d}`);
@@ -1648,8 +1652,9 @@ p { margin: 0; }
       run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, run.answer.text),
       row('asked', run.question),
-      row('drew on summaries', refs(cites(run, id).filter((c) => splitId(c)[0] === 'r2'))),
-      row('drew on parses', refs(cites(run, id).filter((c) => splitId(c)[0] === 'parsed'))),
+      row('shown', `round 2 summaries and parses of all ${plural(run.docs.length, 'document')}`),
+      row('drew on summaries', refs(run.answer.provenance.summary_ids.map((d) => `r2-${d}`))),
+      row('drew on parses', refs(run.answer.provenance.parse_ids.map((d) => `parsed-${d}`))),
       h('div', { class: 'k' }, runSummary(run)),
     ];
   }
@@ -1877,11 +1882,11 @@ p { margin: 0; }
   }
 
   function answerCiteLines(run) {
-    const cited = cites(run, 'answer');
-    const docs = [...new Set(cited.map((c) => splitId(c)[1]))];
-    return docs.map((d) => {
-      const views = [cited.includes(`r2-${d}`) && 'summary', cited.includes(`parsed-${d}`) && 'parse'].filter(Boolean);
-      return { text: `cites ${docLabel(run, d)} · ${views.join(' and ')}`, node: cited.includes(`parsed-${d}`) ? `parsed-${d}` : `r2-${d}` };
+    const { summary_ids, parse_ids } = run.answer.provenance;
+    const view = (label, id) => h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, label);
+    return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
+      const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
+      return [`drew on ${docLabel(run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
     });
   }
 
@@ -2001,12 +2006,14 @@ p { margin: 0; }
       narr.done();
       if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
       narr.say('answer', run.answer.text, { node: 'answer' });
-      for (const line of answerCiteLines(run)) narr.say('sub', line.text, { node: line.node });
+      const citeLines = answerCiteLines(run);
+      for (const text of citeLines) narr.say('sub', text);
+      if (!citeLines.length) narr.say('sub', 'cites no document');
       narr.say('sub', runSummary(run));
       doneStatus(run);
     });
     t += TIMING.litDelay;
-    at(t, () => lightPath(run));
+    if (cites(run, 'answer').length) at(t, () => lightPath(run));
     return steps;
   }
 
