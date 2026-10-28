@@ -108,7 +108,6 @@ p { margin: 0; }
 
 /* ---- frame ---- */
 .app {
-  position: relative;
   height: 100%;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -239,39 +238,34 @@ p { margin: 0; }
   color: var(--dim);
 }
 
+.inspector, .settings {
+  overflow: auto;
+  padding: 0.9em 2ch 1em;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  overscroll-behavior: contain;
+}
 .inspector {
   position: absolute;
   z-index: 5;
   width: min(54ch, calc(100% - 20px));
   max-height: calc(100% - 20px);
-  overflow: auto;
   display: flex;
   flex-direction: column;
   gap: 0.75em;
-  padding: 0.9em 2ch 1em;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: var(--shadow);
   cursor: auto;
-  overscroll-behavior: contain;
   touch-action: pan-x pan-y;
 }
 .settings {
-  position: fixed;
+  --settings-width: min(52ch, calc(100vw - 2 * var(--gutter)));
   inset: auto;
   margin: 0;
-  overflow: auto;
-  padding: 0.9em 2ch 1em;
+  width: var(--settings-width);
   color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  box-shadow: var(--shadow);
-  overscroll-behavior: contain;
 }
-.settings-form { display: flex; flex-direction: column; gap: 0.9em; }
-#settings-form { display: contents; }
+.settings-body { display: flex; flex-direction: column; gap: 0.9em; }
 .field { display: flex; flex-direction: column; gap: 0.25em; }
 .field label { font-weight: 600; }
 .field input {
@@ -284,7 +278,6 @@ p { margin: 0; }
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-.field input::placeholder { color: var(--dim); opacity: 1; }
 .field input:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
 .field-row { display: flex; align-items: baseline; gap: 2ch; }
 .field-row input { flex: 1; }
@@ -413,7 +406,7 @@ p { margin: 0; }
   resize: none;
 }
 #question:placeholder-shown { padding-left: 0; }
-#question::placeholder { color: var(--dim); opacity: 1; }
+.field input::placeholder, #question::placeholder { color: var(--dim); opacity: 1; }
 .ask-foot { display: flex; justify-content: space-between; gap: 2ch; color: var(--dim); }
 .ask-foot span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-btn { font-weight: 600; }
@@ -492,8 +485,8 @@ p { margin: 0; }
   </header>
 
   <div class="settings" id="settings" popover role="dialog" aria-label="Settings">
-    <div class="settings-form">
-      <form id="settings-form" autocomplete="off"></form>
+    <form id="settings-form" autocomplete="off"></form>
+    <div class="settings-body">
       <div class="insp-head">
         <div class="insp-title"><span class="g">● </span>settings</div>
         <button class="btn" id="settings-close" type="button" popovertarget="settings" popovertargetaction="hide" aria-label="close settings">esc</button>
@@ -909,10 +902,9 @@ p { margin: 0; }
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
-  const SETTINGS_WIDTH_CH = 52;
-  const SETTINGS_GAP = 6;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
+  const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -930,7 +922,7 @@ p { margin: 0; }
       const f = (cls) => (filled ? ` class="${cls}"` : '');
       return `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
         <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
-        <g${filled ? ' class="ink"' : ''}>
+        <g${f('ink')}>
         <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('fill-yellow')}/>
         <circle cx="7.8" cy="12" r="2.5"${f('fill-orange')}/>
         <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('fill-orange')}/>
@@ -964,15 +956,10 @@ p { margin: 0; }
 
   const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
 
-  function sampleFiles() {
-    return [...SAMPLE_FILES];
-  }
-
   const docId = (file) => `doc-${file.uid}`;
 
   const state = {
-    files: sampleFiles(),
-    filesAreSample: true,
+    files: SAMPLE_FILES,
     filesDirty: true,
     run: null,
     runTurn: null,
@@ -982,13 +969,21 @@ p { margin: 0; }
     selected: null,
     hovered: null,
     userMoved: false,
-    planned: null,
     layout: new Map(),
   };
   const view = { x: 0, y: 0, k: 1 };
-  // Model and endpoint may be remembered in this browser. The API key itself is never kept: the
-  // prototype sends nothing, so it only remembers, for this tab, that one was entered.
-  const settings = { model: DEFAULT_MODEL, endpoint: '', keySet: false };
+  // Model and endpoint may be remembered in this browser. The API key is never kept: the prototype
+  // sends nothing.
+  const settings = { model: DEFAULT_MODEL, endpoint: '' };
+
+  const filesAreSample = () => state.files === SAMPLE_FILES;
+  // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
+  const isPending = (file) => Boolean(state.run) && !state.run.docs.includes(file);
+
+  function panelFiles() {
+    const runDocs = state.run?.docs ?? [];
+    return [...runDocs, ...state.files.filter((f) => !runDocs.includes(f))];
+  }
 
   // ---------- small helpers ----------
 
@@ -1017,7 +1012,25 @@ p { margin: 0; }
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
+  const fileLabel = (file) => shortLabel(stripExt(file.name));
+  const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  function readStored(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function writeStored(key, value) {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // Storage can be blocked; the page works without it for this visit.
+    }
+  }
 
   function excerpt(text, max) {
     const flat = text.replace(/\s+/g, ' ').trim();
@@ -1161,13 +1174,15 @@ p { margin: 0; }
     applyView();
   }
 
-  function charWidth() {
+  function measureCharWidth() {
     const probe = h('span', { class: 'probe' }, '0'.repeat(20));
     document.body.append(probe);
     const width = probe.getBoundingClientRect().width / 20;
     probe.remove();
     return width || 8;
   }
+
+  const charPx = measureCharWidth();
 
   function gridLayout(files, origin) {
     const layout = new Map();
@@ -1185,28 +1200,27 @@ p { margin: 0; }
 
   const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
 
-  function layoutFor(files) {
-    return gridLayout(files, (i, f) => {
-      const node = state.nodes.get(docId(f));
-      return { x: node.x, y: node.y };
-    });
+  function nodeOrigin(i, file) {
+    const node = state.nodes.get(docId(file));
+    return { x: node.x, y: node.y };
   }
 
-  function boundsOfLayout(layout, files) {
-    if (!layout.size) return null;
-    const widest = Math.max('structure'.length, ...files.map((f) => shortLabel(stripExt(f.name)).length)) * charWidth() + NODE_PAD_PX;
+  function plan(origin) {
+    const files = state.run?.docs ?? state.files;
+    const layout = gridLayout(files, origin);
+    if (state.run) state.files.filter(isPending).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    return layout;
+  }
+
+  function contentBounds() {
+    const widest = Math.max('structure'.length, ...panelFiles().map((f) => fileLabel(f).length)) * charPx + NODE_PAD_PX;
     const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-    for (const p of layout.values()) {
+    for (const p of state.layout.values()) {
       b.minX = Math.min(b.minX, p.x - widest / 2);
       b.maxX = Math.max(b.maxX, p.x + widest / 2);
       b.minY = Math.min(b.minY, p.y - BOW);
       b.maxY = Math.max(b.maxY, p.y + ICON_HALF + 2 * LABEL_LINE_PX);
     }
-    return b;
-  }
-
-  function contentBounds() {
-    const b = { ...(state.planned ?? { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity }) };
     for (const n of state.nodes.values()) {
       const halfW = n.el.offsetWidth / 2;
       b.minX = Math.min(b.minX, n.x - halfW);
@@ -1232,6 +1246,11 @@ p { margin: 0; }
     applyView();
   }
 
+  function refit() {
+    state.userMoved = false;
+    fit(true);
+  }
+
   // ---------- panel: nodes and edges ----------
 
   function iconFor(kind, settled) {
@@ -1241,56 +1260,47 @@ p { margin: 0; }
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
-  function nodeLabels(kind, doc) {
+  function nodeLabels(kind, file) {
     if (kind === 'schema') return ['structure'];
     if (kind === 'answer') return ['answer'];
-    const label = shortLabel(docLabel(state.run, doc));
-    return kind === 'parsed' ? [label] : [label, KIND_SUFFIX[kind]];
+    if (kind === 'doc') return [fileLabel(file), isPending(file) ? 'not run' : null];
+    return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
-  function ariaName(id) {
-    const [kind, d] = splitId(id);
-    const what = state.nodes.get(id)?.pending
-      ? 'document, not run yet'
-      : { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' }[kind];
-    const name = kind === 'doc' || d === null ? nodeName(id) : docLabel(state.run, d);
-    return `${name}, ${what}`;
+  function ariaName(node) {
+    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}`;
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}`;
+    return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
-  function createNode(id, kind, pos, labels, { working = false, pending = false, file = null, doc = null } = {}) {
-    const classes = ['node', kind, working && 'working', pending && 'pending', !reduceMotion() && 'enter'].filter(Boolean).join(' ');
+  function createNode(id, kind, pos, { working = false, file = null, enter = true } = {}) {
+    const pending = kind === 'doc' && isPending(file);
+    const classes = ['node', kind, working && 'working', pending && 'pending', enter && !reduceMotion() && 'enter'].filter(Boolean).join(' ');
     const el = h(
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
-      labels.filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      nodeLabels(kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
-    const node = { id, kind, doc, file, pending, x: pos.x, y: pos.y, el };
+    const node = { id, kind, file, x: pos.x, y: pos.y, el };
     state.nodes.set(id, node);
-    el.setAttribute('aria-label', ariaName(id));
+    el.setAttribute('aria-label', ariaName(node));
     placeNode(node);
     nodesLayer.append(el);
     return node;
   }
 
   function addNode(id) {
-    const [kind, doc] = splitId(id);
-    return createNode(id, kind, state.layout.get(id), nodeLabels(kind, doc), { working: true, doc });
+    const [kind, d] = splitId(id);
+    return createNode(id, kind, state.layout.get(id), { working: true, file: d === null ? null : state.run.docs[d] });
   }
 
-  function addDocNode(file, { pending = false } = {}) {
+  function addDocNode(file, pos) {
     let last = null;
     for (const n of state.nodes.values()) if (n.kind === 'doc' && (!last || n.y > last.y)) last = n;
-    const pos = last ? { x: last.x, y: last.y + GRID.rowGap } : { x: 0, y: 0 };
-    return createNode(docId(file), 'doc', pos, [shortLabel(stripExt(file.name)), pending ? 'not run' : null], { pending, file });
-  }
-
-  function resetDocNode(node) {
-    node.pending = false;
-    node.el.setAttribute('aria-label', ariaName(node.id));
-    node.el.classList.remove('working', 'void', 'pending', 'on-path', 'selected');
-    node.el.querySelectorAll('.label:not(.name)').forEach((l) => l.remove());
+    // A node redrawn at its old position (a run starting) is not new, so it doesn't animate in.
+    return createNode(docId(file), 'doc', pos ?? (last ? { x: last.x, y: last.y + GRID.rowGap } : tidyOrigin(0)), { file, enter: !pos });
   }
 
   function removeNode(id) {
@@ -1298,18 +1308,31 @@ p { margin: 0; }
     if (state.hovered === id) state.hovered = null;
     state.nodes.get(id)?.el.remove();
     state.nodes.delete(id);
-    for (const [key, e] of state.edges) {
-      if (e.from !== id && e.to !== id) continue;
-      e.el.remove();
-      state.edges.delete(key);
-    }
   }
 
-  function syncDocNodes(animate = false) {
-    const keep = new Set([...state.files, ...(state.run ? state.run.docs : [])].map(docId));
+  const easeOut = (t) => 1 - (1 - t) ** 3;
+
+  let arrangeFrame = 0;
+
+  function clearPanel() {
+    cancelAnimationFrame(arrangeFrame);
+    closeInspector();
+    for (const layer of Object.values(layers)) layer.replaceChildren();
+    state.edges.clear();
+    nodesLayer.replaceChildren();
+    state.nodes.clear();
+    state.hovered = null;
+    panel.classList.remove('is-lit');
+  }
+
+  // Document nodes are created only here: one per loaded or run file, at its position in `at` if
+  // it had one, else below the last document node.
+  function syncDocNodes(at = new Map(), animate = false) {
+    const files = panelFiles();
+    const keep = new Set(files.map(docId));
     for (const n of [...state.nodes.values()]) if (n.kind === 'doc' && !keep.has(n.id)) removeNode(n.id);
-    for (const f of state.files) if (!state.nodes.has(docId(f))) addDocNode(f, { pending: Boolean(state.run) });
-    if (!state.run) state.planned = boundsOfLayout(layoutFor(state.files), state.files);
+    for (const f of files) if (!state.nodes.has(docId(f))) addDocNode(f, at.get(docId(f)));
+    state.layout = plan(nodeOrigin);
     updateHint();
     if (!state.userMoved) fit(animate);
   }
@@ -1319,63 +1342,48 @@ p { margin: 0; }
     node.el.style.top = `${node.y}px`;
   }
 
-  function tidyLayout() {
-    const runDocs = state.run ? state.run.docs : [];
-    const layout = gridLayout(runDocs, tidyOrigin);
-    const others = state.files.filter((f) => !runDocs.includes(f) && state.nodes.has(docId(f)));
-    others.forEach((f, j) => layout.set(docId(f), tidyOrigin(runDocs.length + j)));
-    return layout;
+  function drawnAt(node) {
+    return { x: parseFloat(node.el.style.left), y: parseFloat(node.el.style.top) };
   }
 
-  const easeOut = (t) => 1 - (1 - t) ** 3;
-
-  let arrangeTween = null;
-
-  function stopArrange() {
-    if (!arrangeTween) return;
-    cancelAnimationFrame(arrangeTween.frame);
-    arrangeTween.moveTo(1);
-    arrangeTween = null;
-  }
-
+  // The model takes the final positions at once; only the drawing slides there.
   function arrange() {
-    stopArrange();
-    const layout = tidyLayout();
-    if (state.run) state.layout = layout;
-    state.planned = boundsOfLayout(layout, [...state.files, ...(state.run ? state.run.docs : [])]);
-    const moves = [...state.nodes.values()].filter((n) => layout.has(n.id)).map((n) => ({ node: n, from: { x: n.x, y: n.y }, to: layout.get(n.id) }));
-    const moveTo = (progress) => {
-      for (const m of moves) {
-        m.node.x = m.from.x + (m.to.x - m.from.x) * progress;
-        m.node.y = m.from.y + (m.to.y - m.from.y) * progress;
-        placeNode(m.node);
-      }
+    cancelAnimationFrame(arrangeFrame);
+    state.layout = plan(tidyOrigin);
+    state.userMoved = false;
+    const moves = [];
+    for (const node of state.nodes.values()) {
+      const to = state.layout.get(node.id);
+      if (!to) continue;
+      const from = drawnAt(node);
+      Object.assign(node, to);
+      if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
+    }
+    const finish = () => {
+      for (const { node } of moves) placeNode(node);
       redrawEdges();
       positionInspector();
+      if (!state.userMoved) refit();
     };
-    const finish = () => {
-      state.userMoved = false;
-      fit(true);
-    };
-    if (reduceMotion()) {
-      moveTo(1);
-      finish();
-      return;
-    }
+    if (!moves.length || reduceMotion()) return finish();
     const start = performance.now();
-    const tween = { moveTo, frame: 0 };
+    const grabbed = new Set();
     const step = (now) => {
       const t = Math.min(1, (now - start) / ARRANGE_MS);
-      moveTo(easeOut(t));
-      if (t < 1) {
-        tween.frame = requestAnimationFrame(step);
-        return;
+      if (t === 1) return finish();
+      const drawn = new Map();
+      for (const { node, from } of moves) {
+        if (gesture.moved && node === gesture.node) grabbed.add(node);
+        if (grabbed.has(node)) continue;
+        const at = { x: from.x + (node.x - from.x) * easeOut(t), y: from.y + (node.y - from.y) * easeOut(t) };
+        drawn.set(node, at);
+        node.el.style.left = `${at.x}px`;
+        node.el.style.top = `${at.y}px`;
       }
-      arrangeTween = null;
-      finish();
+      redrawEdges((n) => drawn.get(n) ?? n);
+      arrangeFrame = requestAnimationFrame(step);
     };
-    tween.frame = requestAnimationFrame(step);
-    arrangeTween = tween;
+    arrangeFrame = requestAnimationFrame(step);
   }
 
   function markWorking(id) {
@@ -1393,22 +1401,24 @@ p { margin: 0; }
     if (state.selected === id) renderInspector();
   }
 
-  function isBlocked(a, b) {
-    const lo = Math.min(a.x, b.x) + ICON_HALF;
-    const hi = Math.max(a.x, b.x) - ICON_HALF;
+  function isBlocked(a, b, pa, pb) {
+    const lo = Math.min(pa.x, pb.x) + ICON_HALF;
+    const hi = Math.max(pa.x, pb.x) - ICON_HALF;
     for (const n of state.nodes.values()) {
       if (n === a || n === b) continue;
-      if (n.x > lo && n.x < hi && Math.abs(n.y - (a.y + b.y) / 2) < ICON_HALF * 2) return true;
+      if (n.x > lo && n.x < hi && Math.abs(n.y - (pa.y + pb.y) / 2) < ICON_HALF * 2) return true;
     }
     return false;
   }
 
-  function edgePath(a, b) {
-    const sx = a.x + ICON_HALF + EDGE_GAP;
-    const tx = b.x - ICON_HALF - EDGE_GAP;
+  function edgePath(a, b, at = (n) => n) {
+    const pa = at(a);
+    const pb = at(b);
+    const sx = pa.x + ICON_HALF + EDGE_GAP;
+    const tx = pb.x - ICON_HALF - EDGE_GAP;
     const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
-    const bow = Math.abs(a.y - b.y) < ICON_HALF && isBlocked(a, b) ? -BOW : 0;
-    return `M${sx} ${a.y} C${sx + c} ${a.y + bow} ${tx - c} ${b.y + bow} ${tx} ${b.y}`;
+    const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, pa, pb) ? -BOW : 0;
+    return `M${sx} ${pa.y} C${sx + c} ${pa.y + bow} ${tx - c} ${pb.y + bow} ${tx} ${pb.y}`;
   }
 
   function layerFor(kind) {
@@ -1449,8 +1459,8 @@ p { margin: 0; }
     return edge;
   }
 
-  function redrawEdges() {
-    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to)));
+  function redrawEdges(at) {
+    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to), at));
   }
 
   function refreshHighlight() {
@@ -1512,9 +1522,9 @@ p { margin: 0; }
     return block;
   }
 
-  function fileMeta(file, pending = false) {
+  function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (pending) meta.push('not run yet');
+    if (isPending(file)) meta.push('not run yet');
     if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
     return meta.join(' · ');
   }
@@ -1523,13 +1533,17 @@ p { margin: 0; }
     return file.text ? h('pre', { class: 'code wrap' }, file.text) : h('p', { class: 'k' }, 'This file has no readable text.');
   }
 
+  function openFileButton(file, label) {
+    return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
+  }
+
   function docBody(node) {
-    const index = state.run && !node.pending ? state.run.docs.indexOf(node.file) : -1;
+    const index = state.run ? state.run.docs.indexOf(node.file) : -1;
     return [
-      h('div', { class: 'k' }, fileMeta(node.file, node.pending)),
+      h('div', { class: 'k' }, fileMeta(node.file)),
       fileText(node.file),
       index >= 0 && state.nodes.has(`r1-${index}`) ? row('summary', refs([`r1-${index}`])) : null,
-      h('button', { class: 'btn', type: 'button', onclick: () => openFile(node.file) }, 'open in files ›'),
+      openFileButton(node.file, 'open in files ›'),
     ];
   }
 
@@ -1547,7 +1561,7 @@ p { margin: 0; }
       parts.push(row('drew on', refs(s.provenance.map((p) => `r1-${p}`))));
     }
     parts.push(callMeta(run, `${kind}-${d}`));
-    parts.push(h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'));
+    parts.push(openFileButton(run.docs[d], 'open document ›'));
     return parts;
   }
 
@@ -1573,7 +1587,7 @@ p { margin: 0; }
         row('filled from', refs(['schema', `r2-${d}`])),
         run.answer.cites.includes(d) && state.nodes.has('answer') ? row('cited by', refs(['answer'])) : null,
         callMeta(run, id),
-        h('button', { class: 'btn', type: 'button', onclick: () => openFile(run.docs[d]) }, 'open document ›'),
+        openFileButton(run.docs[d], 'open document ›'),
       ];
     }
     return [
@@ -1719,12 +1733,12 @@ p { margin: 0; }
   }
 
   function readyStatus() {
-    setStatus(`${plural(state.files.length, 'document')} ready · ${settings.model}`);
+    if (!state.run) setStatus(`${plural(state.files.length, 'document')} ready · ${settings.model}`);
   }
 
   function nextAction() {
     if (state.run && !state.filesDirty) return 'follow-up';
-    return state.filesAreSample && questionEl.value.trim() === SAMPLE.question ? 'recorded' : 'simulated';
+    return filesAreSample() && questionEl.value.trim() === SAMPLE.question ? 'recorded' : 'simulated';
   }
 
   function updateAskFoot() {
@@ -1735,7 +1749,7 @@ p { margin: 0; }
   }
 
   function updateHint() {
-    const pending = [...state.nodes.values()].filter((n) => n.pending).length;
+    const pending = state.files.filter(isPending).length;
     const hint = $('panel-hint');
     if (!state.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
     else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
@@ -1818,7 +1832,7 @@ p { margin: 0; }
       settleNode(docAt(i));
       narr.phase(`reading · ${rank + 1} of ${n}`);
     }, PACE.read);
-    at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(run.docs.reduce((sum, f) => sum + f.size, 0))}`));
+    at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`));
 
     t += TIMING.phaseGap;
     at(t, () => {
@@ -1908,24 +1922,13 @@ p { margin: 0; }
 
   function playRun(run) {
     cancelTimers();
-    stopArrange();
-    closeInspector();
-    const keep = new Set(run.docs.map(docId));
-    for (const id of [...state.nodes.keys()]) if (!keep.has(id)) removeNode(id);
-    panel.classList.remove('is-lit');
+    const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
+    clearPanel();
     state.run = run;
-    state.hovered = null;
-    for (const f of run.docs) {
-      const node = state.nodes.get(docId(f));
-      if (node) resetDocNode(node);
-      else addDocNode(f);
-    }
-    state.layout = layoutFor(run.docs);
-    state.planned = boundsOfLayout(state.layout, run.docs);
     state.runTurn.body.replaceChildren();
     $('replay-btn').hidden = false;
     state.userMoved = false;
-    syncDocNodes(true);
+    syncDocNodes(docPositions, true);
     const steps = buildTimeline(run, narrator(state.runTurn.body));
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
@@ -1935,7 +1938,7 @@ p { margin: 0; }
   }
 
   function startRun(question) {
-    const recorded = state.filesAreSample && question === SAMPLE.question;
+    const recorded = filesAreSample() && question === SAMPLE.question;
     const run = recorded ? sampleRun() : simulatedRun(state.files, question);
     state.filesDirty = false;
     state.runTurn = addTurn(question);
@@ -1952,15 +1955,14 @@ p { margin: 0; }
   }
 
   function renderFiles() {
-    const total = state.files.reduce((sum, f) => sum + f.size, 0);
-    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(total)} · ${state.filesAreSample ? 'sample memos' : 'your files'}`;
+    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(totalBytes(state.files))} · ${filesAreSample() ? 'sample memos' : 'your files'}`;
     $('file-list').replaceChildren(
       ...state.files.map((f) =>
         h('li', {}, h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'size' }, fmtBytes(f.size)))),
       ),
     );
     $('files-count').textContent = state.files.length;
-    $('sample-btn').hidden = state.filesAreSample;
+    $('sample-btn').hidden = filesAreSample();
   }
 
   function openFile(file) {
@@ -1971,7 +1973,7 @@ p { margin: 0; }
       fileView,
       h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
       h('div', { class: 'insp-title' }, h('span', { class: 'g' }, '● '), file.name),
-      h('div', { class: 'k' }, fileMeta(file, node?.pending)),
+      h('div', { class: 'k' }, fileMeta(file)),
       fileText(file),
       node ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(node.id) }, 'show in panel ›') : null,
     );
@@ -2005,14 +2007,12 @@ p { margin: 0; }
     error.hidden = true;
     const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
     read.sort((a, b) => a.name.localeCompare(b.name));
-    state.files = state.filesAreSample ? read : [...state.files, ...read].slice(0, MAX_FILES);
-    state.filesAreSample = false;
+    state.files = filesAreSample() ? read : [...state.files, ...read].slice(0, MAX_FILES);
     filesChanged(`${plural(read.length, 'file')} added. Your next question runs over ${plural(state.files.length, 'document')}.`);
   }
 
   function useSample() {
-    state.files = sampleFiles();
-    state.filesAreSample = true;
+    state.files = SAMPLE_FILES;
     if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
     filesChanged('Back to the 5 sample memos.');
   }
@@ -2023,7 +2023,7 @@ p { margin: 0; }
     renderFiles();
     updateAskFoot();
     syncDocNodes();
-    if (!state.run) readyStatus();
+    readyStatus();
     transcript.append(line('main', message, { dim: true }));
     scrollTranscript();
   }
@@ -2061,34 +2061,27 @@ p { margin: 0; }
   function toggleTheme() {
     const next = currentTheme() === 'dark' ? 'light' : 'dark';
     root.dataset.theme = next;
-    try {
-      localStorage.setItem(THEME_KEY, next);
-    } catch {
-      // Storage can be blocked; the toggle still works for this visit.
-    }
+    writeStored(THEME_KEY, next);
     updateThemeLabel();
   }
 
   function restoreTheme() {
-    try {
-      const saved = localStorage.getItem(THEME_KEY);
-      if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
-    } catch {
-      // No stored theme; follow the system.
-    }
+    const saved = readStored(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') root.dataset.theme = saved;
     updateThemeLabel();
   }
 
   // ---------- settings ----------
 
   function restoreSettings() {
+    let saved = null;
     try {
-      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? 'null');
-      if (typeof saved?.model === 'string' && saved.model.trim()) settings.model = saved.model.trim();
-      if (typeof saved?.endpoint === 'string') settings.endpoint = saved.endpoint.trim();
+      saved = JSON.parse(readStored(SETTINGS_KEY));
     } catch {
-      // Nothing stored, or storage is blocked; keep the defaults.
+      // A corrupt entry is ignored; keep the defaults.
     }
+    if (typeof saved?.model === 'string' && saved.model.trim()) settings.model = saved.model.trim();
+    if (typeof saved?.endpoint === 'string') settings.endpoint = saved.endpoint.trim();
   }
 
   function showKey(show) {
@@ -2097,16 +2090,13 @@ p { margin: 0; }
     $('setting-key-show').setAttribute('aria-label', show ? 'hide key' : 'show key');
   }
 
+  // Right-aligned under the button; CSS owns the width, so nothing needs measuring before it opens.
   function placeSettings() {
-    const gutter = parseFloat(getComputedStyle(root).getPropertyValue('--gutter'));
     const button = $('settings-btn').getBoundingClientRect();
-    const viewW = root.clientWidth;
-    const width = Math.min(SETTINGS_WIDTH_CH * charWidth(), viewW - 2 * gutter);
     const popover = $('settings');
-    popover.style.width = `${width}px`;
-    popover.style.left = `${clamp(button.right - width, gutter, viewW - width - gutter)}px`;
-    popover.style.top = `${button.bottom + SETTINGS_GAP}px`;
-    popover.style.maxHeight = `${window.innerHeight - button.bottom - SETTINGS_GAP - gutter}px`;
+    popover.style.left = `max(var(--gutter), ${button.right}px - var(--settings-width))`;
+    popover.style.top = `${button.bottom + POPOVER_GAP}px`;
+    popover.style.maxHeight = `${window.innerHeight - button.bottom - POPOVER_GAP - POPOVER_MARGIN}px`;
   }
 
   // beforetoggle, not toggle, so the popover is placed and filled before its first paint.
@@ -2117,7 +2107,6 @@ p { margin: 0; }
     placeSettings();
     $('setting-model').value = settings.model;
     $('setting-endpoint').value = settings.endpoint;
-    $('setting-key').placeholder = settings.keySet ? 'set for this tab' : '';
     $('settings-saved').textContent = '';
   }
 
@@ -2127,15 +2116,10 @@ p { margin: 0; }
     const key = $('setting-key');
     settings.model = $('setting-model').value.trim();
     settings.endpoint = $('setting-endpoint').value.trim();
-    settings.keySet ||= key.value !== '';
+    if (key.value) key.placeholder = 'set for this tab';
     key.value = '';
-    key.placeholder = settings.keySet ? 'set for this tab' : '';
-    try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ model: settings.model, endpoint: settings.endpoint }));
-    } catch {
-      // Storage is blocked; the settings still apply for this visit.
-    }
-    if (!state.run) readyStatus();
+    writeStored(SETTINGS_KEY, JSON.stringify({ model: settings.model, endpoint: settings.endpoint }));
+    readyStatus();
     $('settings-saved').textContent = 'saved';
     clearTimeout(savedTimer);
     savedTimer = setTimeout(() => ($('settings-saved').textContent = ''), SAVED_MS);
@@ -2178,7 +2162,6 @@ p { margin: 0; }
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
     const nodeEl = e.target.closest('.node');
-    if (nodeEl) stopArrange();
     gesture.node = nodeEl ? state.nodes.get(nodeEl.dataset.id) : null;
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
@@ -2223,6 +2206,7 @@ p { margin: 0; }
       else if (gesture.mode === 'pan') closeInspector();
     }
     gesture.mode = null;
+    gesture.node = null;
     panel.classList.remove('panning');
   }
 
@@ -2295,10 +2279,7 @@ p { margin: 0; }
       e.preventDefault();
       saveSettings();
     });
-    $('fit-btn').addEventListener('click', () => {
-      state.userMoved = false;
-      fit(true);
-    });
+    $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
