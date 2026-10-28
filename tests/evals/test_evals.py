@@ -3,7 +3,6 @@ import json
 import re
 import shutil
 import subprocess
-from functools import partial
 
 import httpx
 import litellm
@@ -32,21 +31,21 @@ USD_PER_CALL = 10
 LITELLM_ERROR = {"message": "down", "llm_provider": "openai", "model": "gpt-6-luna"}
 FORBIDDEN = httpx.Response(403, request=httpx.Request("POST", "https://api.openai.com"))
 INFRASTRUCTURE_FAILURES = [
-    partial(exceptions.AuthenticationError, **LITELLM_ERROR),
-    partial(exceptions.PermissionDeniedError, **LITELLM_ERROR, response=FORBIDDEN),
-    partial(exceptions.APIConnectionError, **LITELLM_ERROR),
-    partial(exceptions.Timeout, **LITELLM_ERROR),
-    partial(exceptions.RateLimitError, **LITELLM_ERROR),
-    partial(exceptions.ServiceUnavailableError, **LITELLM_ERROR),
-    partial(exceptions.InternalServerError, **LITELLM_ERROR),
-    partial(exceptions.BadGatewayError, **LITELLM_ERROR),
+    exceptions.AuthenticationError(**LITELLM_ERROR),
+    exceptions.PermissionDeniedError(**LITELLM_ERROR, response=FORBIDDEN),
+    exceptions.APIConnectionError(**LITELLM_ERROR),
+    exceptions.Timeout(**LITELLM_ERROR),
+    exceptions.RateLimitError(**LITELLM_ERROR),
+    exceptions.ServiceUnavailableError(**LITELLM_ERROR),
+    exceptions.InternalServerError(**LITELLM_ERROR),
+    exceptions.BadGatewayError(**LITELLM_ERROR),
+    exceptions.APIError(status_code=524, **LITELLM_ERROR),
 ]
 TASK_FAILURES = [
-    partial(exceptions.ContextWindowExceededError, **LITELLM_ERROR),
-    # litellm's catch-all, as for a response it cannot map: it can fail on every resume
-    partial(exceptions.APIError, status_code=500, **LITELLM_ERROR),
-    partial(SchemaError, "no schema fits the question"),
-    partial(RuntimeError, "the model is down"),
+    exceptions.ContextWindowExceededError(**LITELLM_ERROR),
+    exceptions.APIError(status_code=400, **LITELLM_ERROR),
+    SchemaError("no schema fits the question"),
+    RuntimeError("the model is down"),
 ]
 
 
@@ -97,16 +96,6 @@ def schema_name(request: dict) -> str | None:
 
 def read_json(path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def raises(failure):
-    """A fake reply that raises a fresh ``failure()`` for each request, as a provider
-    does, so no exception is shared across the run's threads."""
-
-    def reply(request):
-        raise failure()
-
-    return reply
 
 
 def test_the_draw_is_reproducible_from_the_seed():
@@ -194,11 +183,11 @@ def test_a_task_the_judge_fails_has_no_record_and_is_only_rejudged_on_resume(
         assert read_json(path.with_name("record.json"))["answer"] == answered["answer"]
 
 
-@pytest.mark.parametrize("failure", TASK_FAILURES, ids=lambda f: f.func.__name__)
+@pytest.mark.parametrize("failure", TASK_FAILURES, ids=lambda e: type(e).__name__)
 def test_a_task_whose_r3con_run_raises_is_recorded_with_its_error_and_scored_worst(
     loong_cache, corpusqa_cache, judging_llm, tmp_path, failure
 ):
-    judging_llm.answers(schema=raises(failure))
+    judging_llm.answers(schema=failure)
 
     line = evaluate(PINNED, tmp_path / "run", tmp_path / "results.jsonl")
 
@@ -208,28 +197,23 @@ def test_a_task_whose_r3con_run_raises_is_recorded_with_its_error_and_scored_wor
         "corpusqa": {"n": 2, "errors": 2, "accuracy": 0.0},
     }
     record = read_json(tmp_path / "run" / "corpusqa" / "sales_en_1" / "record.json")
-    assert record["error"].startswith(f"{failure.func.__name__}: ")
+    assert record["error"].startswith(f"{type(failure).__name__}: ")
     assert record["answer"] == ""
     assert judge_requests(judging_llm) == []
 
 
 @pytest.mark.parametrize(
-    "failure", INFRASTRUCTURE_FAILURES, ids=lambda f: f.func.__name__
+    "failure", INFRASTRUCTURE_FAILURES, ids=lambda e: type(e).__name__
 )
-def test_a_task_the_connection_fails_saves_no_answer_and_reruns_on_resume(
-    loong_cache, corpusqa_cache, judging_llm, cli_paths, failure
+def test_a_task_the_connection_fails_saves_no_answer_and_fails_the_run(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path, failure
 ):
-    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
-    judging_llm.answers(schema=raises(failure))
+    judging_llm.answers(schema=failure)
+    folder, results = tmp_path / "run", tmp_path / "results.jsonl"
 
-    assert main([]) == 1
-    [folder] = (cli_paths / "runs_dir").iterdir()
+    assert evaluate(PINNED, folder, results) is None
     assert not list(folder.rglob("answer.json"))
-    assert not (cli_paths / "results_path").exists()
-
-    requests = len(judging_llm.requests)
-    assert main(["--resume", str(folder)]) == 1
-    assert len(judging_llm.requests) == 2 * requests
+    assert not results.exists()
 
 
 def test_a_run_with_a_call_litellm_could_not_price_has_no_cost(
@@ -365,6 +349,19 @@ def test_main_prints_a_partial_runs_line_and_writes_none(
     assert re.fullmatch(r"\d{8}T\d{6}Z_[0-9a-f]{8}", line["run"])
     assert (cli_paths / "runs_dir" / line["run"] / "run.json").is_file()
     assert not (cli_paths / "results_path").exists()
+
+
+def test_main_fails_while_a_task_has_no_record_and_resume_runs_it_again(
+    loong_cache, corpusqa_cache, judging_llm, cli_paths
+):
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    judging_llm.answers(schema=exceptions.BadGatewayError(**LITELLM_ERROR))
+
+    assert main([]) == 1
+    [folder] = (cli_paths / "runs_dir").iterdir()
+    requests = len(judging_llm.requests)
+    assert main(["--resume", str(folder)]) == 1
+    assert len(judging_llm.requests) == 2 * requests
 
 
 @pytest.mark.parametrize(
