@@ -95,13 +95,18 @@ class Answer:
       final-round snippet used: each a document's id, or ``<id>.<k>`` for part ``k`` of
       a document read in parts in that previous round. A document read in parts has its
       parts' ids combined, in order, without repeats.
+    - ``parsing_provenance`` — for each document, aligned 1:1 with ``documents``, the
+      ids of the final-round relevance snippets its parse used, its own document's
+      among them when it helped: each a document's id, or ``<id>.<k>`` for part ``k``
+      of a document read in parts in that round. A document read in parts has its
+      parts' ids combined, in order, without repeats.
     - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
       ``source_docs`` with each index replaced by that document's id, so it lines up
       with ``source_docs`` by position. A record parsed from one part of a document read
       in parts carries the document's id. The id lets a record be matched against the
-      ids in ``provenance``, in ``relevance_provenance`` and in the run folder's
-      ``relevance/result.json``, where a part's id is ``<id>.<k>`` and matching uses the
-      part before the dot.
+      ids in ``provenance``, in ``relevance_provenance``, in ``parsing_provenance`` and
+      in the run folder's ``relevance/result.json``, where a part's id is ``<id>.<k>``
+      and matching uses the part before the dot.
     """
 
     answer: str
@@ -113,6 +118,7 @@ class Answer:
     document_ids: list[str] = field(default_factory=list)
     provenance: list[str] = field(default_factory=list)
     relevance_provenance: list[list[str]] = field(default_factory=list)
+    parsing_provenance: list[list[str]] = field(default_factory=list)
 
     @property
     def source_ids(self) -> dict[str, list[str]]:
@@ -310,6 +316,7 @@ def run_pipeline(
             task=task,
             prompt_version=config.prompts["structuring/parsing"],
             relevance_snippets=relevance_snippets,
+            document_ids=document_ids,
             model=model,
             max_attempts=caps["parsing_max_attempts"],
             run=record.run,
@@ -321,6 +328,7 @@ def run_pipeline(
             "parsed": extraction.parse,
             "source_docs": extraction.source_docs,
             "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
+            "provenance": extraction.provenance,
         }
     parsed = extraction.parse
 
@@ -385,4 +393,5 @@ def run_pipeline(
         document_ids=document_ids,
         provenance=result.provenance,
         relevance_provenance=relevance.provenance,
+        parsing_provenance=extraction.provenance,
     )

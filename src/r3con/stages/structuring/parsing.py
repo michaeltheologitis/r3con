@@ -9,11 +9,19 @@ document read in parts), all documents in parallel (bounded by
 - The **system prompt** carries the task, the proposed schema source, and the
   relevant context (every document's note, not just this one's) — the
   cross-document context that lets a single document be read in light of what the
-  rest of the corpus says.
+  rest of the corpus says. Each note is headed by its document's id,
+  ``### Document ID: <id>``, or ``<id>.<k>`` for part ``k`` of a document read in
+  parts.
 - The **user message** is the document being parsed, or one part of it.
 
+The reply is structured: the populated ``Parse``, and its ``provenance``, the ids of the
+notes the call used, from among those it shows, its own document's included
+(:func:`r3con.stages.relevance.provenance_schema`). A call shown no note is not asked
+for ``provenance`` and cites nothing.
+
 Each document (or part) yields one populated ``Parse``; the parses merge into one
-(list fields concatenated in document order, a document's parts in order). Every
+(list fields concatenated in document order, a document's parts in order), and its
+parts' provenance into one list (:attr:`ParseResult.provenance`). Every
 merged record is tagged with its **source-document index**
 (``ParseResult.source_docs``), which the reasoning stage turns into the document's id
 and stamps onto each record as ``"document": "<id>"`` (the id-injection), so the model
@@ -37,7 +45,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast, get_origin
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+from pydantic.json_schema import SkipJsonSchema
 
 from r3con import settings
 from r3con.logging_setup import get_logger
@@ -52,7 +61,13 @@ from r3con.runtime.python_executor import (
 )
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.relevance import Snippet, render_relevance
+from r3con.stages.relevance import (
+    Snippet,
+    cited,
+    provenance_schema,
+    render_relevance,
+    summary_ids,
+)
 
 _log = get_logger("structuring.parsing")
 
@@ -73,6 +88,13 @@ _SCHEMA_GLOBALS: dict[str, Any] = {
     "Set": set,
     "Annotated": typing.Annotated,
 }
+
+
+class _Reply(BaseModel):
+    parse: BaseModel
+    # Left out of the schema sent unless provenance_schema puts it in, with the ids a
+    # call shows: a call shown none is not asked for it.
+    provenance: SkipJsonSchema[list[str]] = Field(default_factory=list)
 
 
 class SchemaError(ValueError):
@@ -212,16 +234,25 @@ def _system_prompt(
     task: str,
     schema_code: str,
     relevance_snippets: Sequence[Snippet] | None,
+    document_ids: Sequence[str],
     prompt_version: str,
 ) -> str:
-    """The parsing system prompt: the task, the schema source, the relevant context."""
+    """The parsing system prompt: the task, the schema source, the relevant context,
+    each note headed by its id."""
     return load_prompt(
         "structuring/parsing",
         version=prompt_version,
         task=task,
         schema_code=schema_code,
-        relevance=render_relevance(relevance_snippets),
+        relevance=render_relevance(relevance_snippets, document_ids),
     )
+
+
+def _reply_schema(parse_cls: type[BaseModel], shown: Sequence[str]) -> type[_Reply]:
+    """The reply to a parsing call: ``{parse, provenance}``, ``provenance`` one of the
+    ``shown`` ids each; ``{parse}`` alone when ``shown`` is empty."""
+    reply = create_model("ParseReply", __base__=_Reply, parse=(parse_cls, ...))
+    return provenance_schema("ParseReply", reply, shown) if shown else reply
 
 
 def parse_one_document(
@@ -232,18 +263,23 @@ def parse_one_document(
     task: str,
     prompt_version: str,
     relevance_snippets: Sequence[Snippet] | None = None,
+    document_ids: Sequence[str] = (),
     model: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
     kind: str = "llm_call",
     **llm_kwargs: Any,
-) -> BaseModel:
+) -> tuple[BaseModel, list[str]]:
     """Parse one ``document``, or one part of one, into a populated ``Parse``.
 
     The system prompt carries the task, the schema source, and the relevant
     context (``relevance_snippets`` — every document's note, the
-    cross-document context); the document itself is the user message. One LLM
-    call with ``schema=parse_cls``.
+    cross-document context), each note headed by its document's id from
+    ``document_ids``, one per snippet; the document itself is the user message. One LLM
+    call, whose reply is the ``Parse`` and the ids of the notes it used.
+
+    Returns the ``Parse`` and those ids, in order and without repeats, less any the
+    call did not show (dropped with a warning); ``[]`` when it showed none.
 
     A reply that does not fit the schema is sent again with the validator's error, by
     :func:`r3con.runtime.llm.send_until_valid`, up to ``max_attempts`` sends (``None``
@@ -251,7 +287,8 @@ def parse_one_document(
     ``ValidationError`` is raised. Any other exception passes through at once.
 
     Raises:
-        ValueError: if ``max_attempts`` is not positive.
+        ValueError: if ``max_attempts`` is not positive, or ``document_ids`` is not one
+            id per snippet.
     """
     if max_attempts is None:
         max_attempts = settings.PARSING_MAX_ATTEMPTS
@@ -261,10 +298,13 @@ def parse_one_document(
             f"Override via settings.PARSING_MAX_ATTEMPTS (current default: "
             f"{settings.PARSING_MAX_ATTEMPTS})."
         )
+    shown = summary_ids(relevance_snippets, document_ids)
     reply = send_until_valid(
-        _system_prompt(task, schema_code, relevance_snippets, prompt_version),
+        _system_prompt(
+            task, schema_code, relevance_snippets, document_ids, prompt_version
+        ),
         document,
-        schema=parse_cls,
+        schema=_reply_schema(parse_cls, shown),
         rewrite=_REWRITE,
         kind=kind,
         max_attempts=max_attempts,
@@ -272,7 +312,8 @@ def parse_one_document(
         run=run,
         **llm_kwargs,
     )
-    return cast(BaseModel, reply)
+    reply = cast(_Reply, reply)
+    return reply.parse, cited(reply.provenance, shown, kind)
 
 
 @dataclass
@@ -288,10 +329,14 @@ class ParseResult:
       stamps it onto each record). Without it the merged parse is origin-blind:
       records from every document sit in one flat list and the model cannot say
       which document a fact came from.
+    - ``provenance`` — for each document, aligned 1:1 with the documents, the ids of
+      the notes its parse used; a document read in parts has its parts' ids combined,
+      in order, without repeats.
     """
 
     parse: BaseModel
     source_docs: dict[str, list[int]] = field(default_factory=dict)
+    provenance: list[list[str]] = field(default_factory=list)
 
 
 def parse_documents(
@@ -302,6 +347,7 @@ def parse_documents(
     task: str,
     prompt_version: str,
     relevance_snippets: Sequence[Snippet] | None = None,
+    document_ids: Sequence[str] = (),
     model: str,
     max_attempts: int | None = None,
     run: StageRun | None = None,
@@ -316,14 +362,19 @@ def parse_documents(
     **in parallel** (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`).
     Every call's system prompt carries the same relevant context, so each document is
     read with the cross-document context even though the calls are independent.
+    ``document_ids``, one per document, heads each document's notes with its id.
 
     The parts come from ``splits`` (built over ``documents``; ``None`` builds one), so
     parsing starts from any parts it already holds and may cut them further; it never
     renumbers. The parses merge into one (list fields concatenated in document order, a
     document's parts in order), and each merged record is tagged with its
     source-document index in :attr:`ParseResult.source_docs`, a part's records with its
-    document's. ``max_attempts`` bounds each call's retries (see
-    :func:`parse_one_document`). Returns a :class:`ParseResult`.
+    document's. Each document's cited ids are in :attr:`ParseResult.provenance`.
+    ``max_attempts`` bounds each call's retries (see :func:`parse_one_document`).
+    Returns a :class:`ParseResult`.
+
+    Raises:
+        ValueError: if ``document_ids`` is not one id per snippet.
     """
     if not documents:
         return ParseResult(
@@ -332,16 +383,19 @@ def parse_documents(
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
-    rest = _system_prompt(task, schema_code, relevance_snippets, prompt_version)
+    rest = _system_prompt(
+        task, schema_code, relevance_snippets, document_ids, prompt_version
+    )
+    schema = _reply_schema(parse_cls, summary_ids(relevance_snippets, document_ids))
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
-    def one(i: int, _document: str) -> list[BaseModel]:
+    def one(i: int, _document: str) -> list[tuple[BaseModel, list[str]]]:
         _log.info("parse doc %d/%d", i + 1, len(documents))
         return reader.read_in_parts(
             i,
             call="parse",
             rest=rest,
-            schema=parse_cls,
+            schema=schema,
             send=lambda part, kind: parse_one_document(
                 document=part,
                 schema_code=schema_code,
@@ -349,6 +403,7 @@ def parse_documents(
                 task=task,
                 prompt_version=prompt_version,
                 relevance_snippets=relevance_snippets,
+                document_ids=document_ids,
                 model=model,
                 max_attempts=max_attempts,
                 run=run,
@@ -359,13 +414,20 @@ def parse_documents(
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(
-        [(i, part) for i, parts in enumerate(per_doc) for part in parts], parse_cls
+        [(i, part) for i, parts in enumerate(per_doc) for part, _ in parts], parse_cls
     )
     counts = {f: len(v) for f, v in source_docs.items()}
     _log.info(
         "parsing complete · records per list field: %s", counts or "(no list fields)"
     )
-    return ParseResult(parse=parse, source_docs=source_docs)
+    return ParseResult(
+        parse=parse,
+        source_docs=source_docs,
+        provenance=[
+            list(dict.fromkeys(id_ for _, ids in parts for id_ in ids))
+            for parts in per_doc
+        ],
+    )
 
 
 def _empty_parse(parse_cls: type[BaseModel]) -> BaseModel:

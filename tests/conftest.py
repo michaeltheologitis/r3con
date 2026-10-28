@@ -331,12 +331,15 @@ def llm() -> FakeLLM:
 @pytest.fixture
 def answering_llm(llm: FakeLLM) -> FakeLLM:
     """``llm``, answering every stage so that any run completes: each document's
-    first line is its note and its one parsed row, and the answer joins the rows, on
-    either reasoning path."""
+    first line is its note and its one parsed row, citing no note, and the answer joins
+    the rows, on either reasoning path."""
     return llm.answers(
         relevance=lambda request: f"Notes on {_first_line(request)}.",
         schema=ANSWERING_SCHEMA,
-        parsing=lambda request: json.dumps({"rows": [{"who": _first_line(request)}]}),
+        parsing=lambda request: {
+            "parse": {"rows": [{"who": _first_line(request)}]},
+            "provenance": [],
+        },
         reasoning=_joined_rows,
     )
 

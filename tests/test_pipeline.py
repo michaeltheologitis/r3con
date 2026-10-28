@@ -43,6 +43,7 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
+        "structuring/parsing": "v2",
         "reasoning/direct": "v2",
         "reasoning/coding": "v2",
     },
@@ -53,6 +54,7 @@ ROUTINE = "The site logged its routine checks and found nothing out of the ordin
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
+DOCUMENT_ID_LINE = re.compile(r"^### Document ID: \S+$", re.MULTILINE)
 
 
 def answer(
@@ -159,10 +161,11 @@ def memo_note(request) -> str:
     return note[:200].rsplit(" ", 1)[0] + "."
 
 
-def whole_document_row(request) -> str:
+def whole_document_row(request) -> dict:
     """A parse reply whose one row is the whole document, so the parse fills the
     reasoning prompt."""
-    return json.dumps({"rows": [{"who": request["messages"][1]["content"]}]})
+    rows = [{"who": request["messages"][1]["content"]}]
+    return {"parse": {"rows": rows}, "provenance": []}
 
 
 def memos_run(llm, documents, model, tmp_path, **overrides):
@@ -211,6 +214,15 @@ def citing_every_shown_id(shown_ids):
         return {"summary": note, "provenance": shown_ids(request)[::-1]}
 
     return reply
+
+
+def citing_its_own_note(request) -> dict:
+    """A parse reply: the document as its one row, citing the id heading the note on
+    it."""
+    system, document = (message["content"] for message in request["messages"])
+    note = rf"^### Document ID: (\S+)\nNotes on {re.escape(document)}\.$"
+    [own] = re.findall(note, system, re.MULTILINE)
+    return {"parse": {"rows": [{"who": document}]}, "provenance": [own]}
 
 
 def first_turns(llm) -> list[dict]:
@@ -302,6 +314,39 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
         [ids[2], ids[0]],
         [ids[1], ids[0]],
     ]
+
+
+def test_the_run_folder_and_the_answer_record_which_notes_each_parse_used(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    documents = [*DOCS, "Calder memo"]
+    llm = answering_llm.answers(parsing=citing_its_own_note)
+    result = answer(llm, logger, documents=documents)
+    ids = result.document_ids
+    assert result.parsing_provenance == [[ids[0]], [ids[1]], [ids[2]]]
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert parsing["provenance"] == result.parsing_provenance
+    assert [row["who"] for row in parsing["parsed"]["rows"]] == documents
+
+
+def test_a_config_that_pins_parsing_v1_still_runs(answering_llm, tmp_path):
+    logger = TaskLogger("run", root=tmp_path)
+    prompts = {**CONFIG["prompts"], "structuring/parsing": "v1"}
+    result = answer(answering_llm, logger, prompts=prompts)
+    assert result.answer == "Halloran memo; Merrow memo"
+    assert result.parsing_provenance == [[], []]
+    v1 = load_prompt(
+        "structuring/parsing",
+        version="v1",
+        task="Who?",
+        schema_code=result.schema_code,
+        relevance=render_relevance(
+            [f"Notes on {d}." for d in DOCS], result.document_ids
+        ),
+    )
+    assert system_prompts(answering_llm, "parsing") == [v1, v1]
+    assert read_json(logger, "manifest")["config"]["prompts"] == prompts
 
 
 def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
@@ -415,7 +460,7 @@ def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     assert transcript["messages"][-1]["content"] == NEVER_COMMITS
 
 
-def test_document_ids_reach_relevance_only_as_summary_ids_and_never_structuring(
+def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_schema(
     answering_llm, shown_ids, monkeypatch
 ):
     counting_ids(monkeypatch)
@@ -435,21 +480,31 @@ def test_document_ids_reach_relevance_only_as_summary_ids_and_never_structuring(
         schema = request["response_format"]["json_schema"]["schema"]
         enum = schema["properties"]["provenance"]["items"]["enum"]
         assert enum == shown_ids(request)
-    for stage in ("schema", "parsing"):
-        for request in answering_llm.requests_for(stage):
-            assert ids_in(json.dumps(request, default=str)) == set()
+    for request in answering_llm.requests_for("parsing"):
+        text = "\n".join(message["content"] for message in request["messages"])
+        shown = text.split("## Your job", 1)[0]
+        assert re.findall(r"^### Document ID: (\S+)$", shown, re.MULTILINE) == ids
+        assert ids_in(DOCUMENT_ID_LINE.sub("", text)) == set()
+    for request in answering_llm.requests_for("schema"):
+        assert ids_in(json.dumps(request, default=str)) == set()
 
 
-def test_structuring_names_each_document_by_number_and_reasoning_by_id(
+def test_the_schema_names_each_document_by_number_and_parsing_and_reasoning_by_id(
     answering_llm,
 ):
     result = answer(answering_llm)
     ids = result.document_ids
-    for stage in ("schema", "parsing"):
-        for prompt in system_prompts(answering_llm, stage):
-            assert "### Document 1\nNotes on Halloran memo." in prompt
-            assert "### Document 2\nNotes on Merrow memo." in prompt
-            assert "Document ID" not in prompt
+    for prompt in system_prompts(answering_llm, "schema"):
+        assert "### Document 1\nNotes on Halloran memo." in prompt
+        assert "### Document 2\nNotes on Merrow memo." in prompt
+        assert "Document ID" not in prompt
+    for request in answering_llm.requests_for("parsing"):
+        prompt = request["messages"][0]["content"]
+        assert f"### Document ID: {ids[0]}\nNotes on Halloran memo." in prompt
+        assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
+        assert re.search(r"### Document \d", prompt) is None
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert schema["properties"]["provenance"]["items"]["enum"] == ids
     [request] = answering_llm.requests_for("reasoning")
     prompt = request["messages"][0]["content"]
     assert summary_headings(answering_llm) == ids
@@ -467,10 +522,11 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
 
     def rows(request):
         document = request["messages"][1]["content"]
-        return {"rows": [] if document == documents[1] else [{"who": document[:20]}]}
+        rows = [] if document == documents[1] else [{"who": document[:20]}]
+        return {"parse": {"rows": rows}, "provenance": []}
 
     logger = TaskLogger("run", root=tmp_path)
-    llm = answering_llm.answers(parsing=rows).refuses_over(16_000)
+    llm = answering_llm.answers(parsing=rows).refuses_over(18_000)
     result = answer(llm, logger, documents=documents, model=QWEN)
     ids = result.document_ids
     assert result.source_docs == {"rows": [0, 2, 3, 3, 3, 3, 4]}
@@ -641,7 +697,7 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
         (
             "PARSING_MAX_ATTEMPTS",
             "parsing",
-            '{"rows": [{"who": 7}]}',
+            '{"parse": {"rows": [{"who": 7}]}, "provenance": []}',
             pytest.raises(ValidationError, match="who"),
         ),
     ],
@@ -676,7 +732,7 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
 ):
     registry = grown_registry(40_000)
     logger = TaskLogger("run", root=tmp_path)
-    llm = answering_llm.refuses_over(16_000)
+    llm = answering_llm.refuses_over(18_000)
     result = answer(llm, logger, documents=memos_with(registry), model=QWEN)
     assert len(result.relevant_context) == 5
     assert summary_headings(llm) == as_ids(result.document_ids, REGISTRY_IN_4_PARTS)
@@ -696,7 +752,7 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
         if part in registry and part != registry:
             system = request["messages"][0]["content"]
             assert not any(note in system for note in part_notes)
-    over = [request for request in llm.requests if chars(request) > 16_000]
+    over = [request for request in llm.requests if chars(request) > 18_000]
     assert len(over) == len({json.dumps(r["messages"]) for r in over}) == 2
     record = read_json(logger, "splits")["documents"]["3"]
     assert len(record["cuts"]) == 3

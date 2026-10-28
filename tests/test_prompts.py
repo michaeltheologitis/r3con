@@ -9,6 +9,7 @@ from r3con.config import PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
 from r3con.runtime.codeact import run_codeact
 from r3con.stages.reasoning import reason
+from r3con.stages.structuring.parsing import check_schema, parse_one_document
 
 MODEL = "openai/gpt-6-luna"
 PINNED = load_config("default").prompts
@@ -102,6 +103,27 @@ def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example
     )
     assert set(reply) == {"answer", "provenance"}
     assert (result.answer, result.provenance) == (reply["answer"], reply["provenance"])
+    assert len(llm.requests) == 1
+
+
+@pytest.mark.parametrize("example", examples("structuring/parsing"))
+def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, example):
+    schema_code = example.split("```python\n", 1)[1].split("\n```", 1)[0]
+    headed = re.findall(r"^### Document ID: (\w+)\n(.+)$", example, re.MULTILINE)
+    reply = json.loads(example.split("```json\n", 1)[1].split("\n```", 1)[0])
+    parse, provenance = parse_one_document(
+        document="?",
+        schema_code=schema_code,
+        parse_cls=check_schema(schema_code),
+        task="?",
+        prompt_version=PINNED["structuring/parsing"],
+        relevance_snippets=[note for _, note in headed],
+        document_ids=[id_ for id_, _ in headed],
+        model=MODEL,
+        completion=llm.replies(reply),
+    )
+    assert set(reply) == {"parse", "provenance"}
+    assert (parse.model_dump(), provenance) == (reply["parse"], reply["provenance"])
     assert len(llm.requests) == 1
 
 

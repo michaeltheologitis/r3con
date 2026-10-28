@@ -28,7 +28,7 @@ Config file shape (``configs/<name>.yaml``)::
       relevance/first-round: v1
       relevance/later-rounds: v1
       structuring/schema: v1
-      structuring/parsing: v1
+      structuring/parsing: v2
       reasoning/direct: v2
       reasoning/coding: v2
     params:                      # optional; passed straight to litellm.completion
@@ -155,7 +155,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v2,coding=v2)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v1,rel2=v1,schema=v1,parse=v2,direct=v2,coding=v2)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 

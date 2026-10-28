@@ -15,6 +15,7 @@ from r3con.stages.relevance import (
     join_parts,
     relevance_snippet,
     render_relevance,
+    summary_ids,
     surface_relevance,
 )
 
@@ -180,9 +181,25 @@ def test_the_notes_render_as_one_labelled_section_per_document(snippets, ids, re
     assert render_relevance(snippets, ids) == rendered
 
 
-def test_notes_and_ids_that_do_not_pair_up_are_refused():
+@pytest.mark.parametrize(
+    ("snippets", "ids", "headings"),
+    [
+        (None, [], []),
+        ([], IDS, []),
+        (["a", ""], IDS[:2], IDS[:2]),
+        ([["a", ""], "c"], IDS[:2], ["0a0a0a.1", "0a0a0a.2", "1b1b1b"]),
+    ],
+)
+def test_summary_ids_are_the_ids_the_notes_render_under(snippets, ids, headings):
+    rendered = render_relevance(snippets, ids)
+    assert re.findall(r"^### Document ID: (\S+)$", rendered, re.MULTILINE) == headings
+    assert summary_ids(snippets, ids) == headings
+
+
+@pytest.mark.parametrize("ids_of", [render_relevance, summary_ids])
+def test_notes_and_ids_that_do_not_pair_up_are_refused(ids_of):
     with pytest.raises(ValueError):
-        render_relevance(["one", "two"], IDS[:1])
+        ids_of(["one", "two"], IDS[:1])
 
 
 @pytest.mark.parametrize(

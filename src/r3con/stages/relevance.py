@@ -183,6 +183,27 @@ def render_relevance(
     return "\n\n".join(sections)
 
 
+def summary_ids(
+    relevance_snippets: Sequence[Snippet] | None, document_ids: Sequence[str]
+) -> list[str]:
+    """The ids :func:`render_relevance` heads ``relevance_snippets`` with, given
+    ``document_ids``, in order: each document's id, or ``<id>.<k>`` for each part of a
+    document read in parts; ``[]`` for an empty / ``None`` list, which renders nothing.
+
+    Raises:
+        ValueError: if ``document_ids`` is not one id per snippet.
+    """
+    if not relevance_snippets:
+        return []
+    return [
+        id_
+        for document_id, snippet in zip(document_ids, relevance_snippets, strict=True)
+        for id_ in _part_ids(
+            document_id, len(snippet) if isinstance(snippet, list) else 1
+        )
+    ]
+
+
 def _render_other_snippets(shown: Mapping[str, str]) -> str:
     """The shown snippets, each under its ``### Summary ID: <id>`` heading, separated
     by blank lines."""

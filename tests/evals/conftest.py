@@ -79,7 +79,7 @@ def judging_llm(answering_llm, monkeypatch: pytest.MonkeyPatch):
             equivalent = "Answer 2: 42\n" in user
             return json.dumps({"explanation": "Checked.", "equivalent": equivalent})
         first_line = user.splitlines()[0]
-        return json.dumps({"rows": [{"who": first_line}]})
+        return json.dumps({"parse": {"rows": [{"who": first_line}]}, "provenance": []})
 
     answering_llm.answers(parsing=parse_or_judge)
     monkeypatch.setattr(litellm, "completion", answering_llm)
