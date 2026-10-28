@@ -19,7 +19,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 - `uv run pytest`: the unit tests, with sockets disabled and live tests deselected, so nothing reaches the network. CI also runs them on Python 3.11 to 3.14, at the lowest allowed dependency versions, and against the built wheel.
 - `uv run pytest -m "live and not experiment"`: an end-to-end run against OpenAI, billed to `OPENAI_API_KEY` and skipped without it. The unit tests fake the model, so run it when a change affects what the model is sent or how it is called. A manual CI dispatch runs it by default.
 - `uv run pytest -m experiment`: the experiments, measured live runs that cost far more. Run them only when Michael asks (in CI, a dispatch with `experiment` on); plain `-m live` includes them.
-- `uv run python -m evals`: the eval, r3con on 75 pinned Loong and CorpusQA tasks, judged by Luna, about $2.50–3 a run on `OPENAI_API_KEY` ([`evals/README.md`](evals/README.md)). Run it for a change that could move answers a lot, and when Michael asks; the line it writes to `evals/results.jsonl` goes in that change's PR.
+- `uv run python -m evals`: the eval, r3con on 75 pinned Loong and CorpusQA tasks, judged by Luna, about $3 and three minutes a run on `OPENAI_API_KEY` ([`evals/README.md`](evals/README.md)). Run it for a change that could move answers a lot, and when Michael asks; the line it writes to `evals/results.jsonl` goes in that change's PR.
 
 ## Conventions
 

@@ -16,13 +16,14 @@ adapters are ported from [r3con-evaluation](https://github.com/michaeltheologiti
 
 ## Cost and time
 
-About **$2.50–3 a run** on Luna: the sample holds 7.3M document tokens, r3con sends about
-3.2 times that as input, and output and judging are small. The cost is litellm's price
+About **$3 a run** on Luna (the first full run, on 2026-10-28, cost $2.99): the sample
+holds 7.3M document tokens, r3con sends about 3.2 times that as input, and output and
+judging are small. The cost is litellm's price
 for each call r3con and the judge made, as recorded in their `calls.json`, cached input
 included; it is `null` when litellm could not price a call.
 
 A task takes one to two minutes, and a run does 32 at a time by default (`--workers`),
-each fanning out over its own documents, so a run should take around ten minutes.
+each fanning out over its own documents; the first full run took about three minutes.
 Rate-limited calls are resent with backoff by r3con itself.
 
 ## Running it
