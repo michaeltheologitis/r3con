@@ -1,3 +1,4 @@
+import ast
 import json
 import random
 import re
@@ -12,7 +13,9 @@ from pydantic import ValidationError
 from r3con import read_documents, settings
 from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
 from r3con.pipeline import run_pipeline
+from r3con.prompts import load_prompt
 from r3con.runs import TaskLogger
+from r3con.stages.relevance import render_relevance
 from r3con.stages.structuring.parsing import SchemaError
 
 MODEL = "openai/gpt-6-luna"
@@ -39,6 +42,7 @@ REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
+SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 
 
 def answer(
@@ -275,11 +279,79 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
             assert "Round 1 notes" not in prompt
 
 
-def test_the_reasoning_prompt_names_each_records_document(answering_llm):
-    answer(answering_llm)
-    [prompt] = system_prompts(answering_llm, "reasoning")
-    assert '"document": 1,\n      "who": "Halloran memo"' in prompt
-    assert '"document": 2,\n      "who": "Merrow memo"' in prompt
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_reasoning_is_sent_the_parse_stamped_with_document_numbers_and_no_ids(
+    answering_llm, version
+):
+    llm = answering_llm.answers(reasoning="<code>\nfinal_answer(parse)\n</code>")
+    result = answer(llm, prompts={**CONFIG["prompts"], "reasoning": version})
+    stamped = {
+        "rows": [
+            {"document": 1, "who": "Halloran memo"},
+            {"document": 2, "who": "Merrow memo"},
+        ]
+    }
+    [request] = llm.requests_for("reasoning")
+    assert request["messages"] == [
+        {
+            "role": "system",
+            "content": load_prompt(
+                "reasoning",
+                version=version,
+                relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
+                read_in_parts=False,
+                parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
+            ),
+        },
+        {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
+    ]
+    assert ast.literal_eval(result.answer) == stamped
+
+
+def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
+    answering_llm, shown_ids, monkeypatch
+):
+    counting_ids(monkeypatch)
+    result = answer(answering_llm, documents=[*DOCS, "Calder memo"])
+
+    def ids_in(text: str) -> set[str]:
+        return {id_ for id_ in result.document_ids if id_ in text}
+
+    relevance = answering_llm.requests_for("relevance")
+    later_rounds = [request for request in relevance if "response_format" in request]
+    assert [len(shown_ids(request)) for request in later_rounds] == [2, 2, 2]
+    for request in relevance:
+        text = "\n".join(message["content"] for message in request["messages"])
+        assert ids_in(SUMMARY_ID_LINE.sub("", text)) == set()
+    for request in later_rounds:
+        schema = request["response_format"]["json_schema"]["schema"]
+        enum = schema["properties"]["provenance"]["items"]["enum"]
+        assert enum == shown_ids(request)
+    for stage in LATER_STAGES:
+        for request in answering_llm.requests_for(stage):
+            assert ids_in(json.dumps(request, default=str)) == set()
+
+
+def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
+    answering_llm, grown_registry, tmp_path
+):
+    documents = memos_with(grown_registry(40_000))
+
+    def rows(request):
+        document = request["messages"][1]["content"]
+        return {"rows": [] if document == documents[1] else [{"who": document[:20]}]}
+
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(parsing=rows).refuses_over(16_000)
+    result = answer(llm, logger, documents=documents, model=QWEN, prompts=V2)
+    ids = result.document_ids
+    assert result.source_docs == {"rows": [0, 2, 3, 3, 3, 3, 4]}
+    assert result.source_ids == {"rows": [ids[0], ids[2], *[ids[3]] * 4, ids[4]]}
+    stamps = [row["document"] for row in result.structured_context["rows"]]
+    assert [ids[n - 1] for n in stamps] == result.source_ids["rows"]
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert parsing["source_docs"] == result.source_docs
+    assert parsing["source_ids"] == result.source_ids
 
 
 @pytest.mark.parametrize("rounds", [1, 3])
