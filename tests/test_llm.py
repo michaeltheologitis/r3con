@@ -12,7 +12,7 @@ import openai
 import pytest
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
@@ -186,6 +186,27 @@ def test_an_enum_past_openais_limit_is_sent_without_its_values(llm, n, kept):
     pick = sent_schema(llm, choice)["properties"]["pick"]
     assert pick.get("enum") == (list(values) if kept else None)
     assert pick["type"] == "string"
+
+
+@pytest.mark.parametrize(
+    ("pattern", "kept"),
+    [
+        (r"^\d{4}$", True),
+        (r"^(?=\d)\w+$", False),
+        (r"^(?!x)\w+$", False),
+        (r"(?<=#)\d+", False),
+        (r"(?<!#)\d+", False),
+    ],
+)
+def test_a_pattern_with_a_lookaround_is_sent_without_it(llm, pattern, kept):
+    coded = create_model(
+        "Coded",
+        __config__=ConfigDict(regex_engine="python-re"),
+        code=(str, Field(pattern=pattern)),
+    )
+    code = sent_schema(llm, coded)["properties"]["code"]
+    assert code.get("pattern") == (pattern if kept else None)
+    assert code["type"] == "string"
 
 
 def test_a_dict_field_is_sent_without_properties_left_open(llm):
