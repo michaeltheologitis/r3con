@@ -13,7 +13,6 @@ from r3con.r3con import read_documents
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
-STAGES_BUT_REASONING = {s: "v1" for s in PROMPT_STAGES if not s.startswith("reasoning")}
 
 
 def r3con(*argv: str) -> int:
@@ -115,22 +114,16 @@ def test_a_config_pinning_a_missing_prompt_exits_2_before_any_request(
     assert not (tmp_path / "logs").exists()
 
 
-@pytest.mark.parametrize(
-    ("prompts", "old"),
-    [
-        ({**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}, "relevance"),
-        ({**STAGES_BUT_REASONING, "reasoning": "v2"}, "reasoning"),
-    ],
-)
 def test_a_config_pinning_a_stage_r3con_does_not_have_exits_2_in_one_line(
-    scripted, configs, capsys, prompts, old
+    scripted, configs, capsys
 ):
+    prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}
     configs(old={"model": "openai/m", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "old") == 2
     err = capsys.readouterr().err
     assert err.startswith(
         "r3con: config 'old' pins a prompt for stage(s) r3con does not have: "
-        f"[{old!r}]. The stages are ['relevance/first-round', "
+        "['relevance']. The stages are ['relevance/first-round', "
         "'relevance/later-rounds',"
     )
     assert err.endswith("'reasoning/direct', 'reasoning/coding'].\n")

@@ -7,7 +7,7 @@ import pytest
 import r3con
 from r3con import Answer, RunConfig
 from r3con import r3con as namespace
-from r3con.config import PROMPT_STAGES
+from r3con.config import PROMPT_STAGES, REASONING_PATHS
 from r3con.r3con import read_documents, run
 
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -151,7 +151,7 @@ def test_a_run_on_a_provider_that_takes_no_seed_completes(answering_llm, model):
     assert {request["model"] for request in answering_llm.requests} == {model}
 
 
-@pytest.mark.parametrize("reasoning", ["direct", "coding"])
+@pytest.mark.parametrize("reasoning", REASONING_PATHS)
 def test_the_reasoning_path_is_chosen_per_run_and_recorded(
     answering_llm, tmp_path, reasoning
 ):

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from r3con import read_documents, run
+from r3con.config import REASONING_PATHS
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 QUESTION = (
@@ -21,7 +22,7 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize("reasoning", ["direct", "coding"])
+@pytest.mark.parametrize("reasoning", REASONING_PATHS)
 def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning):
     result = run(
         QUESTION, read_documents(MEMOS), reasoning=reasoning, logs_dir=tmp_path

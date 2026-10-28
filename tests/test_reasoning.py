@@ -5,13 +5,14 @@ import litellm
 import pytest
 
 from r3con import settings
+from r3con.config import REASONING_PATHS
 from r3con.prompts import load_prompt
 from r3con.stages.reasoning import _sample_record_per_field, reason
 from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v1", "reasoning/coding": "v1"}
-PATHS = pytest.mark.parametrize("path", ["direct", "coding"])
+PATHS = pytest.mark.parametrize("path", REASONING_PATHS)
 COMMIT = "Thought: commit.\n<code>\nfinal_answer('ok')\n</code>"
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
 PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
@@ -35,15 +36,15 @@ def reasoning_prompt(llm, path="coding", **kwargs) -> str:
     return llm.requests[-1]["messages"][0]["content"]
 
 
-def ask(llm, *replies, **kwargs):
-    """``reason`` over ROWS on the direct path, ``llm`` answering with ``replies``."""
+def ask(llm, *replies, path="direct", **kwargs):
+    """``reason`` over ROWS on ``path``, ``llm`` answering with ``replies``."""
     kwargs.setdefault("model", MODEL)
     return reason(
         task="Who?",
         schema_code="",
         parsed=ROWS,
         prompts=PROMPTS,
-        path="direct",
+        path=path,
         completion=llm.replies(*replies),
         **kwargs,
     )
@@ -90,9 +91,8 @@ def test_on_the_direct_path_one_call_answers_and_its_reply_is_the_answer(llm):
     ]
 
 
-@pytest.mark.parametrize("empty", ["", "\n"])
-def test_an_empty_direct_reply_is_sent_again(llm, empty):
-    assert ask(llm, empty, "Halloran.").answer == "Halloran."
+def test_an_empty_direct_reply_is_sent_again(llm):
+    assert ask(llm, "", "Halloran.").answer == "Halloran."
     first, again = llm.requests
     assert again["messages"] == first["messages"]
 
@@ -265,15 +265,7 @@ def test_a_first_turn_refused_with_the_whole_parse_is_sent_once_more_with_sample
     llm, caplog, refusal
 ):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
-    result = reason(
-        task="?",
-        schema_code="",
-        parsed=ROWS,
-        model=MODEL,
-        prompts=PROMPTS,
-        path="coding",
-        completion=llm.replies(refusal(), PRINTS, COMMIT),
-    )
+    result = ask(llm, refusal(), PRINTS, COMMIT, path="coding")
     assert result.answer == "ok"
     whole, samples = first_turn_prompts(llm)
     assert LAST_ROW in whole and SAMPLE not in whole

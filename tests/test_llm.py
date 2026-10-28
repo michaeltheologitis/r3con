@@ -204,9 +204,14 @@ def test_a_supplied_completion_is_called_once_per_request_without_retry_settings
     assert CALLER_RETRY_SETTINGS.isdisjoint(llm.requests[0])
 
 
-def test_an_empty_structured_reply_is_rerolled_with_the_same_request(llm):
-    out = ask(llm.replies("", "", '{"x": 7}'), schema=Number)
-    assert out == Number(x=7)
+@pytest.mark.parametrize(
+    ("asking", "answer"),
+    [({"schema": Number}, Number(x=7)), ({"reroll_empty": True}, '{"x": 7}')],
+    ids=["structured", "plain"],
+)
+def test_an_empty_reply_is_rerolled_with_the_same_request(llm, asking, answer):
+    out = ask(llm.replies("", "\n", '{"x": 7}'), **asking)
+    assert out == answer
     first, *rerolls = llm.requests
     assert len(rerolls) == 2
     assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
@@ -231,14 +236,6 @@ def test_empty_replies_raise_once_the_rerolls_run_out(llm, asking):
 def test_an_empty_plain_reply_is_returned_as_it_is(llm):
     assert ask(llm.replies("")) == ""
     assert len(llm.requests) == 1
-
-
-@pytest.mark.parametrize("empty", ["", "\n"])
-def test_an_empty_plain_reply_is_rerolled_when_asked(llm, empty):
-    assert ask(llm.replies(empty, empty, "ok"), reroll_empty=True) == "ok"
-    first, *rerolls = llm.requests
-    assert len(rerolls) == 2
-    assert all(reroll["messages"] == first["messages"] for reroll in rerolls)
 
 
 def test_a_structured_reply_that_parses_is_not_rerolled(llm):

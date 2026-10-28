@@ -173,6 +173,9 @@ def test_a_reasoning_path_r3con_does_not_have_is_refused(
         load_config(name, **overrides)
     assert type(refused.value) is ValueError
     assert str(refused.value).startswith(f"{message} ['direct', 'coding'], got '")
+
+
+def test_a_run_config_refuses_a_reasoning_path_r3con_does_not_have():
     with pytest.raises(ValidationError, match="Input should be 'direct' or 'coding'"):
         RunConfig(model="openai/m", prompts=PROMPTS, reasoning="agent")
 
