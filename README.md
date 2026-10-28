@@ -115,9 +115,9 @@ result.run_dir  # Path      — directory containing run artifacts
 
 Every run writes its intermediate artifacts to a directory under `./logs`. This includes the
 relevance snippet produced for each document at every round, the generated schema, parsed
-records, and model calls. Each call in `calls.json` records its tokens and what it cost
-(`usd`, as litellm prices it, or `null` when it cannot), and each stage's `result.json`
-totals them.
+records, model calls, and the final reasoning transcript. Each call in `calls.json` records
+its tokens and what it cost (`usd`, as litellm prices it, or `null` when it cannot), and
+each stage's `result.json` totals them.
 
 `reasoning/result.json` records the answer and the `path` that produced it: `direct`, one
 call over the relevance snippets and the parsed records, or `coding`, an agent that reads
@@ -125,8 +125,6 @@ the records with code. A run takes the direct path unless its config, `--reasoni
 `reasoning=` says `coding`. A direct run whose prompt doesn't fit the model's window takes
 the coding path instead, and `fallback` says why: `cause` `estimate` (with `estimate` and
 `line`, in tokens) or `refusal` (with `error`). Otherwise `fallback` is `null`.
-`reasoning/transcript.yaml`, the agent's conversation, is written only when the coding
-path ran.
 
 Each document gets a random id of 6 hex characters for the run, and `ids.json` maps each
 id to the document's 0-based index in `documents` (also `result.document_ids`). In
@@ -159,7 +157,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 └── reasoning/
     ├── result.json              <- the answer, its path, and why it fell back
     ├── calls.json
-    └── transcript.yaml          <- only when the coding path ran
+    └── transcript.yaml
 ```
 
 ## Evaluation

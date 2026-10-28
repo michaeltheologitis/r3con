@@ -11,7 +11,13 @@ import yaml
 from pydantic import ValidationError
 
 from r3con import read_documents, settings
-from r3con.config import PROMPT_STAGES, RunConfig, load_config, normalize_model_name
+from r3con.config import (
+    PROMPT_STAGES,
+    REASONING_PATHS,
+    RunConfig,
+    load_config,
+    normalize_model_name,
+)
 from r3con.pipeline import run_pipeline
 from r3con.prompts import load_prompt
 from r3con.runs import TaskLogger
@@ -198,12 +204,12 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def system_message(stage: str, version: str = "v1") -> dict:
-    """The system message of ``stage``'s prompt at ``version`` over DOCS' notes and
-    their whole parse, stamped."""
+def system_message(stage: str) -> dict:
+    """The system message of ``stage``'s v1 prompt over DOCS' notes and their whole
+    parse, stamped."""
     content = load_prompt(
         stage,
-        version=version,
+        version="v1",
         relevance=render_relevance([f"Notes on {d}." for d in DOCS]),
         read_in_parts=False,
         parse_block=json.dumps(STAMPED, indent=2, ensure_ascii=False),
@@ -243,6 +249,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "structuring/parsing/result.json",
         "reasoning/calls.json",
         "reasoning/result.json",
+        "reasoning/transcript.yaml",
     }
     relevance = json.loads((logger.dir / "relevance/result.json").read_text())
     assert (relevance["n_rounds"], relevance["n_docs"]) == (2, 2)
@@ -302,14 +309,7 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     answering_llm, tmp_path
 ):
     llm = answering_llm.answers(reasoning="Halloran and Merrow.")
-    logger = TaskLogger("run", root=tmp_path)
-    result = run_pipeline(
-        task="Who?",
-        documents=DOCS,
-        config=load_config("default"),
-        task_logger=logger,
-        completion=llm,
-    )
+    logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
     [request] = llm.requests_for("reasoning")
     assert request["messages"] == [
         system_message("reasoning/direct"),
@@ -323,16 +323,20 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
         None,
     )
     assert reasoning["totals"]["n_steps"] == 1
-    assert not (logger.dir / "reasoning" / "transcript.yaml").exists()
+    transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
+    roles = [message["role"] for message in transcript["messages"]]
+    assert roles == ["system", "user", "assistant"]
 
 
-def test_the_coding_path_sends_what_reasoning_v2_sent(answering_llm, tmp_path):
+def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
+    answering_llm, tmp_path
+):
     llm = answering_llm.answers(reasoning=COMMITS_THE_PARSE)
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger, reasoning="coding")
     [request] = llm.requests_for("reasoning")
     assert request["messages"] == [
-        system_message("reasoning", "v2"),
+        system_message("reasoning/coding"),
         {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
     ]
     assert ast.literal_eval(result.answer) == STAMPED
@@ -359,7 +363,7 @@ def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_s
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
 
 
-def test_a_fallback_that_fails_after_a_turn_still_leaves_its_transcript(
+def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     answering_llm, tmp_path, refusal
 ):
     llm = answering_llm.answers(reasoning=[refusal(), NEVER_COMMITS, provider_down()])
@@ -368,7 +372,8 @@ def test_a_fallback_that_fails_after_a_turn_still_leaves_its_transcript(
         answer(llm, logger)
     assert [call["kind"] for call in read_json(logger, "reasoning/calls")] == ["turn-1"]
     assert (logger.dir / "reasoning" / "error.txt").is_file()
-    assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
+    transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
+    assert transcript["messages"][-1]["content"] == NEVER_COMMITS
 
 
 def test_document_ids_reach_the_model_only_as_later_rounds_summary_ids(
@@ -438,7 +443,7 @@ def test_no_request_carries_a_seed_unless_params_sets_one(answering_llm):
     assert [request["seed"] for request in answering_llm.requests] == [7] * 8
 
 
-@pytest.mark.parametrize("reasoning", ["direct", "coding"])
+@pytest.mark.parametrize("reasoning", REASONING_PATHS)
 def test_each_stage_renders_the_prompt_version_its_config_pins(
     answering_llm, tmp_path, reasoning
 ):
@@ -695,21 +700,24 @@ def test_the_reasoning_path_changes_only_what_reasoning_sends(
 ):
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
     documents, model = read_documents(MEMOS), window(1_000_000)
-    sent = {}
-    for path in ("direct", "coding"):
+    sent = []
+    for path in REASONING_PATHS:
         counting_ids(monkeypatch)
         answering_llm.requests.clear()
         logger = TaskLogger(path, root=tmp_path)
         answer(answering_llm, logger, documents=documents, model=model, reasoning=path)
-        sent[path] = [
-            (r["messages"], r.get("response_format"))
-            for stage in ("relevance", "schema", "parsing")
-            for r in answering_llm.requests_for(stage)
-        ]
+        sent.append(
+            [
+                (r["messages"], r.get("response_format"))
+                for stage in ("relevance", "schema", "parsing")
+                for r in answering_llm.requests_for(stage)
+            ]
+        )
         assert len(answering_llm.requests_for("reasoning")) == 1
         assert not (logger.dir / "splits.json").exists()
-    assert len(sent["coding"]) == 16
-    assert sent["direct"] == sent["coding"]
+    first, *others = sent
+    assert len(first) == 16
+    assert all(other == first for other in others)
 
 
 @pytest.mark.parametrize("measured", [False, True], ids=["by-refusal", "by-estimate"])

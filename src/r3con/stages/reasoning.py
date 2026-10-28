@@ -9,8 +9,9 @@
   rendered with a view of the records, and the agent writes and runs code until it
   commits with ``final_answer(x)``.
 
-A direct run takes the coding path when the direct prompt does not fit the model's
-window: the coding path can show one sample record per field and read the rest with code.
+A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
+it over the line or the provider refuses it as too long, takes the coding path instead,
+starting from one sample record per field.
 
 Either way it reasons over the parse *together with* the relevant context from stage 1 —
 the two are co-equal views, and the parse alone is lossy. It never sees the source
@@ -27,7 +28,7 @@ from __future__ import annotations
 import functools
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
@@ -141,10 +142,9 @@ class ReasoningResult:
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
-    - ``fallback``: why the coding path ran when the direct path was asked for, else
-      ``None``: ``{"cause": "estimate", "estimate": tokens, "line": tokens}`` when the
-      direct prompt was estimated over the line, or ``{"cause": "refusal", "error":
-      message}`` when the provider refused it as too long.
+    - ``fallback``: why a direct run took the coding path, else ``None``:
+      ``{"cause": "estimate", "estimate": tokens, "line": tokens}`` or
+      ``{"cause": "refusal", "error": message}``.
     """
 
     answer: str
@@ -197,23 +197,22 @@ def _reason_with_code(
     user_message: str,
     model: str,
     splits: Splits,
-    fallback: dict[str, Any] | None = None,
+    whole: bool = True,
     **codeact_kwargs: Any,
 ) -> ReasoningResult:
     """The coding path: the CodeAct loop over the parse, under the system prompt
     ``render(parse_block=...)``.
 
-    The view of the parse is the whole parse when its first turn fits, else one sample
-    record per top-level field: when the parse is over
+    With ``whole``, the view of the parse is the whole parse when its first turn fits,
+    else one sample record per top-level field: when the parse is over
     ``settings.REASONING_PARSE_MAX_TOKS``, when ``splits`` estimates the first turn with
     it over the line, or when the provider refuses that turn as too long, which sends it
-    once more with the samples. A ``fallback`` from the direct path, whose prompt held
-    the whole parse and did not fit, starts with the samples.
+    once more with the samples. Without ``whole``, it is the samples from the start.
     """
-    # The whole parse, unless this is a fallback, it is over the flood guard (a parse
-    # that runs to thousands of records), or its first turn is over the line.
-    parse_tokens = 0 if fallback else count_tokens(parse_json)
-    whole = not fallback and parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
+    parse_tokens = count_tokens(parse_json) if whole else None
+    whole = parse_tokens is not None and (
+        parse_tokens <= settings.REASONING_PARSE_MAX_TOKS
+    )
     system_prompt = render(
         parse_block=parse_json if whole else _sample_view(parse_dict)
     )
@@ -256,8 +255,47 @@ def _reason_with_code(
         path="coding",
         turns=result.turns,
         terminated_by=result.terminated_by,
-        fallback=fallback,
     )
+
+
+def _reason_directly(
+    *,
+    render: Callable[..., str],
+    parse_json: str,
+    user_message: str,
+    model: str,
+    splits: Splits,
+    run: StageRun | None,
+    **llm_kwargs: Any,
+) -> ReasoningResult | dict[str, Any]:
+    """The direct path's answer, or, when its prompt does not fit, why not: the
+    ``fallback`` of a :class:`ReasoningResult`."""
+    system_prompt = render(parse_block=parse_json)
+    if estimate := splits.over_line(system_prompt, user_message):
+        _log.info(
+            "reasoning's direct prompt would take about %s tokens, over the %s-token "
+            "line; reasoning with code instead",
+            f"{estimate:,}",
+            f"{splits.line:,}",
+        )
+        return {"cause": "estimate", "estimate": estimate, "line": splits.line}
+    try:
+        reply = litellm_chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_message,
+            model=model,
+            run=run,
+            kind="direct",
+            reroll_empty=True,
+            **llm_kwargs,
+        )
+    except ContextWindowExceededError as refusal:
+        _log.warning(
+            "reasoning's direct prompt was refused as too long; reasoning with code "
+            "instead"
+        )
+        return {"cause": "refusal", "error": str(refusal)}
+    return ReasoningResult(answer=cast(str, reply).strip(), path="direct")
 
 
 def reason(
@@ -279,24 +317,11 @@ def reason(
 ) -> ReasoningResult:
     """Answer ``task`` over ``parsed`` and the relevant context, on ``path``.
 
-    The LLM never sees the long source text — only the task, a view of the parse
-    itself, and the **relevant context** from stage 1. ``prompts`` pins the versions of
-    ``reasoning/direct`` and ``reasoning/coding`` (a run config's ``prompts``). The user
-    message is the bare task.
-
-    On the direct path, one completion answers: the system prompt carries the whole
-    parse, and the reply, stripped, is the answer. An empty reply is sent again, as an
-    empty structured reply is (:func:`r3con.runtime.llm.litellm_chat_completion`). When
-    ``splits`` (``None`` builds one for ``model``) estimates that request over the line,
-    or the provider refuses it as too long, the coding path runs instead, and the
-    result's ``fallback`` says why.
-
-    On the coding path, the full parse is bound as the Python variable ``parse`` in the
-    sandbox; the agent inspects it via ``print(...)`` across turns and commits via
-    ``final_answer(x)``. Its prompt shows the whole parse when the first turn fits, else
-    one sample record per top-level field (see :func:`_reason_with_code`).
-    ``max_turns``, ``timeout_s`` and ``additional_authorized_imports`` apply only here;
-    loop mechanics live in :func:`r3con.runtime.codeact.run_codeact`.
+    ``prompts`` pins the versions of ``reasoning/direct`` and ``reasoning/coding`` (a
+    run config's ``prompts``), and ``path`` is a run config's ``reasoning``:
+    ``"direct"`` or ``"coding"``. ``max_turns``, ``timeout_s`` and
+    ``additional_authorized_imports`` apply only to the coding path. ``splits``
+    (``None`` builds one for ``model``) says whether a prompt fits the model's window.
     """
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
@@ -331,36 +356,17 @@ def reason(
     )
     if path == "coding":
         return with_code()
-
-    system_prompt = render(
-        stage="reasoning/direct",
-        version=prompts["reasoning/direct"],
-        parse_block=parse_json,
+    outcome = _reason_directly(
+        render=functools.partial(
+            render, stage="reasoning/direct", version=prompts["reasoning/direct"]
+        ),
+        parse_json=parse_json,
+        user_message=user_message,
+        model=model,
+        splits=splits,
+        run=run,
+        **llm_kwargs,
     )
-    if estimate := splits.over_line(system_prompt, user_message):
-        _log.info(
-            "reasoning's direct prompt would take about %s tokens, over the %s-token "
-            "line; reasoning with code instead",
-            f"{estimate:,}",
-            f"{splits.line:,}",
-        )
-        return with_code(
-            fallback={"cause": "estimate", "estimate": estimate, "line": splits.line}
-        )
-    try:
-        reply = litellm_chat_completion(
-            system_prompt=system_prompt,
-            user_prompt=user_message,
-            model=model,
-            run=run,
-            kind="direct",
-            reroll_empty=True,
-            **llm_kwargs,
-        )
-    except ContextWindowExceededError as refusal:
-        _log.warning(
-            "reasoning's direct prompt was refused as too long; reasoning with code "
-            "instead"
-        )
-        return with_code(fallback={"cause": "refusal", "error": str(refusal)})
-    return ReasoningResult(answer=cast(str, reply).strip(), path="direct")
+    if isinstance(outcome, ReasoningResult):
+        return outcome
+    return replace(with_code(whole=False), fallback=outcome)

@@ -243,16 +243,16 @@ def litellm_chat_completion(
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
     **Empty re-roll.** When ``schema`` is set, or ``reroll_empty`` is, and the model
-    returns *empty* content (nothing, or only whitespace), the call is **re-rolled** up to ``max_empty_retries`` times
-    (default ``settings.LLM_EMPTY_CONTENT_RETRIES``) before raising — an empty body is
-    a recoverable bad generation, not a hard error, and it's a successful HTTP 200 so
-    the resends of temporary errors never catch it. Each re-roll re-sends the same
-    request, so it is an independent sample (a ``seed`` the caller passes in ``kwargs``
-    is re-sent unchanged). This recovers the common transient case where a reasoning
-    model spent its budget on the thinking block; a *deterministic* empty still raises
-    after the re-rolls. (A non-empty-but-malformed JSON raises a Pydantic
-    ``ValidationError`` instead — that's the *caller's* retry to handle, e.g. the
-    parsing stage's per-document retry loop.)
+    returns *empty* content (nothing, or only whitespace), the call is **re-rolled** up
+    to ``max_empty_retries`` times (default ``settings.LLM_EMPTY_CONTENT_RETRIES``)
+    before raising — an empty body is a recoverable bad generation, not a hard error,
+    and it's a successful HTTP 200 so the resends of temporary errors never catch it.
+    Each re-roll re-sends the same request, so it is an independent sample (a ``seed``
+    the caller passes in ``kwargs`` is re-sent unchanged). This recovers the common
+    transient case where a reasoning model spent its budget on the thinking block; a
+    *deterministic* empty still raises after the re-rolls. (A non-empty-but-malformed
+    JSON raises a Pydantic ``ValidationError`` instead — that's the *caller's* retry to
+    handle, e.g. the parsing stage's per-document retry loop.)
     """
     if max_empty_retries is None:
         max_empty_retries = settings.LLM_EMPTY_CONTENT_RETRIES

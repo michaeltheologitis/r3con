@@ -7,10 +7,6 @@ through the whole pipeline as one object, so nothing output-affecting is threade
 Runtime-only knobs (parallelism, paths, retry caps, timeouts) stay in
 :mod:`r3con.settings` — they don't change a correct answer.
 
-``reasoning`` picks how stage 3 answers: ``direct``, one completion over the summaries
-and the whole parse, or ``coding``, an agent that reads the parse with code. A direct
-run takes the coding path when the direct prompt does not fit the model's window.
-
 Two runs are the same run iff their :meth:`RunConfig.label` matches, so **every**
 output-shaping axis must appear in :meth:`RunConfig._identity_parts` — that function is
 the one place to extend the identity.

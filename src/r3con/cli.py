@@ -3,8 +3,8 @@
     r3con run "Which supplier missed the most delivery windows?" ./reports
 
 Everything the pipeline did is left in a run folder under ``./logs`` — the relevance
-snippets, the proposed schema, the parse, and the reasoning calls — because the answer
-alone rarely tells you whether to trust it.
+snippets, the proposed schema, the parse, and the reasoning transcript — because the
+answer alone rarely tells you whether to trust it.
 """
 
 from __future__ import annotations

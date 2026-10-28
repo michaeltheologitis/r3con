@@ -250,7 +250,7 @@ def run(
         logs_dir: where the run folder goes. Defaults to ``./logs``
             (or ``R3CON_LOGS_DIR``).
         save_artifacts: write the per-stage artifacts — the relevance snippets, the
-            proposed schema, the parse, the reasoning calls — into a run folder.
+            proposed schema, the parse, the reasoning transcript — into a run folder.
             On by default: they are how you see what the run actually did. Set ``False``
             to run without touching the filesystem.
 
