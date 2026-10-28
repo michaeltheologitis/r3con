@@ -330,7 +330,7 @@ def quiet_litellm() -> Iterator[None]:
 def _resend_temporary_errors(request: dict[str, Any]) -> Any:
     resending = tenacity.Retrying(
         sleep=_sleep,
-        retry=tenacity.retry_if_exception(_is_temporary),
+        retry=tenacity.retry_if_exception(is_temporary),
         stop=_give_up,
         wait=_wait_before_resending,
         before_sleep=tenacity.before_sleep_log(_log, logging.WARNING),
@@ -339,7 +339,8 @@ def _resend_temporary_errors(request: dict[str, Any]) -> Any:
     return resending(litellm.completion, **request, num_retries=0)
 
 
-def _is_temporary(error: BaseException) -> bool:
+def is_temporary(error: BaseException) -> bool:
+    """Whether r3con resends ``error``: a 5xx, 408, 409 or 429, unless quota ran out."""
     status = getattr(error, "status_code", None)
     if not isinstance(status, int):
         return False
