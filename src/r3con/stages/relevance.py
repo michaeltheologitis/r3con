@@ -35,20 +35,19 @@ for inspection.
 
 from __future__ import annotations
 
-import logging
 import random
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, NamedTuple, TypeVar, cast
 
-from pydantic import BaseModel, Field, ValidationError, create_model
+from pydantic import BaseModel, Field, create_model
 
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
-from r3con.runtime.llm import litellm_chat_completion
+from r3con.runtime.llm import send_until_valid
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
 
@@ -157,31 +156,30 @@ def render_relevance(
 
     Each document gets a ``### Document N`` heading, and each part of a document read in
     parts a ``### Document N.k`` heading, ``k`` from 1. With ``document_ids``, one per
-    snippet, the headings name each document by its id instead: ``### Document ID:
-    <id>`` and ``### Document ID: <id>.<k>``. A note with nothing relevant renders as
-    ``(no relevant summary for this task)``. An empty / ``None`` list renders to ``""``
-    so the consuming prompt omits the block.
+    snippet, the headings name each document, and each part, by its id instead
+    (:func:`_part_ids`): ``### Document ID: <id>``. A note with nothing relevant renders
+    as ``(no relevant summary for this task)``. An empty / ``None`` list renders to
+    ``""`` so the consuming prompt omits the block.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per snippet.
     """
     if not relevance_snippets:
         return ""
-    labels = (
-        [f"Document {n}" for n in range(1, len(relevance_snippets) + 1)]
+    numbers = [str(n) for n in range(1, len(relevance_snippets) + 1)]
+    names, label = (
+        (numbers, "Document")
         if document_ids is None
-        else [f"Document ID: {id_}" for id_ in document_ids]
+        else (document_ids, "Document ID:")
     )
     nothing = "(no relevant summary for this task)"
     sections: list[str] = []
-    for label, snippet in zip(labels, relevance_snippets, strict=True):
-        if isinstance(snippet, list):
-            sections += [
-                f"### {label}.{k}\n{(note or '').strip() or nothing}"
-                for k, note in enumerate(snippet, start=1)
-            ]
-        else:
-            sections.append(f"### {label}\n{(snippet or '').strip() or nothing}")
+    for name, snippet in zip(names, relevance_snippets, strict=True):
+        notes = snippet if isinstance(snippet, list) else [snippet]
+        sections += [
+            f"### {label} {part}\n{(note or '').strip() or nothing}"
+            for part, note in zip(_part_ids(name, len(notes)), notes, strict=True)
+        ]
     return "\n\n".join(sections)
 
 
@@ -192,17 +190,17 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
 
 
 def provenance_schema(
-    name: str, base: type[_ReplyT], shown_ids: Sequence[str], *, required: bool = True
+    name: str, base: type[_ReplyT], shown_ids: Sequence[str]
 ) -> type[_ReplyT]:
     """``base``, named ``name``, with its ``provenance`` a list of the ids a call shows.
     The shown ids reach only the JSON schema, as an ``enum``; the reply itself is read
-    as plain strings and checked by :func:`cited`. Unless ``required``, a reply without
-    ``provenance`` reads as citing nothing, though the strict schema sent still
-    requires it."""
+    as plain strings and checked by :func:`cited`. A reply without ``provenance`` cites
+    nothing, though the strict schema sent requires it."""
     shown_id = Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]
     # A default_factory stays out of the schema; strict mode refuses a default.
-    default = ... if required else Field(default_factory=list)
-    return create_model(name, __base__=base, provenance=(list[shown_id], default))
+    return create_model(
+        name, __base__=base, provenance=(list[shown_id], Field(default_factory=list))
+    )
 
 
 def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:
@@ -223,76 +221,15 @@ def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _R
     return _Request(prompt, schema, shown)
 
 
-def cited(
-    provenance: Sequence[str],
-    shown: Collection[str],
-    kind: str,
-    log: logging.Logger = _log,
-) -> list[str]:
+def cited(provenance: Sequence[str], shown: Collection[str], kind: str) -> list[str]:
     """The ids a reply cites, in order and without repeats, less those the call did not
-    show, which are dropped with a warning to ``log``."""
+    show, which are dropped with a warning."""
     unshown = [id_ for id_ in provenance if id_ not in shown]
     if unshown:
-        log.warning(
+        _log.warning(
             "%s: dropped provenance id(s) the call did not show: %s", kind, unshown
         )
     return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown))
-
-
-def _retry_prompt(user_prompt: str, error: str, rewrite: str) -> str:
-    """The user message that resends ``user_prompt`` after a reply failed its schema:
-    the message again, the validator's error, and ``rewrite``, which asks for the reply
-    again, as parsing resends a document."""
-    return (
-        f"{user_prompt}\n\n"
-        "---\n\n"
-        "Your previous response failed schema validation:\n\n"
-        f"{error}\n\n"
-        f"{rewrite}, fixing only the offending field(s) so the output validates "
-        "against the schema. Output the corrected JSON."
-    )
-
-
-def send_until_valid(
-    system_prompt: str,
-    user_prompt: str,
-    *,
-    schema: type[BaseModel] | None,
-    rewrite: str,
-    kind: str,
-    max_attempts: int,
-    log: logging.Logger = _log,
-    **llm_call: Any,
-) -> str | BaseModel:
-    """The reply to ``user_prompt`` beside ``system_prompt``, sending it again with the
-    validator's error and ``rewrite`` when a reply does not fit ``schema`` (invalid
-    JSON, a missing field), up to ``max_attempts`` sends; the last send's error is
-    raised. Each resend is logged to ``log`` and recorded as ``<kind>-retry-<n>``."""
-
-    def send(text: str, attempt: int) -> str | BaseModel:
-        return litellm_chat_completion(
-            system_prompt=system_prompt,
-            user_prompt=text,
-            schema=schema,
-            kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
-            **llm_call,
-        )
-
-    text = user_prompt
-    for attempt in range(1, max_attempts):
-        try:
-            return send(text, attempt)
-        except ValidationError as e:
-            error = f"{type(e).__name__}: {e}"
-            log.warning(
-                "%s: sending again (%d/%d) after %s",
-                kind,
-                attempt,
-                max_attempts - 1,
-                error,
-            )
-            text = _retry_prompt(user_prompt, error, rewrite)
-    return send(text, max_attempts)
 
 
 def _read(

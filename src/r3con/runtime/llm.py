@@ -15,6 +15,8 @@ Two entry points. :func:`litellm_chat_completion_full` returns the raw response 
 :func:`litellm_chat_completion` returns the text, or a validated Pydantic instance when
 a ``schema`` is given, re-rolling the same request if the model answers with empty
 content (a 200 with no JSON, which transport retries never see).
+:func:`send_until_valid` sends a structured request again, with the validator's error,
+when its reply does not fit the schema.
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
@@ -64,7 +66,7 @@ from typing import TYPE_CHECKING, Any
 
 import litellm
 import tenacity
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
@@ -295,6 +297,61 @@ def litellm_chat_completion(
                 "settings.LLM_EMPTY_CONTENT_RETRIES."
             )
         _log.warning("empty reply, re-rolling (%d/%d)", attempt, max_empty_retries)
+
+
+def _retry_prompt(user_prompt: str, error: str, rewrite: str) -> str:
+    """The user message that resends ``user_prompt`` after a reply failed its schema:
+    the message again, the validator's error, and ``rewrite``, which asks for the reply
+    again, as parsing resends a document."""
+    return (
+        f"{user_prompt}\n\n"
+        "---\n\n"
+        "Your previous response failed schema validation:\n\n"
+        f"{error}\n\n"
+        f"{rewrite}, fixing only the offending field(s) so the output validates "
+        "against the schema. Output the corrected JSON."
+    )
+
+
+def send_until_valid(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    schema: type[BaseModel] | None,
+    rewrite: str,
+    kind: str,
+    max_attempts: int,
+    **llm_call: Any,
+) -> str | BaseModel:
+    """The reply to ``user_prompt`` beside ``system_prompt``, sending it again with the
+    validator's error and ``rewrite`` when a reply does not fit ``schema`` (invalid
+    JSON, a missing field), up to ``max_attempts`` sends; the last send's error is
+    raised. Each resend is logged and recorded as ``<kind>-retry-<n>``."""
+
+    def send(text: str, attempt: int) -> str | BaseModel:
+        return litellm_chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=text,
+            schema=schema,
+            kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
+            **llm_call,
+        )
+
+    text = user_prompt
+    for attempt in range(1, max_attempts):
+        try:
+            return send(text, attempt)
+        except ValidationError as e:
+            error = f"{type(e).__name__}: {e}"
+            _log.warning(
+                "%s: sending again (%d/%d) after %s",
+                kind,
+                attempt,
+                max_attempts - 1,
+                error,
+            )
+            text = _retry_prompt(user_prompt, error, rewrite)
+    return send(text, max_attempts)
 
 
 def count_tokens(text: str) -> int:

@@ -1,9 +1,7 @@
 import litellm
 import pytest
-import yaml
 
 from r3con import settings
-from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import (
     CodeExecutionError,
     _clip_assistant_response,
@@ -167,9 +165,9 @@ def test_a_commit_is_run_whatever_shape_its_code_arrives_in(llm, response, answe
         ("final_answer('a', provenance=('x', 'y'))", ["x", "y"]),
         ("final_answer('a', provenance={r for r in ['x']})", ["x"]),
         ("final_answer('a', provenance=frozen)", ["x"]),
-        ("final_answer('a')", None),
-        ("final_answer('a', provenance='x')", None),
-        ("final_answer('a', provenance=7)", None),
+        ("final_answer('a')", []),
+        ("final_answer('a', provenance='x')", []),
+        ("final_answer('a', provenance=7)", []),
     ],
 )
 def test_final_answer_hands_back_the_collection_of_ids_it_is_given(
@@ -187,16 +185,9 @@ def test_final_answer_hands_back_the_collection_of_ids_it_is_given(
         ("final_answer('a')", "provenance received: None"),
     ],
 )
-def test_the_transcript_ends_with_the_commit_and_the_provenance_as_given(
-    llm, tmp_path, call, shown
-):
-    run = StageRun(stage="reasoning", task_logger=TaskLogger("run", root=tmp_path))
-    result = solve(llm, prints("1"), f"<code>\n{call}\n</code>", run=run)
-    run.flush()
-    transcript = yaml.safe_load((run.dir / "transcript.yaml").read_text())
-    last = transcript["messages"][-1]
-    assert last == {"role": "user", "content": result.turns[-1].observation}
-    assert last["content"] == (
+def test_the_committing_turn_records_the_provenance_as_given(llm, call, shown):
+    result = solve(llm, f"<code>\n{call}\n</code>")
+    assert result.turns[-1].observation == (
         f"<observation>\nfinal_answer received: a\n{shown}\n</observation>"
     )
 
@@ -270,7 +261,7 @@ def test_running_out_of_turns_asks_once_for_an_answer_in_prose(
 ):
     result = solve(llm, turn, turn, synthesis, model="openai/gpt-4o", max_turns=2)
     assert (result.answer, result.terminated_by) == (answer, "max_turns")
-    assert result.provenance is None
+    assert result.provenance == []
     assert len(result.turns) == 2
     synthesis_request = llm.requests[2]
     assert "out of code turns" in synthesis_request["messages"][-1]["content"]

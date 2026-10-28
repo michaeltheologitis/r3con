@@ -12,9 +12,8 @@
 
 Either way the prompt names each document by its id for the run: a summary is headed
 ``### Document ID: <id>`` (``<id>.<k>`` for part ``k`` of a document read in parts), and
-each record says ``"document": "<id>"``. The answer's provenance is the ids of the
-documents it used, read leniently: a part's id counts as its document's, and an id no
-document has is dropped with a warning.
+each record says ``"document": "<id>"``. The answer cites the ids of the documents it
+used (:func:`_documents_cited`).
 
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
 it over the line or the provider refuses it as too long, takes the coding path instead,
@@ -48,15 +47,9 @@ from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S, CodeActTurn, run_codeact
-from r3con.runtime.llm import count_tokens
+from r3con.runtime.llm import count_tokens, send_until_valid
 from r3con.splitting import Splits
-from r3con.stages.relevance import (
-    Snippet,
-    cited,
-    provenance_schema,
-    render_relevance,
-    send_until_valid,
-)
+from r3con.stages.relevance import Snippet, cited, provenance_schema, render_relevance
 
 _log = get_logger("reasoning")
 
@@ -119,22 +112,13 @@ def _sample_record_per_field(parse_dict: Any) -> str:
 def tag_source_documents(
     parse_dict: Any,
     source_docs: dict[str, list[int]] | None,
-    document_ids: Sequence[str] | None = None,
+    document_ids: Sequence[str],
 ) -> Any:
-    """Stamp each list-field record with the document it was parsed from, from the
-    parsing step's ``source_docs`` provenance: ``"document": N``, 1-based, or, with
-    ``document_ids``, that document's id, ``"document": "<id>"``.
-
-    Each record aligns 1:1 with ``source_docs[name]``; without the stamp the model
-    cannot say *which* document a fact came from. The label matches the heading
-    :func:`r3con.stages.relevance.render_relevance` gives the same document with the
-    same ``document_ids`` (or without), so the parse and the relevant context share
-    **one** document-id space and the agent can cross-reference a record against the
-    note its document contributed. That identity rests on both views being built over
-    the documents in the same order — reorder the collection between stages and the
-    ids stop meaning the same thing. No-op without ``source_docs`` or for a non-dict
-    parse. Mutates and returns ``parse_dict`` (``document`` first, so it reads
-    first)."""
+    """Stamp each list-field record with the id of the document it was parsed from
+    (``"document": "<id>"``), from the parsing step's ``source_docs``, so the model can
+    say which document a fact came from and match it against that document's summary,
+    headed by the same id. No-op without ``source_docs`` or for a non-dict parse.
+    Mutates and returns ``parse_dict`` (``document`` first, so it reads first)."""
     if not source_docs or not isinstance(parse_dict, dict):
         return parse_dict
     for name, idxs in source_docs.items():
@@ -143,9 +127,7 @@ def tag_source_documents(
             continue
         for k in range(min(len(recs), len(idxs))):
             if isinstance(recs[k], dict) and "document" not in recs[k]:
-                i = idxs[k]
-                label = i + 1 if document_ids is None else document_ids[i]
-                recs[k] = {"document": label, **recs[k]}
+                recs[k] = {"document": document_ids[idxs[k]], **recs[k]}
     return parse_dict
 
 
@@ -173,10 +155,7 @@ class ReasoningResult:
 
     - ``answer``: the answer text.
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
-    - ``provenance``: the ids of the documents the answer used, in the order it cited
-      them, without repeats; empty when it cited none, or, on the coding path, when
-      ``final_answer`` got no collection as ``provenance`` or the loop hit its turn
-      cap.
+    - ``provenance``: the ids of the documents the answer used.
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -236,7 +215,7 @@ def _documents_cited(
     """The documents ``provenance`` cites, by :func:`r3con.stages.relevance.cited`, a
     part's id ``<id>.<k>`` read as its document's ``<id>``."""
     whole = [id_.split(".", 1)[0] for id_ in provenance]
-    return cited(whole, set(document_ids), kind, log=_log)
+    return cited(whole, set(document_ids), kind)
 
 
 def _reason_with_code(
@@ -252,8 +231,7 @@ def _reason_with_code(
     **codeact_kwargs: Any,
 ) -> ReasoningResult:
     """The coding path: the CodeAct loop over the parse, under the system prompt
-    ``render(parse_block=...)``, its provenance the documents of ``document_ids`` that
-    ``final_answer``'s ``provenance`` cites.
+    ``render(parse_block=...)``.
 
     With ``whole``, the view of the parse is the whole parse when its first turn fits,
     else one sample record per top-level field: when the parse is over
@@ -302,15 +280,10 @@ def _reason_with_code(
         on_first_turn_too_long=with_samples,
         **codeact_kwargs,
     )
-    if result.provenance is None:
-        _log.info(
-            "the answer came without a collection of ids (%s); it cites no documents",
-            result.terminated_by,
-        )
     return ReasoningResult(
         answer=result.answer,
         path="coding",
-        provenance=_documents_cited(result.provenance or [], document_ids, "coding"),
+        provenance=_documents_cited(result.provenance, document_ids, "coding"),
         turns=result.turns,
         terminated_by=result.terminated_by,
     )
@@ -336,16 +309,10 @@ def _reason_directly(
     **llm_kwargs: Any,
 ) -> ReasoningResult | dict[str, Any]:
     """The direct path's answer, or, when its prompt does not fit or no reply fits its
-    schema, why not: the ``fallback`` of a :class:`ReasoningResult`.
-
-    The reply is ``{answer, provenance}``, ``provenance`` an ``enum`` of
-    ``document_ids`` that reads as ``[]`` when missing, and ``answer`` not empty; a
-    reply that does not fit is sent again with the validator's error, up to
-    ``max_attempts`` sends."""
+    schema in ``max_attempts`` sends, why not: the ``fallback`` of a
+    :class:`ReasoningResult`."""
     system_prompt = render(parse_block=parse_json)
-    schema = provenance_schema(
-        "ReasoningAnswer", _DirectReply, document_ids, required=False
-    )
+    schema = provenance_schema("ReasoningAnswer", _DirectReply, document_ids)
     schema_json = json.dumps(schema.model_json_schema())
     if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(
@@ -363,7 +330,6 @@ def _reason_directly(
             rewrite=_REWRITE,
             kind="direct",
             max_attempts=max_attempts,
-            log=_log,
             model=model,
             run=run,
             **llm_kwargs,
@@ -408,24 +374,21 @@ def reason(
     splits: Splits | None = None,
     **llm_kwargs: Any,
 ) -> ReasoningResult:
-    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``, with the
-    ids of the documents the answer used.
+    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``.
 
-    ``prompts`` pins the versions of ``reasoning/direct`` and ``reasoning/coding`` (a
-    run config's ``prompts``), and ``path`` is a run config's ``reasoning``:
-    ``"direct"`` or ``"coding"``. ``document_ids`` is each document's id for the run
+    ``prompts`` and ``path`` are a run config's ``prompts`` and ``reasoning``.
+    ``document_ids`` is each document's id for the run
     (:func:`r3con.stages.relevance.draw_document_ids`), aligned with
-    ``relevance_snippets`` and the indices in ``source_docs``: the prompt names each
-    document by its id, and the answer's provenance cites them. ``max_attempts``
-    (``None`` reads ``settings.REASONING_MAX_ATTEMPTS``) caps the sends of the direct
-    request; ``max_turns``, ``timeout_s`` and ``additional_authorized_imports`` apply
-    only to the coding path. ``splits`` (``None`` builds one for ``model``) says whether
-    a prompt fits the model's window.
+    ``relevance_snippets`` and the indices in ``source_docs``. ``max_attempts``
+    (``None`` reads ``settings.REASONING_MAX_ATTEMPTS``) caps the direct request's
+    sends; ``max_turns``, ``timeout_s`` and ``additional_authorized_imports`` apply to
+    the coding path. ``splits`` (``None`` builds one for ``model``) says whether a
+    prompt fits the model's window.
 
     Raises:
         ValueError: if ``relevance_snippets`` is not one snippet per document id,
             ``source_docs`` names a document ``document_ids`` has no id for, or
-            ``max_attempts`` is not positive.
+            ``max_attempts`` is below 1.
     """
     uncovered = sorted(
         {i for idxs in (source_docs or {}).values() for i in idxs}
@@ -436,14 +399,11 @@ def reason(
             f"source_docs refers to document index(es) {uncovered}, but document_ids "
             f"names {len(document_ids)} document(s): give one id per document."
         )
-    if max_attempts is None:
-        max_attempts = settings.REASONING_MAX_ATTEMPTS
-    if max_attempts < 1:
-        raise ValueError(
-            f"max_attempts must be >= 1, got {max_attempts}. Override via "
-            "settings.REASONING_MAX_ATTEMPTS (current default: "
-            f"{settings.REASONING_MAX_ATTEMPTS})."
-        )
+    max_attempts = settings.check_cap(
+        "reasoning_max_attempts",
+        settings.REASONING_MAX_ATTEMPTS if max_attempts is None else max_attempts,
+        name="max_attempts",
+    )
     parse_dict = (
         parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed
     )

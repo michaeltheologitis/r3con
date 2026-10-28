@@ -242,12 +242,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "Notes on Halloran memo.",
         "Notes on Merrow memo.",
     ]
-    assert result.structured_context == {
-        "rows": [
-            {"document": 1, "who": "Halloran memo"},
-            {"document": 2, "who": "Merrow memo"},
-        ]
-    }
+    assert result.structured_context == stamped(result.document_ids)
     assert "class Parse(BaseModel)" in result.schema_code
     assert result.source_docs == {"rows": [0, 1]}
     assert result.run_dir == logger.dir
@@ -486,7 +481,7 @@ def test_every_record_carries_its_documents_id_a_split_documents_parts_included(
     assert result.source_docs == {"rows": [0, 2, 3, 3, 3, 3, 4]}
     assert result.source_ids == {"rows": [ids[0], ids[2], *[ids[3]] * 4, ids[4]]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
-    assert [ids[n - 1] for n in stamps] == result.source_ids["rows"]
+    assert stamps == result.source_ids["rows"]
     parsing = read_json(logger, "structuring/parsing/result")
     assert parsing["source_docs"] == result.source_docs
     assert parsing["source_ids"] == result.source_ids
@@ -683,7 +678,9 @@ def test_a_refused_document_is_read_in_parts_and_keeps_its_number(
     assert READ_IN_PARTS in system_prompts(llm, "reasoning")[0]
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
     stamps = [row["document"] for row in result.structured_context["rows"]]
-    assert stamps == [1, 2, 3, 4, 4, 4, 4, 5]
+    assert stamps == as_ids(
+        result.document_ids, ["1", "2", "3", "4", "4", "4", "4", "5"]
+    )
     snippets = read_json(logger, "relevance/result")["rounds"][0]["snippets"]
     part_notes = [s["summary"] for s in snippets[3:7]]
     assert [s["id"] for s in snippets[3:7]] == [
@@ -727,10 +724,10 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
     def reply(request):
-        return {"summary": "x"} if "response_format" in request else "A snippet."
+        return {"provenance": []} if "response_format" in request else "A snippet."
 
     logger = TaskLogger("run", root=tmp_path)
-    with pytest.raises(ValidationError, match="provenance"):
+    with pytest.raises(ValidationError, match="summary"):
         answer(answering_llm.answers(relevance=reply), logger)
     assert len(answering_llm.requests_for("relevance")) == len(DOCS) + 2
     assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2

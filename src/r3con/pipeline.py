@@ -71,17 +71,15 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
-    - ``provenance`` — the ids of the documents the answer used, as reasoning cited
-      them: in order, without repeats, each one of ``document_ids``. Empty when it
-      cited none.
+    - ``provenance`` — the ids of the documents the answer used.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
       its parts' notes joined. A document that contributes nothing is an empty string,
       which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every document,
-      as plain JSON-able data. Each record carries a ``document`` key naming the 1-based
-      document it came from.
+      as plain JSON-able data. Each record carries a ``document`` key naming the id of the
+      document it came from, as reasoning saw it.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
       most characteristic artifact of the method: it is what the question was decided to
       be *about*.
@@ -375,10 +373,11 @@ def run_pipeline(
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance_snippets],
-        # plain data, each record stamped with its document's 1-based number, not its id
+        # the parse reasoning saw, as plain data
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
             extraction.source_docs,
+            document_ids,
         ),
         schema_code=proposal.schema_code,
         source_docs=extraction.source_docs,

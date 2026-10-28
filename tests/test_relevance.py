@@ -24,7 +24,7 @@ TASK = "Which filing reports higher revenue?"
 PROMPTS = {"relevance/first-round": "v1", "relevance/later-rounds": "v1"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 NOTE = re.compile(r"N\(\w+,r\d\)")
-MALFORMED = {"summary": "A reply without its provenance."}
+MALFORMED = {"provenance": ["1b1b1b"]}
 
 
 def paragraphs(n: int) -> str:
@@ -273,11 +273,24 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(l
     schema = request["response_format"]["json_schema"]
     assert (schema["name"], schema["strict"]) == ("RelevanceSummary", True)
     assert list(schema["schema"]["properties"]) == ["summary", "provenance"]
+    assert schema["schema"]["required"] == ["summary", "provenance"]
+    assert "default" not in schema["schema"]["properties"]["provenance"]
     assert schema["schema"]["properties"]["summary"]["anyOf"] == [
         {"type": "string"},
         {"type": "null"},
     ]
     assert allowed_ids(request) == {"enum": ["1b1b1b", "2c2c2c"], "type": "string"}
+
+
+def test_a_later_rounds_reply_without_provenance_cites_nothing(llm):
+    def reply(request):
+        if "response_format" not in request:
+            return "A snippet."
+        return {"summary": "A snippet."}
+
+    result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply)
+    assert result.provenance == [[], []]
+    assert len(llm.requests) == 4
 
 
 def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):
@@ -345,7 +358,7 @@ def test_a_reply_that_does_not_fit_its_schema_is_sent_again(llm, tmp_path):
         user = resend["messages"][1]["content"]
         assert user.startswith(
             "DOC0\n\n---\n\nYour previous response failed schema validation:\n\n"
-            "ValidationError: 1 validation error for RelevanceSummary\nprovenance\n"
+            "ValidationError: 1 validation error for RelevanceSummary\nsummary\n"
             "  Field required"
         )
         assert user.endswith(
@@ -364,7 +377,7 @@ def test_the_last_malformed_reply_is_raised_once_the_attempts_run_out(
     def reply(request):
         return MALFORMED if "response_format" in request else "A snippet."
 
-    with pytest.raises(ValidationError, match="provenance"):
+    with pytest.raises(ValidationError, match="summary"):
         surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply, workers=1)
     assert len(sends_of(llm, "DOC0")) == 1 + attempts
 

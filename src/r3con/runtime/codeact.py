@@ -255,16 +255,13 @@ class CodeActResult:
     ``answer`` is a final synthesized best-effort (one plain-prose call over the whole
     conversation), or the last non-empty observation if that synthesis comes back empty.
 
-    ``provenance`` is the collection the agent passed as ``final_answer``'s
-    ``provenance`` (a list, tuple, set, …), each item as a string in its order,
-    unchecked; ``None`` when it passed none, a string, or something other than a
-    collection, and when the loop exhausted ``max_turns``.
+    ``provenance`` is the ids passed as ``final_answer``'s ``provenance``.
     """
 
     answer: str
     turns: list[CodeActTurn] = field(default_factory=list)
     terminated_by: str = "final_answer"  # "final_answer" | "max_turns"
-    provenance: list[str] | None = None
+    provenance: list[str] = field(default_factory=list)
 
 
 # Registered as ``final_answer``; what it returns comes back as ``CodeOutput.output``.
@@ -286,12 +283,13 @@ def _stringify_final_answer(value: Any) -> str:
     return str(value)
 
 
-def _provenance_ids(value: Any) -> list[str] | None:
-    """What was passed as ``final_answer``'s ``provenance``, each item as a string in
-    its order, or ``None`` when it is a string or not a collection."""
+def _provenance_ids(value: Any) -> list[str]:
+    """What was passed as ``final_answer``'s ``provenance``: each item of a collection
+    (a list, tuple, set, …) as a string, in its order, unchecked; ``[]`` for anything
+    else, a string included, or nothing."""
     if isinstance(value, Collection) and not isinstance(value, (str, bytes)):
         return [str(id_) for id_ in value]
-    return None
+    return []
 
 
 def run_codeact(
@@ -518,8 +516,6 @@ def run_codeact(
             observation = _format_observation(
                 f"final_answer received: {answer}\nprovenance received: {provenance!r}"
             )
-            if run is not None:
-                run.close_transcript({"role": "user", "content": observation})
             turns.append(
                 CodeActTurn(
                     response=response,

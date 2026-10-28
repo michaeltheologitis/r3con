@@ -309,30 +309,9 @@ def test_the_coding_path_takes_its_ids_in_any_collection(llm, collection):
     assert sorted(result.provenance) == IDS[:2]
 
 
-@pytest.mark.parametrize(
-    ("replies", "ended_by"),
-    [
-        (["<code>\nfinal_answer('ok')\n</code>"], "final_answer"),
-        (["<code>\nfinal_answer('ok', provenance='d0c000')\n</code>"], "final_answer"),
-        ([PRINTS, "The answer is ok."], "max_turns"),
-    ],
-    ids=["without", "a-string", "turn-cap"],
-)
-def test_a_coding_answer_without_a_collection_of_ids_cites_nothing(
-    llm, caplog, replies, ended_by
-):
-    caplog.set_level(logging.INFO, logger="r3con.reasoning")
-    result = ask(llm, *replies, path="coding", max_turns=1)
-    assert (result.provenance, result.terminated_by) == ([], ended_by)
-    assert [(r.levelname, r.message) for r in caplog.records] == [
-        (
-            "INFO",
-            (
-                f"the answer came without a collection of ids ({ended_by}); it "
-                "cites no documents"
-            ),
-        )
-    ]
+def test_a_coding_answer_at_the_turn_cap_cites_nothing(llm):
+    result = ask(llm, PRINTS, "The answer is ok.", path="coding", max_turns=1)
+    assert (result.provenance, result.terminated_by) == ([], "max_turns")
 
 
 @PATHS

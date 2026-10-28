@@ -113,6 +113,7 @@ result.run_dir  # Path      — directory containing run artifacts
 `str(result)` returns the same value as `result.answer`. Each document gets an id for the
 run, and `result.document_ids[i]` is the id of `documents[i]`, so the documents the
 answer used are `[documents[result.document_ids.index(id_)] for id_ in result.provenance]`.
+Each record in `result.structured_context` names its document's id under `document`.
 
 ## Run artifacts
 

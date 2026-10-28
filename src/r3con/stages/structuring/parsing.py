@@ -17,8 +17,8 @@ Each document (or part) yields one populated ``Parse``; the parses merge into on
 merged record is tagged with its **source-document index**
 (``ParseResult.source_docs``), which the reasoning stage turns into the document's id
 and stamps onto each record as ``"document": "<id>"`` (the id-injection), so the model
-can name the document a fact came from. Only ``Answer.structured_context`` stamps the
-1-based number, ``"document": N``, instead.
+can name the document a fact came from; ``Answer.structured_context`` carries the same
+stamps.
 
 This module also owns :func:`check_schema`, stage 2's schema validator. It lives
 here, with the code that *uses* a schema rather than with the code that proposes
