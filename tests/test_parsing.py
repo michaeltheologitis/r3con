@@ -81,6 +81,76 @@ class Item(BaseModel):
 class Parse(BaseModel):
     items: list[Item]
 """
+# The schemas the model wrote for two tasks of the 2026-10-28 eval (Loong 9673e4be and
+# CorpusQA financial_zh_20), as written. Pydantic gives each Decimal field a pattern with
+# a lookaround, and OpenAI refused both schemas, so every parsing call failed.
+OPERATING_COSTS = """from decimal import Decimal
+from pydantic import BaseModel, Field
+
+
+class OperatingCostObservation(BaseModel):
+    \"\"\"A reported operating-cost figure for a particular period.\"\"\"
+    period: str | None = Field(description="The reporting period the operating-cost figure covers")
+    amount: Decimal | None = Field(description="The operating-cost amount as reported")
+    unit: str | None = Field(description="The currency or unit used for the amount, if stated")
+
+
+class CompanyOperatingCosts(BaseModel):
+    \"\"\"Operating-cost figures reported by one company.\"\"\"
+    company: str | None = Field(description="The company named in the report")
+    observations: list[OperatingCostObservation] = Field(
+        description="Reported operating-cost figures, including current-period and comparative-period figures when present"
+    )
+
+
+class Parse(BaseModel):
+    company_operating_costs: list[CompanyOperatingCosts]
+"""
+BALANCE_SHEET = """from decimal import Decimal
+from pydantic import BaseModel, Field
+
+class CompanyBalanceSheetData(BaseModel):
+    company_name: str | None = Field(description="Name of the company in the report")
+    reporting_date: str | None = Field(description="Date the balance-sheet figures are stated for")
+    accounts_payable: Decimal | None = Field(description="Accounts payable at the reporting date")
+    total_assets: Decimal | None = Field(description="Total assets at the reporting date")
+    equity_attributable_to_shareholders: Decimal | None = Field(description="Equity attributable to shareholders of the listed company at the reporting date")
+
+class Parse(BaseModel):
+    company_balance_sheet_data: list[CompanyBalanceSheetData]
+"""
+OPERATING_COSTS_REPLY = {
+    "company_operating_costs": [
+        {
+            "company": "Huaxin Cement",
+            "observations": [{"period": "2023", "amount": "1520.75", "unit": "CNY m"}],
+        }
+    ]
+}
+BALANCE_SHEET_REPLY = {
+    "company_balance_sheet_data": [
+        {
+            "company_name": "Jiangsu Bank",
+            "reporting_date": "2023-12-31",
+            "accounts_payable": "1520000000.00",
+            "total_assets": "3.2E+12",
+            "equity_attributable_to_shareholders": None,
+        }
+    ]
+}
+LOOKAROUNDS = ("(?=", "(?!", "(?<=", "(?<!")
+CHECKED_LOOKAROUND = """import re
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class Row(BaseModel):
+    model_config = ConfigDict(regex_engine="python-re")
+    code: str = Field(pattern=PATTERN)
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+"""
 ITEM = {
     "kind": "site",
     "status": "open",
@@ -104,6 +174,23 @@ def a_row_named_by_the_first_word(request) -> str:
     """One row per document or part, naming its first word."""
     first_word = re.match(r"\w+", request["messages"][1]["content"]).group()
     return json.dumps({"rows": [{"who": first_word}]})
+
+
+def refuses_a_lookaround(reply: dict):
+    """A provider in OpenAI's strict mode: it refuses a schema with a regex lookaround,
+    as OpenAI refused these, and otherwise answers ``reply``."""
+
+    def answer(request) -> dict:
+        sent = json.dumps(request["response_format"]["json_schema"]["schema"])
+        if any(lookaround in sent for lookaround in LOOKAROUNDS):
+            raise litellm.BadRequestError(
+                message="Invalid JSON schema: regex lookaround is not supported.",
+                model=MODEL,
+                llm_provider="openai",
+            )
+        return reply
+
+    return answer
 
 
 def parse_one(llm, **kwargs):
@@ -329,6 +416,54 @@ def test_a_schema_with_plain_methods_and_rich_types_is_accepted():
     assert [type(extra).__name__ for extra in item.extras] == ["Note", "Tag"]
     with pytest.raises(ValidationError, match="cost"):
         parse_cls.model_validate({"items": [{**ITEM, "cost": "-1"}]})
+
+
+@pytest.mark.parametrize(
+    ("schema_code", "reply", "record", "decimal_field"),
+    [
+        (OPERATING_COSTS, OPERATING_COSTS_REPLY, "OperatingCostObservation", "amount"),
+        (
+            BALANCE_SHEET,
+            BALANCE_SHEET_REPLY,
+            "CompanyBalanceSheetData",
+            "accounts_payable",
+        ),
+    ],
+    ids=["loong", "corpusqa"],
+)
+def test_a_decimal_field_is_parsed_though_openai_refuses_its_pydantic_pattern(
+    llm, schema_code, reply, record, decimal_field
+):
+    parse = parse_one_document(
+        document="memo",
+        schema_code=schema_code,
+        parse_cls=check_schema(schema_code),
+        task="What did each company report?",
+        prompt_version="v1",
+        model=MODEL,
+        completion=llm.answers(parsing=refuses_a_lookaround(reply)),
+    )
+    assert parse.model_dump(mode="json") == reply
+    sent = llm.requests[0]["response_format"]["json_schema"]["schema"]
+    assert sent["$defs"][record]["properties"][decimal_field]["anyOf"] == [
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "null"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "source"),
+    [(r'r"^(?!x)\w+$"', r"^(?!x)\w+$"), (r're.compile(r"(?<=#)\d+")', r"(?<=#)\d+")],
+    ids=["string", "compiled"],
+)
+def test_a_lookaround_pydantic_would_check_is_refused_with_what_to_do_instead(
+    pattern, source
+):
+    with pytest.raises(SchemaError, match="regex lookaround") as refused:
+        check_schema(CHECKED_LOOKAROUND.replace("PATTERN", pattern))
+    assert source in str(refused.value)
+    assert "Write each without (?=, (?!, (?<= or (?<!" in str(refused.value)
 
 
 def test_a_malformed_reply_is_retried_with_the_validator_error(llm):
