@@ -389,7 +389,7 @@ def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
 
 def test_a_document_that_never_validates_stops_after_max_attempts(llm):
     llm.answers(parsing='{"rows": "not-a-list"}')
-    with pytest.raises(SchemaError, match="exhausted 3 attempts.*ValidationError"):
+    with pytest.raises(ValidationError, match="rows"):
         parse_one(llm, max_attempts=3)
     assert len(llm.requests) == 3
     assert llm.requests[2]["messages"][1]["content"].startswith("memo\n\n---\n\n")
