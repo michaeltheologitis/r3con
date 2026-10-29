@@ -86,7 +86,8 @@ const MIN_TARGET_PX = 24;
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ALL_LEFT_OUT = "5 documents of this run aren't in the files now · a new run would cover 0 documents";
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
-const FILE_ADDED_AFTER_RUN = '1 file added: a new run would cover 1 document, and ask stays on this run.';
+const FILE_ADDED_AFTER_RUN = '1 file added, in place of the 5 sample memos: a new run would cover 1 document, and ask stays on this run.';
+const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
 const TYPE_A_MODEL = 'type a model first';
 // Its faint lines: each of the 5 round-2 summaries, and the 4 parses with records.
 const SAMPLE_ANSWER_INPUTS = 9;
@@ -777,26 +778,37 @@ async function removeArea() {
       hint: `${left.length} documents · ready to run`,
       status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
       head: 'sample memos',
-      said: `Removed ${names[1]}: your next question runs over ${left.length} documents.`,
+      said: `Removed ${names[1]}.`,
       live: 'polite',
       focus: `remove ${names[2]}`,
     };
     const beforeName = "removing a file before a run drops its node, recounts, still calls the memos left the sample, says so in the files pane's live line, and the focus moves to the next file's remove";
     check('remove', beforeName, isDeepStrictEqual(after, expected), JSON.stringify(after));
 
+    const offer = await page.$eval('#sample-btn', (button) => (button.hidden ? null : button.textContent));
+    check('remove', 'with a sample memo removed, the sample button offers all of them back', offer === ALL_SAMPLE_MEMOS, offer);
+
     await page.click('#tab-chat');
     await page.click('#run-btn');
     const simulated = await page.textContent('#run-status');
     check('remove', 'with a sample memo removed, the next run is simulated, not the recording', simulated.startsWith('● done · simulated run'), simulated);
+    const stillSaid = await page.textContent('#files-said');
+    check('remove', "after a removal and then a run, the files pane's line says only what happened, nothing of the next run", stillSaid === `Removed ${names[1]}.`, stillSaid);
 
     await page.click('#tab-files');
     await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
     await removeButton(page, '06_extra_memo.txt').waitFor();
     const listed = await removeNames(page);
     const head = await page.textContent('#files-head');
-    const said = await page.textContent('#files-said');
-    const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && said === FILE_ADDED_AFTER_RUN;
-    check('remove', 'files added over the sample memos left take their place, and the files pane says so', replaced, `${listed.join(', ')}; ${head}; ${said}`);
+    const said = [await page.textContent('#files-said'), await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent)];
+    const inPlace = `1 file added, in place of the ${left.length} sample memos`;
+    const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
+    const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && saysSo;
+    check('remove', 'files added over the sample memos left take their place, and the files pane and the chat say which they replaced', replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
+
+    await page.click('#sample-btn');
+    const back = { files: (await removeNames(page)).length, hidden: await page.$eval('#sample-btn', (button) => button.hidden) };
+    check('remove', 'the sample button brings back all the sample memos, then hides', isDeepStrictEqual(back, { files: names.length, hidden: true }), JSON.stringify(back));
   });
 
   await withPage('remove', { sample: false }, async (page) => {
@@ -822,8 +834,10 @@ async function removeArea() {
     const status = await page.textContent('#run-status');
     await page.click('#tab-chat');
     await send(page, asks[0].question);
+    const answered = await becomes(page, landedNode, 'answer-1');
+    const docs = await count(page, '#world .node.doc');
     const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-1')));
-    const overRun = into.length === SAMPLE_ANSWER_INPUTS && into.includes('r2-1>answer-1');
+    const overRun = answered && docs === SAMPLE_DOCS && into.length === SAMPLE_ANSWER_INPUTS && into.includes('r2-1>answer-1');
     const kept = nodes === SAMPLE_COUNTS.nodes && footer.primary === 'ask ⏎' && footer.note === REMOVED_FROM_RUN && status === SAMPLE_STATUS;
     const keptName = "after a run, removing one of its files keeps the run's nodes and done line, an ask still answers over the run, the removed file's summary too, and the footer says what a new run would cover";
     check('remove', keptName, kept && overRun, `${nodes} nodes; ${footer.note}; ${status}; ${into.length} lines into answer-1`);
@@ -2054,10 +2068,11 @@ async function liveRemoveKeepsProblem(url) {
   const before = (page) => page.route('**/api/keys', (route) => route.abort());
   await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
+    check('live', 'a connection lost at load shows in the status', atLoad, await page.textContent('#run-status'));
     await page.click('#tab-files');
     await page.locator('#file-list .remove').first().click();
     const status = await page.textContent('#run-status');
-    check('live', 'removing a file before a run leaves a connection error in the status', atLoad && status === LOST_CONNECTION, status);
+    check('live', 'removing a file before a run leaves a connection error in the status', status === LOST_CONNECTION, status);
   });
 }
 

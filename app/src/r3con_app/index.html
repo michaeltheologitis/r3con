@@ -608,7 +608,7 @@ p { margin: 0; }
             <label class="btn" for="file-input">+ add files</label>
             <input class="vh" id="folder-input" type="file" webkitdirectory multiple>
             <label class="btn" for="folder-input">+ add folder</label>
-            <button class="btn" id="sample-btn" type="button" hidden>use the sample memos</button>
+            <button class="btn" id="sample-btn" type="button"></button>
           </div>
           <div class="drop-hint">or drop files and folders here</div>
           <p class="err" id="files-error" hidden></p>
@@ -1189,6 +1189,7 @@ p { margin: 0; }
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
   const isPending = (tab, file) => Boolean(tab.run) && !tab.run.docs.includes(file);
   const pendingFiles = (tab) => state.files.filter((f) => isPending(tab, f));
+  const fileCount = () => plural(state.files.length, 'document');
 
   function panelFiles(tab) {
     const runDocs = tab.run?.docs ?? [];
@@ -2316,7 +2317,7 @@ p { margin: 0; }
   function readyStatus() {
     if (state.tabs.length) return;
     if (connectionProblem) return errorStatus(connectionProblem);
-    setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
+    setStatus(`${fileCount()} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
   // A question can ask over the shown tab's run once its answer has landed and the run has ended.
@@ -2332,7 +2333,7 @@ p { margin: 0; }
     button.disabled = !enabled;
   }
 
-  const newRunCovers = () => `a new run would cover ${plural(state.files.length, 'document')}`;
+  const newRunCovers = () => `a new run would cover ${fileCount()}`;
 
   // How the files differ from the tab's run, and so what a new run would cover; nothing while they match.
   function coverNote(tab) {
@@ -2362,7 +2363,7 @@ p { margin: 0; }
   function updateHint() {
     const pending = pendingFiles(state.shown).length;
     const hint = $('panel-hint');
-    if (!state.shown.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
+    if (!state.shown.run) hint.textContent = `${fileCount()} · ready to run`;
     else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
     hint.hidden = !hint.textContent;
   }
@@ -2946,7 +2947,7 @@ p { margin: 0; }
 
   function renderFiles() {
     const sampleOnly = state.files.length > 0 && state.files.every((f) => f.sample);
-    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(totalBytes(state.files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
+    $('files-head').textContent = `${fileCount()} · ${fmtBytes(totalBytes(state.files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
     $('file-list').replaceChildren(
       ...state.files.map((f) =>
         h(
@@ -2959,6 +2960,7 @@ p { margin: 0; }
     );
     $('files-count').textContent = state.files.length;
     $('sample-btn').hidden = filesAreSample();
+    $('sample-btn').textContent = state.files.some((f) => f.sample) ? `use all ${plural(SAMPLE_FILES.length, 'sample memo')}` : 'use the sample memos';
   }
 
   function openFile(file) {
@@ -3004,19 +3006,21 @@ p { margin: 0; }
     const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
     read.sort((a, b) => a.name.localeCompare(b.name));
     // Files added over the sample memos take the place of any that are left.
+    const replaced = state.files.filter((f) => f.sample).length;
     state.files = [...state.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
-    filesChanged(`${plural(read.length, 'file')} added: ${nextRunLine()}.`);
+    const added = `${plural(read.length, 'file')} added`;
+    filesChanged(replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added);
   }
 
   function nextRunLine() {
-    return primaryAction() === 'ask' ? `${newRunCovers()}, and ask stays on this run` : `your next question runs over ${plural(state.files.length, 'document')}`;
+    return primaryAction() === 'ask' ? `${newRunCovers()}, and ask stays on this run` : `your next question runs over ${fileCount()}`;
   }
 
   // The re-render drops the clicked button, and the focus with it.
   function removeFile(file) {
     const i = state.files.indexOf(file);
     state.files = state.files.filter((f) => f !== file);
-    filesChanged(`Removed ${file.name}: ${nextRunLine()}.`);
+    filesChanged(`Removed ${file.name}`);
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
   }
@@ -3024,18 +3028,19 @@ p { margin: 0; }
   function useSample() {
     state.files = SAMPLE_FILES;
     if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
-    filesChanged('Back to the 5 sample memos.');
+    filesChanged(`Back to the ${plural(SAMPLE_FILES.length, 'sample memo')}`);
   }
 
-  function filesChanged(message) {
+  // `what` happened to the files. The chat is hidden while the files tab is shown, so the pane says it too;
+  // only the chat, which is history, says what the next run would cover, since that changes as runs do.
+  function filesChanged(what) {
     closeFile();
     renderFiles();
     updateComposer();
     syncDocNodes(state.shown);
     readyStatus();
-    // The chat is hidden while the files tab is shown, so the files pane says it too.
-    $('files-said').textContent = message;
-    transcript.append(line('main', message, { dim: true }));
+    $('files-said').textContent = `${what}.`;
+    transcript.append(line('main', `${what}: ${nextRunLine()}.`, { dim: true }));
     scrollTranscript();
   }
 
