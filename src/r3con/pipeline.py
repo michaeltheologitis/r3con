@@ -25,12 +25,18 @@ With a ``task_logger``, each stage writes its artifacts into one flat run-folder
 as that stage succeeds, so a later failure still leaves the earlier work on disk, and a
 stage that fails leaves the calls it completed and its traceback (see
 :mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
+
+:func:`ask_pipeline` answers a new task over what a finished run built, read back from
+its folder (:func:`read_representation`), by running reasoning alone.
 """
 
 from __future__ import annotations
 
+import datetime
+import json
+import re
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -38,18 +44,39 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from r3con.config import RunConfig, check_prompts
+from r3con.config import (
+    ReasoningPath,
+    RunConfig,
+    check_prompts,
+    check_reasoning,
+    normalize_model_name,
+)
 from r3con.logging_setup import get_logger
+from r3con.prompts import require_prompt_path
 from r3con.runs import StageRun, TaskLogger, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
-from r3con.stages.relevance import draw_document_ids, join_parts, surface_relevance
+from r3con.stages.relevance import (
+    RelevantContext,
+    SnippetRecord,
+    draw_document_ids,
+    join_parts,
+    surface_relevance,
+)
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
 
 _log = get_logger("pipeline")
+
+# The run folder's subfolder that holds one folder per ask.
+_ASKS_FOLDER = "asks"
+# The stages whose results an ask reasons over, as folders of the run folder.
+_BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
+_REASONING_PROMPTS = ("reasoning/direct", "reasoning/coding")
+# Anything a model name holds that a folder name should not.
+_NOT_IN_FOLDER_NAMES = re.compile(r"[^\w.-]+")
 
 
 def _sources_as_ids(
@@ -130,6 +157,24 @@ class Answer:
 
     def __str__(self) -> str:
         return self.answer
+
+
+@dataclass(frozen=True)
+class Representation:
+    """What a run built for its question, read back from its folder by
+    :func:`read_representation`, for :func:`ask_pipeline` to reason over: the
+    manifest's ``config`` block, the document ids, the final round of relevance
+    snippets, the schema, and the parse as the folder holds it, with its
+    ``source_docs`` and ``provenance``."""
+
+    run_dir: Path
+    config: dict[str, Any]
+    document_ids: list[str]
+    relevance: RelevantContext
+    schema_code: str
+    parsed: dict[str, Any]
+    source_docs: dict[str, list[int]]
+    parsing_provenance: list[list[str]]
 
 
 @dataclass
@@ -219,16 +264,9 @@ def run_pipeline(
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
     model = config.model
     rounds = config.relevance_rounds
-    # The output knobs flow from the config; api_base/api_key are transport only.
-    llm_kwargs: dict[str, Any] = {**config.params}
-    if api_base:
-        llm_kwargs["api_base"] = api_base
-    if api_key:
-        llm_kwargs["api_key"] = api_key
-    if completion is not None:
-        # A named parameter of `litellm_chat_completion`, so it binds there rather than
-        # being forwarded into the provider request.
-        llm_kwargs["completion"] = completion
+    llm_kwargs = _llm_kwargs(
+        config.params, api_base=api_base, api_key=api_key, completion=completion
+    )
 
     document_ids = draw_document_ids(len(documents))
     # The identity card first, so even a run that dies in stage 1 says what it was.
@@ -338,24 +376,184 @@ def run_pipeline(
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
-    with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
-        result = reasoning.reason(
-            task=task,
-            schema_code=proposal.schema_code,
-            parsed=parsed,
-            source_docs=extraction.source_docs,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            prompts=config.prompts,
-            path=config.reasoning,
-            document_ids=document_ids,
-            max_attempts=caps["reasoning_max_attempts"],
-            max_turns=caps["reasoning_max_turns"],
-            timeout_s=reasoning_timeout_s,
-            run=record.run,
-            splits=splits,
-            **llm_kwargs,
+    result = _reasoning_stage(
+        task_logger,
+        model,
+        task=task,
+        schema_code=proposal.schema_code,
+        parsed=parsed,
+        source_docs=extraction.source_docs,
+        relevance_snippets=relevance_snippets,
+        prompts=config.prompts,
+        path=config.reasoning,
+        document_ids=document_ids,
+        max_attempts=caps["reasoning_max_attempts"],
+        max_turns=caps["reasoning_max_turns"],
+        timeout_s=reasoning_timeout_s,
+        splits=splits,
+        **llm_kwargs,
+    )
+    return _answer(
+        result,
+        relevance=relevance,
+        schema_code=proposal.schema_code,
+        parsed=parsed,
+        source_docs=extraction.source_docs,
+        parsing_provenance=extraction.provenance,
+        document_ids=document_ids,
+        run_dir=task_logger.dir if task_logger is not None else None,
+    )
+
+
+def read_representation(run_dir: Path) -> Representation:
+    """Read back what the run in ``run_dir`` built, for :func:`ask_pipeline`.
+
+    The final round's relevance snippets are kept as the run left them, one per part
+    for a document read in parts. ``reasoning/`` is not read, so a run that failed in
+    reasoning can still be asked.
+
+    Raises:
+        FileNotFoundError: in one line naming ``run_dir``, if it is not a run folder or
+            its run never finished parsing.
+    """
+    if not (run_dir / "manifest.json").is_file():
+        raise FileNotFoundError(
+            f"{run_dir} is not a run folder: it has no manifest.json."
         )
+    unbuilt = [s for s in _BUILT_STAGES if not (run_dir / s / "result.json").is_file()]
+    if unbuilt:
+        raise FileNotFoundError(
+            f"{run_dir}: the run never finished parsing ({unbuilt[0]}/result.json is "
+            "missing), and ask needs its relevance, schema and parsing."
+        )
+    ids: dict[str, int] = _read_json(run_dir / "ids.json")
+    rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
+    final_round: list[list[SnippetRecord]] = [[] for _ in ids]
+    for snippet in rounds[-1]["snippets"] if rounds else []:
+        document = ids[snippet["id"].partition(".")[0]]
+        final_round[document].append(SnippetRecord(**snippet))
+    parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
+    schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
+    return Representation(
+        run_dir=run_dir,
+        config=_read_json(run_dir / "manifest.json")["config"],
+        document_ids=sorted(ids, key=ids.__getitem__),
+        relevance=RelevantContext(records=[final_round] if rounds else []),
+        schema_code=schema["schema_code"],
+        parsed=parsing["parsed"],
+        source_docs=parsing["source_docs"],
+        parsing_provenance=parsing["provenance"],
+    )
+
+
+def ask_pipeline(
+    built: Representation,
+    *,
+    task: str,
+    model: str | None = None,
+    path: ReasoningPath | None = None,
+    params: Mapping[str, Any] | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    completion: Callable[..., Any] | None = None,
+) -> Answer:
+    """Answer ``task`` over ``built`` by running reasoning alone, as
+    :func:`run_pipeline` runs it, under the run's reasoning prompt pins.
+
+    ``model``, ``path`` and ``params`` default to the run's; the model as the manifest
+    records it, without its provider prefix. ``api_base``, ``api_key`` and
+    ``completion`` are transport, as in :func:`run_pipeline`.
+
+    The ask is written to a new ``<run_dir>/asks/<NNN>-<model>/``: ``ask.json`` first,
+    then ``reasoning/`` as a run writes it, or, if reasoning raises, its completed calls
+    and ``error.txt``, with a note naming the folder on the exception.
+
+    Raises:
+        ValueError: if ``path`` is not a reasoning path, or a setting is out of range.
+        FileNotFoundError: if a reasoning prompt the run pins has no file.
+        Each of these is raised before any request and before the ask's folder exists.
+    """
+    config = built.config
+    model = str(config["model"]) if model is None else model
+    path = check_reasoning(config["reasoning"] if path is None else path, "ask")
+    prompts = {stage: config["prompts"][stage] for stage in _REASONING_PROMPTS}
+    for stage, version in prompts.items():
+        require_prompt_path(stage, version)
+    caps = settings_snapshot()
+    task_logger = _ask_logger(built.run_dir, model)
+    task_logger.write_json(
+        "ask",
+        {
+            "question": task,
+            "model": normalize_model_name(model),
+            "reasoning": path,
+            "prompts": prompts,
+            "created": datetime.datetime.now(datetime.UTC).isoformat(
+                timespec="seconds"
+            ),
+        },
+    )
+    _log.info("asking over %s · artifacts: %s", built.run_dir, task_logger.dir)
+    result = _reasoning_stage(
+        task_logger,
+        model,
+        task=task,
+        schema_code=built.schema_code,
+        parsed=built.parsed,
+        source_docs=built.source_docs,
+        relevance_snippets=built.relevance.snippets,
+        prompts=prompts,
+        path=path,
+        document_ids=built.document_ids,
+        max_attempts=caps["reasoning_max_attempts"],
+        max_turns=caps["reasoning_max_turns"],
+        **_llm_kwargs(
+            config.get("params") or {} if params is None else params,
+            api_base=api_base,
+            api_key=api_key,
+            completion=completion,
+        ),
+    )
+    return _answer(
+        result,
+        relevance=built.relevance,
+        schema_code=built.schema_code,
+        parsed=built.parsed,
+        source_docs=built.source_docs,
+        parsing_provenance=built.parsing_provenance,
+        document_ids=built.document_ids,
+        run_dir=built.run_dir,
+    )
+
+
+def _llm_kwargs(
+    params: Mapping[str, Any],
+    *,
+    api_base: str | None,
+    api_key: str | None,
+    completion: Callable[..., Any] | None,
+) -> dict[str, Any]:
+    """What every request is sent with: the output knobs in ``params``, then the
+    transport."""
+    llm_kwargs: dict[str, Any] = {**params}
+    if api_base:
+        llm_kwargs["api_base"] = api_base
+    if api_key:
+        llm_kwargs["api_key"] = api_key
+    if completion is not None:
+        # A named parameter of `litellm_chat_completion`, so it binds there rather than
+        # being forwarded into the provider request.
+        llm_kwargs["completion"] = completion
+    return llm_kwargs
+
+
+def _reasoning_stage(
+    task_logger: TaskLogger | None, model: str, **reason_kwargs: Any
+) -> reasoning.ReasoningResult:
+    """:func:`~r3con.stages.reasoning.reason` on ``model`` with ``reason_kwargs``,
+    recorded under ``reasoning/``."""
+    with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
+        result = reasoning.reason(model=model, run=record.run, **reason_kwargs)
         _log.info(
             "reasoning done on the %s path (%s, %d turn(s)): %s",
             result.path,
@@ -382,20 +580,57 @@ def run_pipeline(
                 for t in result.turns
             ],
         }
+    return result
+
+
+def _answer(
+    result: reasoning.ReasoningResult,
+    *,
+    relevance: RelevantContext,
+    schema_code: str,
+    parsed: BaseModel | dict[str, Any],
+    source_docs: dict[str, list[int]],
+    parsing_provenance: list[list[str]],
+    document_ids: list[str],
+    run_dir: Path | None,
+) -> Answer:
+    """The :class:`Answer` that reasoning's ``result`` makes with what it reasoned
+    over."""
     return Answer(
         answer=result.answer,
-        relevant_context=[join_parts(s) for s in relevance_snippets],
+        relevant_context=[join_parts(s) for s in relevance.snippets],
         # the parse reasoning saw, as plain data
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
-            extraction.source_docs,
+            source_docs,
             document_ids,
         ),
-        schema_code=proposal.schema_code,
-        source_docs=extraction.source_docs,
-        run_dir=task_logger.dir if task_logger is not None else None,
+        schema_code=schema_code,
+        source_docs=source_docs,
+        run_dir=run_dir,
         document_ids=document_ids,
         provenance=result.provenance,
         relevance_provenance=relevance.provenance,
-        parsing_provenance=extraction.provenance,
+        parsing_provenance=parsing_provenance,
     )
+
+
+def _ask_logger(run_dir: Path, model: str) -> TaskLogger:
+    """A logger for a new ask's folder, ``<run_dir>/asks/<NNN>-<model>/``, ``NNN`` one
+    past the highest number there."""
+    asks = run_dir / _ASKS_FOLDER
+    model_name = _NOT_IN_FOLDER_NAMES.sub("-", str(normalize_model_name(model)))
+    while True:
+        numbers = [
+            int(n) for p in asks.glob("*") if (n := p.name.partition("-")[0]).isdigit()
+        ]
+        folder = f"{max(numbers, default=0) + 1:03d}-{model_name}"
+        try:
+            (asks / folder).mkdir(parents=True)
+        except FileExistsError:
+            continue  # an ask running alongside took this number first
+        return TaskLogger(folder, root=asks)
+
+
+def _read_json(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))

@@ -45,6 +45,9 @@ Layout per ``logs/<run-folder>/``:
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
+- ``asks/<NNN>-<model>/`` — one folder per :func:`r3con.ask` over the run, numbered
+  from 001: ``ask.json`` (``{question, model, reasoning, prompts, created}``) and
+  ``reasoning/`` as above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and

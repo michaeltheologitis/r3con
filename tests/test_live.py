@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from r3con import read_documents, run
+from r3con import ask, read_documents, run
 from r3con.config import REASONING_PATHS
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
@@ -32,3 +32,12 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning
     cited = [documents[result.document_ids.index(id_)] for id_ in used]
     assert cited
     assert not any("Cafeteria refurbishment" in document for document in cited)
+
+
+def test_an_ask_answers_a_new_question_over_a_finished_run(tmp_path):
+    built = run(QUESTION, read_documents(MEMOS), logs_dir=tmp_path)
+    asked = ask(built, "Which site logged the fewest equipment incidents in Q3?")
+    assert asked.answer.strip()
+    used = {id_.split(".")[0] for ids in asked.provenance.values() for id_ in ids}
+    assert used
+    assert used <= set(built.document_ids)

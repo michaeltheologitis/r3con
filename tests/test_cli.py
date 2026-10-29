@@ -60,6 +60,27 @@ def test_the_flags_override_the_config_and_show_in_the_label(answering, capsys):
     assert "final_answer(" in turn["messages"][0]["content"]
 
 
+def test_ask_prints_a_new_answer_over_a_finished_run(answering, capsys):
+    assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
+    run_dir = path_after("artifacts: ", capsys.readouterr().err)
+    assert r3con("ask", str(run_dir), "Who else?", "--model", QWEN) == 0
+    assert capsys.readouterr().out == f"{ANSWER}\n"
+    asked = answering.requests[-1]
+    assert asked["model"] == QWEN
+    assert "Who else?" in asked["messages"][1]["content"]
+    assert (run_dir / "asks" / "001-Qwen3.5-35B-A3B" / "ask.json").is_file()
+
+
+def test_ask_over_a_folder_that_is_not_a_run_exits_2_in_one_line(
+    scripted, tmp_path, capsys
+):
+    assert r3con("ask", str(tmp_path), "Who?") == 2
+    assert capsys.readouterr().err == (
+        f"r3con: {tmp_path} is not a run folder: it has no manifest.json.\n"
+    )
+    assert scripted.requests == []
+
+
 def test_seed_is_not_an_option(scripted, capsys):
     assert r3con("run", "Who?", str(MEMOS), "--seed", "7") == 2
     assert "unrecognized arguments: --seed" in capsys.readouterr().err

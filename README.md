@@ -87,6 +87,14 @@ result = r3con.run(
 
 `documents` is simply a list of strings, one per document.
 
+To ask a new question over the same run, `r3con.ask` reuses what the run built and runs
+only the reasoning step, at a fraction of a run's cost:
+
+```python
+other = r3con.ask(result, "Which supplier delivered on time most often?")
+print(other)
+```
+
 ## Notebooks
 
 The examples use five short memos arranged so that no single document contains the full
@@ -134,10 +142,11 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   └── parsing/
 │       ├── result.json          <- the parsed records
 │       └── calls.json
-└── reasoning/
-    ├── result.json              <- the answer
-    ├── calls.json
-    └── transcript.yaml
+├── reasoning/
+│   ├── result.json              <- the answer
+│   ├── calls.json
+│   └── transcript.yaml
+└── asks/                        <- one folder per r3con.ask: ask.json and reasoning/
 ```
 
 ## Evaluation

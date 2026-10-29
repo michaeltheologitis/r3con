@@ -199,6 +199,17 @@ def _refused(error: Mapping[str, Any], name: str, overridden: Collection[str]) -
     return f"{where}: `{setting}={reprlib.repr(error['input'])}`: {error['msg']}"
 
 
+def check_reasoning(reasoning: Any, where: str) -> ReasoningPath:
+    """``reasoning`` must name one of :data:`REASONING_PATHS`. Caught here with a
+    one-line message rather than as a validation error of the whole config."""
+    if reasoning not in REASONING_PATHS:
+        raise ValueError(
+            f"{where}: `reasoning` must be one of {list(REASONING_PATHS)}, got "
+            f"{reasoning!r}."
+        )
+    return reasoning
+
+
 def _find(relative: str) -> Path | None:
     """First existing ``relative`` path across the config search path, else ``None``."""
     for root in config_search_path():
