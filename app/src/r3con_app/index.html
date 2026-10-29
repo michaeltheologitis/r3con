@@ -1377,6 +1377,7 @@ p { margin: 0; }
   }
 
   const stopping = (tab) => streamsOf(tab).some((stream) => stream.stopping);
+  const toStop = (tab) => streamsOf(tab).filter((stream) => !stream.stopping);
 
   // A stop pressed before the job's id has come back is sent as soon as it does.
   function stopJob(stream) {
@@ -2242,7 +2243,7 @@ p { margin: 0; }
     };
     return {
       say,
-      // The r3con stage being told, or READING before the first.
+      // The r3con stage being told, READING while a replay reads its documents, or null between them.
       stage: null,
       // Says a line once under `name`; saying it again rewrites it in place.
       sayAs(name, kind, text, opts) {
@@ -2330,7 +2331,8 @@ p { margin: 0; }
     const pending = pendingFiles(state.shown).length;
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
-    offer($('stop-btn'), tabBusy(state.shown), !stopping(state.shown));
+    // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
+    offer($('stop-btn'), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
     offer($('new-run-btn'), asks);
     const note = $('ask-note');
     const one = pending === 1;
@@ -2564,7 +2566,10 @@ p { margin: 0; }
       settleNode(tab, docAt(i));
       narr.phase(`reading · ${rank + 1} of ${n}`);
     }, PACE.read);
-    at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`));
+    at(t, () => {
+      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`);
+      narr.stage = null;
+    });
 
     for (const kind of ['r1', 'r2']) {
       t += TIMING.phaseGap;
@@ -2700,6 +2705,9 @@ p { margin: 0; }
     const id = addAsk(tab, ask);
     const narr = narrator(tab, addTurn(tab, question, id), { status: false });
     const stream = openStream('ask', tab, ask);
+    // An ask leaves the status alone, but its stop was asked for there: once that has ended, the status
+    // says so until it next changes, and the tab keeps its run's own line.
+    let stopped = null;
     const failed = (text) => {
       narr.done();
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
@@ -2719,8 +2727,7 @@ p { margin: 0; }
       if (event.type === 'ask_failed') {
         const end = endLine(stream.stopping, event);
         failed(`${askSummary(ask)} · ${end}`);
-        // An ask leaves the status alone, but its stop was asked for there, so its end is said there too.
-        if (stream.stopping) tabStatus(tab, ...errorLine(`ask ${end}`));
+        if (stream.stopping) stopped = `ask ${end}`;
       }
     };
     narr.phase(`asking · ${model}`);
@@ -2732,6 +2739,7 @@ p { margin: 0; }
       failed(explain(error, error.message, 'the ask stopped'));
     } finally {
       closeStream(stream);
+      if (stopped && tab === state.shown && !stopping(tab)) errorStatus(stopped);
     }
   }
 
@@ -3519,7 +3527,7 @@ p { margin: 0; }
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
-    stop: (tab) => streamsOf(tab).forEach(stopJob),
+    stop: (tab) => toStop(tab).forEach(stopJob),
     ask: (question) => askOver(state.shown, question, pickedModel()),
     async saveKey(provider, key, endpoint) {
       const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
