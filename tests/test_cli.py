@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from pathlib import Path
@@ -60,15 +61,73 @@ def test_the_flags_override_the_config_and_show_in_the_label(answering, capsys):
     assert "final_answer(" in turn["messages"][0]["content"]
 
 
-def test_ask_prints_a_new_answer_over_a_finished_run(answering, capsys):
+def finished_run(capsys) -> Path:
+    """The folder of a finished ``r3con run`` over the memos."""
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
-    run_dir = path_after("artifacts: ", capsys.readouterr().err)
+    return path_after("artifacts: ", capsys.readouterr().err)
+
+
+def without_a_reasoning_path(manifest: dict) -> None:
+    del manifest["config"]["reasoning"]
+
+
+def pinning_a_missing_prompt(manifest: dict) -> None:
+    manifest["config"]["prompts"]["reasoning/coding"] = "v9"
+
+
+def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
+    run_dir = finished_run(capsys)
     assert r3con("ask", str(run_dir), "Who else?", "--model", QWEN) == 0
-    assert capsys.readouterr().out == f"{ANSWER}\n"
+    out, err = capsys.readouterr()
+    assert out == f"{ANSWER}\n"
+    folder = path_after("artifacts: ", err)
+    assert folder == run_dir / "asks" / "001-Qwen3.5-35B-A3B"
+    assert (folder / "ask.json").is_file()
     asked = answering.requests[-1]
     assert asked["model"] == QWEN
     assert "Who else?" in asked["messages"][1]["content"]
-    assert (run_dir / "asks" / "001-Qwen3.5-35B-A3B" / "ask.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            without_a_reasoning_path,
+            "was written by an older r3con that ask can't read: KeyError: 'reasoning'",
+        ),
+        (
+            pinning_a_missing_prompt,
+            "No prompt for stage 'reasoning/coding' version 'v9'",
+        ),
+    ],
+    ids=["older-r3con", "missing-prompt"],
+)
+def test_ask_over_a_run_folder_it_cannot_use_exits_2_in_one_line(
+    answering, capsys, change, message
+):
+    run_dir = finished_run(capsys)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    change(manifest)
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    sent = len(answering.requests)
+    assert r3con("ask", str(run_dir), "Who else?") == 2
+    err = capsys.readouterr().err
+    assert err.startswith("r3con: ")
+    assert message in err
+    assert err.count("\n") == 1
+    assert len(answering.requests) == sent
+    assert not (run_dir / "asks").exists()
+
+
+def test_a_failed_ask_exits_1_and_points_at_its_partial_artifacts(answering, capsys):
+    run_dir = finished_run(capsys)
+    down = litellm.APIConnectionError("provider down", llm_provider="openai", model="m")
+    answering.answers(reasoning=down)
+    assert r3con("ask", str(run_dir), "Who else?") == 1
+    err = capsys.readouterr().err
+    folder = path_after("artifacts: ", err)
+    assert path_after("r3con: partial artifacts in ", err) == folder
+    assert "provider down" in (folder / "reasoning" / "error.txt").read_text()
 
 
 def test_ask_over_a_folder_that_is_not_a_run_exits_2_in_one_line(

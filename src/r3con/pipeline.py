@@ -45,6 +45,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from r3con.config import (
+    PROMPT_STAGES,
     ReasoningPath,
     RunConfig,
     check_prompts,
@@ -74,7 +75,11 @@ _log = get_logger("pipeline")
 _ASKS_FOLDER = "asks"
 # The stages whose results an ask reasons over, as folders of the run folder.
 _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
-_REASONING_PROMPTS = ("reasoning/direct", "reasoning/coding")
+# The prompt stages reasoning renders, whose pins an ask keeps.
+_REASONING_STAGES = tuple(s for s in PROMPT_STAGES if s.startswith("reasoning/"))
+# What reading a run folder raises when a file lacks a key or has another shape, as
+# one written by an older r3con does (one from before ids.json lacks that file).
+_OLDER_SHAPES = (FileNotFoundError, KeyError, TypeError, AttributeError, IndexError)
 # Anything a model name holds that a folder name should not.
 _NOT_IN_FOLDER_NAMES = re.compile(r"[^\w.-]+")
 
@@ -162,15 +167,19 @@ class Answer:
 @dataclass(frozen=True)
 class Representation:
     """What a run built for its question, read back from its folder by
-    :func:`read_representation`, for :func:`ask_pipeline` to reason over: the
-    manifest's ``config`` block, the model string the run called litellm with (the
-    ``config`` block's bare name for a run recorded before ``litellm_model`` was), the
-    document ids, the final round of relevance snippets, the schema, and the parse as
-    the folder holds it, with its ``source_docs`` and ``provenance``."""
+    :func:`read_representation`, for :func:`ask_pipeline` to reason over.
+
+    From the manifest: the model string the run called litellm with (the ``config``
+    block's bare name for a run recorded before ``litellm_model`` was), its reasoning
+    path, its reasoning prompt pins and its params. From the stages: the document ids,
+    the final round of relevance snippets, the schema, and the parse as the folder
+    holds it, with its ``source_docs`` and ``provenance``."""
 
     run_dir: Path
-    config: dict[str, Any]
     model: str
+    reasoning: ReasoningPath
+    prompts: dict[str, str]
+    params: dict[str, Any]
     document_ids: list[str]
     relevance: RelevantContext
     schema_code: str
@@ -416,7 +425,10 @@ def read_representation(run_dir: Path) -> Representation:
 
     Raises:
         FileNotFoundError: in one line naming ``run_dir``, if it is not a run folder or
-            its run never finished parsing.
+            its run never finished parsing; or if a reasoning prompt version it pins has
+            no file.
+        ValueError: in one line naming ``run_dir``, if an older r3con wrote it, so a
+            file lacks a key or has another shape; or if it names no reasoning path.
     """
     if not (run_dir / "manifest.json").is_file():
         raise FileNotFoundError(
@@ -428,6 +440,23 @@ def read_representation(run_dir: Path) -> Representation:
             f"{run_dir}: the run never finished parsing ({unbuilt[0]}/result.json is "
             "missing), and ask needs its relevance, schema and parsing."
         )
+    try:
+        built = _read_built(run_dir)
+    except _OLDER_SHAPES as odd:
+        raise ValueError(
+            f"{run_dir} was written by an older r3con that ask can't read: "
+            f"{type(odd).__name__}: {odd}"
+        ) from odd
+    for stage, version in built.prompts.items():
+        require_prompt_path(stage, version)
+    return built
+
+
+def _read_built(run_dir: Path) -> Representation:
+    """The :class:`Representation` in ``run_dir``'s files, read as this r3con writes
+    them."""
+    manifest = _read_json(run_dir / "manifest.json")
+    config = manifest["config"]
     ids: dict[str, int] = _read_json(run_dir / "ids.json")
     rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
     final_round: list[list[SnippetRecord]] = [[] for _ in ids]
@@ -436,11 +465,12 @@ def read_representation(run_dir: Path) -> Representation:
         final_round[document].append(SnippetRecord(**snippet))
     parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
     schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
-    manifest = _read_json(run_dir / "manifest.json")
     return Representation(
         run_dir=run_dir,
-        config=manifest["config"],
-        model=manifest.get("litellm_model") or manifest["config"]["model"],
+        model=manifest.get("litellm_model") or config["model"],
+        reasoning=check_reasoning(config["reasoning"], str(run_dir / "manifest.json")),
+        prompts={stage: config["prompts"][stage] for stage in _REASONING_STAGES},
+        params=dict(config.get("params") or {}),
         document_ids=sorted(ids, key=ids.__getitem__),
         relevance=RelevantContext(records=[final_round] if rounds else []),
         schema_code=schema["schema_code"],
@@ -457,6 +487,7 @@ def ask_pipeline(
     model: str | None = None,
     path: ReasoningPath | None = None,
     params: Mapping[str, Any] | None = None,
+    task_logger: TaskLogger | None = None,
     api_base: str | None = None,
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
@@ -464,34 +495,37 @@ def ask_pipeline(
     """Answer ``task`` over ``built`` by running reasoning alone, as
     :func:`run_pipeline` runs it, under the run's reasoning prompt pins.
 
-    ``model``, ``path`` and ``params`` default to the run's, the model being
-    ``built.model``. ``api_base``, ``api_key`` and ``completion`` are transport, as in
+    ``model`` and ``path`` default to the run's. ``params`` defaults to the run's when
+    the ask runs on the run's model, and to none on another, where a provider's own
+    params (``reasoning_effort``, ``extra_body``) could break the request.
+    ``api_base``, ``api_key`` and ``completion`` are transport, as in
     :func:`run_pipeline`.
 
-    The ask is written to a new ``<run_dir>/asks/<NNN>-<model>/``: ``ask.json`` first,
-    then ``reasoning/`` as a run writes it, or, if reasoning raises, its completed calls
-    and ``error.txt``, with a note naming the folder on the exception.
+    The ask is written to ``task_logger``, by default a new folder
+    (:func:`new_ask_logger`): ``ask.json`` first (the question, the model and params
+    sent, the reasoning path, the prompt pins, the time), then ``reasoning/`` as a run
+    writes it, or, if reasoning raises, its completed calls and ``error.txt``, with a
+    note naming the folder on the exception.
 
     Raises:
-        ValueError: if ``path`` is not a reasoning path, or a setting is out of range.
-        FileNotFoundError: if a reasoning prompt the run pins has no file.
-        Each of these is raised before any request and before the ask's folder exists.
+        ValueError: if ``path`` is not a reasoning path, or a setting is out of range;
+            before any request, and before a default folder is made.
     """
-    config = built.config
+    if params is None:
+        params = built.params if model in (None, built.model) else {}
     model = built.model if model is None else model
-    path = check_reasoning(config["reasoning"] if path is None else path, "ask")
-    prompts = {stage: config["prompts"][stage] for stage in _REASONING_PROMPTS}
-    for stage, version in prompts.items():
-        require_prompt_path(stage, version)
+    path = check_reasoning(built.reasoning if path is None else path, "ask")
     caps = settings_snapshot()
-    task_logger = _ask_logger(built.run_dir, model)
+    if task_logger is None:
+        task_logger = new_ask_logger(built.run_dir, model)
     task_logger.write_json(
         "ask",
         {
             "question": task,
-            "model": normalize_model_name(model),
+            "model": model,
             "reasoning": path,
-            "prompts": prompts,
+            "prompts": built.prompts,
+            "params": params,
             "created": datetime.datetime.now(datetime.UTC).isoformat(
                 timespec="seconds"
             ),
@@ -506,13 +540,13 @@ def ask_pipeline(
         parsed=built.parsed,
         source_docs=built.source_docs,
         relevance_snippets=built.relevance.snippets,
-        prompts=prompts,
+        prompts=built.prompts,
         path=path,
         document_ids=built.document_ids,
         max_attempts=caps["reasoning_max_attempts"],
         max_turns=caps["reasoning_max_turns"],
         **_llm_kwargs(
-            config.get("params") or {} if params is None else params,
+            params,
             api_base=api_base,
             api_key=api_key,
             completion=completion,
@@ -528,6 +562,23 @@ def ask_pipeline(
         document_ids=built.document_ids,
         run_dir=built.run_dir,
     )
+
+
+def new_ask_logger(run_dir: Path, model: str) -> TaskLogger:
+    """A logger for a new ask's folder, ``<run_dir>/asks/<NNN>-<model>/``, made now,
+    ``NNN`` one past the highest number there and ``<model>`` its bare name."""
+    asks = run_dir / _ASKS_FOLDER
+    model_name = _NOT_IN_FOLDER_NAMES.sub("-", str(normalize_model_name(model)))
+    while True:
+        numbers = [
+            int(n) for p in asks.glob("*") if (n := p.name.partition("-")[0]).isdigit()
+        ]
+        folder = f"{max(numbers, default=0) + 1:03d}-{model_name}"
+        try:
+            (asks / folder).mkdir(parents=True)
+        except FileExistsError:
+            continue  # an ask running alongside took this number first
+        return TaskLogger(folder, root=asks)
 
 
 def _llm_kwargs(
@@ -617,23 +668,6 @@ def _answer(
         relevance_provenance=relevance.provenance,
         parsing_provenance=parsing_provenance,
     )
-
-
-def _ask_logger(run_dir: Path, model: str) -> TaskLogger:
-    """A logger for a new ask's folder, ``<run_dir>/asks/<NNN>-<model>/``, ``NNN`` one
-    past the highest number there."""
-    asks = run_dir / _ASKS_FOLDER
-    model_name = _NOT_IN_FOLDER_NAMES.sub("-", str(normalize_model_name(model)))
-    while True:
-        numbers = [
-            int(n) for p in asks.glob("*") if (n := p.name.partition("-")[0]).isdigit()
-        ]
-        folder = f"{max(numbers, default=0) + 1:03d}-{model_name}"
-        try:
-            (asks / folder).mkdir(parents=True)
-        except FileExistsError:
-            continue  # an ask running alongside took this number first
-        return TaskLogger(folder, root=asks)
 
 
 def _read_json(path: Path) -> Any:

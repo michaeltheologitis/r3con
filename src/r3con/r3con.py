@@ -363,12 +363,15 @@ def ask(
             recorded before r3con kept that string, its bare name (``gpt-6-luna``).
         reasoning: ``"direct"`` or ``"coding"``, as in :func:`run`. Defaults to the
             run's.
-        params: as in :func:`run`. Defaults to the run's.
+        params: as in :func:`run`. Defaults to the run's when the ask runs on the run's
+            model, and to none on another model, since one provider's params
+            (``reasoning_effort``, ``extra_body``) can break another's request.
         api_key, api_base, completion: as in :func:`run`.
 
     Each ask is written to a new ``<run_dir>/asks/<NNN>-<model>/``, numbered from 001:
-    ``ask.json`` (the question, model, reasoning path, prompt versions and time) and
-    ``reasoning/``, as a run writes it. The run's own files are left as they are.
+    ``ask.json`` (the question, the model and params sent, the reasoning path, the
+    prompt versions and the time) and ``reasoning/``, as a run writes it. The run's own
+    files are left as they are.
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
@@ -376,8 +379,9 @@ def ask(
 
     Raises:
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
-            with ``save_artifacts=False``), if ``reasoning`` is not a reasoning path,
-            or if a setting in :mod:`r3con.settings` is out of range.
+            with ``save_artifacts=False``), if its folder was written by an older r3con
+            that ask can't read, if ``reasoning`` is not a reasoning path, or if a
+            setting in :mod:`r3con.settings` is out of range.
         FileNotFoundError: if ``source`` is not a run folder, if its run never finished
             parsing, or if a reasoning prompt version it pins has no file.
         Each of these is raised before any request and before the ask's folder exists.

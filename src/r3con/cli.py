@@ -21,7 +21,12 @@ from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
-from r3con.pipeline import ask_pipeline, read_representation, run_pipeline
+from r3con.pipeline import (
+    ask_pipeline,
+    new_ask_logger,
+    read_representation,
+    run_pipeline,
+)
 from r3con.r3con import read_documents
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
@@ -212,12 +217,16 @@ def _ask(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"r3con: {e}", file=sys.stderr)
         return 2
+    model = built.model if args.model is None else args.model
     try:
+        task_logger = new_ask_logger(built.run_dir, model)
+        print(f"artifacts: {task_logger.dir}", file=sys.stderr)
         result = ask_pipeline(
             built,
             task=args.question,
-            model=args.model,
+            model=model,
             path=args.reasoning,
+            task_logger=task_logger,
             api_base=args.base_url,
             api_key=args.api_key,
         )
