@@ -20,7 +20,8 @@ About **$3 a run** on Luna (the first full run, on 2026-10-28, cost $2.99): the 
 holds 7.3M document tokens, r3con sends about 3.2 times that as input, and output and
 judging are small. The cost is litellm's price
 for each call r3con and the judge made, as recorded in their `calls.json`, cached input
-included; it is `null` when litellm could not price a call.
+included, but not the asks over a task's r3con run (its `asks/`); it is `null` when
+litellm could not price a call.
 
 A task takes one to two minutes, and a run does 32 at a time by default (`--workers`),
 each fanning out over its own documents; the first full run took about three minutes.
@@ -34,6 +35,7 @@ From the repo root, with `OPENAI_API_KEY` set:
 uv run python -m evals                       # the full run; writes its line to results.jsonl
 uv run python -m evals --limit 1             # one task per benchmark, to try it out
 uv run python -m evals --resume evals/runs/<folder>
+uv run python -m evals --ask-over evals/runs/<folder> --model <model>   # see below
 ```
 
 The first run downloads the data (about 150 MB) into `evals/.cache/` and checks each file's
@@ -45,8 +47,8 @@ git-ignored.
 
 A task is left without a record when its r3con run raises an error r3con resends (a
 failed connection, a server error, a timeout or a rate limit) once its resends are
-spent, or a refused key, access or quota, and when loading the task or judging its
-answer raises: the run logs it, exits non-zero and writes no line, and `--resume`
+spent, a refused key, access or quota, or a model the provider does not know, and when
+loading the task or judging its answer raises: the run logs it, exits non-zero and writes no line, and `--resume`
 retries it, judging a saved answer again rather than running r3con twice. Every other
 error is recorded with the task and scored worst (Loong 1, CorpusQA 0); to retry a
 recorded task, delete its folder and resume.
@@ -61,19 +63,52 @@ Only a full run (no `--limit`) writes a line, and a run has one line: finishing 
 retrying it replaces its earlier line. A full run reads `results.jsonl` before any task
 starts and stops at a line that is not JSON, so a broken file never costs a paid run.
 
+## Comparing answering models
+
+`--ask-over` answers a finished run's tasks again with another model, over the same
+representations: per task, `r3con.ask` reruns only reasoning over the task's r3con run
+folder, with the run's question, and the answer is judged as in a run.
+
+```bash
+uv run python -m evals --ask-over evals/runs/<folder> --model anthropic/claude-sonnet-5-5
+```
+
+It writes to `<folder>/asks/<model>-<hash>/` (`/` and other punctuation in the model as
+`-`, then a hash of the exact model string), laid out as a run folder; each
+`answer.json` names, relative to `<folder>`, the task's r3con run (`run_dir`) and where
+r3con wrote the ask (`ask_dir`, in that run's `asks/`). A model whose provider litellm
+does not know stops the comparison before any call. Errors are kept as in a run, and a
+task whose r3con run never finished parsing cannot be asked, so it is recorded with that
+error. Every task asked over needs a record in the run. Running the command again
+finishes the comparison; it resumes only from the commit it started with and a clean
+tree, and to start it over, delete its folder. `--limit` and `--workers` work as for a
+run.
+
+Redoing a task of the run (`--resume` after deleting its answer) rebuilds its r3con run,
+so the comparisons over it are stale and must be redone. An ask that raises a temporary
+error and is retried leaves its partial ask folder, whose calls the comparison's `usd`
+does not count.
+
+The asks run this checkout's reasoning over what the run built, from its commit or, when
+`ask_of.dirty`, from uncommitted changes to it, so the line names both commits. On Luna,
+the comparison over the $3.06 run of 2026-10-28 (`c6c8e60`) cost $0.068, about 2% of the
+run ($0.057 of asks and $0.011 of judging), and took 30 seconds; on another model, it is
+that model's price for about 340k input and 30k output tokens.
+
 ## Reading `results.jsonl`
 
-One JSON object per full run:
+One JSON object per full run, and one per full comparison:
 
 | Field | Meaning |
 | --- | --- |
-| `date`, `commit`, `dirty` | When the run started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
-| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, generation params when set, and every prompt version |
+| `date`, `commit`, `dirty` | When the run or comparison started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
+| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, generation params when set, and every prompt version. A comparison has no `label` |
+| `ask_of`, `answer_model` | A comparison's only: the run it asked over (its `run` folder, `commit`, `dirty` and `label`), and the model that answered |
 | `judge_model` | The judge |
 | `benchmarks.loong` | `n`, `errors`, `avg_score` (1–100), `perfect_rate` (0–1) |
 | `benchmarks.corpusqa` | `n`, `errors`, `accuracy` (0–1) |
-| `usd` | What the run's calls cost, or `null` if litellm could not price one |
-| `run` | The run's folder under `evals/runs/`, on the machine that ran it |
+| `usd` | What the run's calls cost, or a comparison's asks and judging; `null` if litellm could not price one |
+| `run` | The folder under `evals/runs/`, on the machine that ran it: `<run>` or `<run>/asks/<model>` |
 
 With 40 and 35 tasks, a difference of a few points is noise; look for large moves.
 

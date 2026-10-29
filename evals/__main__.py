@@ -3,6 +3,7 @@
     uv run python -m evals                      # a full run: writes its line to results.jsonl
     uv run python -m evals --limit 1            # one task per benchmark, writes nothing
     uv run python -m evals --resume evals/runs/<folder>
+    uv run python -m evals --ask-over evals/runs/<folder> --model <litellm model>
 
 See ``evals/README.md``.
 """
@@ -11,19 +12,23 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import functools
+import hashlib
 import json
 import logging
 import os
 import random
+import re
 import shutil
 import subprocess
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import litellm
 from litellm import exceptions
 
 import r3con
@@ -31,6 +36,7 @@ from evals import JUDGE_MODEL, corpusqa, log, loong
 from r3con.config import RunConfig, load_config
 from r3con.logging_setup import configure_logging
 from r3con.masking import masked
+from r3con.pipeline import ASKS_FOLDER
 from r3con.runs import StageRun, TaskLogger, new_run_folder
 from r3con.runtime.llm import is_temporary
 
@@ -44,17 +50,25 @@ RUNS_DIR = EVALS_DIR / "runs"
 STARTED = "run.json"
 ANSWER = "answer.json"
 RECORD = "record.json"
+MANIFEST = "manifest.json"
+# A comparison's folder is the model with these characters as "-", then a hash of the
+# exact model string, so that no two models share one.
+FOLDER_UNSAFE = re.compile(r"[^\w-]+")
+MODEL_HASH_CHARS = 8
 BENCHMARKS: dict[str, ModuleType] = {"loong": loong, "corpusqa": corpusqa}
 SAMPLE_SIZES = {"loong": 40, "corpusqa": 35}
 SEED = 20261028
 DEFAULT_WORKERS = 32
 USD_DIGITS = 4
-# A refused key, access or quota: the setup's problem, not r3con's.
+# A refused key, access or quota, or a model the provider does not know: the setup's
+# problem, not r3con's.
 SETUP_ERRORS = (
     exceptions.AuthenticationError,
     exceptions.PermissionDeniedError,
     exceptions.RateLimitError,
+    exceptions.NotFoundError,
 )
+Answering = Callable[[str, dict[str, Any], Path], dict[str, Any]]
 
 
 def sample(ids: Iterable[str], n: int) -> list[str]:
@@ -85,15 +99,95 @@ def evaluate(
     run. Else log what is missing and return ``None``."""
     earlier = _results_lines(results) if limit is None else []
     config = load_config()
-    header = _start(folder, config)
+    _as_run(folder)
+    header = _start(folder, "label", config.label())
     selection = {name: pinned[name][:limit] for name in BENCHMARKS}
+    answer = functools.partial(_answer, root=folder, config=config)
+    again = f"--resume {folder}"
+    scored = _score(selection, folder, answer, folder, workers, again)
+    if scored is None:
+        return None
+    line = {**header, **scored, "run": folder.name}
+    if limit is None:
+        _save_line(results, earlier, line)
+    return line
+
+
+def compare(
+    pinned: dict[str, Any],
+    run: Path,
+    model: str,
+    results: Path,
+    *,
+    limit: int | None = None,
+    workers: int = DEFAULT_WORKERS,
+) -> dict[str, Any] | None:
+    """Answer each pinned task of the finished run in ``run``, or the first ``limit``
+    of each benchmark, again with ``model``: through :func:`r3con.ask` over the task's
+    r3con run folder, with its question. The answers are judged and recorded as a
+    run's, in ``run``'s ``asks/<model>/``, laid out as a run folder, where a task with
+    a record is skipped; the results line is returned and written as :func:`evaluate`
+    does."""
+    earlier = _results_lines(results) if limit is None else []
+    asked = _as_run(run)
+    if "label" not in asked:
+        raise SystemExit(
+            f"evals: {run} is not a run: it has no {STARTED} with a label."
+        )
+    try:
+        litellm.get_llm_provider(model)
+    except exceptions.BadRequestError:
+        raise SystemExit(
+            f"evals: litellm knows no provider for --model {model}; check its spelling."
+        ) from None
+    selection = {name: pinned[name][:limit] for name in BENCHMARKS}
+    unfinished = _missing(selection, run)
+    if unfinished:
+        raise SystemExit(
+            f"evals: {unfinished} task(s) of {run} have no record; finish it with "
+            f"--resume {run} first."
+        )
+    digest = hashlib.sha256(model.encode()).hexdigest()[:MODEL_HASH_CHARS]
+    folder = run / ASKS_FOLDER / f"{FOLDER_UNSAFE.sub('-', model)}-{digest}"
+    header = _start(
+        folder, "answer_model", model, anew=f"delete {folder} to start it again"
+    )
+    answer = functools.partial(_ask, run=run, model=model)
+    again = f"--ask-over {run} --model {model}"
+    scored = _score(selection, folder, answer, run, workers, again)
+    if scored is None:
+        return None
+    ask_of = {key: asked[key] for key in ("commit", "dirty", "label")}
+    line = {
+        **header,
+        "ask_of": {"run": run.name, **ask_of},
+        **scored,
+        "run": f"{run.name}/{ASKS_FOLDER}/{folder.name}",
+    }
+    if limit is None:
+        _save_line(results, earlier, line)
+    return line
+
+
+def _score(
+    selection: dict[str, list[str]],
+    folder: Path,
+    answer: Answering,
+    root: Path,
+    workers: int,
+    again: str,
+) -> dict[str, Any] | None:
+    """Answer and judge each selected task that has no record in ``folder``, ``workers``
+    at a time, ``root`` being the run folder an answer's paths are relative to. Once
+    every one has a record, return their scores per benchmark and their cost; else log
+    what is missing and how to finish (``again``), and return ``None``."""
     pending = _pending(selection, folder)
     log.info("%s: %d task(s) to run, %d at a time", folder, len(pending), workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
         for name, row in pending:
             task_dir = folder / name / row["id"]
-            future = pool.submit(run_task, name, row, task_dir, config)
+            future = pool.submit(run_task, name, row, task_dir, answer, root)
             futures[future] = (name, row["id"])
         try:
             for future in as_completed(futures):
@@ -102,38 +196,34 @@ def evaluate(
             pool.shutdown(wait=False, cancel_futures=True)
             raise
 
-    paths = {
-        name: [folder / name / task_id / RECORD for task_id in ids]
-        for name, ids in selection.items()
-    }
-    missing = sum(not path.exists() for group in paths.values() for path in group)
+    missing = _missing(selection, folder)
     if missing:
-        log.error("%d task(s) have no record; finish with --resume %s", missing, folder)
+        log.error("%d task(s) have no record; finish with %s", missing, again)
         return None
     records = {
-        name: [json.loads(path.read_text(encoding="utf-8")) for path in group]
-        for name, group in paths.items()
+        name: [
+            json.loads((folder / name / task_id / RECORD).read_text(encoding="utf-8"))
+            for task_id in ids
+        ]
+        for name, ids in selection.items()
     }
     costs = [record["usd"] for group in records.values() for record in group]
     priced = [cost for cost in costs if cost is not None]
-    line = {
-        **header,
+    return {
         "benchmarks": {name: _scores(name, group) for name, group in records.items()},
         "usd": round(sum(priced), USD_DIGITS) if len(priced) == len(costs) else None,
-        "run": folder.name,
     }
-    if limit is None:
-        _save_line(results, earlier, line)
-    return line
 
 
 def run_task(
-    name: str, row: dict[str, Any], task_dir: Path, config: RunConfig
+    name: str, row: dict[str, Any], task_dir: Path, answer: Answering, root: Path
 ) -> dict[str, Any]:
-    """Answer one task with r3con unless its answer is saved already, judge the answer,
-    and write the task's record."""
+    """Answer one task with ``answer`` unless its answer is saved already, judge the
+    answer, and write the task's record, with the cost of the calls in ``task_dir``
+    and, for an ask, in the ask's folder, which the answer names relative to the run
+    folder ``root``."""
     if not (task_dir / ANSWER).exists():
-        _write_json(task_dir / ANSWER, _answer(BENCHMARKS[name], row, task_dir, config))
+        _write_json(task_dir / ANSWER, answer(name, row, task_dir))
     answered = json.loads((task_dir / ANSWER).read_text(encoding="utf-8"))
     judging = StageRun(
         stage="judge",
@@ -144,51 +234,103 @@ def run_task(
         score, rationale = BENCHMARKS[name].judge(row, answered["answer"], run=judging)
     finally:
         judging.flush(write_transcript=False)
+    asked = [root / answered["ask_dir"]] if answered.get("ask_dir") else []
     record = {
         "benchmark": name,
         "task_id": row["id"],
         "score": score,
         "rationale": rationale,
         **answered,
-        **spend(task_dir),
+        **spend(task_dir, *asked),
     }
     _write_json(task_dir / RECORD, record)
     return record
 
 
 def _answer(
-    benchmark: ModuleType, row: dict[str, Any], task_dir: Path, config: RunConfig
+    name: str, row: dict[str, Any], task_dir: Path, *, root: Path, config: RunConfig
 ) -> dict[str, Any]:
-    """r3con's answer to one task, from a fresh folder. A run that raises leaves its
-    error and an empty answer, which the judge scores worst, unless the error
+    """r3con's answer to one task, from a fresh folder, kept as :func:`_answered`
+    says, with ``run_dir``, its r3con run folder, relative to the run folder
+    ``root``."""
+    question, documents = BENCHMARKS[name].inputs(row)
+    shutil.rmtree(task_dir, ignore_errors=True)
+    answered = _answered(
+        row["id"],
+        lambda: r3con.run(question, documents, config=config, logs_dir=task_dir).answer,
+    )
+    return {**answered, "run_dir": _relative(_run_folder(task_dir), root)}
+
+
+def _ask(
+    name: str, row: dict[str, Any], _task_dir: Path, *, run: Path, model: str
+) -> dict[str, Any]:
+    """``model``'s answer to one task, kept as :func:`_answered` says: by
+    :func:`r3con.ask` over the task's r3con run folder in the run folder ``run``, with
+    its question. ``run_dir`` is that r3con run folder and ``ask_dir`` the one r3con
+    wrote the ask to, in its ``asks/``, both relative to ``run``."""
+    run_dir = _run_folder(run / name / row["id"])
+    asked: list[Path] = []
+
+    def note(event: dict[str, Any]) -> None:
+        if event["type"] == "ask_started" and not asked:
+            asked.append(Path(event["ask_dir"]))
+
+    def ask() -> str:
+        if run_dir is None:
+            raise FileNotFoundError(f"{run / name / row['id']} holds no r3con run")
+        manifest = json.loads((run_dir / MANIFEST).read_text(encoding="utf-8"))
+        return r3con.ask(run_dir, manifest["task"], model=model, on_event=note).answer
+
+    answered = _answered(row["id"], ask)
+    return {
+        **answered,
+        "run_dir": _relative(run_dir, run),
+        "ask_dir": _relative(asked[0] if asked else None, run),
+    }
+
+
+def _answered(task_id: str, answer: Callable[[], str]) -> dict[str, Any]:
+    """What ``answer()`` returned, the error it raised and the seconds it took. An
+    error leaves an empty answer, which the judge scores worst, unless it
     ``is_temporary`` or is one of ``SETUP_ERRORS``: then it propagates, no answer is
     saved, and a resume retries it."""
-    question, documents = benchmark.inputs(row)
-    shutil.rmtree(task_dir, ignore_errors=True)
     started = time.monotonic()
-    answer, error = "", None
+    text, error = "", None
     try:
-        answer = r3con.run(question, documents, config=config, logs_dir=task_dir).answer
+        text = answer()
     except Exception as e:
         if is_temporary(e) or isinstance(e, SETUP_ERRORS):
             raise
         error = masked(f"{type(e).__name__}: {e}")
-        log.warning("%s raised %s", row["id"], error)
-    run_dir = next((path.parent for path in task_dir.glob("*/manifest.json")), None)
+        log.warning("%s raised %s", task_id, error)
     return {
-        "answer": answer,
+        "answer": text,
         "error": error,
         "seconds": round(time.monotonic() - started, 1),
-        "run_dir": str(run_dir) if run_dir else None,
     }
 
 
-def spend(folder: Path) -> dict[str, Any]:
-    """The tokens and cost of every call recorded under ``folder``, r3con's and the
-    judge's. ``usd`` is ``None`` when litellm could not price one of the calls."""
+def _run_folder(task_dir: Path) -> Path | None:
+    """The r3con run folder in ``task_dir``, if r3con made one."""
+    return next((path.parent for path in task_dir.glob(f"*/{MANIFEST}")), None)
+
+
+def _relative(path: Path | None, root: Path) -> str | None:
+    """``path`` relative to the run folder ``root``, so that a moved or copied run
+    still finds it."""
+    return path.relative_to(root).as_posix() if path else None
+
+
+def spend(*folders: Path) -> dict[str, Any]:
+    """The tokens and cost of every call recorded under ``folders``, r3con's and the
+    judge's, but not under an ``asks/`` in them: asks made over a run are not its cost.
+    ``usd`` is ``None`` when litellm could not price one of the calls."""
     calls = [
         call
+        for folder in folders
         for path in folder.rglob("calls.json")
+        if ASKS_FOLDER not in path.relative_to(folder).parts
         for call in json.loads(path.read_text(encoding="utf-8"))
     ]
     tokens = [call["tokens"] or {} for call in calls]
@@ -200,9 +342,13 @@ def spend(folder: Path) -> dict[str, Any]:
     }
 
 
-def _start(folder: Path, config: RunConfig) -> dict[str, Any]:
-    """What the run is: written into ``folder`` when it starts, and checked against
-    this checkout when it resumes, so one run never mixes two versions of r3con."""
+def _start(
+    folder: Path, key: str, value: str, *, anew: str = "start a new run"
+) -> dict[str, Any]:
+    """What the run is, with ``value`` as ``key`` (a run's ``label``, or the
+    ``answer_model`` of a comparison): written into ``folder`` when it starts, and
+    checked against this checkout when it resumes, so one run never mixes two versions
+    of r3con. ``anew`` says how to start over instead."""
     current = {
         "date": datetime.datetime.now(datetime.UTC).date().isoformat(),
         "commit": _git("rev-parse", "HEAD"),
@@ -210,7 +356,7 @@ def _start(folder: Path, config: RunConfig) -> dict[str, Any]:
             _git("status", "--porcelain", "--untracked-files=no", "--", *DIRTY_PATHS)
         ),
         "r3con_version": r3con.__version__,
-        "label": config.label(),
+        key: value,
         "judge_model": JUDGE_MODEL,
     }
     if not (folder / STARTED).exists():
@@ -222,15 +368,37 @@ def _start(folder: Path, config: RunConfig) -> dict[str, Any]:
         raise SystemExit(
             f"evals: cannot resume {folder}: the tree {when} uncommitted changes to "
             "src/ or evals/, so this checkout may not be the code it ran. Commit first, "
-            "then start a new run."
+            f"then {anew}."
         )
-    if (started["commit"], started["label"]) != (current["commit"], current["label"]):
+    if (started["commit"], started.get(key)) != (current["commit"], value):
         raise SystemExit(
             f"evals: {folder} was started at commit {started['commit']} as "
-            f"{started['label']}, but this checkout is {current['commit']} as "
-            f"{current['label']}. Resume it from that commit, or start a new run."
+            f"{started.get(key)}, but this checkout is {current['commit']} as "
+            f"{value}. Resume it from that commit, or {anew}."
         )
     return started
+
+
+def _as_run(folder: Path) -> dict[str, Any]:
+    """What the run in ``folder`` was started as (:func:`_start`), if it was. The
+    folder of a comparison is refused, with how to finish it."""
+    path = folder / STARTED
+    started = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    if "answer_model" in started:
+        raise SystemExit(
+            f"evals: {folder} is a comparison; finish it with --ask-over "
+            f"{folder.parent.parent} --model {started['answer_model']}"
+        )
+    return started
+
+
+def _missing(selection: dict[str, list[str]], folder: Path) -> int:
+    """How many selected tasks have no record in ``folder``."""
+    return sum(
+        not (folder / name / task_id / RECORD).exists()
+        for name, ids in selection.items()
+        for task_id in ids
+    )
 
 
 def _pending(
@@ -341,12 +509,26 @@ def _parser() -> argparse.ArgumentParser:
         metavar="N",
         help=f"Tasks run at once (default: {DEFAULT_WORKERS}).",
     )
-    parser.add_argument(
+    folder = parser.add_mutually_exclusive_group()
+    folder.add_argument(
         "--resume",
         type=Path,
         metavar="FOLDER",
         help="Finish the run in FOLDER: tasks without a record run, and a saved answer "
         "is judged again rather than recomputed.",
+    )
+    folder.add_argument(
+        "--ask-over",
+        type=Path,
+        metavar="FOLDER",
+        help="Answer the tasks of the finished run in FOLDER again with --model, by "
+        "r3con.ask over each task's r3con run, and judge the answers, in "
+        "FOLDER/asks/<model>/. Running it again finishes it.",
+    )
+    parser.add_argument(
+        "--model",
+        metavar="MODEL",
+        help="The litellm model that answers with --ask-over.",
     )
     parser.add_argument(
         "--draw",
@@ -357,17 +539,30 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if (args.ask_over is None) != (args.model is None):
+        parser.error("--ask-over and --model go together")
     configure_logging()
     log.setLevel(logging.INFO)
     if args.draw:
         _write_json(TASKS_PATH, draw())
         return 0
     pinned = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
-    folder = args.resume or RUNS_DIR / new_run_folder()
-    line = evaluate(
-        pinned, folder, RESULTS_PATH, limit=args.limit, workers=args.workers
-    )
+    if args.ask_over:
+        line = compare(
+            pinned,
+            args.ask_over.resolve(),
+            args.model,
+            RESULTS_PATH,
+            limit=args.limit,
+            workers=args.workers,
+        )
+    else:
+        folder = args.resume.resolve() if args.resume else RUNS_DIR / new_run_folder()
+        line = evaluate(
+            pinned, folder, RESULTS_PATH, limit=args.limit, workers=args.workers
+        )
     if line is None:
         return 1
     print(json.dumps(line, indent=2, ensure_ascii=False))
