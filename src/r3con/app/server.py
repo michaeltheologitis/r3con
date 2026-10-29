@@ -532,7 +532,11 @@ class _Server(uvicorn.Server):
 
 def listen(port: int) -> socket.socket:
     """A socket listening on 127.0.0.1 at ``port``, 0 for a free one."""
-    return socket.create_server((HOST, port))
+    listener = socket.create_server((HOST, port))
+    # asyncio's selector loop sets TCP_NODELAY on accepted sockets only for IPPROTO_TCP.
+    return socket.socket(
+        listener.family, listener.type, socket.IPPROTO_TCP, fileno=listener.detach()
+    )
 
 
 def _server(
