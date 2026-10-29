@@ -489,14 +489,14 @@ def test_an_ask_sends_the_runs_params_only_on_the_runs_model_unless_given_its_ow
 def test_an_ask_over_a_run_recorded_without_its_litellm_model_uses_the_bare_name(
     answering_llm, tmp_path
 ):
-    result = finished_run(answering_llm, tmp_path)
+    result = finished_run(answering_llm, tmp_path, model=GPT_4O)
     manifest_path = result.run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     del manifest["litellm_model"]
     manifest_path.write_text(json.dumps(manifest))
     ask(result, "Who else?", completion=answering_llm)
     ran, asked = answering_llm.requests_for("reasoning")
-    assert (ran["model"], asked["model"]) == ("openai/gpt-6-luna", "gpt-6-luna")
+    assert (ran["model"], asked["model"]) == (GPT_4O, "gpt-4o")
 
 
 def test_an_ask_reasons_on_the_path_given_instead_of_the_runs(answering_llm, tmp_path):
