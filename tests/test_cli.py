@@ -138,8 +138,8 @@ def test_a_config_naming_a_reasoning_path_r3con_does_not_have_exits_2_in_one_lin
     configs(bad={"model": "openai/m", "reasoning": "agent", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "bad") == 2
     assert capsys.readouterr().err == (
-        "r3con: config 'bad': `reasoning` must be one of ['direct', 'coding'], got "
-        "'agent'.\n"
+        "r3con: config 'bad': `reasoning='agent'`: Input should be 'direct' or "
+        "'coding'.\n"
     )
     assert scripted.requests == []
 

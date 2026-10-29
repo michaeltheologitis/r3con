@@ -43,7 +43,15 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    NonNegativeInt,
+    ValidationError,
+    field_validator,
+)
+from pydantic_core import ErrorDetails
 
 from r3con import settings
 from r3con.prompts import require_prompt_path
@@ -104,8 +112,8 @@ class RunConfig(BaseModel):
     # the config it was loaded from (the run label's base)
     name: str = DEFAULT_CONFIG
     model: str
-    # keep in sync with configs/default.yaml (the shipped default)
-    relevance_rounds: int = 2
+    # keep in sync with configs/default.yaml (the shipped default); 0 skips relevance
+    relevance_rounds: NonNegativeInt = 2
     # keep in sync with configs/default.yaml
     reasoning: ReasoningPath = "direct"
     prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
@@ -189,30 +197,6 @@ def resolve_config_path(name: str) -> Path | None:
     return _find(f"{name}.yaml")
 
 
-def _check_params(params: Any, where: str) -> dict[str, Any]:
-    """``params`` must be a mapping of litellm keyword arguments. Caught here with a
-    readable message rather than deep inside a call."""
-    if params is None:
-        return {}
-    if not isinstance(params, Mapping):
-        raise TypeError(
-            f"{where}: `params` must be a mapping of litellm keyword arguments "
-            f"(temperature, top_p, extra_body, …) — got {type(params).__name__}."
-        )
-    return dict(params)
-
-
-def _check_reasoning(reasoning: Any, where: str) -> ReasoningPath:
-    """``reasoning`` must name one of :data:`REASONING_PATHS`. Caught here with a
-    one-line message rather than as a validation error of the whole config."""
-    if reasoning not in REASONING_PATHS:
-        raise ValueError(
-            f"{where}: `reasoning` must be one of {list(REASONING_PATHS)}, got "
-            f"{reasoning!r}."
-        )
-    return reasoning
-
-
 def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
     """Refuse a prompt pinned for a stage not in :data:`PROMPT_STAGES`, naming the
     stages there are."""
@@ -222,6 +206,25 @@ def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
             f"{where} pins a prompt for stage(s) r3con does not have: {unknown}. The "
             f"stages are {list(PROMPT_STAGES)}."
         )
+
+
+def _validated(fields: Mapping[str, Any], where: str) -> RunConfig:
+    """``fields`` as a :class:`RunConfig`, else a one-line ``ValueError`` naming
+    ``where`` they were set and each setting refused."""
+    try:
+        return RunConfig.model_validate(fields)
+    except ValidationError as invalid:
+        problems = "; ".join(map(_refused, invalid.errors()))
+        raise ValueError(f"{where}: {problems}.") from None
+
+
+def _refused(error: ErrorDetails) -> str:
+    """One setting pydantic refused: its name, the value given unless it was
+    missing, and why."""
+    setting = ".".join(map(str, error["loc"]))
+    if error["type"] != "missing":
+        setting += f"={error['input']!r}"
+    return f"`{setting}`: {error['msg']}"
 
 
 def _find(relative: str) -> Path | None:
@@ -245,11 +248,10 @@ def load_config(
     that is not ``None``. Every override is recorded on the config and shows up in its
     label, because each of them shapes the output.
 
-    Raises ``KeyError`` for an unknown config name, ``TypeError`` for ``params`` that
-    are not a mapping, ``ValueError`` if the config sets a field r3con does not read,
-    omits a required field or a prompt version for any stage, pins a prompt for a
-    stage r3con does not have, or names a reasoning path not in
-    :data:`REASONING_PATHS`, and
+    Raises ``KeyError`` for an unknown config name, ``ValueError`` if the config sets a
+    field r3con does not read, omits a required field or a prompt version for any
+    stage, pins a prompt for a stage r3con does not have, or if a setting in the file
+    or an override is not valid for its field (in one line naming each), and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -269,21 +271,11 @@ def load_config(
                 f"(params: {{seed: {raw['seed']}}})."
             )
         raise ValueError(message)
-    if "model" not in raw:
-        raise ValueError(f"config {name!r} must define a `model`.")
     _check_stages(raw.get("prompts") or {}, f"config {name!r}")
+    # A setting left empty in the file takes its default, as an override of None does.
+    fields = {key: value for key, value in raw.items() if value is not None}
+    cfg = _validated({**fields, "name": name}, f"config {name!r}")
 
-    cfg = RunConfig(
-        name=name,
-        model=raw["model"],
-        relevance_rounds=int(raw.get("relevance_rounds", 2)),
-        reasoning=_check_reasoning(raw.get("reasoning", "direct"), f"config {name!r}"),
-        prompts=dict(raw.get("prompts") or {}),
-        params=_check_params(raw.get("params"), f"config {name!r}"),
-    )
-
-    # Overrides are recorded on the config as well as applied, so the manifest shows both
-    # the resolved value and the fact that it was overridden.
     overrides = {
         "model": model,
         "relevance_rounds": relevance_rounds,
@@ -291,12 +283,11 @@ def load_config(
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
-    if "params" in applied:
-        applied["params"] = _check_params(applied["params"], "override")
-    if "reasoning" in applied:
-        _check_reasoning(applied["reasoning"], "override")
     if applied:
-        cfg = cfg.model_copy(update={**applied, "overrides": applied})
+        cfg = _validated({**cfg.model_dump(), **applied}, "override")
+        # Recorded as resolved, so the manifest shows both the value and that it was
+        # overridden.
+        cfg.overrides = {key: getattr(cfg, key) for key in applied}
     check_prompts(cfg)
     return cfg
 

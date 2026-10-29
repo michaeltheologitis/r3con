@@ -69,6 +69,16 @@ def test_the_default_config_loads_with_its_shipped_values():
             "default[model=gpt-6-luna,rounds=2,reasoning=coding,",
         ),
         (
+            {"relevance_rounds": 0},
+            {"relevance_rounds": 0},
+            "default[model=gpt-6-luna,rounds=0,",
+        ),
+        (
+            {"relevance_rounds": "3"},
+            {"relevance_rounds": 3},
+            "default[model=gpt-6-luna,rounds=3,",
+        ),
+        (
             {
                 "model": None,
                 "relevance_rounds": None,
@@ -128,7 +138,7 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"prompts": PROMPTS}, "must define a `model`"),
+        ({"prompts": PROMPTS}, "config 'bad': `model`: Field required"),
         ({**FULL, "prompts": {CODING: "v1"}}, "missing prompt versions"),
     ],
 )
@@ -167,22 +177,55 @@ def test_a_config_pinning_a_stage_r3con_does_not_have_is_refused_with_the_stages
         RunConfig(model="openai/m", prompts=prompts)
 
 
-@pytest.mark.parametrize(
-    ("name", "overrides", "message"),
-    [
-        ("agent", {}, "config 'agent': `reasoning` must be one of"),
-        ("default", {"reasoning": "Direct"}, "override: `reasoning` must be one of"),
-    ],
-    ids=["file", "override"],
-)
-def test_a_reasoning_path_r3con_does_not_have_is_refused(
-    configs, name, overrides, message
-):
-    configs(agent={**FULL, "reasoning": "agent"})
+BAD_SETTINGS = [
+    (
+        "relevance_rounds",
+        "three",
+        "Input should be a valid integer, unable to parse string as an integer",
+    ),
+    ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
+    (
+        "relevance_rounds",
+        2.5,
+        "Input should be a valid integer, got a number with a fractional part",
+    ),
+    ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
+    ("params", "temperature=0.7", "Input should be a valid dictionary"),
+    ("params", ["temperature", 0.7], "Input should be a valid dictionary"),
+    ("model", 5, "Input should be a valid string"),
+]
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), BAD_SETTINGS)
+def test_a_bad_override_is_refused_in_one_line_naming_it(field, value, reason):
     with pytest.raises(ValueError) as refused:
-        load_config(name, **overrides)
-    assert type(refused.value) is ValueError
-    assert str(refused.value).startswith(f"{message} ['direct', 'coding'], got '")
+        load_config("default", **{field: value})
+    assert str(refused.value) == f"override: `{field}={value!r}`: {reason}."
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), BAD_SETTINGS)
+def test_a_bad_setting_in_a_config_file_is_refused_in_one_line_naming_it(
+    configs, field, value, reason
+):
+    configs(bad={**FULL, field: value})
+    with pytest.raises(ValueError) as refused:
+        load_config("bad")
+    assert str(refused.value) == f"config 'bad': `{field}={value!r}`: {reason}."
+
+
+def test_every_bad_override_is_named_in_the_same_line():
+    with pytest.raises(ValueError) as refused:
+        load_config("default", relevance_rounds=-1, reasoning="agent")
+    assert str(refused.value) == (
+        "override: `relevance_rounds=-1`: Input should be greater than or equal to 0; "
+        "`reasoning='agent'`: Input should be 'direct' or 'coding'."
+    )
+
+
+def test_a_setting_left_empty_in_a_config_file_takes_its_default(configs):
+    configs(empty={**FULL, "reasoning": None, "params": None})
+    config = load_config("empty")
+    assert (config.reasoning, config.params) == ("direct", {})
 
 
 def test_a_run_config_refuses_a_reasoning_path_r3con_does_not_have():
@@ -194,17 +237,6 @@ def test_a_run_config_refuses_a_reasoning_path_r3con_does_not_have():
 def test_a_misspelt_override_is_refused(name, value):
     with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
         load_config("default", **{name: value})
-
-
-@pytest.mark.parametrize(
-    ("name", "overrides"),
-    [("default", {"params": "temperature=0.7"}), ("bad", {})],
-    ids=["override", "file"],
-)
-def test_params_that_are_not_a_mapping_are_a_type_error(configs, name, overrides):
-    configs(bad={**FULL, "params": "temperature=0.7"})
-    with pytest.raises(TypeError, match="`params` must be a mapping.*got str"):
-        load_config(name, **overrides)
 
 
 @pytest.mark.parametrize(
