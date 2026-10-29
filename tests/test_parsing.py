@@ -93,6 +93,18 @@ class Cost(BaseModel):
 class Parse(BaseModel):
     costs: list[Cost]
 """
+DOCUMENT_FIELD = """
+class Memo(BaseModel):
+    document: str
+
+class Parse(BaseModel):
+    memos: list[Memo]
+"""
+HIDES_THE_STAMP = (
+    "records of Parse.memos declare their own 'document' field, whose value will hide "
+    "r3con's document stamp: those records will not trace back to the document they "
+    "came from"
+)
 LOOKAROUNDS = ("(?=", "(?!", "(?<=", "(?<!")
 ITEM = {
     "kind": "site",
@@ -322,6 +334,19 @@ def test_a_usable_schema_returns_its_parse_class(code, record):
 def test_an_unusable_schema_is_refused_with_what_to_fix(code, error):
     with pytest.raises(SchemaError, match=error):
         check_schema(textwrap.dedent(code))
+
+
+def test_a_schema_whose_records_declare_document_is_accepted_with_one_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="r3con.structuring.parsing")
+    parse_cls = check_schema(DOCUMENT_FIELD)
+    assert list(parse_cls.model_fields) == ["memos"]
+    assert caplog.messages == [HIDES_THE_STAMP]
+
+
+def test_a_schema_whose_records_leave_document_free_logs_nothing(caplog):
+    caplog.set_level(logging.WARNING, logger="r3con.structuring.parsing")
+    check_schema(SCHEMA)
+    assert caplog.messages == []
 
 
 @pytest.mark.parametrize(
