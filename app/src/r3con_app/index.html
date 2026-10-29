@@ -310,6 +310,7 @@ p { margin: 0; }
   background: none;
   border: 0;
   padding: 0;
+  text-align: left;
   cursor: pointer;
   text-decoration: underline;
   text-decoration-color: var(--line);
@@ -439,6 +440,7 @@ p { margin: 0; }
 }
 #model-pick optgroup, #model-pick option { color: var(--fg); background: var(--bg); }
 #model-hint { align-self: flex-start; }
+.ask-actions { display: flex; gap: 2ch; }
 .run-btn { font-weight: 600; }
 .note { padding: 0.5em 2ch 0.7em; color: var(--dim); }
 
@@ -566,10 +568,14 @@ p { margin: 0; }
           </div>
           <div class="ask-foot">
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
-            <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
+            <span class="ask-actions">
+              <button class="btn" id="new-run-btn" type="button" title="⌘/Ctrl+Enter" aria-keyshortcuts="Control+Enter Meta+Enter" hidden>new run</button>
+              <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
+            </span>
           </div>
           <input class="field" id="model-other" type="text" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
+          <p class="k" id="ask-note" hidden></p>
         </form>
       </section>
 
@@ -868,6 +874,78 @@ p { margin: 0; }
  }
 };
 
+  // Real r3con.ask answers over SAMPLE's run folder, each from its asks/<folder>/, keyed by question
+  // and model; written by a script from those folders, never by hand.
+  const RECORDED_ASKS = [
+ {
+  "question": "Which sites does Halloran Services maintain?",
+  "model": "openai/gpt-6-luna",
+  "folder": "20261029T073207Z_cc2a2838",
+  "created": "2026-10-29T07:32:07+00:00",
+  "text": "Halloran Services Ltd is identified as the maintenance contractor at the Northgate and Riverside sites in the Q3 reports.",
+  "provenance": {
+   "summary_ids": [
+    0,
+    2,
+    3
+   ],
+   "parse_ids": [
+    0,
+    2,
+    3
+   ]
+  },
+  "totals": {
+   "tokens": 3279,
+   "usd": 0.00047805
+  }
+ },
+ {
+  "question": "Which sites does Halloran Services maintain?",
+  "model": "openai/gpt-6.1-terra",
+  "folder": "20261029T073212Z_83ad380c",
+  "created": "2026-10-29T07:32:12+00:00",
+  "text": "Halloran Services Ltd maintains Northgate and Riverside.",
+  "provenance": {
+   "summary_ids": [
+    0,
+    2,
+    3
+   ],
+   "parse_ids": [
+    0,
+    2,
+    3
+   ]
+  },
+  "totals": {
+   "tokens": 3251,
+   "usd": 0.00464075
+  }
+ },
+ {
+  "question": "How many incidents did Merrow Facilities Group's sites log?",
+  "model": "openai/gpt-6-luna",
+  "folder": "20261029T073215Z_99dea02e",
+  "created": "2026-10-29T07:32:15+00:00",
+  "text": "Merrow Facilities Group's identified site, Eastfield, logged 9 incidents in Q3.",
+  "provenance": {
+   "summary_ids": [
+    1,
+    3
+   ],
+   "parse_ids": [
+    1,
+    3
+   ]
+  },
+  "totals": {
+   "tokens": 3254,
+   "usd": 0.00011053999999999998
+  }
+ }
+];
+
   // Replay timing, in milliseconds. A stage's nodes appear one by one, then settle in the order the
   // recorded run finished them.
   const TIMING = {
@@ -878,7 +956,6 @@ p { margin: 0; }
     schemaWork: 1400,
     answerWork: 1700,
     litDelay: 650,
-    followUpDelay: 700,
   };
   const PACE = {
     read: { appearStagger: 150, settleFirst: 450, settleStagger: 150, minWork: 350 },
@@ -953,7 +1030,9 @@ p { margin: 0; }
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
-  const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
+  const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema' };
+  // The node kinds made once per document, in its row.
+  const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
   const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
   const ROUNDS = 2;
@@ -1042,7 +1121,6 @@ p { margin: 0; }
 
   const state = {
     files: SAMPLE_FILES,
-    filesDirty: true,
     run: null,
     runTurn: null,
     // The streams open on r3con-app, a run's events or an ask's: each `{ kind }`, dropped once closed.
@@ -1096,6 +1174,7 @@ p { margin: 0; }
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
   const fileLabel = (file) => shortLabel(stripExt(file.name));
+  const bareModel = (model) => model.split('/').pop();
   const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
@@ -1144,7 +1223,7 @@ p { margin: 0; }
     const [kind, d] = splitId(id);
     if (kind === 'doc') return state.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return 'answer';
+    if (kind === 'answer') return answerLabel(answerOf(state.run, id));
     const label = docLabel(state.run, d);
     return `${label} · ${KIND_SUFFIX[kind]}`;
   }
@@ -1250,7 +1329,7 @@ p { margin: 0; }
 
   function closeStream(stream) {
     state.streams.delete(stream);
-    updateRunLabel();
+    updateComposer();
   }
 
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
@@ -1303,6 +1382,13 @@ p { margin: 0; }
     return cites;
   }
 
+  // Every stride-th document a simulated answer can cite, counted from `shift`.
+  function madeUpAnswerCites(n, stride, citable, shift = 0) {
+    return range(n).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
+  }
+
+  const simulatedAnswerText = (question) => `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`;
+
   function simulatedRun(files, question, model) {
     const n = files.length;
     const order = range(n);
@@ -1311,7 +1397,6 @@ p { margin: 0; }
     // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
     const hasSummary = (j) => Boolean(summary(files[j]));
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
-    const every = (stride, citable) => order.filter((i) => citable(i) && i % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
       simulated: true,
       question,
@@ -1321,10 +1406,10 @@ p { margin: 0; }
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
       answer: {
-        text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
+        text: simulatedAnswerText(question),
         provenance: {
-          summary_ids: every(SIMULATED_SUMMARY_STRIDE, hasSummary),
-          parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => records[i].length > 0),
+          summary_ids: madeUpAnswerCites(n, SIMULATED_SUMMARY_STRIDE, hasSummary),
+          parse_ids: madeUpAnswerCites(n, SIMULATED_PARSE_STRIDE, (i) => records[i].length > 0),
         },
       },
       calls: null,
@@ -1345,10 +1430,29 @@ p { margin: 0; }
     return [run.source, run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
+  // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live.
+  function askSummary({ source, model, totals }) {
+    const spend = source === 'simulated' ? ['nothing was sent'] : spent(totals);
+    return [`${source} ask over this run`, model, ...spend].join(' · ');
+  }
+
+  // The run's own answer node is `answer`; ask k's, in run.answers, is `answer-k`.
+  const askId = (k) => `answer-${k}`;
+
+  // The run's own answer or an ask's, in one shape.
+  function answerOf(run, id) {
+    const [, k] = splitId(id);
+    if (k === null) return { ...run.answer, question: run.question, model: run.model, simulated: run.simulated, summary: runSummary(run) };
+    const ask = run.answers[k];
+    return { ...ask, simulated: ask.source === 'simulated', summary: askSummary(ask) };
+  }
+
+  const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
+
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
-      const { summary_ids, parse_ids } = run.answer.provenance;
+      const { summary_ids, parse_ids } = answerOf(run, id).provenance;
       return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
@@ -1358,11 +1462,11 @@ p { margin: 0; }
 
   function ownDocument(run, id) {
     const [kind, i] = splitId(id);
-    return kind === 'r1' || kind === 'r2' || kind === 'parsed' ? docId(run.docs[i]) : null;
+    return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
-  function answerLineage(run) {
-    const nodes = new Set(['answer']);
+  function answerLineage(run, answerId) {
+    const nodes = new Set([answerId]);
     const edges = new Set();
     for (const id of nodes) {
       for (const from of [ownDocument(run, id), ...cites(run, id)].filter(Boolean)) {
@@ -1414,7 +1518,7 @@ p { margin: 0; }
     if (!origins.length) return layout;
     files.forEach((f, i) => {
       layout.set(docId(f), origins[i]);
-      for (const kind of ['r1', 'r2', 'parsed']) layout.set(`${kind}-${i}`, { x: origins[i].x + COLUMN[kind] * GRID.colGap, y: origins[i].y });
+      for (const kind of PER_DOCUMENT) layout.set(`${kind}-${i}`, { x: origins[i].x + COLUMN[kind] * GRID.colGap, y: origins[i].y });
     });
     const ys = origins.map((o) => o.y);
     layout.set('schema', { x: origins[0].x + COLUMN.schema * GRID.colGap, y: origins[0].y });
@@ -1429,10 +1533,18 @@ p { margin: 0; }
     return { x: node.x, y: node.y };
   }
 
+  // Asks stack around the run's own answer, one row gap apart: below it, above it, then further out.
+  function askSpot(answer, k) {
+    const out = Math.floor(k / 2) + 1;
+    return { x: answer.x, y: answer.y + (k % 2 ? -out : out) * GRID.rowGap };
+  }
+
   function plan(origin) {
     const files = state.run?.docs ?? state.files;
     const layout = gridLayout(files, origin);
-    if (state.run) state.files.filter(isPending).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    if (!state.run) return layout;
+    state.files.filter(isPending).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    state.run.answers.forEach((_, k) => layout.set(askId(k), askSpot(layout.get('answer'), k)));
     return layout;
   }
 
@@ -1484,15 +1596,18 @@ p { margin: 0; }
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
-  function nodeLabels(kind, file) {
-    if (kind === 'schema') return ['structure'];
-    if (kind === 'answer') return ['answer'];
+  function nodeLabels(id, kind, file) {
+    if (kind === 'schema' || kind === 'answer') return [nodeName(id)];
     if (kind === 'doc') return [fileLabel(file), isPending(file) ? 'not run' : null];
     return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
   function ariaName(node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
+    if (node.kind === 'answer') {
+      const { question, model } = answerOf(state.run, node.id);
+      return `answer to ${question} · ${model}${stopped}`;
+    }
     if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
     return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
@@ -1506,7 +1621,7 @@ p { margin: 0; }
       { class: classes, tabindex: '0', role: 'button', 'data-id': id },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
-      nodeLabels(kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      nodeLabels(id, kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
     state.nodes.set(id, node);
@@ -1518,7 +1633,7 @@ p { margin: 0; }
 
   function addNode(id) {
     const [kind, d] = splitId(id);
-    return createNode(id, kind, state.layout.get(id), { working: true, file: d === null ? null : state.run.docs[d] });
+    return createNode(id, kind, state.layout.get(id), { working: true, file: PER_DOCUMENT.has(kind) ? state.run.docs[d] : null });
   }
 
   function addDocNode(file, pos) {
@@ -1638,6 +1753,12 @@ p { margin: 0; }
     if (state.selected === id) renderInspector();
   }
 
+  // A node has landed once its call finished without the run or ask stopping first.
+  function landed(id) {
+    const classes = state.nodes.get(id)?.el.classList;
+    return Boolean(classes) && !classes.contains('working') && !classes.contains('failed');
+  }
+
   function blockers(a, b, at) {
     const pa = at(a);
     const pb = at(b);
@@ -1718,17 +1839,27 @@ p { margin: 0; }
     for (const n of state.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
+  // Lights the lineage of the run's lit answer, and nothing else; an answer that cites nothing lights nothing.
   function lightPath(run) {
-    if (!cites(run, 'answer').length) return;
-    const path = answerLineage(run);
-    panel.classList.add('is-lit');
-    for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', path.nodes.has(id));
+    const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
+    panel.classList.toggle('is-lit', Boolean(path));
+    for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
     for (const e of state.edges.values()) {
-      const on = path.edges.has(e.key);
+      const on = Boolean(path?.edges.has(e.key));
+      const layer = on ? layers.lit : layerFor(e.kind);
       e.el.classList.toggle('lit', on);
-      if (on) layers.lit.append(e.el);
+      if (e.el.parentNode !== layer) layer.append(e.el);
     }
   }
+
+  // Exactly one answer is lit: the newest, or the one last selected.
+  function lightAnswer(run, id) {
+    run.lit = id;
+    lightPath(run);
+  }
+
+  // A run lights its own answer, or again the one lit before a replay.
+  const lightRun = (run) => lightAnswer(run, run.lit ?? 'answer');
 
   // ---------- inspector ----------
 
@@ -1814,7 +1945,7 @@ p { margin: 0; }
     const node = state.nodes.get(id);
     if (kind === 'doc') return docBody(node);
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
-    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, 'the run stopped before this finished')];
+    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d !== null ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
@@ -1836,13 +1967,14 @@ p { margin: 0; }
         openFileButton(run.docs[d], 'open document ›'),
       ];
     }
+    const answer = answerOf(run, id);
     return [
-      run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
-      h('p', { class: 'insp-text strong' }, run.answer.text),
-      row('asked', run.question),
-      row('drew on summaries', refs(run.answer.provenance.summary_ids.map((d) => `r2-${d}`))),
-      row('drew on parses', refs(run.answer.provenance.parse_ids.map((d) => `parsed-${d}`))),
-      h('div', { class: 'k' }, runSummary(run)),
+      answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
+      h('p', { class: 'insp-text strong' }, answer.text),
+      row('asked', answer.question),
+      row('drew on summaries', refs(answer.provenance.summary_ids.map((i) => `r2-${i}`))),
+      row('drew on parses', refs(answer.provenance.parse_ids.map((i) => `parsed-${i}`))),
+      h('div', { class: 'k' }, answer.summary),
     ];
   }
 
@@ -1865,7 +1997,9 @@ p { margin: 0; }
     positionInspector();
   }
 
+  // Selecting an answer that has landed also lights it.
   function openInspector(id, { focus = false } = {}) {
+    if (splitId(id)[0] === 'answer' && landed(id)) lightAnswer(state.run, id);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
@@ -2008,11 +2142,20 @@ p { margin: 0; }
     setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
-  // A question asks over the run on the panel once it has its answer and has ended, until the files change.
-  const canAsk = () => Boolean(state.run?.answer) && !streaming('run') && !state.filesDirty;
+  // A question can ask over the run on the panel once its answer has landed and the run has ended.
+  const canAsk = () => landed('answer') && !streaming('run');
+  // Enter asks once there is a run to ask over, or one going; before any run, or after a failed one, it runs.
+  const primaryAction = () => (canAsk() || streaming('run') ? 'ask' : 'run');
 
-  function updateRunLabel() {
-    $('run-btn').textContent = canAsk() ? 'send ⏎' : 'run ⏎';
+  function updateComposer() {
+    const asks = canAsk();
+    const pending = state.files.filter(isPending).length;
+    $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
+    $('new-run-btn').hidden = !asks;
+    const note = $('ask-note');
+    const one = pending === 1;
+    note.textContent = asks && pending ? `${plural(pending, 'new document')} ${one ? "isn't" : "aren't"} in this run · new run to include ${one ? 'it' : 'them'}` : '';
+    note.hidden = !note.textContent;
   }
 
   function updateHint() {
@@ -2023,13 +2166,14 @@ p { margin: 0; }
     hint.hidden = !hint.textContent;
   }
 
-  function submitQuestion() {
+  // `action` is ask, over the run on the panel, or run, a new one over the files.
+  function submitQuestion(action) {
     const question = questionEl.value.trim();
     if (!question) {
       questionEl.focus();
       return;
     }
-    const asks = canAsk();
+    const asks = action === 'ask';
     const refused = state.files.length ? refusal(question, asks) : null;
     if (refused) {
       setStatus(refused);
@@ -2039,32 +2183,20 @@ p { margin: 0; }
     if (!state.files.length) {
       narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
     } else if (asks) {
-      mode.followUp(question);
+      mode.ask(question);
     } else {
       startRun(question);
     }
     questionEl.value = '';
-    updateRunLabel();
+    updateComposer();
   }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
   function refusal(question, asks) {
-    if (streaming('run')) return state.filesDirty ? RUN_STILL_GOING : ASK_WHEN_DONE;
+    if (streaming('run')) return asks ? ASK_WHEN_DONE : RUN_STILL_GOING;
     if (!asks && streaming('ask')) return ASK_STILL_GOING;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.files);
-  }
-
-  function simulatedFollowUp(question) {
-    const narr = narrator(addTurn(question).body, { status: false });
-    const reply = () => {
-      narr.done();
-      narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-      narr.say('sub', 'This prototype only replays the run in the panel, so it can’t answer follow-ups yet.');
-    };
-    if (reduceMotion()) return reply();
-    narr.phase('thinking');
-    setTimeout(reply, TIMING.followUpDelay);
   }
 
   // ---------- replay ----------
@@ -2197,13 +2329,14 @@ p { margin: 0; }
     if (!citeLines.length) narr.say('sub', 'cites no document');
   }
 
-  function showAnswer(run, narr) {
-    settleNode('answer');
-    showCites(run, 'answer');
+  function showAnswer(run, narr, id = 'answer') {
+    settleNode(id);
+    showCites(run, id);
     narr.done();
-    if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-    sayAnswer(run, narr, run.answer, 'answer');
-    updateRunLabel();
+    const answer = answerOf(run, id);
+    if (answer.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
+    sayAnswer(run, narr, answer, id);
+    updateComposer();
   }
 
   function finishRun(run, narr) {
@@ -2270,9 +2403,11 @@ p { margin: 0; }
     at(t, () => {
       showAnswer(run, narr);
       finishRun(run, narr);
+      run.answers.forEach((_, k) => redrawAsk(run, askId(k)));
+      if (!run.simulated) offerRecordedAsks(narr);
     });
     t += TIMING.litDelay;
-    at(t, () => lightPath(run));
+    at(t, () => lightRun(run));
     return steps;
   }
 
@@ -2330,7 +2465,7 @@ p { margin: 0; }
       case 'run_finished':
         run.totals = totalsOf(event);
         finishRun(run, narr);
-        lightPath(run);
+        lightRun(run);
         break;
       case 'run_failed':
         failRun(narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
@@ -2365,21 +2500,27 @@ p { margin: 0; }
     }
   }
 
-  // An ask runs only reasoning, over what the run built; its answer is told in the chat, not drawn.
+  // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
   async function askOver(run, question, model) {
+    const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const narr = narrator(addTurn(question).body, { status: false });
-    const how = `an ask over this run · ${model}`;
+    const id = addAsk(run, ask);
     const failed = (text) => {
       narr.done();
+      if (!landed(id)) settleNode(id, { failed: true });
       sayError(narr, text);
     };
     const onEvent = (event) => {
       if (event.type === 'reasoning_finished') {
-        narr.done();
-        sayAnswer(run, narr, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
+        Object.assign(ask, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
+        showAnswer(run, narr, id);
+        lightAnswer(run, id);
       }
-      if (event.type === 'ask_finished') narr.say('sub', [how, ...spent(totalsOf(event))].join(' · '));
-      if (event.type === 'ask_failed') failed(`${how} · failed · ${event.error}`);
+      if (event.type === 'ask_finished') {
+        ask.totals = totalsOf(event);
+        narr.say('sub', askSummary(ask));
+      }
+      if (event.type === 'ask_failed') failed(`${askSummary(ask)} · failed · ${event.error}`);
     };
     const stream = openStream('ask');
     narr.phase(`asking · ${model}`);
@@ -2404,13 +2545,82 @@ p { margin: 0; }
     state.userMoved = false;
     syncDocNodes({ at: docPositions, animate: true, replan: true });
     mode.play(run, narrator(state.runTurn.body));
+    updateComposer();
   }
 
   function startRun(question) {
-    const run = mode.newRun(question);
-    state.filesDirty = false;
+    // A run's answers to later questions, and which of its answers is lit.
+    const run = Object.assign(mode.newRun(question), { answers: [], lit: null });
     state.runTurn = addTurn(question);
     playRun(run);
+  }
+
+  // ---------- asks ----------
+  // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
+
+  // Adds `ask` to the run and draws its node, working, with what it is shown; returns the node's id.
+  function addAsk(run, ask) {
+    const k = run.answers.push(ask) - 1;
+    const id = askId(k);
+    state.layout.set(id, askSpot(state.layout.get('answer'), k));
+    appear(run, id);
+    if (!state.userMoved) fit(true);
+    return id;
+  }
+
+  // Draws a landed ask again, as a replay does, without saying it in the chat again.
+  function redrawAsk(run, id) {
+    appear(run, id);
+    settleNode(id);
+    showCites(run, id);
+  }
+
+  function simulatedAsk(run, question, model) {
+    const n = run.docs.length;
+    // Shifted per ask, so that each simulated answer cites other documents than the last.
+    const shift = run.answers.length + 1;
+    const cite = (stride, citable) => madeUpAnswerCites(n, stride, citable, shift);
+    return {
+      question,
+      model,
+      source: 'simulated',
+      text: simulatedAnswerText(question),
+      provenance: {
+        summary_ids: cite(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary)),
+        parse_ids: cite(SIMULATED_PARSE_STRIDE, (i) => recordCount(run.parsed[i]) > 0),
+      },
+      totals: null,
+    };
+  }
+
+  // The prototype answers from a recorded ask when one has this question and model over the recorded
+  // run, else with a simulated one; either lands at once.
+  function prototypeAsk(run, question, model) {
+    const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
+    const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
+    const narr = narrator(addTurn(question).body, { status: false });
+    const id = addAsk(run, ask);
+    showAnswer(run, narr, id);
+    narr.say('sub', askSummary(ask));
+    lightAnswer(run, id);
+  }
+
+  // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
+  function offerRecordedAsks(narr) {
+    narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
+    for (const ask of RECORDED_ASKS) {
+      const label = `${ask.question} · ${bareModel(ask.model)}`;
+      narr.say('sub', h('button', { class: 'ref', type: 'button', onclick: () => prepareAsk(ask) }, label));
+    }
+  }
+
+  function prepareAsk({ question, model }) {
+    const listed = [...$('model-pick').options].some((option) => option.value === model);
+    $('model-pick').value = listed ? model : '';
+    if (!listed) $('model-other').value = model;
+    onPick();
+    questionEl.value = question;
+    questionEl.focus();
   }
 
   // ---------- files ----------
@@ -2486,10 +2696,9 @@ p { margin: 0; }
   }
 
   function filesChanged(message) {
-    state.filesDirty = true;
     closeFile();
     renderFiles();
-    updateRunLabel();
+    updateComposer();
     syncDocNodes();
     readyStatus();
     transcript.append(line('main', message, { dim: true }));
@@ -2924,13 +3133,14 @@ p { margin: 0; }
 
     $('ask-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      submitQuestion();
+      submitQuestion(primaryAction());
     });
+    $('new-run-btn').addEventListener('click', () => submitQuestion('run'));
     questionEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
-        e.preventDefault();
-        $('ask-form').requestSubmit();
-      }
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      e.preventDefault();
+      if (e.ctrlKey || e.metaKey) submitQuestion('run');
+      else $('ask-form').requestSubmit();
     });
     $('model-pick').addEventListener('change', onPick);
     $('model-other').addEventListener('change', onPick);
@@ -2979,13 +3189,13 @@ p { margin: 0; }
     note: PROTOTYPE_MODE_NOTE,
     keysNote: PROTOTYPE_KEYS_NOTE,
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
-    needsModel: (question, asks) => !asks && !replaysRecording(question),
+    needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
     // It shows a file's start only, so it reads no more than that.
     readable: (file) => file.slice(0, READ_BYTES),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
-    followUp: simulatedFollowUp,
+    ask: (question) => prototypeAsk(state.run, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
     providersWithKeys: async () => [...keyed],
   };
@@ -3001,7 +3211,7 @@ p { margin: 0; }
     readable: (file) => file,
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
-    followUp: (question) => askOver(state.run, question, pickedModel()),
+    ask: (question) => askOver(state.run, question, pickedModel()),
     async saveKey(provider, key, endpoint) {
       const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
       return keyedProviders(await saved.json());
@@ -3023,7 +3233,7 @@ p { margin: 0; }
     buildSettings();
     questionEl.value = SAMPLE.question;
     renderFiles();
-    updateRunLabel();
+    updateComposer();
     renderPicker([]);
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
