@@ -293,7 +293,8 @@ def run_pipeline(
     The run reports its progress as events, each a dict of JSON values with its
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
 
-    - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds``.
+    - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds`` and
+      ``run_dir``, the run folder as ``run_finished`` gives it (``None`` without one).
     - ``relevance_started``, before a document is read in a round: ``round``,
       ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
       read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
@@ -349,12 +350,14 @@ def run_pipeline(
         task_logger=task_logger,
     )
     emit = EventRecorder(on_event, task_logger)
+    run_dir = str(task_logger.dir) if task_logger is not None else None
     emit(
         "run_started",
         question=task,
         model=model,
         document_ids=document_ids,
         rounds=rounds,
+        run_dir=run_dir,
     )
     stage_runs: list[StageRun | None] = []
 
@@ -489,11 +492,7 @@ def run_pipeline(
         record.result = _reasoning_record(result)
     stage_runs.append(record.run)
     emit("reasoning_finished", **_reasoning_outcome(result))
-    emit(
-        "run_finished",
-        run_dir=str(task_logger.dir) if task_logger is not None else None,
-        **_spent(stage_runs),
-    )
+    emit("run_finished", run_dir=run_dir, **_spent(stage_runs))
     return _answer(
         result,
         relevance=relevance,

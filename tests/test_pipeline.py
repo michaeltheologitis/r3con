@@ -1059,6 +1059,7 @@ def test_a_run_reports_each_stage_and_document_from_its_start_to_its_finish(
         "model": MODEL,
         "document_ids": result.document_ids,
         "rounds": 2,
+        "run_dir": None,
     }
     types = [event["type"] for event in events]
     assert types.count("run_finished") == 1
@@ -1130,6 +1131,23 @@ def test_each_finished_event_carries_what_the_run_folder_records(
             "usd": 110.0,
         }
     ]
+
+
+def test_run_started_names_the_existing_run_folder_run_finished_names(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    events, manifest_by_then = [], []
+
+    def on_event(event):
+        events.append(event)
+        if event["type"] == "run_started":
+            folder = Path(event["run_dir"])
+            manifest_by_then.append((folder / "manifest.json").is_file())
+
+    answer(answering_llm, logger, on_event=on_event)
+    assert events[0]["run_dir"] == events[-1]["run_dir"] == str(logger.dir)
+    assert manifest_by_then == [True]
 
 
 @pytest.mark.parametrize("cause", ["estimate", "refusal"])
