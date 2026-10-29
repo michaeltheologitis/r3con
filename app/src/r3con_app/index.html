@@ -192,10 +192,10 @@ p { margin: 0; }
 .edge.flow { opacity: 0.5; }
 .edge.cite { opacity: 0.85; }
 .edge.hl { opacity: 0.9; stroke: var(--fg); }
-.panel.is-lit .edge { opacity: 0.07; }
-.panel.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
-.panel.is-lit .edge.hl { opacity: 0.55; }
-.panel.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
+.drawing.is-lit .edge { opacity: 0.07; }
+.drawing.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
+.drawing.is-lit .edge.hl { opacity: 0.55; }
+.drawing.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
 .edge.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s ease-out forwards; }
 .edge.fade { animation: fade 0.6s ease-out; }
 
@@ -233,15 +233,15 @@ p { margin: 0; }
   font-size: 26px;
   line-height: 1;
 }
-.panel.is-lit .node { opacity: 0.3; }
-.panel.is-lit .node.on-path { opacity: 1; }
-.panel.is-lit .node.on-path .icon { color: var(--accent); }
-.panel.is-lit .node.on-path .label { color: var(--fg); }
+.drawing.is-lit .node { opacity: 0.3; }
+.drawing.is-lit .node.on-path { opacity: 1; }
+.drawing.is-lit .node.on-path .icon { color: var(--accent); }
+.drawing.is-lit .node.on-path .label { color: var(--fg); }
 .fill-orange { fill: var(--fill-orange); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
 .ink { stroke: var(--tree-ink); }
-.panel.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
+.drawing.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
 .node.pending .icon { opacity: 0.5; }
 
 .panel-hint {
@@ -1054,9 +1054,8 @@ p { margin: 0; }
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con-app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
-  const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
-  const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
   const TYPE_A_MODEL = 'type a model first';
+  const STARTING = 'running · starting';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
@@ -1139,16 +1138,31 @@ p { margin: 0; }
     edges.setAttribute('aria-hidden', 'true');
     edges.append(layers.base, layers.mid, layers.lit);
     const nodesEl = h('div');
-    const drawing = h('div', { class: 'drawing' }, edges, nodesEl);
-    const row = { id: null, button: null, close: null };
-    return { ...row, run: null, turn: null, status: [], drawing, layers, nodesEl, nodes: new Map(), edges: new Map(), layout: new Map(), view: { x: 0, y: 0, k: 1 }, userMoved: false, timers: [] };
+    return {
+      id: null,
+      button: null,
+      close: null,
+      run: null,
+      turn: null,
+      status: [],
+      drawing: h('div', { class: 'drawing' }, edges, nodesEl),
+      layers,
+      nodesEl,
+      nodes: new Map(),
+      edges: new Map(),
+      layout: new Map(),
+      view: { x: 0, y: 0, k: 1 },
+      userMoved: false,
+      timers: [],
+      arrangeFrame: 0,
+    };
   }
 
   const state = {
     files: SAMPLE_FILES,
-    // The tabs with a run, in order; before the first run the panel shows a tab with none.
+    // The tabs with a run, in order; before the first run the panel shows a tab with none, never listed.
     tabs: [],
-    shown: null,
+    shown: newTab(),
     nextTab: 1,
     // The streams open on r3con-app, a run's events or an ask's: each `{ kind, tab }`, dropped once closed.
     streams: new Set(),
@@ -1161,6 +1175,7 @@ p { margin: 0; }
   const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
   const isPending = (tab, file) => Boolean(tab.run) && !tab.run.docs.includes(file);
+  const pendingFiles = (tab) => state.files.filter((f) => isPending(tab, f));
 
   function panelFiles(tab) {
     const runDocs = tab.run?.docs ?? [];
@@ -1244,7 +1259,7 @@ p { margin: 0; }
     const [kind, d] = splitId(id);
     if (kind === 'doc') return tab.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return answerLabel(tab.run.answers[d]);
+    if (kind === 'answer') return answerLabel(answerOf(tab.run, id));
     return `${docLabel(tab.run, d)} · ${KIND_SUFFIX[kind]}`;
   }
 
@@ -1339,8 +1354,7 @@ p { margin: 0; }
     if (!ENDINGS.has(last?.type)) throw lostConnection();
   }
 
-  // Whether a run's or an ask's stream is open: over `tab`, or over any tab.
-  const streaming = (kind, tab = null) => [...state.streams].some((stream) => stream.kind === kind && (!tab || stream.tab === tab));
+  const streaming = (kind, tab) => [...state.streams].some((stream) => stream.kind === kind && stream.tab === tab);
 
   function openStream(kind, tab) {
     const stream = { kind, tab };
@@ -1381,7 +1395,6 @@ p { margin: 0; }
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
     return {
       simulated: false,
-      question: SAMPLE.question,
       docs: state.files,
       r1: SAMPLE.r1,
       r2: SAMPLE.r2,
@@ -1390,7 +1403,6 @@ p { margin: 0; }
       answers: [{ question: SAMPLE.question, model: SAMPLE.model, ...SAMPLE.answer }],
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
-      model: SAMPLE.model,
       source: 'recorded run',
       order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
@@ -1425,7 +1437,6 @@ p { margin: 0; }
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
     const run = {
       simulated: true,
-      question,
       docs: files,
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
@@ -1433,7 +1444,6 @@ p { margin: 0; }
       parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
       calls: null,
       totals: null,
-      model,
       order: { r1: order, r2: order, parsed: order },
     };
     return { ...run, answers: [{ question, model, ...madeUpAnswer(run, question, 0) }] };
@@ -1442,12 +1452,13 @@ p { margin: 0; }
   // Filled in by r3con-app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
   function liveRun(question, model) {
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
-    return { simulated: false, id: null, ids: [], question, model, docs: state.files, answers: [unanswered(question, model)], ...empty };
+    return { simulated: false, id: null, ids: [], docs: state.files, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
   function runSummary(run) {
-    if (run.simulated) return `simulated run · ${run.model} · nothing was sent`;
-    return [run.source, run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
+    const { model } = run.answers[0];
+    if (run.simulated) return `simulated run · ${model} · nothing was sent`;
+    return [run.source, model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
   // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live.
@@ -1457,8 +1468,8 @@ p { margin: 0; }
   }
 
   // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
-  const askId = (k) => `answer-${k}`;
-  const RUN_ANSWER = askId(0);
+  const answerId = (k) => `answer-${k}`;
+  const RUN_ANSWER = answerId(0);
 
   function answerOf(run, id) {
     const [, k] = splitId(id);
@@ -1466,9 +1477,6 @@ p { margin: 0; }
     if (k === 0) return { ...answer, simulated: run.simulated, summary: runSummary(run) };
     return { ...answer, simulated: answer.source === 'simulated', summary: askSummary(answer) };
   }
-
-  // The run's own answer, before it is known: its question and model.
-  const unanswered = (question, model) => ({ question, model, text: null, provenance: null });
 
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
@@ -1553,7 +1561,6 @@ p { margin: 0; }
 
   const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
 
-  // Plans from where the tab's document nodes are.
   function nodeOrigin(tab) {
     return (i, file) => {
       const node = tab.nodes.get(docId(file));
@@ -1561,28 +1568,29 @@ p { margin: 0; }
     };
   }
 
-  // Asks stack around the run's own answer, one row gap apart: below it, above it, then further out.
-  function askSpot(answer, k) {
-    const out = Math.floor(k / 2) + 1;
-    return { x: answer.x, y: answer.y + (k % 2 ? -out : out) * GRID.rowGap };
+  // Answer k sits around the run's own answer, one row gap apart: below it, above it, then further out.
+  function answerSpot(first, k) {
+    const out = Math.ceil(k / 2);
+    return { x: first.x, y: first.y + (k % 2 ? out : -out) * GRID.rowGap };
   }
 
-  // The first slot around the run's answer, where it is now, that no answer node holds.
-  function freeAskSpot(tab) {
-    const answer = tab.nodes.get(RUN_ANSWER);
+  // The first spot around the run's answer, where it is now, that no answer node holds.
+  function freeAnswerSpot(tab) {
+    const first = tab.nodes.get(RUN_ANSWER);
     const answers = [...tab.nodes.values()].filter((n) => n.kind === 'answer');
     const taken = (spot) => answers.some((n) => Math.abs(n.x - spot.x) < GRID.colGap / 2 && Math.abs(n.y - spot.y) < GRID.rowGap / 2);
     let k = 0;
-    while (taken(askSpot(answer, k))) k += 1;
-    return askSpot(answer, k);
+    while (taken(answerSpot(first, k))) k += 1;
+    return answerSpot(first, k);
   }
 
   function plan(tab, origin) {
     const files = tab.run?.docs ?? state.files;
     const layout = gridLayout(files, origin);
     if (!tab.run) return layout;
-    state.files.filter((f) => isPending(tab, f)).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
-    tab.run.answers.slice(1).forEach((_, k) => layout.set(askId(k + 1), askSpot(layout.get(RUN_ANSWER), k)));
+    pendingFiles(tab).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    const first = layout.get(RUN_ANSWER);
+    tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
   }
 
@@ -1623,9 +1631,8 @@ p { margin: 0; }
     applyView();
   }
 
-  // A tab drawn in the background is fitted when it is shown.
   function fitShown(tab, animate = false) {
-    if (tab === state.shown && !tab.userMoved) fit(animate);
+    if (!tab.userMoved) fit(animate);
   }
 
   function refit() {
@@ -1651,7 +1658,7 @@ p { margin: 0; }
   function ariaName(tab, node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = tab.run.answers[splitId(node.id)[1]];
+      const { question, model } = answerOf(tab.run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
@@ -1661,7 +1668,7 @@ p { margin: 0; }
 
   function createNode(tab, id, kind, pos, { working = false, file = null, enter = true } = {}) {
     const pending = kind === 'doc' && isPending(tab, file);
-    const classes = ['node', kind, working && 'working', pending && 'pending', enter && !reduceMotion() && 'enter'].filter(Boolean).join(' ');
+    const classes = ['node', kind, working && 'working', pending && 'pending', enter && animates(tab) && 'enter'].filter(Boolean).join(' ');
     const el = h(
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id, 'aria-pressed': kind === 'answer' ? 'false' : null },
@@ -1690,32 +1697,38 @@ p { margin: 0; }
   }
 
   function removeNode(tab, id) {
-    if (state.selected === id) closeInspector();
-    if (state.hovered === id) state.hovered = null;
+    if (openIn(tab) === id) closeInspector();
+    if (hoveredIn(tab) === id) state.hovered = null;
     tab.nodes.get(id)?.el.remove();
     tab.nodes.delete(id);
   }
 
   const easeOut = (t) => 1 - (1 - t) ** 3;
 
-  let arrangeFrame = 0;
-
   function clearPanel(tab) {
-    cancelAnimationFrame(arrangeFrame);
-    closeInspector();
+    cancelAnimationFrame(tab.arrangeFrame);
+    if (openIn(tab)) closeInspector();
     for (const layer of Object.values(tab.layers)) layer.replaceChildren();
     tab.edges.clear();
     tab.nodesEl.replaceChildren();
     tab.nodes.clear();
-    state.hovered = null;
-    panel.classList.remove('is-lit');
+    tab.drawing.classList.remove('is-lit');
+    if (hoveredIn(tab)) state.hovered = null;
   }
 
-  // Document nodes are created only here, for the shown tab: one per loaded or run file, at its position
-  // in `at` if it had one, else below the last document node. A run's grid is planned once, when it
-  // starts; later syncs only add or drop document entries.
-  function syncDocNodes({ at = new Map(), animate = false, replan = !state.shown.run } = {}) {
-    const tab = state.shown;
+  // A slide left going in a tab that is no longer shown jumps to where it was going.
+  function finishSlide(tab) {
+    if (!tab.arrangeFrame) return;
+    cancelAnimationFrame(tab.arrangeFrame);
+    tab.arrangeFrame = 0;
+    for (const node of tab.nodes.values()) placeNode(node);
+    redrawEdges(tab);
+  }
+
+  // Document nodes are created only here: one per loaded or run file, at its position in `at` if it had
+  // one, else below the last document node. A run's grid is planned once, when it starts; later syncs
+  // only add or drop document entries.
+  function syncDocNodes(tab, { at = new Map(), animate = false, replan = !tab.run } = {}) {
     const files = panelFiles(tab);
     const keep = new Set(files.map(docId));
     for (const n of [...tab.nodes.values()]) {
@@ -1745,7 +1758,7 @@ p { margin: 0; }
   // The model takes the final positions at once; only the drawing slides there.
   function arrange() {
     const tab = state.shown;
-    cancelAnimationFrame(arrangeFrame);
+    cancelAnimationFrame(tab.arrangeFrame);
     tab.layout = plan(tab, tidyOrigin);
     tab.userMoved = false;
     const moves = [];
@@ -1757,10 +1770,11 @@ p { margin: 0; }
       if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
     }
     const finish = () => {
+      tab.arrangeFrame = 0;
       for (const { node } of moves) placeNode(node);
       redrawEdges(tab);
       positionInspector();
-      if (!tab.userMoved) refit();
+      fitShown(tab, true);
     };
     if (!moves.length || reduceMotion()) return finish();
     const start = performance.now();
@@ -1778,9 +1792,9 @@ p { margin: 0; }
         node.el.style.top = `${at.y}px`;
       }
       redrawEdges(tab, (n) => drawn.get(n) ?? n);
-      arrangeFrame = requestAnimationFrame(step);
+      tab.arrangeFrame = requestAnimationFrame(step);
     };
-    arrangeFrame = requestAnimationFrame(step);
+    tab.arrangeFrame = requestAnimationFrame(step);
   }
 
   function markWorking(tab, id) {
@@ -1798,7 +1812,15 @@ p { margin: 0; }
     });
     if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
     node.el.setAttribute('aria-label', ariaName(tab, node));
-    if (tab === state.shown && state.selected === id) renderInspector();
+    rerenderIfOpen(tab, id);
+  }
+
+  // Ids repeat across tabs; the popup and the hover are only ever on the shown tab's nodes.
+  const openIn = (tab) => (tab === state.shown ? state.selected : null);
+  const hoveredIn = (tab) => (tab === state.shown ? state.hovered : null);
+
+  function rerenderIfOpen(tab, id) {
+    if (openIn(tab) === id) renderInspector();
   }
 
   // A node has landed once its call finished without the run or ask stopping first.
@@ -1841,20 +1863,15 @@ p { margin: 0; }
     return kind === 'context' || kind === 'self' ? tab.layers.base : tab.layers.mid;
   }
 
-  function animateEdge(el, how) {
-    if (reduceMotion()) return;
+  // A tab drawn while hidden would play every animation at once when shown.
+  const animates = (tab) => tab === state.shown && !reduceMotion();
+
+  function animateEdge(tab, el, how) {
+    if (!animates(tab)) return;
     el.classList.remove('draw', 'fade');
     el.removeAttribute('pathLength');
     if (how === 'draw') el.setAttribute('pathLength', '1');
     el.classList.add(how);
-    el.addEventListener(
-      'animationend',
-      () => {
-        el.classList.remove(how);
-        el.removeAttribute('pathLength');
-      },
-      { once: true },
-    );
   }
 
   function addEdge(tab, from, to, kind, how) {
@@ -1871,9 +1888,9 @@ p { margin: 0; }
     edge.el.classList.add(kind);
     layerFor(tab, kind).append(edge.el);
     edge.el.setAttribute('d', edgePath(tab, tab.nodes.get(from), tab.nodes.get(to)));
-    if (how) animateEdge(edge.el, how);
+    if (how) animateEdge(tab, edge.el, how);
     const id = state.hovered ?? state.selected;
-    edge.el.classList.toggle('hl', tab === state.shown && id !== null && (id === from || id === to));
+    edge.el.classList.toggle('hl', id !== null && (id === from || id === to));
     return edge;
   }
 
@@ -1893,16 +1910,14 @@ p { margin: 0; }
     for (const n of tab.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
-  // An answer that cites nothing lights nothing.
-  const litPath = ({ run }) => (run?.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null);
-
-  // Lights the lineage of the tab's lit answer, and nothing else.
+  // Lights the lineage of the tab's lit answer; an answer that cites nothing lights nothing.
   function lightPath(tab) {
-    const path = litPath(tab);
-    if (tab === state.shown) panel.classList.toggle('is-lit', Boolean(path));
+    const { run } = tab;
+    const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
+    tab.drawing.classList.toggle('is-lit', Boolean(path));
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
-      if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === tab.run.lit));
+      if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
     for (const e of tab.edges.values()) {
       const on = Boolean(path?.edges.has(e.key));
@@ -1926,7 +1941,7 @@ p { margin: 0; }
 
   // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open there.
   function lightLanded(tab, id) {
-    const open = tab === state.shown ? state.selected : null;
+    const open = openIn(tab);
     if (open && open !== id && splitId(open)[0] === 'answer' && landed(tab, open)) return;
     lightAnswer(tab, id);
   }
@@ -2140,7 +2155,7 @@ p { margin: 0; }
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
     return h(
       node ? 'button' : 'div',
-      { class: classes, type: node ? 'button' : null, onclick: node ? () => openOnTab(tab, node) : null },
+      { class: classes, type: node ? 'button' : null, 'data-tab': node ? tab.id : null, 'data-node': node },
       h('span', { class: 'g', 'aria-hidden': 'true' }, g),
       h('span', { class: 't' }, text),
     );
@@ -2158,13 +2173,19 @@ p { margin: 0; }
     });
   }
 
-  // Node ids repeat across tabs, so a link from the chat names its tab as well as its node.
-  function openOnTab(tab, id) {
-    if (tab !== state.shown) switchTab(tab);
-    jumpTo(id);
+  // Node ids repeat across tabs, so a link from the chat names its tab as well as what it opens. A closed
+  // tab is no longer listed, so its links do nothing and nothing in the chat keeps it alive.
+  function onTranscriptClick(e) {
+    const link = e.target.closest('button[data-tab]');
+    const tab = state.tabs.find((t) => String(t.id) === link?.dataset.tab);
+    if (!tab) return;
+    const { node, answer, offer } = link.dataset;
+    switchTab(tab);
+    if (node) jumpTo(node);
+    if (answer && landed(tab, answer)) lightAnswer(tab, answer);
+    if (offer) prepareAsk(RECORDED_ASKS[offer]);
   }
 
-  // Tells a tab's run or ask into `body`; a run's narrator also keeps the tab's status.
   function narrator(tab, body, { status = true } = {}) {
     let spinner = null;
     const named = new Map();
@@ -2199,19 +2220,13 @@ p { margin: 0; }
     };
   }
 
-  // A turn's marker shows its tab and lights the answer it asked for.
-  function addTurn(tab, question, answerId) {
+  function addTurn(tab, question, answer) {
     const body = h('div', { class: 'turn-body' });
     const user = line('user', question);
-    if (tab) user.append(h('button', { class: 'btn marker', type: 'button', 'aria-label': `show tab ${tab.id}`, onclick: () => openTurn(tab, answerId) }, `tab ${tab.id}`));
+    if (tab) user.append(h('button', { class: 'btn marker', type: 'button', 'aria-label': `show tab ${tab.id}`, 'data-tab': tab.id, 'data-answer': answer }, `tab ${tab.id}`));
     transcript.append(h('div', { class: 'turn', 'data-tab': tab?.id }, user, body));
     scrollTranscript();
-    return { body, question };
-  }
-
-  function openTurn(tab, id) {
-    if (tab !== state.shown) switchTab(tab);
-    if (landed(tab, id)) lightAnswer(tab, id);
+    return body;
   }
 
   // The status is a live region, so rewriting it unchanged, as on each keystroke, would talk over the user.
@@ -2244,7 +2259,7 @@ p { margin: 0; }
 
   function updateComposer() {
     const asks = canAsk();
-    const pending = state.files.filter((f) => isPending(state.shown, f)).length;
+    const pending = pendingFiles(state.shown).length;
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
     // Hiding the focused button would drop the focus to the page.
@@ -2257,7 +2272,7 @@ p { margin: 0; }
   }
 
   function updateHint() {
-    const pending = state.files.filter((f) => isPending(state.shown, f)).length;
+    const pending = pendingFiles(state.shown).length;
     const hint = $('panel-hint');
     if (!state.shown.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
     else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
@@ -2282,7 +2297,7 @@ p { margin: 0; }
     if (asks) {
       mode.ask(question);
     } else if (!state.files.length) {
-      narrator(null, addTurn(null, question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
+      narrator(null, addTurn(null, question), { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
     } else {
       startRun(question);
     }
@@ -2293,8 +2308,6 @@ p { margin: 0; }
   // Why the question can't be sent yet, if it can't; it then stays in the box.
   function refusal(question, asks) {
     if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
-    if (!asks && streaming('run')) return RUN_STILL_GOING;
-    if (!asks && streaming('ask')) return ASK_STILL_GOING;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.files);
   }
@@ -2335,7 +2348,7 @@ p { margin: 0; }
   }
 
   function answerCiteLines(tab, { summary_ids, parse_ids }) {
-    const view = (label, id) => h('button', { class: 'ref', type: 'button', onclick: () => openOnTab(tab, id) }, label);
+    const view = (label, id) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-node': id }, label);
     return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
       const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
       return [`drew on ${docLabel(tab.run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
@@ -2448,7 +2461,7 @@ p { margin: 0; }
   function finishRun(tab, narr) {
     narr.say('sub', runSummary(tab.run));
     tabStatus(tab, ...doneLine(tab.run));
-    if (tab === state.shown && state.selected === RUN_ANSWER) renderInspector();
+    rerenderIfOpen(tab, RUN_ANSWER);
   }
 
   // Marks every node still working as stopped; with no answer, the next question starts a new run.
@@ -2510,7 +2523,7 @@ p { margin: 0; }
     at(t, () => {
       showAnswer(tab, narr);
       finishRun(tab, narr);
-      run.answers.slice(1).forEach((_, k) => redrawAsk(tab, askId(k + 1)));
+      for (let k = 1; k < run.answers.length; k += 1) redrawAsk(tab, answerId(k));
       if (!run.simulated) offerRecordedAsks(tab, narr);
     });
     t += TIMING.litDelay;
@@ -2599,7 +2612,8 @@ p { margin: 0; }
     const stream = openStream('run', tab);
     narr.phase('starting');
     try {
-      const body = { question: run.question, model: run.model, documents: run.docs.map((f) => f.text) };
+      const { question, model } = run.answers[0];
+      const body = { question, model, documents: run.docs.map((f) => f.text) };
       const started = await api('/api/runs', { method: 'POST', body });
       run.id = (await started.json()).run_id;
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
@@ -2615,7 +2629,7 @@ p { margin: 0; }
     const { run } = tab;
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id).body, { status: false });
+    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
     const failed = (text) => {
       narr.done();
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
@@ -2630,7 +2644,7 @@ p { margin: 0; }
       if (event.type === 'ask_finished') {
         ask.totals = totalsOf(event);
         narr.say('sub', askSummary(ask));
-        if (tab === state.shown && state.selected === id) renderInspector();
+        rerenderIfOpen(tab, id);
       }
       if (event.type === 'ask_failed') failed(`${askSummary(ask)} · failed · ${event.error}`);
     };
@@ -2654,32 +2668,34 @@ p { margin: 0; }
     clearPanel(tab);
     // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
     tab.drawing.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length));
-    tab.turn.body.replaceChildren();
+    tab.turn.replaceChildren();
     tab.userMoved = false;
-    syncDocNodes({ at, animate: true, replan: true });
-    mode.play(tab, narrator(tab, tab.turn.body));
+    tabStatus(tab, STARTING);
+    syncDocNodes(tab, { at, animate: true, replan: true });
+    mode.play(tab, narrator(tab, tab.turn));
     updateComposer();
   }
 
-  // A new run opens a tab of its own; the first takes over the panel shown before any run.
+  // Every run opens a tab of its own, its documents starting where the shown tab has them.
   function startRun(question) {
-    const from = state.shown;
-    const tab = from.run ? newTab() : from;
+    const at = docPositions(state.shown);
+    const tab = newTab();
     tab.id = state.nextTab++;
     tab.run = { ...mode.newRun(question), lit: null };
     tab.turn = addTurn(tab, question, RUN_ANSWER);
     state.tabs.push(tab);
     openTab(tab);
-    switchTab(tab);
-    playRun(tab, docPositions(from));
+    showDrawing(tab);
+    playRun(tab, at);
+    revealTab(tab);
   }
 
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
 
   function addAsk(tab, ask) {
-    const id = askId(tab.run.answers.push(ask) - 1);
-    tab.layout.set(id, freeAskSpot(tab));
+    const id = answerId(tab.run.answers.push(ask) - 1);
+    tab.layout.set(id, freeAnswerSpot(tab));
     addNode(tab, id);
     fitShown(tab, true);
     return id;
@@ -2702,7 +2718,7 @@ p { margin: 0; }
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id).body, { status: false });
+    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
     showAnswer(tab, narr, id);
     narr.say('sub', askSummary(ask));
     lightLanded(tab, id);
@@ -2710,13 +2726,9 @@ p { margin: 0; }
 
   // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
   function offerRecordedAsks(tab, narr) {
-    const choose = (ask) => {
-      if (tab !== state.shown) switchTab(tab);
-      prepareAsk(ask);
-    };
-    const offer = (ask) => h('button', { class: 'ref', type: 'button', onclick: () => choose(ask) }, `${ask.question} · ${bareModel(ask.model)}`);
+    const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
     narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
-    for (const ask of RECORDED_ASKS) narr.say('sub', offer(ask));
+    RECORDED_ASKS.forEach((ask, i) => narr.say('sub', offer(ask, i)));
   }
 
   function prepareAsk({ question, model }) {
@@ -2730,15 +2742,16 @@ p { margin: 0; }
 
   // ---------- tabs ----------
 
-  const tabLabel = (tab) => answerLabel(tab.run);
+  const tabLabel = (tab) => answerLabel(tab.run.answers[0]);
   const tabButtonId = (tab) => `run-tab-${tab.id}`;
   // A tab can't close while its run or an ask over it is going.
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
-  // Adds the tab's button, and its close button, to the tab row.
+  // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
   function openTab(tab) {
-    tab.button = h('button', { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) }, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
-    tab.close = h('button', { class: 'btn tab-close', type: 'button', 'aria-label': `close tab ${tab.id} ${tabLabel(tab)}`, onclick: () => closeTab(tab) }, '×');
+    const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', 'aria-keyshortcuts': 'Delete', onclick: () => switchTab(tab) };
+    tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
+    tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
     $('run-tabs').append(tab.button, tab.close);
   }
 
@@ -2757,31 +2770,43 @@ p { margin: 0; }
     panel.setAttribute('aria-labelledby', tabButtonId(state.shown));
   }
 
-  // Swaps the whole panel for the tab's: its nodes, lines, lit answer, positions and view.
-  function switchTab(tab) {
+  function showDrawing(tab) {
+    finishSlide(state.shown);
     closeInspector();
     state.hovered = null;
     state.shown = tab;
     world.replaceChildren(tab.drawing);
-    panel.classList.toggle('is-lit', Boolean(litPath(tab)));
-    syncDocNodes();
     applyView();
     refreshHighlight();
-    if (tab.status.length) setStatus(...tab.status);
     updateComposer();
-    for (const el of [tab.button, tab.close]) if (el && !el.hidden) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  // The shown tab goes to its neighbour; its turns stay in the chat, their links inert.
+  // On a phone the tab row scrolls, and the shown tab could be out of sight.
+  function revealTab(tab) {
+    for (const el of [tab.button, tab.close]) if (!el.hidden) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function switchTab(tab) {
+    if (tab === state.shown) return;
+    showDrawing(tab);
+    // Nodes drawn while their tab was hidden had no size to fit by, and files may have changed since.
+    syncDocNodes(tab);
+    setStatus(...tab.status);
+    revealTab(tab);
+  }
+
   function closeTab(tab) {
     if (tabBusy(tab) || state.tabs.length === 1) return;
+    cancelTimers(tab);
     const i = state.tabs.indexOf(tab);
     state.tabs.splice(i, 1);
     tab.button.remove();
     tab.close.remove();
     for (const turn of transcript.querySelectorAll(`.turn[data-tab="${tab.id}"]`)) {
       for (const button of turn.querySelectorAll('button')) button.disabled = true;
-      turn.querySelector('.marker').textContent = `tab ${tab.id} · closed`;
+      const marker = turn.querySelector('.marker');
+      marker.removeAttribute('aria-label');
+      marker.textContent = `tab ${tab.id} · closed`;
     }
     if (tab === state.shown) switchTab(state.tabs[Math.min(i, state.tabs.length - 1)]);
     else updateTabs();
@@ -2790,13 +2815,14 @@ p { margin: 0; }
 
   const TAB_KEYS = { ArrowRight: 1, ArrowLeft: -1 };
 
-  // Arrow keys move between tabs, showing each as they go.
   function onTabKey(e) {
+    const tab = state.tabs.find((t) => t.button === e.target);
+    if (!tab) return;
+    if (e.key === 'Delete') return closeTab(tab);
     const step = TAB_KEYS[e.key];
-    if (!step || !e.target.matches('.run-tab')) return;
+    if (!step) return;
     e.preventDefault();
-    const i = state.tabs.indexOf(state.shown);
-    const next = state.tabs[(i + step + state.tabs.length) % state.tabs.length];
+    const next = state.tabs[(state.tabs.indexOf(tab) + step + state.tabs.length) % state.tabs.length];
     switchTab(next);
     next.button.focus();
   }
@@ -2879,7 +2905,7 @@ p { margin: 0; }
     closeFile();
     renderFiles();
     updateComposer();
-    syncDocNodes();
+    syncDocNodes(state.shown);
     readyStatus();
     transcript.append(line('main', message, { dim: true }));
     scrollTranscript();
@@ -3267,6 +3293,11 @@ p { margin: 0; }
       state.hovered = null;
       refreshHighlight();
     });
+    // An animation's class comes off once it has played, so the node or line can play it again.
+    world.addEventListener('animationend', (e) => {
+      e.target.classList.remove('enter', 'draw', 'fade');
+      e.target.removeAttribute('pathLength');
+    });
     // On click, not pointerup: a tap's click would otherwise land on the inspector that just opened under it.
     panel.addEventListener('click', (e) => {
       const id = hoverFrom(e);
@@ -3308,6 +3339,7 @@ p { margin: 0; }
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(state.shown));
     $('run-tabs').addEventListener('keydown', onTabKey);
+    transcript.addEventListener('click', onTranscriptClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
 
@@ -3422,7 +3454,8 @@ p { margin: 0; }
     buildSettings();
     questionEl.value = SAMPLE.question;
     renderFiles();
-    switchTab(newTab());
+    showDrawing(state.shown);
+    syncDocNodes(state.shown);
     renderPicker([]);
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
