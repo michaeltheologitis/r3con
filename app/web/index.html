@@ -172,12 +172,13 @@ p { margin: 0; }
   stroke-width: calc(1px / var(--k, 1));
   transition: opacity 0.4s, stroke 0.4s, stroke-width 0.4s;
 }
-.edge.context { opacity: 0.16; }
+.edge.context { opacity: calc(0.16 * var(--context-fade, 1)); }
 .edge.self { opacity: 0.5; stroke-dasharray: calc(2px / var(--k, 1)) calc(3px / var(--k, 1)); }
 .edge.flow { opacity: 0.5; }
 .edge.cite { opacity: 0.85; }
 .edge.hl { opacity: 0.9; stroke: var(--fg); }
 .panel.is-lit .edge { opacity: 0.07; }
+.panel.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
 .panel.is-lit .edge.hl { opacity: 0.55; }
 .panel.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
 .edge.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s ease-out forwards; }
@@ -875,7 +876,7 @@ p { margin: 0; }
   const SPIN_FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
   const SPIN_FRAME_MS = 110;
 
-  const GRID = { colGap: 200, rowGap: 100 };
+  const GRID = { colGap: 230, rowGap: 112 };
   const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
   const cssPx = (name) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const ICON_PX = cssPx('--icon-size');
@@ -894,7 +895,7 @@ p { margin: 0; }
   const BRIDGE_CLEARANCE = ICON_HALF + TOP_ROW_HOPS * LANE_GAP;
   const LABEL_MAX = 24;
   const NODE_PAD_PX = 12;
-  const ZOOM = { min: 0.25, max: 2.5, fitMax: 1.15 };
+  const ZOOM = { min: 0.05, max: 2.5, fitMax: 1.15 };
   const FIT_MARGIN = 28;
   const WHEEL_ZOOM_RATE = 0.004;
   const WHEEL_LINE_PX = 16;
@@ -928,6 +929,7 @@ p { margin: 0; }
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
+  const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
   const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
@@ -2030,6 +2032,8 @@ p { margin: 0; }
     const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
     clearPanel();
     state.run = run;
+    // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
+    panel.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / run.docs.length));
     state.runTurn.body.replaceChildren();
     $('replay-btn').hidden = false;
     state.userMoved = false;
