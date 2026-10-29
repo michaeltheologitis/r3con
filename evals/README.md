@@ -90,10 +90,10 @@ error and is retried leaves its partial ask folder, whose calls the comparison's
 does not count.
 
 The asks run this checkout's reasoning over what the run built, from its commit or, when
-`ask_of.dirty`, from uncommitted changes to it, so the line names both commits. On Luna
-a comparison costs about 2% of a run (for the run of 2026-10-28 at `c6c8e60`, reasoning
-cost $0.06 and judging $0.01 of $3.06); on another model, its price for about 340k input
-and 30k output tokens.
+`ask_of.dirty`, from uncommitted changes to it, so the line names both commits. On Luna,
+the comparison over the $3.06 run of 2026-10-28 (`c6c8e60`) cost $0.068, about 2% of the
+run ($0.057 of asks and $0.011 of judging), and took 30 seconds; on another model, it is
+that model's price for about 340k input and 30k output tokens.
 
 ## Reading `results.jsonl`
 
