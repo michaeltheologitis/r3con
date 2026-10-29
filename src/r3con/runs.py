@@ -56,8 +56,8 @@ Layout per ``logs/<run-folder>/``:
   above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
-call that completed, plus ``transcript.yaml`` where the stage writes one) and
-``error.txt``, the traceback.
+call that answered or raised an error, plus ``transcript.yaml`` where the stage writes
+one) and ``error.txt``, the traceback.
 
 Two layers in code:
 
@@ -67,14 +67,18 @@ Two layers in code:
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
   writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, usd, sends, resend_wait_seconds, finish_reason, prompt, output}``, where
-  ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's price
-  for the call, or ``null`` when it cannot price it, ``sends`` is the times the request
-  was sent, more than 1 when a temporary error made r3con resend it, and
+  tokens, usd, sends, resend_wait_seconds, finish_reason, error, prompt, output}``,
+  where ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's
+  price for the call, or ``null`` when it cannot price it, ``sends`` is the times the
+  request was sent, more than 1 when a temporary error made r3con resend it, and
   ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
-  ``null`` when r3con did not resend it itself) and, unless skipped, ``transcript.yaml``
-  (the readable message thread). Aggregate token and cost totals are available via
-  ``compute_totals()`` so callers fold them into the stage's ``result.json``.
+  ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
+  call that raised one, the error's class and the first non-empty line of its message:
+  such a call has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0,
+  as r3con got no reply to price) and, unless skipped, ``transcript.yaml`` (the
+  readable message thread). Aggregate token and cost totals are available via
+  ``compute_totals()`` so callers fold them into the stage's ``result.json``; their
+  ``n_steps`` counts only the calls that answered.
 """
 
 from __future__ import annotations
@@ -345,12 +349,14 @@ class StepRecord:
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
+    error: str | None = None
 
 
 def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
-    """The step count and summed tokens of ``steps`` (``None`` when none counted any),
-    and their ``usd``: the sum of theirs, or ``None`` when litellm could not price one
-    of them."""
+    """The count of ``steps`` that answered, leaving out those that raised an error
+    (``calls.json`` lists them), the summed tokens of ``steps`` (``None`` when none
+    counted any), and their ``usd``: the sum of theirs, or ``None`` when litellm could
+    not price one of them."""
     prompt = completion = total = 0
     any_tokens = False
     costs = [s.usd for s in steps]
@@ -361,7 +367,7 @@ def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
             completion += s.tokens.get("completion", 0)
             total += s.tokens.get("total", 0)
     return {
-        "n_steps": len(steps),
+        "n_steps": sum(s.error is None for s in steps),
         "tokens": {"prompt": prompt, "completion": completion, "total": total}
         if any_tokens
         else None,
@@ -403,9 +409,11 @@ class StageRun:
         usd: float | None = None,
         sends: int | None = None,
         resend_wait_seconds: float | None = None,
+        error: str | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
-        completion order; each call's ``kind`` carries its own identity."""
+        completion order, and identify a call: a kind can repeat, as when a refused
+        turn is sent again under the same kind."""
         with self._lock:
             step = StepRecord(
                 step=len(self.steps) + 1,
@@ -417,6 +425,7 @@ class StageRun:
                 usd=usd,
                 sends=sends,
                 resend_wait_seconds=resend_wait_seconds,
+                error=error,
             )
             self.steps.append(step)
         return step
@@ -461,6 +470,7 @@ class StageRun:
                     "sends": s.sends,
                     "resend_wait_seconds": s.resend_wait_seconds,
                     "finish_reason": resp.get("finish_reason"),
+                    "error": s.error,
                     "prompt": s.messages,
                     "output": resp.get("content"),
                 }
@@ -478,11 +488,12 @@ class StageRun:
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
         """The readable conversation = the final step's full message thread + its
-        response. For a multi-turn loop (codeact) the last step's ``messages`` already
-        contain the whole grown conversation; for a retry loop (the schema proposal)
-        they are the final (successful) attempt — earlier attempts live in ``calls.json``. Empty
-        run → ``[]``. (Stages with many parallel calls flush with
-        ``write_transcript=False`` and never reach here.)"""
+        reply, if it got one. For a multi-turn loop (codeact) the last step's
+        ``messages`` already contain the whole grown conversation; for a retry loop (the
+        schema proposal) they are the final attempt — earlier attempts live in
+        ``calls.json``. A stage that ended on a call that raised shows the thread that
+        call sent, with no reply. Empty run → ``[]``. (Stages with many parallel calls
+        flush with ``write_transcript=False`` and never reach here.)"""
         if not self.steps:
             return []
         last = self.steps[-1]

@@ -21,6 +21,8 @@ import pytest
 import urllib3  # noqa: F401
 import yaml
 
+from r3con.config import normalize_model_name
+
 litellm.suppress_debug_info = True
 _completion = litellm.completion
 
@@ -30,6 +32,7 @@ MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 Content = str | dict[str, Any]
 Reply = Content | BaseException | Callable[[Request], Content]
 
+MODEL = "openai/gpt-6-luna"
 R3CON_VARIABLES = (
     "R3CON_LOGS_DIR",
     "R3CON_DOC_WORKERS",
@@ -434,7 +437,23 @@ def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
 @pytest.fixture
 def refusal() -> Callable[[], litellm.ContextWindowExceededError]:
     """Makes a new error of the kind litellm raises for a request refused as too long."""
-    return lambda: too_long(4_000, 5_000, "openai/gpt-6-luna")
+    return lambda: too_long(4_000, 5_000, MODEL)
+
+
+@pytest.fixture
+def priced_model() -> Iterator[dict[str, float]]:
+    """MODEL at round test rates, which it yields: 10 tokens in and 20 out cost $10 a
+    call. litellm caches each model's price by name, so the cache is cleared once the
+    rates are set and again once they are undone."""
+    name = normalize_model_name(MODEL)
+    rates = {"input_cost_per_token": 0.5, "output_cost_per_token": 0.25}
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(
+            litellm.model_cost, name, {**litellm.model_cost.get(name, {}), **rates}
+        )
+        litellm.get_model_info.cache_clear()
+        yield rates
+    litellm.get_model_info.cache_clear()
 
 
 @pytest.fixture

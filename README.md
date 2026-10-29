@@ -124,8 +124,8 @@ r3con also records provenance, how the answer, each summary and each parse came 
 
 ## Run artifacts
 
-Every run writes each stage's output and model calls, with their tokens, cost, and any
-resends and the wait between them, to a folder under `./logs`.
+Every run writes each stage's output and model calls, failed ones included, with their
+tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir

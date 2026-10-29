@@ -20,7 +20,6 @@ from r3con.config import (
     REASONING_PATHS,
     RunConfig,
     load_config,
-    normalize_model_name,
 )
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
@@ -91,6 +90,9 @@ def provider_down() -> litellm.APIConnectionError:
     return litellm.APIConnectionError(
         "provider down", llm_provider="openai", model=MODEL
     )
+
+
+PROVIDER_DOWN_LINE = "APIConnectionError: litellm.APIConnectionError: provider down"
 
 
 def read_json(logger, name: str):
@@ -218,22 +220,6 @@ def memos_run(llm, documents, model, tmp_path, **overrides):
         completion=llm,
     )
     return logger, result
-
-
-@pytest.fixture
-def priced_model():
-    """MODEL at round test rates: 10 tokens in and 20 out cost $10 a call. litellm
-    caches each model's price by name, so the cache is cleared once the rates are set
-    and again once they are undone."""
-    name = normalize_model_name(MODEL)
-    rates = {"input_cost_per_token": 0.5, "output_cost_per_token": 0.25}
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setitem(
-            litellm.model_cost, name, {**litellm.model_cost.get(name, {}), **rates}
-        )
-        litellm.get_model_info.cache_clear()
-        yield
-    litellm.get_model_info.cache_clear()
 
 
 def counting_ids(monkeypatch) -> None:
@@ -534,10 +520,18 @@ def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(litellm.APIConnectionError):
         answer(llm, logger)
-    assert [call["kind"] for call in read_json(logger, "reasoning/calls")] == ["turn-1"]
+    calls = read_json(logger, "reasoning/calls")
+    assert [(call["kind"], call["error"] is None) for call in calls] == [
+        ("direct", False),
+        ("turn-1", True),
+        ("turn-2", False),
+    ]
     assert (logger.dir / "reasoning" / "error.txt").is_file()
     transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
-    assert transcript["messages"][-1]["content"] == NEVER_COMMITS
+    *_, turn, observation = transcript["messages"]
+    assert (turn["role"], observation["role"]) == ("assistant", "user")
+    assert turn["content"].split() == NEVER_COMMITS.split()
+    assert observation["content"].startswith("<observation>")
 
 
 def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_schema(
@@ -691,7 +685,7 @@ def test_a_failing_stage_leaves_its_calls_and_traceback_and_names_the_run_folder
     assert failure.value.__notes__ == [f"r3con: partial artifacts in {logger.dir}"]
     folder = logger.dir / STAGE_FOLDERS[stage]
     error = (folder / "error.txt").read_text()
-    assert "APIConnectionError: litellm.APIConnectionError: provider down" in error
+    assert PROVIDER_DOWN_LINE in error
     assert (folder / "calls.json").is_file()
     assert not (folder / "result.json").exists()
     earlier = list(STAGE_FOLDERS.values())[: list(STAGE_FOLDERS).index(stage)]
@@ -706,10 +700,11 @@ def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(
     with pytest.raises(litellm.APIConnectionError):
         answer(answering_llm.answers(relevance=["one", "two", down, down]), logger)
     calls = read_json(logger, "relevance/calls")
-    assert sorted(call["kind"] for call in calls) == [
-        "relevance-r1-d0",
-        "relevance-r1-d1",
-    ]
+    answered = sorted(call["kind"] for call in calls if call["error"] is None)
+    assert answered == ["relevance-r1-d0", "relevance-r1-d1"]
+    # Once one call raises, a call not yet started is never sent.
+    assert len(calls) == len(answering_llm.requests)
+    assert {call["error"] for call in calls} == {None, PROVIDER_DOWN_LINE}
 
 
 def test_an_interrupted_stage_is_recorded_like_a_failure(answering_llm, tmp_path):
@@ -939,8 +934,9 @@ def test_a_later_stage_splits_further_without_renumbering(
     assert summary_headings(llm) == as_ids(
         result.document_ids, ["1", "2", "3", "4.1", "4.2", "5"]
     )
-    kinds = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
-    assert sorted(kind for kind in kinds if "-d3" in kind) == [
+    calls = read_json(logger, "structuring/parsing/calls")
+    replied = [call["kind"] for call in calls if call["error"] is None]
+    assert sorted(kind for kind in replied if "-d3" in kind) == [
         f"parse-d3c{k}" for k in range(4)
     ]
     assert len(llm.requests_for("relevance")) == (12 if measured else 13)
@@ -1299,7 +1295,7 @@ def test_a_failing_stage_reports_run_failed_with_its_name_and_no_finish(
         "type": "run_failed",
         "time": failed["time"],
         "stage": stage,
-        "error": "APIConnectionError: litellm.APIConnectionError: provider down",
+        "error": PROVIDER_DOWN_LINE,
     }
     assert "run_finished" not in [event["type"] for event in events]
     assert events_in(logger.dir) == events

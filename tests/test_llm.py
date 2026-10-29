@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
+    _ERROR_CHARS,
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
@@ -69,6 +70,8 @@ TOO_LONG = (400, VLLM_TOO_LONG)
 CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
 LONGEST_FIRST_BACKOFF = 1
 NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
+KEY = "sk-not-a-real-key-0123456789"
+BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 
 
 class Flat(BaseModel):
@@ -109,9 +112,18 @@ def loud_litellm(monkeypatch):
 
 
 @pytest.fixture
+def run(tmp_path) -> StageRun:
+    return StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+
+@pytest.fixture
 def top_draws(monkeypatch):
     """Every random draw at the top of its range: the longest backoff and jitter."""
     monkeypatch.setattr(random, "uniform", lambda low, high: high)
+
+
+def refused(message: str) -> litellm.BadRequestError:
+    return litellm.BadRequestError(message=message, llm_provider="openai", model=MODEL)
 
 
 def litellm_settings():
@@ -490,34 +502,17 @@ def test_a_callers_own_retry_setting_replaces_r3cons_resends(
     assert len(httpserver.log) == requests
 
 
-def test_a_recorded_call_carries_litellms_price_for_it(llm, monkeypatch, tmp_path):
-    usd_in, usd_out = 1.0, 10.0
-    entry = {
-        "input_cost_per_token": usd_in,
-        "output_cost_per_token": usd_out,
-        "litellm_provider": "openai",
-        "mode": "chat",
-    }
-    monkeypatch.setitem(litellm.model_cost, "openai/priced", entry)
-    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
-
-    litellm_chat_completion(
-        system_prompt="s",
-        user_prompt="u",
-        model="openai/priced",
-        completion=llm.replies("ok"),
-        run=run,
-    )
+def test_a_recorded_call_carries_litellms_price_for_it(llm, priced_model, run):
+    ask(llm.replies("ok"), run=run)
 
     [step] = run.steps
-    assert (
-        step.usd == step.tokens["prompt"] * usd_in + step.tokens["completion"] * usd_out
+    assert step.usd == (
+        step.tokens["prompt"] * priced_model["input_cost_per_token"]
+        + step.tokens["completion"] * priced_model["output_cost_per_token"]
     )
 
 
-def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, tmp_path):
-    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
-
+def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, run):
     litellm_chat_completion(
         system_prompt="s",
         user_prompt="u",
@@ -543,11 +538,10 @@ def slowed_down(retry_after: str) -> litellm.RateLimitError:
     ids=["first-time", "after-two-rate-limits-to-hundredths"],
 )
 def test_a_recorded_call_says_how_often_it_was_sent_and_how_long_it_waited(
-    llm, monkeypatch, tmp_path, top_draws, rate_limits, sends, resend_wait_seconds
+    llm, monkeypatch, run, top_draws, rate_limits, sends, resend_wait_seconds
 ):
     errors = [slowed_down(retry_after="1.004") for _ in range(rate_limits)]
     monkeypatch.setattr(litellm, "completion", llm.replies(*errors, "ok"))
-    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
 
     litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL, run=run)
 
@@ -556,13 +550,116 @@ def test_a_recorded_call_says_how_often_it_was_sent_and_how_long_it_waited(
     assert len(llm.requests) == sends
 
 
-def test_a_call_r3con_did_not_resend_itself_records_no_sends_or_wait(llm, tmp_path):
-    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
-
+def test_a_call_r3con_did_not_resend_itself_records_no_sends_or_wait(llm, run):
     ask(llm.replies("ok"), run=run)
 
     [step] = run.steps
     assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("errors", "sends", "resend_wait_seconds", "recorded"),
+    [
+        (
+            [slowed_down(retry_after="1.004") for _ in range(3)],
+            3,
+            4.01,
+            "RateLimitError: litellm.RateLimitError: slow down",
+        ),
+        (
+            [refused("unknown parameter: tone")],
+            1,
+            0,
+            f"{BAD_REQUEST}unknown parameter: tone",
+        ),
+    ],
+    ids=["gives-up-after-two-resends", "refused-at-once"],
+)
+def test_a_call_that_raises_is_recorded_and_its_error_raised_as_it_was(
+    llm, monkeypatch, run, top_draws, errors, sends, resend_wait_seconds, recorded
+):
+    monkeypatch.setattr(settings, "LLM_TEMPORARY_ERROR_RETRIES", 2)
+    monkeypatch.setattr(litellm, "completion", llm.replies(*errors))
+
+    with pytest.raises(type(errors[-1])) as raised:
+        litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model=MODEL, run=run
+        )
+
+    assert raised.value is errors[-1]
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (sends, resend_wait_seconds)
+    assert (step.error, step.response, step.tokens) == (recorded, {}, None)
+    assert len(llm.requests) == sends
+
+
+def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm, run):
+    with pytest.raises(litellm.RateLimitError):
+        ask(llm.replies(slowed_down(retry_after="1")), run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
+    llm, priced_model, run
+):
+    llm.replies("ok", refused("no"))
+
+    ask(llm, run=run)
+    with pytest.raises(litellm.BadRequestError):
+        ask(llm, run=run)
+
+    answered, failed = run.steps
+    assert failed.usd == 0.0
+    assert run.compute_totals()["usd"] == answered.usd > 0
+
+
+@pytest.mark.parametrize(
+    ("error", "api_key", "recorded"),
+    [
+        (
+            refused("refused\nTraceback (most recent call last):"),
+            KEY,
+            f"{BAD_REQUEST}refused",
+        ),
+        (
+            ConnectionError("\n\nprovider down\nTraceback (most recent call last):"),
+            KEY,
+            "ConnectionError: provider down",
+        ),
+        (
+            refused("x" * _ERROR_CHARS),
+            KEY,
+            BAD_REQUEST + "x" * (_ERROR_CHARS - len(BAD_REQUEST)),
+        ),
+        (
+            refused(f"bad key Bearer {KEY}"),
+            KEY,
+            f"{BAD_REQUEST}bad key Bearer <api_key>",
+        ),
+        (
+            refused("maximum context length is 4000 tokens"),
+            "x",
+            f"{BAD_REQUEST}maximum context length is 4000 tokens",
+        ),
+    ],
+    ids=[
+        "first-line",
+        "first-non-empty-line",
+        "cut-short",
+        "key-masked",
+        "placeholder-key-left-alone",
+    ],
+)
+def test_a_recorded_error_is_its_first_line_cut_short_without_the_key(
+    llm, run, error, api_key, recorded
+):
+    with pytest.raises(type(error)):
+        ask(llm.replies(error), run=run, api_key=api_key)
+
+    [step] = run.steps
+    assert step.error == recorded
 
 
 def test_litellm_reads_its_bundled_price_map():
