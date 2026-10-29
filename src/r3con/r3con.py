@@ -55,7 +55,13 @@ from r3con.config import (
     load_config,
 )
 from r3con.logging_setup import get_logger
-from r3con.pipeline import Answer, ask_pipeline, read_representation, run_pipeline
+from r3con.pipeline import (
+    Answer,
+    ask_config,
+    ask_pipeline,
+    read_representation,
+    run_pipeline,
+)
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.settings import active_logs_dir, settings_snapshot
 
@@ -351,20 +357,24 @@ def ask(
 
     The run's relevance snippets, schema and parse are reused as its folder holds them,
     so an ask costs one reasoning step rather than a run. Reasoning is sent what the
-    run's was, with ``question`` in place of the run's question, under the run's prompt
-    versions; it falls back to the coding path as a run's does.
+    run's was, with ``question`` in place of the run's question. Its prompts are the
+    run's pins, resolved as a run resolves them (a ``./prompts`` overlay in the working
+    directory included), and the ask's manifest records the files it used. It falls
+    back to the coding path as a run's does.
 
     Args:
-        source: an :class:`Answer` from :func:`run`, whose ``run_dir`` is read, or the
-            path of a run folder.
+        source: an :class:`Answer` from :func:`run` or :func:`ask`, whose ``run_dir``
+            is read, or the path of a run folder or of an ask's folder. An ask's folder
+            stands for the run it asked over, so asking over an ask asks that run again.
         question: the question to answer; it may be the run's own.
         model: a litellm model string. Defaults to the one the run called; for a run
             recorded before r3con kept that string, its bare name (``gpt-6-luna``).
         reasoning: ``"direct"`` or ``"coding"``, as in :func:`run`. Defaults to the
             run's.
         params: as in :func:`run`. Defaults to the run's when the ask runs on the run's
-            model, and to none on another model, since one provider's params
-            (``reasoning_effort``, ``extra_body``) can break another's request.
+            model (by its name without the provider prefix), and to none on another
+            model, since one provider's params (``reasoning_effort``, ``extra_body``)
+            can break another's request.
         api_key, api_base, completion: as in :func:`run`.
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
@@ -374,16 +384,17 @@ def ask(
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
-        reasoning, and whose other fields are the run's; ``run_dir`` is the run folder.
+        reasoning, and whose other fields are the run's; ``run_dir`` is the ask's own
+        folder, which holds its manifest, calls and transcript.
 
     Raises:
         FileNotFoundError: if ``source`` is not a run folder, if its run never finished
             parsing, or if a prompt version it pins has no file.
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
-            with ``save_artifacts=False``), if its folder was written by an older r3con
-            that ask can't read, if it leaves a prompt version unpinned, if an override
-            is not valid for its setting, or if a setting in :mod:`r3con.settings` is
-            out of range.
+            with ``save_artifacts=False``), if a file in its folder is not as this
+            r3con writes it (one an older r3con wrote, say), if it leaves a prompt
+            version unpinned, if an override is not valid for its setting, or if a
+            setting in :mod:`r3con.settings` is out of range.
         Each of these is raised in one line, before any request and before the ask's
         folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left
@@ -396,12 +407,12 @@ def ask(
             "ask needs the run folder, and this Answer has none: its run was made with "
             "save_artifacts=False."
         )
+    built = read_representation(run_dir)
+    config = ask_config(built, model=model, reasoning=reasoning, params=params)
     return ask_pipeline(
-        read_representation(run_dir),
+        built,
+        config,
         task=question,
-        model=model,
-        path=reasoning,
-        params=params,
         api_base=api_base,
         api_key=api_key,
         completion=completion,

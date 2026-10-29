@@ -369,7 +369,34 @@ def test_an_ask_answers_over_the_runs_representation_citing_only_its_ids(
     cited = {id_.partition(".")[0] for ids in asked.provenance.values() for id_ in ids}
     assert cited
     assert cited <= set(result.document_ids)
-    assert replace(asked, answer=result.answer, provenance=result.provenance) == result
+    assert asked.run_dir.parent == result.run_dir / "asks"
+    the_runs = replace(
+        asked,
+        answer=result.answer,
+        provenance=result.provenance,
+        run_dir=result.run_dir,
+    )
+    assert the_runs == result
+
+
+@pytest.mark.parametrize(
+    "source",
+    [lambda asked: asked, lambda asked: asked.run_dir],
+    ids=["answer", "folder"],
+)
+def test_an_ask_over_an_ask_asks_its_run_again_in_a_folder_of_its_own(
+    answering_llm, tmp_path, source
+):
+    result = finished_run(answering_llm, tmp_path)
+    first = ask(result, "Who else?", completion=answering_llm)
+    second = ask(source(first), "Who, then?", completion=answering_llm)
+    assert second.answer == JOINED
+    assert first.run_dir.parent == second.run_dir.parent == result.run_dir / "asks"
+    assert first.run_dir != second.run_dir
+    manifest = json.loads((second.run_dir / "manifest.json").read_text())
+    assert manifest["ask_of"] == result.run_dir.name
+    _, asked_first, asked_second = answering_llm.requests_for("reasoning")
+    assert asked_second["messages"][0] == asked_first["messages"][0]
 
 
 def test_an_ask_sends_the_runs_reasoning_prompt_with_the_new_question(
@@ -428,24 +455,27 @@ def test_an_asks_manifest_records_its_question_its_run_and_the_config_it_ran_und
 @pytest.mark.parametrize(
     ("options", "model", "params"),
     [
-        ({}, QWEN, RUN_PARAMS),
-        ({"model": QWEN}, QWEN, RUN_PARAMS),
-        ({"model": GPT_4O}, GPT_4O, {}),
-        (
-            {"model": GPT_4O, "params": {"temperature": 0.9}},
-            GPT_4O,
-            {"temperature": 0.9},
-        ),
+        ({}, GPT_4O, RUN_PARAMS),
+        ({"model": GPT_4O}, GPT_4O, RUN_PARAMS),
+        ({"model": "gpt-4o"}, "gpt-4o", RUN_PARAMS),
+        ({"model": QWEN}, QWEN, {}),
+        ({"model": QWEN, "params": {"temperature": 0.9}}, QWEN, {"temperature": 0.9}),
     ],
-    ids=["the-runs", "the-runs-named", "another", "another-with-params"],
+    ids=[
+        "the-runs",
+        "the-runs-named",
+        "the-runs-by-its-bare-name",
+        "another",
+        "another-with-params",
+    ],
 )
 def test_an_ask_sends_the_runs_params_only_on_the_runs_model_unless_given_its_own(
     answering_llm, tmp_path, options, model, params
 ):
-    result = finished_run(answering_llm, tmp_path, model=QWEN, params=RUN_PARAMS)
+    result = finished_run(answering_llm, tmp_path, model=GPT_4O, params=RUN_PARAMS)
     ask(result, "Who else?", completion=answering_llm, **options)
     ran, asked = answering_llm.requests_for("reasoning")
-    assert ran["model"] == QWEN
+    assert ran["model"] == GPT_4O
     assert asked["model"] == model
     sent = {
         key: asked[key] for key in RUN_PARAMS.keys() | params.keys() if key in asked
@@ -542,9 +572,7 @@ def test_a_run_folder_an_older_r3con_wrote_is_refused_in_one_line(
     with pytest.raises(ValueError) as refused:
         ask(result, "Who else?", completion=answering_llm)
     message = str(refused.value)
-    assert message.startswith(
-        f"{result.run_dir} was written by an older r3con that ask can't read: {error}"
-    )
+    assert message.startswith(f"can't read {result.run_dir} as a run folder: {error}")
     assert "\n" not in message
     assert len(answering_llm.requests) == sent
     assert not (result.run_dir / "asks").exists()

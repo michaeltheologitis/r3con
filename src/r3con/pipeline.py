@@ -41,7 +41,13 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from r3con.config import ReasoningPath, RunConfig, check_prompts, configure
+from r3con.config import (
+    ReasoningPath,
+    RunConfig,
+    check_prompts,
+    configure,
+    normalize_model_name,
+)
 from r3con.logging_setup import get_logger
 from r3con.runs import StageRun, TaskLogger, new_run_folder, write_manifest
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
@@ -62,8 +68,8 @@ _log = get_logger("pipeline")
 
 ASKS_FOLDER = "asks"
 _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
-# What reading a folder an older r3con wrote raises (0.4.0 wrote no ids.json).
-_OLDER_SHAPES = (FileNotFoundError, KeyError, TypeError, ValidationError)
+# What reading a run folder raises when its files are not as this r3con writes them.
+_UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValidationError)
 
 
 def _sources_as_ids(
@@ -103,8 +109,8 @@ class Answer:
       be *about*.
     - ``source_docs`` — for each list field of the parse, the 0-based source-document
       index of each record, positionally aligned with it.
-    - ``run_dir`` — the folder holding the full artifacts, or ``None`` if the run wasn't
-      asked to write any.
+    - ``run_dir`` — the folder holding the full artifacts (for :func:`r3con.ask`, the
+      ask's own folder), or ``None`` if the run wasn't asked to write any.
     - ``document_ids`` — each document's id in this run, aligned 1:1 with
       ``documents``: random, drawn afresh for each run, and recorded in the run folder's
       ``ids.json``.
@@ -398,7 +404,12 @@ def run_pipeline(
 
 
 def read_representation(run_dir: Path) -> Representation:
-    """Read back what the run in ``run_dir`` built; :func:`r3con.ask` lists refusals."""
+    """Read back what the run in ``run_dir``, or the run an ask's folder ``run_dir``
+    asked over, built; :func:`r3con.ask` lists refusals."""
+    manifest = run_dir / "manifest.json"
+    # An ask's folder sits in the asks/ of the run it asked over.
+    if manifest.is_file() and "ask_of" in _read_json(manifest):
+        run_dir = run_dir.parent.parent
     if not (run_dir / "manifest.json").is_file():
         raise FileNotFoundError(
             f"{run_dir} is not a run folder: it has no manifest.json."
@@ -411,10 +422,9 @@ def read_representation(run_dir: Path) -> Representation:
         )
     try:
         built = _read_built(run_dir)
-    except _OLDER_SHAPES as error:
+    except _UNREADABLE as error:
         raise ValueError(
-            f"{run_dir} was written by an older r3con that ask can't read: "
-            f"{_in_one_line(error)}"
+            f"can't read {run_dir} as a run folder: {_in_one_line(error)}"
         ) from error
     check_prompts(built.config)
     return built
@@ -462,28 +472,40 @@ def _in_one_line(error: Exception) -> str:
     return "; ".join(f"`{setting}`: {why}" for setting, why in settings)
 
 
-def ask_pipeline(
+def ask_config(
     built: Representation,
     *,
-    task: str,
     model: str | None = None,
-    path: ReasoningPath | None = None,
+    reasoning: ReasoningPath | None = None,
     params: Mapping[str, Any] | None = None,
+) -> RunConfig:
+    """The run's config with an ask's overrides, as :func:`r3con.ask` says."""
+    another_model = model is not None and (
+        normalize_model_name(model) != normalize_model_name(built.config.model)
+    )
+    if params is None and another_model:
+        params = {}
+    return configure(
+        built.config.model_dump(exclude={"overrides"}),
+        built.config.name,
+        model=model,
+        reasoning=reasoning,
+        params=params,
+    )
+
+
+def ask_pipeline(
+    built: Representation,
+    config: RunConfig,
+    *,
+    task: str,
     task_logger: TaskLogger | None = None,
     api_base: str | None = None,
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
 ) -> Answer:
-    """Rerun only reasoning over ``built`` for ``task``, as :func:`r3con.ask` says."""
-    if params is None and model not in (None, built.config.model):
-        params = {}
-    config = configure(
-        built.config.model_dump(exclude={"overrides"}),
-        built.config.name,
-        model=model,
-        reasoning=path,
-        params=params,
-    )
+    """Rerun only reasoning over ``built`` for ``task`` under ``config``
+    (:func:`ask_config`), as :func:`r3con.ask` says."""
     caps = settings_snapshot()
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
@@ -528,7 +550,7 @@ def ask_pipeline(
         source_docs=built.source_docs,
         parsing_provenance=built.parsing_provenance,
         document_ids=built.document_ids,
-        run_dir=built.run_dir,
+        run_dir=task_logger.dir,
     )
 
 

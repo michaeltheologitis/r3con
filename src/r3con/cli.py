@@ -23,6 +23,7 @@ from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.pipeline import (
     ASKS_FOLDER,
+    ask_config,
     ask_pipeline,
     read_representation,
     run_pipeline,
@@ -208,6 +209,7 @@ def _ask(args: argparse.Namespace) -> int:
         configure_logging("INFO" if args.verbose else None)
         settings_snapshot()
         built = read_representation(Path(args.run_dir))
+        config = ask_config(built, model=args.model, reasoning=args.reasoning)
     except (FileNotFoundError, ValueError) as e:
         print(f"r3con: {e}", file=sys.stderr)
         return 2
@@ -216,9 +218,8 @@ def _ask(args: argparse.Namespace) -> int:
     try:
         result = ask_pipeline(
             built,
+            config,
             task=args.question,
-            model=args.model,
-            path=args.reasoning,
             task_logger=task_logger,
             api_base=args.base_url,
             api_key=args.api_key,

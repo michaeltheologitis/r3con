@@ -105,7 +105,7 @@ class RunConfig(BaseModel):
 
     # the config it was loaded from (the run label's base)
     name: str = DEFAULT_CONFIG
-    model: str
+    model: Annotated[str, Field(min_length=1)]
     # keep in sync with configs/default.yaml (the shipped default); 0 skips relevance
     relevance_rounds: Annotated[int, Field(ge=0, strict=True)] = 2
     # keep in sync with configs/default.yaml

@@ -215,6 +215,7 @@ BAD_SETTINGS = [
     ("params", "temperature=0.7", "Input should be a valid dictionary"),
     ("params", ["temperature", 0.7], "Input should be a valid dictionary"),
     ("model", 5, "Input should be a valid string"),
+    ("model", "", "String should have at least 1 character"),
 ]
 
 

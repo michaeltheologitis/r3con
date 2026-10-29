@@ -95,7 +95,7 @@ def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
     [
         (
             as_written_before_ids,
-            "was written by an older r3con that ask can't read: FileNotFoundError",
+            "as a run folder: FileNotFoundError",
         ),
         (
             pinning_a_missing_prompt,
@@ -115,6 +115,19 @@ def test_ask_over_a_run_folder_it_cannot_use_exits_2_in_one_line(
     assert err.startswith("r3con: ")
     assert message in err
     assert err.count("\n") == 1
+    assert len(answering.requests) == sent
+    assert not (run_dir / "asks").exists()
+
+
+def test_an_ask_with_a_refused_override_exits_2_in_one_line_and_makes_no_folder(
+    answering, capsys
+):
+    run_dir = finished_run(capsys)
+    sent = len(answering.requests)
+    assert r3con("ask", str(run_dir), "Who else?", "--model", "") == 2
+    assert capsys.readouterr().err == (
+        "r3con: override: `model=''`: String should have at least 1 character.\n"
+    )
     assert len(answering.requests) == sent
     assert not (run_dir / "asks").exists()
 
