@@ -595,13 +595,20 @@ def test_a_run_that_never_finished_parsing_cannot_be_asked(answering_llm, tmp_pa
     assert not (run_dir / "asks").exists()
 
 
-def test_a_run_that_failed_in_reasoning_can_still_be_asked(answering_llm, tmp_path):
+def test_a_run_that_failed_in_reasoning_can_be_asked_over_the_folder_it_started_in(
+    answering_llm, tmp_path
+):
     reply = {"answer": "Calder memo", "provenance_ids": {}}
     answering_llm.answers(reasoning=[bad_key(), reply])
+    events = []
     with pytest.raises(litellm.AuthenticationError):
-        finished_run(answering_llm, tmp_path)
-    [run_dir] = (tmp_path / "logs").iterdir()
-    assert ask(run_dir, "Who else?", completion=answering_llm).answer == "Calder memo"
+        finished_run(answering_llm, tmp_path, on_event=events.append)
+    started = events[0]
+    assert started["type"] == "run_started"
+    [only] = (tmp_path / "logs").iterdir()
+    assert only == Path(started["run_dir"])
+    asked = ask(started["run_dir"], "Who else?", completion=answering_llm)
+    assert asked.answer == "Calder memo"
 
 
 def test_an_answer_without_a_run_folder_cannot_be_asked(answering_llm):
