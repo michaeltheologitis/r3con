@@ -887,9 +887,12 @@ p { margin: 0; }
   const DOC_ICON_STROKE = (ICON_STROKE * ICON_PX) / DOC_ICON_PX;
   const EDGE_GAP = 6;
   const MIN_CURVE = 40;
-  const BOW = 44;
-  const LABEL_MAX = 24;
   const LABEL_LINE_PX = 21;
+  const TOP_ROW_HOPS = COLUMN.parsed - COLUMN.doc - 1;
+  const LANE_GAP = (GRID.rowGap - 2 * ICON_HALF - 2 * LABEL_LINE_PX) / TOP_ROW_HOPS;
+  const BRIDGE_RAMP = 40;
+  const BRIDGE_CLEARANCE = ICON_HALF + TOP_ROW_HOPS * LANE_GAP;
+  const LABEL_MAX = 24;
   const NODE_PAD_PX = 12;
   const ZOOM = { min: 0.25, max: 2.5, fitMax: 1.15 };
   const FIT_MARGIN = 28;
@@ -1170,19 +1173,16 @@ p { margin: 0; }
     return [];
   }
 
-  function ownStep(run, id) {
+  function ownDocument(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'parsed') return `r2-${i}`;
-    if (kind === 'r2') return `r1-${i}`;
-    if (kind === 'r1') return docId(run.docs[i]);
-    return null;
+    return kind === 'r1' || kind === 'r2' || kind === 'parsed' ? docId(run.docs[i]) : null;
   }
 
   function answerLineage(run) {
     const nodes = new Set(['answer']);
     const edges = new Set();
     for (const id of nodes) {
-      for (const from of [ownStep(run, id), ...cites(run, id)].filter(Boolean)) {
+      for (const from of [ownDocument(run, id), ...cites(run, id)].filter(Boolean)) {
         nodes.add(from);
         edges.add(`${from}>${id}`);
       }
@@ -1264,7 +1264,7 @@ p { margin: 0; }
     for (const [id, p] of state.layout) {
       b.minX = Math.min(b.minX, p.x - widest / 2);
       b.maxX = Math.max(b.maxX, p.x + widest / 2);
-      b.minY = Math.min(b.minY, p.y - BOW);
+      b.minY = Math.min(b.minY, p.y - BRIDGE_CLEARANCE);
       b.maxY = Math.max(b.maxY, p.y + iconHalf(splitId(id)[0]) + 2 * LABEL_LINE_PX);
     }
     for (const n of state.nodes.values()) {
@@ -1456,27 +1456,34 @@ p { margin: 0; }
     if (state.selected === id) renderInspector();
   }
 
-  function isBlocked(a, b, at) {
+  function blockers(a, b, at) {
     const pa = at(a);
     const pb = at(b);
     const lo = Math.min(pa.x + iconHalf(a.kind), pb.x + iconHalf(b.kind));
     const hi = Math.max(pa.x - iconHalf(a.kind), pb.x - iconHalf(b.kind));
+    let count = 0;
     for (const n of state.nodes.values()) {
       if (n === a || n === b) continue;
       const p = at(n);
-      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < iconHalf(n.kind) * 2) return true;
+      if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < iconHalf(n.kind) * 2) count += 1;
     }
-    return false;
+    return count;
   }
 
+  // One lane higher per blocker, so bridges from one node nest.
   function edgePath(a, b, at = (n) => n) {
     const pa = at(a);
     const pb = at(b);
     const sx = pa.x + iconHalf(a.kind) + EDGE_GAP;
     const tx = pb.x - iconHalf(b.kind) - EDGE_GAP;
-    const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
-    const bow = Math.abs(pa.y - pb.y) < ICON_HALF && isBlocked(a, b, at) ? -BOW : 0;
-    return `M${sx} ${pa.y} C${sx + c} ${pa.y + bow} ${tx - c} ${pb.y + bow} ${tx} ${pb.y}`;
+    const hops = Math.abs(pa.y - pb.y) < ICON_HALF && tx > sx ? blockers(a, b, at) : 0;
+    if (!hops) {
+      const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
+      return `M${sx} ${pa.y} C${sx + c} ${pa.y} ${tx - c} ${pb.y} ${tx} ${pb.y}`;
+    }
+    const top = Math.min(pa.y, pb.y) - ICON_HALF - LANE_GAP * hops;
+    const ramp = Math.min(BRIDGE_RAMP / hops, (tx - sx) / 4);
+    return `M${sx} ${pa.y} Q${sx + ramp} ${top} ${sx + 2 * ramp} ${top} H${tx - 2 * ramp} Q${tx - ramp} ${top} ${tx} ${pb.y}`;
   }
 
   function layerFor(kind) {
@@ -1891,18 +1898,19 @@ p { margin: 0; }
   }
 
   function inputsOf(run, id) {
-    const every = (kind) => range(run.docs.length).map((j) => `${kind}-${j}`);
-    const [kind] = splitId(id);
-    if (kind === 'r2') return every('r1');
-    if (kind === 'parsed') return every('r2');
-    if (kind === 'answer') return [...every('r2'), ...every('parsed')];
+    const [kind, i] = splitId(id);
+    const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
+    if (kind === 'r2') return every('r1', (j) => j !== i && run.r1[j].summary);
+    if (kind === 'parsed' || kind === 'schema') return every('r2');
+    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => run.parsed[j].records.length)];
     return [];
   }
 
-  // Dotted: the same document, read again (round 2) or now structured (parse); faint: others shown.
+  // Dotted: the call's own document, read again; faint: the other outputs it was shown.
   function showInputs(run, to) {
-    const own = ownStep(run, to);
-    for (const from of inputsOf(run, to)) addEdge(from, to, from === own ? 'self' : 'context', 'fade');
+    const own = ownDocument(run, to);
+    if (own) addEdge(own, to, 'self', 'fade');
+    for (const from of inputsOf(run, to)) addEdge(from, to, 'context', 'fade');
   }
 
   function showCites(run, to) {
@@ -1969,7 +1977,7 @@ p { margin: 0; }
       narr.say('main', 'proposing a structure');
       narr.phase('proposing a structure');
       addNode('schema');
-      addEdge('r2-0', 'schema', 'flow', 'draw');
+      showInputs(run, 'schema');
     });
     t += TIMING.schemaWork;
     at(t, () => {
