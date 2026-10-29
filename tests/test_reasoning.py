@@ -7,10 +7,8 @@ import pytest
 
 from r3con import settings
 from r3con.config import REASONING_PATHS
-from r3con.prompts import load_prompt
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.reasoning import _sample_record_per_field, reason
-from r3con.stages.relevance import render_relevance
 
 MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v3", "reasoning/coding": "v3"}
@@ -138,7 +136,9 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     )
 
 
-def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(llm):
+def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(
+    llm, reasoning_sections, parse_shown
+):
     reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance_ids": NO_IDS}
     result = ask(llm, reply)
     assert result.answer == "Site 099 logged nothing unusual."
@@ -146,15 +146,11 @@ def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(llm):
     assert (result.path, result.fallback) == ("direct", None)
     assert (result.turns, result.terminated_by) == ((), "reply")
     [request] = llm.requests
-    assert request["messages"] == [
-        {
-            "role": "system",
-            "content": load_prompt(
-                "reasoning/direct", version="v3", parse_block=json.dumps(ROWS, indent=2)
-            ),
-        },
-        {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
-    ]
+    system, user = request["messages"]
+    assert system["role"] == "system"
+    shown = reasoning_sections(system["content"], "direct", summaries=False)
+    assert parse_shown(shown) == ROWS
+    assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
 
 
 def test_the_direct_reply_cites_from_an_enum_of_summaries_and_one_of_parses_shown(llm):
@@ -539,27 +535,30 @@ def test_a_small_parse_is_shown_whole_and_the_schema_source_is_not(llm, path):
 
 
 @PATHS
-def test_a_small_parses_prompt_is_its_paths_template_with_the_parse_as_json(llm, path):
-    notes = ["Northgate logged 5.", "Riverside logged 6."]
+def test_the_prompt_shows_each_summary_under_its_id_and_the_parse_stamped_by_id(
+    llm, reasoning_sections, parse_shown, path
+):
     prompt = reasoning_prompt(
         llm,
         path,
-        parsed={"rows": [{"who": "Halloran"}, {"who": "Merrow"}]},
+        parsed={"rows": [{"who": "Café Halloran"}, {"who": "Merrow"}]},
         source_docs={"rows": [0, 1]},
-        relevance_snippets=notes,
+        relevance_snippets=["Northgate logged 5.", "Riverside logged 6.", ""],
     )
-    stamped = {
+    shown = reasoning_sections(prompt, path)
+    assert shown["## Document summaries"].endswith(
+        f"### Document ID: {IDS[0]}\nNorthgate logged 5.\n\n"
+        f"### Document ID: {IDS[1]}\nRiverside logged 6.\n\n"
+        f"### Document ID: {IDS[2]}\n(no relevant summary for this task)"
+    )
+    assert parse_shown(shown) == {
         "rows": [
-            {"document": IDS[0], "who": "Halloran"},
+            {"document": IDS[0], "who": "Café Halloran"},
             {"document": IDS[1], "who": "Merrow"},
         ]
     }
-    assert prompt == load_prompt(
-        f"reasoning/{path}",
-        version="v3",
-        relevance=render_relevance(notes, IDS[:2]),
-        parse_block=json.dumps(stamped, indent=2, ensure_ascii=False),
-    )
+    first_row = f'      "document": "{IDS[0]}",\n      "who": "Café Halloran"\n'
+    assert first_row in shown["## The parsed data (`parse`)"]
 
 
 def test_a_huge_parse_is_shown_as_one_sample_per_field_and_says_so(llm):
@@ -626,16 +625,15 @@ def test_the_prompt_says_documents_were_read_in_parts_only_when_a_summary_is_a_p
 
 @pytest.mark.parametrize(("tokens", "whole"), [(4_000, False), (1_000_000, True)])
 def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
-    llm, window, caplog, tokens, whole
+    llm, window, caplog, reasoning_sections, parse_shown, tokens, whole
 ):
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     prompt = reasoning_prompt(llm, parsed=ROWS, model=window(tokens))
     assert (LAST_ROW in prompt) is whole
     assert (SAMPLE in prompt) is not whole
     if whole:
-        assert prompt == load_prompt(
-            "reasoning/coding", version="v3", parse_block=json.dumps(ROWS, indent=2)
-        )
+        shown = reasoning_sections(prompt, "coding", summaries=False)
+        assert parse_shown(shown) == ROWS
         assert caplog.messages == []
     else:
         assert caplog.messages == [

@@ -19,9 +19,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.pipeline import run_pipeline
-from r3con.prompts import load_prompt
 from r3con.runs import TaskLogger
-from r3con.stages.relevance import render_relevance
 from r3con.stages.structuring.parsing import SchemaError
 
 MODEL = "openai/gpt-6-luna"
@@ -244,17 +242,23 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def system_message(stage: str, ids: list[str]) -> dict:
-    """The system message of ``stage``'s v3 prompt over DOCS' notes and their whole
-    parse, under the documents' ``ids``."""
-    content = load_prompt(
-        stage,
-        version="v3",
-        relevance=render_relevance([f"Notes on {d}." for d in DOCS], ids),
-        read_in_parts=False,
-        parse_block=json.dumps(stamped(ids), indent=2, ensure_ascii=False),
-    )
-    return {"role": "system", "content": content}
+@pytest.fixture
+def shows_the_notes_and_the_stamped_parse(reasoning_sections, parse_shown):
+    """Checks a system message is ``path``'s reasoning prompt over DOCS' notes, each
+    under its document's id, and their whole parse, each row stamped with its
+    document's id."""
+
+    def check(message: dict, path: str, ids: list[str]) -> None:
+        assert message["role"] == "system"
+        shown = reasoning_sections(message["content"], path)
+        assert READ_IN_PARTS not in shown["## Document summaries"]
+        assert shown["## Document summaries"].endswith(
+            f"### Document ID: {ids[0]}\nNotes on Halloran memo.\n\n"
+            f"### Document ID: {ids[1]}\nNotes on Merrow memo."
+        )
+        assert parse_shown(shown) == stamped(ids)
+
+    return check
 
 
 def test_a_run_answers_and_leaves_every_stages_artifacts(
@@ -408,7 +412,7 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
 
 
 def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
-    answering_llm, tmp_path
+    answering_llm, shows_the_notes_and_the_stamped_parse, tmp_path
 ):
     def cites_the_first_summary_and_the_second_parse(request):
         lists = citable_lists(request)
@@ -424,10 +428,9 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
-    assert request["messages"] == [
-        system_message("reasoning/direct", ids),
-        {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
-    ]
+    system, user = request["messages"]
+    shows_the_notes_and_the_stamped_parse(system, "direct", ids)
+    assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     cited = {"summary_ids": [ids[0]], "parse_ids": [ids[1]]}
     assert (result.answer, result.provenance) == ("Halloran and Merrow.", cited)
     reasoning = read_json(logger, "reasoning/result")
@@ -443,17 +446,16 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
 
 
 def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
-    answering_llm, tmp_path
+    answering_llm, shows_the_notes_and_the_stamped_parse, tmp_path
 ):
     llm = answering_llm.answers(reasoning=COMMITS_THE_PARSE)
     logger = TaskLogger("run", root=tmp_path)
     result = answer(llm, logger, reasoning="coding")
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
-    assert request["messages"] == [
-        system_message("reasoning/coding", ids),
-        {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"},
-    ]
+    system, user = request["messages"]
+    shows_the_notes_and_the_stamped_parse(system, "coding", ids)
+    assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     assert ast.literal_eval(result.answer) == stamped(ids)
     assert result.provenance == {"summary_ids": [], "parse_ids": []}
     reasoning = read_json(logger, "reasoning/result")
@@ -463,7 +465,7 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
 
 
 def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_says_why(
-    answering_llm, tmp_path, refusal
+    answering_llm, tmp_path, refusal, shows_the_notes_and_the_stamped_parse
 ):
     refused = refusal()
     llm = answering_llm.answers(reasoning=[refused, COMMITS_THE_PARSE])
@@ -472,7 +474,7 @@ def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_s
     ids = result.document_ids
     assert ast.literal_eval(result.answer) == stamped(ids)
     direct, coding = (r["messages"][0] for r in llm.requests_for("reasoning"))
-    assert direct == system_message("reasoning/direct", ids)
+    shows_the_notes_and_the_stamped_parse(direct, "direct", ids)
     assert SAMPLE in coding["content"] and "final_answer(" in coding["content"]
     reasoning = read_json(logger, "reasoning/result")
     assert reasoning["path"] == "coding"
