@@ -85,11 +85,6 @@ def with_one_reasoning_prompt(manifest: dict) -> None:
     prompts["reasoning"] = "v2"
 
 
-def events_in(folder: Path) -> list[dict]:
-    lines = (folder / "events.jsonl").read_text().splitlines()
-    return [json.loads(line) for line in lines]
-
-
 def bad_key() -> litellm.AuthenticationError:
     return litellm.AuthenticationError(
         message="bad key", llm_provider="openai", model="gpt-6-luna"
@@ -647,7 +642,9 @@ def test_a_failed_ask_leaves_its_folder_with_its_error_and_names_it(
     assert not (folder / "reasoning" / "result.json").exists()
 
 
-def test_an_ask_reports_its_own_events_into_its_folder(answering_llm, tmp_path):
+def test_an_ask_reports_its_own_events_into_its_folder(
+    answering_llm, events_in, tmp_path
+):
     ran = []
     built = finished_run(answering_llm, tmp_path, on_event=ran.append)
     asked = []
@@ -672,6 +669,26 @@ def test_an_ask_reports_its_own_events_into_its_folder(answering_llm, tmp_path):
     assert finished["tokens"] == {"prompt": 10, "completion": 20, "total": 30}
     assert events_in(folder) == asked
     assert events_in(built.run_dir) == ran
+
+
+def test_a_failed_ask_reports_ask_failed_into_its_folder(
+    answering_llm, events_in, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path)
+    answering_llm.answers(reasoning=bad_key())
+    events = []
+    with pytest.raises(litellm.AuthenticationError):
+        ask(built, "Who else?", completion=answering_llm, on_event=events.append)
+    assert [event["type"] for event in events] == [
+        "ask_started",
+        "reasoning_started",
+        "ask_failed",
+    ]
+    assert (events[-1]["stage"], events[-1]["error"]) == (
+        "reasoning",
+        "AuthenticationError: litellm.AuthenticationError: bad key",
+    )
+    assert events_in(Path(events[0]["ask_dir"])) == events
 
 
 def test_without_a_run_folder_only_the_callback_gets_events(answering_llm, tmp_path):

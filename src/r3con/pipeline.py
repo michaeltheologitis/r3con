@@ -81,8 +81,6 @@ ASKS_FOLDER = "asks"
 _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
 # What reading a run folder raises when its files are not as this r3con writes them.
 _UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValidationError)
-# The fields of a ReasoningResult that its reasoning_finished event carries.
-_REASONING_FINISHED = ("answer", "provenance", "path", "fallback")
 
 
 def _sources_as_ids(
@@ -195,6 +193,7 @@ def _recorded_stage(
     *,
     transcript: bool,
     emit: Emit,
+    failed: str = "run_failed",
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
@@ -203,9 +202,9 @@ def _recorded_stage(
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the calls
     that completed and ``error.txt`` with the traceback, adds a note naming the run
-    folder to the exception, emits ``run_failed`` with the stage's name as its events
-    give it (``schema`` for ``structuring/schema``) and the error in one line, and
-    re-raises. Without a logger it records nothing, but still emits ``run_failed``.
+    folder to the exception, emits ``failed`` with the stage's name as its events give
+    it (``schema`` for ``structuring/schema``) and the error in one line, and
+    re-raises. Without a logger it records nothing, but still emits ``failed``.
     """
     run = (
         None
@@ -225,7 +224,7 @@ def _recorded_stage(
             run.flush(write_transcript=transcript)
             run.task_logger.write_text(f"{stage}/error", traceback.format_exc())
             error.add_note(f"r3con: partial artifacts in {run.task_logger.dir}")
-        emit("run_failed", stage=stage.rpartition("/")[2], error=_one_line(error))
+        emit(failed, stage=stage.rpartition("/")[2], error=_one_line(error))
         raise
 
 
@@ -291,16 +290,16 @@ def run_pipeline(
     stage that raises writes its completed calls and ``error.txt``, and the exception
     carries a note naming the run folder.
 
-    The run reports its progress as events, each a dict that ``json.dumps`` takes,
-    with its ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
+    The run reports its progress as events, each a dict of JSON values with its
+    ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
 
     - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds``.
-    - ``relevance_started`` / ``relevance_finished``, around each document's call in a
-      round, or each part's: ``round``, ``doc_id``, ``part`` (``k`` of the part's
-      snippet id ``<id>.<k>``, ``None`` for a document read whole); finished adds the
-      snippet's ``summary`` and the ids of the previous round's snippets it used,
-      ``provenance``. A call the provider refuses as too long gets no finish: the
-      document is cut further, and its parts start afresh.
+    - ``relevance_started``, before a document is read in a round: ``round``,
+      ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
+      read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
+      ``<id>.<k>``, ``None`` for a document read whole), the snippet's ``summary`` and
+      the ids of the previous round's snippets it used, ``provenance``. A part refused
+      as too long and cut further is no event.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
@@ -314,10 +313,12 @@ def run_pipeline(
       (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, one line.
 
     Each event is appended to ``events.jsonl`` in the run folder, when there is one,
-    and handed to ``on_event``, when given. ``on_event`` is called from the stages'
-    worker threads, but under one lock, so it is never entered twice at once; if it
-    raises, the error is logged and the run goes on. A model call that is resent (a
-    rate limit, a reply that did not fit) is no event: ``calls.json`` records it.
+    and handed to ``on_event``, when given, as a copy. ``on_event`` is called from the
+    stages' worker threads, but under one lock, so it is never entered twice at once;
+    the workers wait for it, so it should return quickly (put the event on a queue,
+    say). If it raises, or writing the file fails, the error is logged and the run goes
+    on. A model call that is resent (a rate limit, a reply that did not fit) is no
+    event: ``calls.json`` records it.
     """
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
@@ -487,7 +488,7 @@ def run_pipeline(
         )
         record.result = _reasoning_record(result)
     stage_runs.append(record.run)
-    emit("reasoning_finished", **{f: getattr(result, f) for f in _REASONING_FINISHED})
+    emit("reasoning_finished", **_reasoning_outcome(result))
     emit(
         "run_finished",
         run_dir=str(task_logger.dir) if task_logger is not None else None,
@@ -566,7 +567,7 @@ def _in_one_line(error: Exception) -> str:
     """``error`` on one line: each setting pydantic refused and why, else its type and
     message."""
     if not isinstance(error, ValidationError):
-        return f"{type(error).__name__}: {error}"
+        return _one_line(error)
     settings = (
         (".".join(str(part) for part in e["loc"] if part != "[key]"), e["msg"])
         for e in error.errors()
@@ -613,7 +614,8 @@ def ask_pipeline(
     It reports its progress as :func:`run_pipeline` does, to ``on_event`` and the ask
     folder's own ``events.jsonl``: ``ask_started`` (``question``, ``model``,
     ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, then
-    ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``run_failed``."""
+    ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
+    ``error``)."""
     caps = settings_snapshot()
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
@@ -631,7 +633,12 @@ def ask_pipeline(
     emit("ask_started", question=task, model=config.model, ask_dir=ask_dir)
     emit("reasoning_started", question=task, model=config.model)
     with _recorded_stage(
-        task_logger, "reasoning", config.model, transcript=True, emit=emit
+        task_logger,
+        "reasoning",
+        config.model,
+        transcript=True,
+        emit=emit,
+        failed="ask_failed",
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -654,7 +661,7 @@ def ask_pipeline(
             ),
         )
         record.result = _reasoning_record(result)
-    emit("reasoning_finished", **{f: getattr(result, f) for f in _REASONING_FINISHED})
+    emit("reasoning_finished", **_reasoning_outcome(result))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
     return _answer(
         result,
@@ -689,13 +696,21 @@ def _llm_kwargs(
     return llm_kwargs
 
 
-def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
-    """The fields of the reasoning stage's ``result.json``."""
+def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:
+    """What reasoning concluded: its answer, provenance, path and fallback, as its
+    ``result.json`` and its ``reasoning_finished`` event both give them."""
     return {
         "answer": result.answer,
         "provenance": result.provenance,
         "path": result.path,
         "fallback": result.fallback,
+    }
+
+
+def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
+    """The fields of the reasoning stage's ``result.json``."""
+    return {
+        **_reasoning_outcome(result),
         "terminated_by": result.terminated_by,
         "n_turns": len(result.turns),
         "turns": [

@@ -106,7 +106,6 @@ _log = get_logger("runs")
 # out of a call kind so calls.json carries per-call provenance. Matches ``parse-d0``,
 # ``relevance-r2-d3`` and ``parse-d3c1``.
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
-# The run folder's file of progress events, one JSON object per line.
 _EVENTS = "events.jsonl"
 
 Emit = Callable[..., None]
@@ -187,14 +186,17 @@ def no_events(event_type: str, /, **fields: Any) -> None:
 
 class EventRecorder:
     """An :data:`Emit` for one run or ask: each event is ``{"type": event_type,
-    "time": ..., **fields}``, ``time`` the wall clock in ISO 8601, appended as one line to
-    ``events.jsonl`` in ``task_logger``'s folder, if there is one, and then handed to
-    ``on_event``, if there is one.
+    "time": ..., **fields}``, ``time`` the wall clock in ISO 8601, written as one line
+    of JSON (a value JSON can't hold as its ``str``) to ``events.jsonl`` in
+    ``task_logger``'s folder, if there is one, and handed to ``on_event``, if there is
+    one, as that line decoded: a copy, so changing it changes nothing in the run.
 
     Stages emit from worker threads. Each event is stamped, written and handed over
     under one lock, so ``on_event`` is never entered twice at once and the file's lines
-    are in time order. An ``on_event`` that raises is logged, at warning level the first
-    time and at debug level after, and the run goes on.
+    are in time order; workers wait while it runs, so it should return quickly (put the
+    event on a queue, say). Recording never fails the run: when writing the file or
+    ``on_event`` raises, the error is logged, at warning level with its traceback the
+    first time its type is raised there and at debug level after, and the run goes on.
     """
 
     def __init__(
@@ -205,7 +207,7 @@ class EventRecorder:
         self._on_event = on_event
         self._path = None if task_logger is None else task_logger.dir / _EVENTS
         self._lock = threading.Lock()
-        self._raised = False
+        self._raised: set[tuple[str, type[Exception]]] = set()
 
     def __call__(self, event_type: str, /, **fields: Any) -> None:
         with self._lock:
@@ -215,26 +217,34 @@ class EventRecorder:
                 "time": now.isoformat(timespec="milliseconds"),
                 **fields,
             }
+            line = json.dumps(event, ensure_ascii=False, default=str)
             if self._path is not None:
-                with self._path.open("a", encoding="utf-8") as events:
-                    events.write(json.dumps(event, ensure_ascii=False) + "\n")
+                where = f"writing {self._path}"
+                self._guarded(where, event_type, _append_line, self._path, line)
             if self._on_event is not None:
-                self._hand_over(self._on_event, event)
+                self._guarded("on_event", event_type, self._on_event, json.loads(line))
 
-    def _hand_over(
-        self, on_event: Callable[[dict[str, Any]], None], event: dict[str, Any]
+    def _guarded(
+        self, what: str, event_type: str, action: Callable[..., None], *args: Any
     ) -> None:
         try:
-            on_event(event)
-        except Exception:  # noqa: BLE001 — a bug in the caller's UI must not kill a paid run
-            level = logging.DEBUG if self._raised else logging.WARNING
+            action(*args)
+        except Exception as error:  # noqa: BLE001 — recording a paid run must not kill it
+            raised = (what, type(error))
             _log.log(
-                level,
-                "on_event raised on a %s event; the run goes on",
-                event["type"],
+                logging.DEBUG if raised in self._raised else logging.WARNING,
+                "%s raised %s on a %s event; the run goes on",
+                what,
+                type(error).__name__,
+                event_type,
                 exc_info=True,
             )
-            self._raised = True
+            self._raised.add(raised)
+
+
+def _append_line(path: Path, line: str) -> None:
+    with path.open("a", encoding="utf-8") as lines:
+        lines.write(line + "\n")
 
 
 def write_manifest(

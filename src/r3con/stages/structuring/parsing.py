@@ -450,9 +450,9 @@ def parse_documents(
     ``max_attempts`` bounds each call's retries (see :func:`parse_one_document`).
     Returns a :class:`ParseResult`.
 
-    Around each document's parse, all its parts', ``emit`` reports ``parsing_started``
-    with its ``doc_id``, and ``parsing_finished`` with that, its ``n_records`` (across
-    every list field) and its ``provenance``. It is called from worker threads.
+    ``emit`` reports ``parsing_started`` and ``parsing_finished`` around each
+    document's parse, all its parts' (:func:`r3con.pipeline.run_pipeline` lists their
+    fields). It is called from worker threads.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per document, or ``max_attempts``
@@ -481,7 +481,7 @@ def parse_documents(
     )
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
-    def one(i: int, _document: str) -> list[tuple[BaseModel, list[str]]]:
+    def one(i: int, _document: str) -> tuple[list[BaseModel], list[str]]:
         _log.info("parse doc %d/%d", i + 1, len(documents))
         emit("parsing_started", doc_id=document_ids[i])
         parts = reader.read_in_parts(
@@ -500,21 +500,22 @@ def parse_documents(
                 **llm_kwargs,
             ),
         )
+        parses = [parse for parse, _ in parts]
+        provenance = combine_parts(ids for _, ids in parts)
         emit(
             "parsing_finished",
             doc_id=document_ids[i],
             n_records=sum(
-                len(getattr(parse, f))
-                for parse, _ in parts
-                for f in parse_cls.model_fields
+                len(getattr(p, f)) for p in parses for f in parse_cls.model_fields
             ),
-            provenance=combine_parts(ids for _, ids in parts),
+            provenance=provenance,
         )
-        return parts
+        return parses, provenance
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(
-        [(i, part) for i, parts in enumerate(per_doc) for part, _ in parts], parse_cls
+        [(i, parse) for i, (parses, _) in enumerate(per_doc) for parse in parses],
+        parse_cls,
     )
     counts = {f: len(v) for f, v in source_docs.items()}
     _log.info(
@@ -523,7 +524,7 @@ def parse_documents(
     return ParseResult(
         parse=parse,
         source_docs=source_docs,
-        provenance=[combine_parts(ids for _, ids in parts) for parts in per_doc],
+        provenance=[provenance for _, provenance in per_doc],
     )
 
 

@@ -467,6 +467,17 @@ def parse_shown() -> Callable[[dict[str, str]], Any]:
     return shown_parse
 
 
+def recorded_events(folder: Path) -> list[dict[str, Any]]:
+    """The events in ``folder``'s ``events.jsonl``, in order."""
+    lines = (folder / "events.jsonl").read_text().splitlines()
+    return [json.loads(line) for line in lines]
+
+
+@pytest.fixture
+def events_in() -> Callable[[Path], list[dict[str, Any]]]:
+    return recorded_events
+
+
 @pytest.fixture
 def configs(tmp_path):
     """Writes ``name -> fields`` into the working directory's config overlay."""

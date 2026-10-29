@@ -272,13 +272,14 @@ def run(
             proposed schema, the parse, the reasoning transcript — into a run folder.
             On by default: they are how you see what the run actually did. Set ``False``
             to run without touching the filesystem.
-        on_event: called with each progress event as it happens, a JSON-able dict
-            with its ``type`` (``run_started``, ``relevance_started``, …,
+        on_event: called with each progress event as it happens, a copy as a dict of
+            JSON values with its ``type`` (``run_started``, ``relevance_started``, …,
             ``run_finished`` or ``run_failed``), its ``time`` and its fields, listed in
             :func:`~r3con.pipeline.run_pipeline`. It is called from worker threads,
-            but never twice at once, so it needs no lock of its own; if it raises, the
-            error is logged and the run goes on. The run folder's ``events.jsonl``
-            records the same events, whether or not it is given.
+            but never twice at once, so it needs no lock of its own; the workers wait
+            for it, so it should return quickly (put the event on a queue, say). If it
+            raises, the error is logged and the run goes on. The run folder's
+            ``events.jsonl`` records the same events, whether or not it is given.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
@@ -388,7 +389,7 @@ def ask(
         api_key, api_base, completion: as in :func:`run`.
         on_event: as in :func:`run`, called with the ask's events: ``ask_started``,
             ``reasoning_started``, ``reasoning_finished``, then ``ask_finished`` or
-            ``run_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
+            ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
     folder is: a ``manifest.json`` as a run writes one, for the run's config with this
