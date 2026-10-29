@@ -9,17 +9,19 @@ opened URL's fragment, ``#token=...``.
 - ``GET /api/keys``: which providers have a key, stored here or in the environment.
   ``POST`` stores one (``{provider, key}``, or ``{provider: "other", endpoint, key?}``),
   ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. Keys stay in
-  this process's memory: the server never sends, logs or writes one.
-- ``POST /api/runs`` (``{question, model, documents: [{name, text}]}``) starts
+  this process's memory: the server never sends, logs or writes one, and masks any it
+  finds in an error before passing the error on.
+- ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
   ``run_failed``.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model}``) starts ``r3con.ask`` over a
-  finished run and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events`` streams its
-  events until ``ask_finished`` or ``ask_failed``.
+  run that has started and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events``
+  streams its events until ``ask_finished`` or ``ask_failed``.
 
-A failure answers ``{"error": "..."}``. A run or ask that r3con refuses before it starts
-ends its stream with a failure event whose ``stage`` is ``null``.
+A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
+Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
+stream with a failure event whose ``stage`` is ``null``.
 """
 
 from __future__ import annotations
@@ -27,23 +29,23 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import datetime
 import hmac
 import json
-import logging
 import os
 import secrets
 import socket
 import threading
 import webbrowser
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 
+import litellm
 import platformdirs
 import uvicorn
+from litellm.exceptions import BadRequestError
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -63,26 +65,32 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
+from r3con.logging_setup import configure_logging, get_logger
+from r3con.pipeline import _one_line
+from r3con.runs import EventRecorder
+from r3con.runtime.llm import quiet_litellm
+
+Provider = Literal["openai", "anthropic", "gemini"]
+Kind = Literal["run", "ask"]
 
 HOST = "127.0.0.1"
-# Where the page is in a source checkout; a bundled app points this elsewhere.
-PAGE = Path(__file__).resolve().parents[2] / "web" / "index.html"
-DATA_DIR = Path(platformdirs.user_data_dir("r3con"))
-RUNS_FOLDER = "runs"
+PAGE = Path(__file__).with_name("index.html")
+LOGS_DIR = platformdirs.user_data_path("r3con") / "runs"
 TOKEN_BYTES = 32
 ID_BYTES = 8
 MAX_BODY_BYTES = 64 * 1024 * 1024
 SHUTDOWN_GRACE_SECONDS = 1
-KEY_VARIABLES = {
+KEY_VARIABLES: dict[Provider, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
 }
+KEY_MASK = "[key]"
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 PUBLIC_PATHS = frozenset({"/"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
-logger = logging.getLogger(__name__)
+logger = get_logger("app")
 Parsed = TypeVar("Parsed")
 
 
@@ -101,17 +109,11 @@ Text = Annotated[str, AfterValidator(_not_blank)]
 Secret = Annotated[SecretStr, AfterValidator(_secret_not_blank)]
 
 
-class Document(BaseModel):
-    model_config = FORBID_EXTRA
-    name: Text
-    text: Text
-
-
 class RunRequest(BaseModel):
     model_config = FORBID_EXTRA
     question: Text
     model: Text
-    documents: list[Document] = Field(min_length=1)
+    documents: list[Text] = Field(min_length=1)
 
 
 class AskRequest(BaseModel):
@@ -122,7 +124,7 @@ class AskRequest(BaseModel):
 
 class ProviderKey(BaseModel):
     model_config = FORBID_EXTRA
-    provider: Literal["openai", "anthropic", "gemini"]
+    provider: Provider
     key: Secret
 
 
@@ -135,7 +137,7 @@ class OtherEndpoint(BaseModel):
 
 class ForgetKey(BaseModel):
     model_config = FORBID_EXTRA
-    provider: Literal["openai", "anthropic", "gemini", "other"]
+    provider: Provider | Literal["other"]
 
 
 KEY_BODY: TypeAdapter[ProviderKey | OtherEndpoint] = TypeAdapter(
@@ -153,12 +155,13 @@ class Job:
 
 @dataclass
 class ServerState:
-    data_dir: Path
+    logs_dir: Path
     completion: Callable[..., Any] | None
-    keys: dict[str, SecretStr] = field(default_factory=dict)
+    keys: dict[Provider, SecretStr] = field(default_factory=dict)
     other: OtherEndpoint | None = None
-    runs: dict[str, Job] = field(default_factory=dict)
-    asks: dict[str, Job] = field(default_factory=dict)
+    jobs: dict[Kind, dict[str, Job]] = field(
+        default_factory=lambda: {"run": {}, "ask": {}}
+    )
 
 
 def _state(request: Request) -> ServerState:
@@ -166,15 +169,8 @@ def _state(request: Request) -> ServerState:
 
 
 async def _read(request: Request, parse: Callable[[bytes], Parsed]) -> Parsed:
-    body = bytearray()
-    async for chunk in request.stream():
-        body += chunk
-        if len(body) > MAX_BODY_BYTES:
-            raise HTTPException(
-                413, f"The request body is over {MAX_BODY_BYTES:,} bytes."
-            )
     try:
-        return parse(bytes(body))
+        return parse(await request.body())
     except ValidationError as error:
         raise HTTPException(422, _explain(error)) from None
 
@@ -201,60 +197,115 @@ def _key_status(state: ServerState) -> dict[str, Any]:
     return status
 
 
-def _credentials(state: ServerState, model: str) -> tuple[str | None, str | None]:
-    """The ``api_key`` and ``api_base`` for ``model``, by its litellm provider prefix:
-    ``None`` for a key not stored here, so that litellm reads the environment."""
-    provider = model.partition("/")[0]
+def _held_keys(state: ServerState) -> tuple[str, ...]:
+    """Every key this server could send, stored here or in its environment, longest
+    first, so that a key inside another is masked whole."""
+    stored = list(state.keys.values())
+    if state.other is not None and state.other.key is not None:
+        stored.append(state.other.key)
+    environment = (os.environ.get(variable, "") for variable in KEY_VARIABLES.values())
+    keys = {key.get_secret_value() for key in stored}
+    keys.update(key for key in environment if key.strip())
+    return tuple(sorted(keys, key=len, reverse=True))
+
+
+def _masked(text: str, keys: Iterable[str]) -> str:
+    for key in keys:
+        text = text.replace(key, KEY_MASK)
+    return text
+
+
+def _provider(model: str) -> str:
+    """``model``'s provider as litellm places it, or ``"other"`` if it can't."""
+    try:
+        with quiet_litellm():
+            return litellm.get_llm_provider(model)[1]
+    except BadRequestError:
+        return "other"
+
+
+def _model_options(state: ServerState, model: str) -> dict[str, Any]:
+    """What r3con is called with for ``model``: the key stored for its provider, or for
+    any other provider the Other endpoint and its key. A key not stored here is passed
+    as ``None``, so that litellm reads the environment."""
+    provider, other = _provider(model), state.other
     if provider in KEY_VARIABLES:
-        key = state.keys.get(provider)
-        return (None if key is None else key.get_secret_value()), None
-    other = state.other
-    if other is None:
-        return None, None
-    key = None if other.key is None else other.key.get_secret_value()
-    return key, other.endpoint
-
-
-def _add(job: Job, event: dict[str, Any]) -> None:
-    job.events.append(event)
-    job.wake.set()
-    job.wake = asyncio.Event()
+        key, base = state.keys.get(provider), None
+    elif other is not None:
+        key, base = other.key, other.endpoint
+    else:
+        key, base = None, None
+    return {
+        "model": model,
+        "api_key": None if key is None else key.get_secret_value(),
+        "api_base": base,
+        "completion": state.completion,
+    }
 
 
 def _ended(job: Job) -> bool:
     return bool(job.events) and job.events[-1]["type"] in ENDINGS
 
 
-def _add_failure(job: Job, failed: str, error: Exception) -> None:
+def _add(job: Job, event: dict[str, Any]) -> None:
     if _ended(job):
         return
-    line = " ".join(f"{type(error).__name__}: {error}".split())
-    now = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds")
-    _add(job, {"type": failed, "time": now, "stage": None, "error": line})
+    job.events.append(event)
+    job.wake.set()
+    job.wake = asyncio.Event()
+
+
+def _relay(
+    loop: asyncio.AbstractEventLoop,
+    job: Job,
+    keys: tuple[str, ...],
+    event: dict[str, Any],
+) -> None:
+    """Hand ``event`` to ``job`` on the server's loop, with no key in its error; once
+    the loop has closed, as it has when the server stops mid-run, drop it."""
+    if "error" in event:
+        event["error"] = _masked(event["error"], keys)
+    try:
+        loop.call_soon_threadsafe(_add, job, event)
+    except RuntimeError:
+        if not loop.is_closed():
+            raise
 
 
 def _work(
-    job: Job, loop: asyncio.AbstractEventLoop, call: Callable[..., Any], failed: str
+    job: Job,
+    loop: asyncio.AbstractEventLoop,
+    call: Callable[..., Any],
+    failed: str,
+    keys: tuple[str, ...],
 ) -> None:
+    on_event = partial(_relay, loop, job, keys)
     try:
-        call(on_event=lambda event: loop.call_soon_threadsafe(_add, job, event))
-    except Exception as error:
-        logger.exception("r3con raised in a worker thread")
-        loop.call_soon_threadsafe(_add_failure, job, failed, error)
+        call(on_event=on_event)
+    except Exception as error:  # noqa: BLE001 — logged below, as one masked line
+        # No traceback: r3con writes it to the failed stage's error.txt.
+        line = _masked(_one_line(error), keys)
+        logger.error("%s: %s", failed, line)
+        EventRecorder(on_event, None)(failed, stage=None, error=line)
 
 
-def _start(call: Callable[..., Any], failed: str) -> Job:
-    """Run ``call`` on a thread of its own, its events landing in the returned job."""
-    job = Job()
-    loop = asyncio.get_running_loop()
-    worker = threading.Thread(target=_work, args=(job, loop, call, failed), daemon=True)
+def _start(state: ServerState, kind: Kind, call: Callable[..., Any]) -> str:
+    """Run ``call`` on a thread of its own, its events landing in a new job of
+    ``kind``; returns the job's id."""
+    job_id = secrets.token_hex(ID_BYTES)
+    state.jobs[kind][job_id] = job = Job()
+    args = (job, asyncio.get_running_loop(), call, f"{kind}_failed", _held_keys(state))
+    worker = threading.Thread(
+        target=_work, args=args, name=f"r3con-app-{job_id}", daemon=True
+    )
     worker.start()
-    return job
+    return job_id
 
 
 async def _stream(job: Job) -> AsyncIterator[str]:
     sent = 0
     while True:
+        # Taken before draining, so that an event added after the drain still wakes us.
         wake = job.wake
         while sent < len(job.events):
             yield f"data: {json.dumps(job.events[sent])}\n\n"
@@ -264,7 +315,7 @@ async def _stream(job: Job) -> AsyncIterator[str]:
         await wake.wait()
 
 
-def _job(jobs: dict[str, Job], job_id: str, kind: str) -> Job:
+def _job(jobs: dict[str, Job], job_id: str, kind: Kind) -> Job:
     job = jobs.get(job_id)
     if job is None:
         raise HTTPException(404, f"There is no {kind} {job_id}.")
@@ -304,57 +355,42 @@ async def forget_key(request: Request) -> Response:
 async def start_run(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, RunRequest.model_validate_json)
-    api_key, api_base = _credentials(state, body.model)
     run = partial(
         r3con.run,
         body.question,
-        [document.text for document in body.documents],
-        model=body.model,
-        api_key=api_key,
-        api_base=api_base,
-        completion=state.completion,
-        logs_dir=state.data_dir / RUNS_FOLDER,
+        body.documents,
+        logs_dir=state.logs_dir,
+        **_model_options(state, body.model),
     )
-    run_id = secrets.token_hex(ID_BYTES)
-    state.runs[run_id] = _start(run, "run_failed")
-    return JSONResponse({"run_id": run_id}, status_code=202)
-
-
-async def run_events(request: Request) -> Response:
-    run = _job(_state(request).runs, request.path_params["run_id"], "run")
-    return StreamingResponse(_stream(run), media_type="text/event-stream")
+    return JSONResponse({"run_id": _start(state, "run", run)}, status_code=202)
 
 
 async def start_ask(request: Request) -> Response:
     state = _state(request)
-    run = _job(state.runs, request.path_params["run_id"], "run")
+    run = _job(state.jobs["run"], request.path_params["run_id"], "run")
     body = await _read(request, AskRequest.model_validate_json)
-    last = run.events[-1] if run.events else {}
-    if last.get("type") != "run_finished":
-        raise HTTPException(409, "An ask needs a finished run, and this one is not.")
-    api_key, api_base = _credentials(state, body.model)
+    started = run.events[0] if run.events else {}
+    if started.get("type") != "run_started":
+        raise HTTPException(
+            409, "This run has not started, so it has no folder to ask over."
+        )
     ask = partial(
         r3con.ask,
-        last["run_dir"],
+        started["run_dir"],
         body.question,
-        model=body.model,
-        api_key=api_key,
-        api_base=api_base,
-        completion=state.completion,
+        **_model_options(state, body.model),
     )
-    ask_id = secrets.token_hex(ID_BYTES)
-    state.asks[ask_id] = _start(ask, "ask_failed")
-    return JSONResponse({"ask_id": ask_id}, status_code=202)
+    return JSONResponse({"ask_id": _start(state, "ask", ask)}, status_code=202)
 
 
-async def ask_events(request: Request) -> Response:
-    ask = _job(_state(request).asks, request.path_params["ask_id"], "ask")
-    return StreamingResponse(_stream(ask), media_type="text/event-stream")
+async def events(request: Request, *, kind: Kind) -> Response:
+    job = _job(_state(request).jobs[kind], request.path_params["job_id"], kind)
+    return StreamingResponse(_stream(job), media_type="text/event-stream")
 
 
 async def _error(request: Request, error: Exception) -> Response:
-    if not isinstance(error, HTTPException):
-        raise error
+    # Starlette types every handler as taking any Exception; this one is HTTPException's.
+    assert isinstance(error, HTTPException)
     return JSONResponse(
         {"error": error.detail}, error.status_code, headers=error.headers
     )
@@ -405,12 +441,13 @@ def create_app(
     *,
     token: str,
     port: int,
-    data_dir: Path = DATA_DIR,
+    logs_dir: Path = LOGS_DIR,
     completion: Callable[..., Any] | None = None,
+    max_body_bytes: int = MAX_BODY_BYTES,
 ) -> ASGIApp:
     """The server's ASGI app, for requests to 127.0.0.1 or localhost on ``port`` that
-    carry ``token``. Runs go under ``data_dir``'s ``runs/``; ``completion`` is passed to
-    r3con as its own ``completion`` is."""
+    carry ``token``. Run folders go in ``logs_dir``; ``completion`` is passed to r3con
+    as its own ``completion`` is."""
     app = Starlette(
         routes=[
             Route("/", page),
@@ -418,18 +455,19 @@ def create_app(
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
             Route("/api/runs", start_run, methods=["POST"]),
-            Route("/api/runs/{run_id}/events", run_events),
+            Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route("/api/runs/{run_id}/asks", start_ask, methods=["POST"]),
-            Route("/api/asks/{ask_id}/events", ask_events),
+            Route("/api/asks/{job_id}/events", partial(events, kind="ask")),
         ],
         exception_handlers={HTTPException: _error},
+        max_body_size=max_body_bytes,
     )
-    app.state.server = ServerState(data_dir=data_dir, completion=completion)
+    app.state.server = ServerState(logs_dir=logs_dir, completion=completion)
     return guard(app, token=token, port=port)
 
 
 def _server(
-    port: int, data_dir: Path, completion: Callable[..., Any] | None
+    port: int, logs_dir: Path, completion: Callable[..., Any] | None
 ) -> tuple[uvicorn.Server, socket.socket, str]:
     """A server for a socket already listening on ``port`` (0 for a free one), and the
     URL that opens its page."""
@@ -439,7 +477,7 @@ def _server(
     listener.listen()
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
-    app = create_app(token=token, port=port, data_dir=data_dir, completion=completion)
+    app = create_app(token=token, port=port, logs_dir=logs_dir, completion=completion)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
     return uvicorn.Server(config), listener, f"http://{HOST}:{port}/#token={token}"
 
@@ -447,12 +485,12 @@ def _server(
 def serve(
     *,
     port: int = 0,
-    data_dir: Path = DATA_DIR,
+    logs_dir: Path = LOGS_DIR,
     completion: Callable[..., Any] | None = None,
 ) -> tuple[str, Callable[[], None]]:
     """Start the server on a thread of its own. Returns the URL that opens the page,
     with this launch's token, and a function that stops the server."""
-    server, listener, url = _server(port, data_dir, completion)
+    server, listener, url = _server(port, logs_dir, completion)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
@@ -476,16 +514,17 @@ def main(argv: list[str] | None = None) -> None:
         help="the port to listen on (default: a free one)",
     )
     parser.add_argument(
-        "--data-dir",
+        "--logs-dir",
         type=Path,
-        default=DATA_DIR,
-        help="where runs are written, under runs/ (default: %(default)s)",
+        default=LOGS_DIR,
+        help="where run folders go (default: %(default)s)",
     )
     parser.add_argument(
         "--no-browser", action="store_true", help="print the URL, but don't open it"
     )
     args = parser.parse_args(argv)
-    server, listener, url = _server(args.port, args.data_dir, None)
+    configure_logging()
+    server, listener, url = _server(args.port, args.logs_dir, None)
     print(f"r3con app: {url}", flush=True)
     if not args.no_browser:
         webbrowser.open(url)

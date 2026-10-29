@@ -1762,6 +1762,7 @@ name = "r3con-app"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "litellm" },
     { name = "platformdirs" },
     { name = "pydantic" },
     { name = "r3context" },
@@ -1780,6 +1781,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "litellm", specifier = ">=1.103,<2" },
     { name = "platformdirs", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "r3context", editable = "../" },

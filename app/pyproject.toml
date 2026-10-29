@@ -5,6 +5,7 @@ description = "The local server that connects r3con's app to r3con."
 requires-python = ">=3.11"
 dependencies = [
     "r3context",
+    "litellm>=1.103,<2",
     "platformdirs>=4.0",
     "pydantic>=2.11",
     "starlette>=1.10",
