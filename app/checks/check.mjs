@@ -54,7 +54,9 @@ const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
 const NEW_QUESTION = 'Which memo mentions the storm?';
-const RECORDED_READY = `${SAMPLE_DOCS} documents ready · recorded run · gpt-6-luna`;
+const RECORDED_MODEL = 'gpt-6-luna';
+const FIRST_TYPED_MODEL = 'hosted_vllm/foo';
+const ready = (kind, model) => `${SAMPLE_DOCS} documents ready · ${kind} · ${model}`;
 const FIELD_NAMES = {
   OpenAI: 'key-openai',
   Anthropic: 'key-anthropic',
@@ -75,7 +77,7 @@ function check(area, name, pass, detail = '') {
 
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
-async function withPage(area, { layout = LAYOUTS.desktop, sample = true }, body) {
+async function withPage(area, { layout = LAYOUTS.desktop, sample = true, expectedErrors = [] }, body) {
   const messages = [];
   let context;
   try {
@@ -93,7 +95,17 @@ async function withPage(area, { layout = LAYOUTS.desktop, sample = true }, body)
     await context?.close();
   }
   const errors = messages.filter((m) => ['error', 'warning'].includes(m.type)).map((m) => m.text);
-  check(area, `${layout.name}: no console errors or warnings`, errors.length === 0, errors.slice(0, 3).join(' | '));
+  const unexpected = errors.filter((text) => !expectedErrors.some((start) => text.startsWith(start)));
+  const missing = expectedErrors.filter((start) => !errors.some((text) => text.startsWith(start)));
+  const beyond = expectedErrors.length ? ` beyond: ${expectedErrors.join('; ')}` : '';
+  const detail = [...unexpected.slice(0, 3), ...missing.map((start) => `missing: ${start}`)].join(' | ');
+  check(area, `${layout.name}: no console errors or warnings${beyond}`, !unexpected.length && !missing.length, detail);
+}
+
+// Clicks save and waits for the settings to say "saved"; false if they never do.
+async function saveKeys(page) {
+  await page.click('#settings-save');
+  return becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
 }
 
 async function runSample(page) {
@@ -250,6 +262,22 @@ function popupInsidePanel() {
   return !el.hidden && r.left >= p.left && r.top >= p.top && r.right <= p.right && r.bottom <= p.bottom;
 }
 
+// The stand-in saveKey adds the provider to a Set, so refusing that one add acts as a server refusing the key.
+function refuseKeyOnce(provider) {
+  const add = Set.prototype.add;
+  Set.prototype.add = function (value) {
+    if (value !== provider) return add.call(this, value);
+    Set.prototype.add = add;
+    throw new Error('the server refused the key');
+  };
+}
+
+function countStatusWrites() {
+  window.statusWrites = 0;
+  const observer = new MutationObserver((records) => (window.statusWrites += records.length));
+  observer.observe(document.getElementById('run-status'), { childList: true, characterData: true, subtree: true });
+}
+
 function placesHolding(key) {
   const fields = [...document.querySelectorAll('input, textarea')].filter((el) => el.value.includes(key));
   const holding = (store) => Object.keys(store).filter((k) => store.getItem(k).includes(key));
@@ -317,11 +345,17 @@ async function beforeRun() {
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
     const hint = await page.textContent('#panel-hint');
-    const ready = `${SAMPLE_DOCS} documents · ready to run`;
-    check('before a run', 'the hint says the documents are ready to run', hint === ready, hint);
+    const hintText = `${SAMPLE_DOCS} documents · ready to run`;
+    check('before a run', 'the hint says the documents are ready to run', hint === hintText, hint);
     const status = await page.textContent('#run-status');
-    const named = status === RECORDED_READY;
+    const named = status === ready('recorded run', RECORDED_MODEL);
     check('before a run', "the status names a recorded run and the recording's model", named, status);
+    await page.evaluate(countStatusWrites);
+    await page.focus('#question');
+    await page.keyboard.type(' today');
+    const writes = await page.evaluate(() => window.statusWrites);
+    const once = writes === 1 && (await page.textContent('#run-status')) === ready('simulated run', DEFAULT_MODEL);
+    check('before a run', 'typing a question rewrites the status once, not on every key', once, `${writes} writes`);
   });
 }
 
@@ -413,7 +447,8 @@ async function files() {
 async function settings() {
   for (const layout of Object.values(LAYOUTS)) {
     const checkAt = (name, pass, detail) => check('settings', `${layout.name}: ${name}`, pass, detail);
-    await withPage('settings', { layout, sample: false }, async (page, messages) => {
+    const expectedErrors = ["couldn't save the keys"];
+    await withPage('settings', { layout, sample: false, expectedErrors }, async (page, messages) => {
       await keys(page, checkAt);
       await picker(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
@@ -451,14 +486,19 @@ async function keys(page, checkAt) {
   await page.fill('#key-other', TEST_KEY);
   await page.click('#settings-save');
   checkAt('an Other key without an endpoint blocks the save', await blocked());
+  await page.fill('#key-other', '');
+  await page.fill('#key-openai', TEST_KEY);
+  await page.evaluate(refuseKeyOnce, 'openai');
+  await page.click('#settings-save');
+  const refused = await becomes(page, () => document.getElementById('settings-saved').textContent === "couldn't save");
+  const keptKey = (await page.inputValue('#key-openai')) === TEST_KEY && (await states()).length === 0;
+  checkAt('a refused save says so and keeps the typed key', refused && keptKey, await saved());
 
   await page.fill('#endpoint-other', TEST_ENDPOINT);
-  await page.fill('#key-openai', TEST_KEY);
   await page.fill('#key-gemini', TEST_KEY);
-  await page.click('#settings-save');
-  await becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
+  const savedKeys = await saveKeys(page);
   const set = await states();
-  const marked = isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
+  const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
   checkAt('a save marks OpenAI, Google and Other as set', marked, set.join(', '));
   const keyed = await page.evaluate(pickerState);
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
@@ -488,30 +528,35 @@ async function keys(page, checkAt) {
 async function picker(page, checkAt) {
   const status = () => page.textContent('#run-status');
   const stored = () => page.evaluate(storedEntries);
-  const ready = (run) => `${SAMPLE_DOCS} documents ready · ${run}`;
+  const leaveField = () => page.$eval('#model-other', (el) => el.blur());
+  const recordedReady = ready('recorded run', RECORDED_MODEL);
   await page.selectOption('#model-pick', LISTED_MODEL);
   const recordedCue = await status();
   const recordedName = "before a recorded run the status names the recording's model, not the picked one";
-  checkAt(recordedName, recordedCue === RECORDED_READY, recordedCue);
+  checkAt(recordedName, recordedCue === recordedReady, recordedCue);
 
   await page.selectOption('#model-pick', '');
+  await page.fill('#model-other', FIRST_TYPED_MODEL);
+  await leaveField();
   await page.click('#settings-btn');
   await page.fill('#key-anthropic', TEST_KEY);
-  await page.click('#settings-save');
-  await becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
+  const savedKeys = await saveKeys(page);
   await page.keyboard.press('Escape');
   const afterSave = await page.evaluate(pickerState);
-  const fieldShown = await page.$eval('#model-other', (el) => !el.hidden);
-  const stays = afterSave.value === '' && fieldShown && afterSave.groups.includes('Anthropic');
-  checkAt('other model… stays chosen through a key save', stays, JSON.stringify(afterSave));
+  const field = await page.$eval('#model-other', (el) => (el.hidden ? null : el.value));
+  const shownOnce = field === FIRST_TYPED_MODEL && !afterSave.models.includes(FIRST_TYPED_MODEL);
+  const stays = savedKeys && afterSave.value === '' && shownOnce && afterSave.groups.includes('Anthropic');
+  checkAt('other model… stays chosen through a key save, its model shown once', stays, JSON.stringify(afterSave));
 
+  await page.fill('#model-other', '');
+  await leaveField();
   await page.fill('#question', NEW_QUESTION);
   await page.click('#run-btn');
   const asked = await status();
   const focused = await page.evaluate(() => document.activeElement.id);
   const questionKept = (await page.inputValue('#question')) === NEW_QUESTION && (await count(page, '.turn')) === 0;
   const kept = await stored();
-  const lastChoice = isDeepStrictEqual(kept, { [MODEL_KEY]: LISTED_MODEL });
+  const lastChoice = isDeepStrictEqual(kept, { [MODEL_KEY]: FIRST_TYPED_MODEL });
   const waits = asked === 'type a model to run' && focused === 'model-other' && questionKept && lastChoice;
   const waitsName = 'a simulated run with no model asks for one, keeps the question and the last choice';
   checkAt(waitsName, waits, `${asked}; focus on #${focused}`);
@@ -519,15 +564,16 @@ async function picker(page, checkAt) {
   await page.keyboard.press('Backspace');
   const whileTyping = await stored();
   await page.fill('#model-other', OTHER_MODEL);
-  await page.$eval('#model-other', (el) => el.blur());
+  await leaveField();
   const typed = await stored();
   const onLeave = isDeepStrictEqual(whileTyping, kept) && isDeepStrictEqual(typed, { [MODEL_KEY]: OTHER_MODEL });
   const onLeaveName = 'a typed model is stored once the field is left, not while typing, and alone';
   checkAt(onLeaveName, onLeave, `${JSON.stringify(whileTyping)} → ${JSON.stringify(typed)}`);
 
   const simulatedCue = await status();
-  const cues = recordedCue === RECORDED_READY && simulatedCue === ready(`simulated run · ${OTHER_MODEL}`);
-  checkAt('the status says whether a run replays the recording or is simulated', cues, simulatedCue);
+  const cues = recordedCue === recordedReady && simulatedCue === ready('simulated run', OTHER_MODEL);
+  const cueName = 'the status says whether a run replays the recording or is simulated';
+  checkAt(cueName, cues, `${recordedCue} → ${simulatedCue}`);
   await page.click('#run-btn');
   const done = `● done · simulated run · ${OTHER_MODEL} · nothing was sent`;
   const namesModel = await becomes(page, (text) => document.getElementById('run-status').textContent === text, done);
@@ -536,7 +582,7 @@ async function picker(page, checkAt) {
   await page.reload();
   const after = await page.evaluate(pickerState);
   const keysGone = after.groups.length === 0 && after.hint && (await page.evaluate(keyStates)).length === 0;
-  const survives = after.value === OTHER_MODEL && keysGone && (await status()) === RECORDED_READY;
+  const survives = after.value === OTHER_MODEL && keysGone && (await status()) === recordedReady;
   checkAt('after a reload the choice is kept and the keys are not', survives, JSON.stringify(after));
   await page.selectOption('#model-pick', '');
   await page.click('#run-btn');

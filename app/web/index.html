@@ -1823,7 +1823,9 @@ p { margin: 0; }
     if (state.run) return;
     const recorded = replaysRecording(questionEl.value.trim());
     const run = recorded ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`;
-    setStatus(`${plural(state.files.length, 'document')} ready · ${run}`);
+    const text = `${plural(state.files.length, 'document')} ready · ${run}`;
+    // The status is a live region, so rewriting it unchanged on each keystroke would talk over typing.
+    if ($('run-status').textContent !== text) setStatus(text);
   }
 
   function updateRunLabel() {
@@ -2235,7 +2237,8 @@ p { margin: 0; }
     const current = select.options.length ? select.value : remembered;
     const option = (value, text = value) => h('option', { value }, text);
     const optgroup = ({ label, models }) => h('optgroup', { label }, models.map((model) => option(model)));
-    const unlisted = listed.includes(remembered) ? null : option(remembered);
+    const typed = current === '' ? $('model-other').value.trim() : '';
+    const unlisted = listed.includes(remembered) || remembered === typed ? null : option(remembered);
     fill(select, unlisted, groups.map(optgroup), option('', 'other model…'));
     select.value = current === '' || listed.includes(current) ? current : remembered;
     $('model-hint').hidden = providers.length > 0;
@@ -2247,14 +2250,10 @@ p { margin: 0; }
     other.hidden = other.disabled = $('model-pick').value !== '';
   }
 
-  function rememberModel() {
-    const model = pickedModel();
-    if (model) writeStored(MODEL_KEY, model);
-  }
-
   function onPick() {
     showOtherModel();
-    rememberModel();
+    const model = pickedModel();
+    if (model) writeStored(MODEL_KEY, model);
     readyStatus();
   }
 
@@ -2580,8 +2579,7 @@ p { margin: 0; }
       }
     });
     $('model-pick').addEventListener('change', onPick);
-    $('model-other').addEventListener('input', readyStatus);
-    $('model-other').addEventListener('change', rememberModel);
+    $('model-other').addEventListener('change', onPick);
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
