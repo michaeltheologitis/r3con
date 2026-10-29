@@ -4,6 +4,8 @@ import pytest
 
 from r3con.logging_setup import configure_logging, get_logger
 
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+
 
 def test_loggers_live_under_the_r3con_namespace():
     assert get_logger().name == "r3con"
@@ -50,3 +52,15 @@ def test_a_log_level_variable_that_is_not_a_level_is_refused_naming_it(monkeypat
     monkeypatch.setenv("R3CON_LOG_LEVEL", "loud")
     with pytest.raises(ValueError, match="^R3CON_LOG_LEVEL "):
         configure_logging()
+
+
+def test_a_logged_message_and_its_traceback_have_keys_masked(caplog, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", KEY)
+    caplog.set_level(logging.WARNING, logger="r3con")
+    try:
+        raise RuntimeError(f"echoed {KEY}")
+    except RuntimeError as error:
+        get_logger("llm").warning("sending again after %s", error, exc_info=True)
+    assert "sending again after echoed REDACTED" in caplog.text
+    assert "RuntimeError: echoed REDACTED" in caplog.text
+    assert KEY not in caplog.text

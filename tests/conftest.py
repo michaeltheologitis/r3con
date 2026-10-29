@@ -529,6 +529,8 @@ def _isolated(
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     monkeypatch.chdir(tmp_path)
+    # Each test starts with no key registered for masking by an earlier one's calls.
+    monkeypatch.setattr("r3con.masking._registered", set())
     if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
         monkeypatch.setattr(litellm, "completion", FakeLLM())
     if not request.node.get_closest_marker("live"):

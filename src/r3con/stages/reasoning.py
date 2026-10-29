@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field, ValidationError, create_model, field_vali
 from r3con import settings
 from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import get_logger
+from r3con.masking import masked
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -254,7 +255,8 @@ class ReasoningResult:
       path, no turns and ``"reply"``.
     - ``fallback``: why a direct run took the coding path, else ``None``:
       ``{"cause": "estimate", "estimate": tokens, "line": tokens}``,
-      ``{"cause": "refusal", "error": message}``, or, when no reply fit its schema,
+      ``{"cause": "refusal", "error": message}``, keys masked
+      (:func:`r3con.masking.masked`), or, when no reply fit its schema,
       ``{"cause": "invalid", "error": message}``.
     """
 
@@ -423,7 +425,7 @@ def _reason_directly(
             "reasoning's direct prompt was refused as too long; reasoning with code "
             "instead"
         )
-        return {"cause": "refusal", "error": str(refusal)}
+        return {"cause": "refusal", "error": masked(str(refusal))}
     except ValidationError as invalid:
         _log.warning(
             "reasoning's direct reply did not fit its schema in %d send(s); reasoning "

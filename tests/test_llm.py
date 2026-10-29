@@ -15,9 +15,9 @@ from litellm.types.router import RetryPolicy
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from r3con import settings
+from r3con.masking import _ERROR_CHARS
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
-    _ERROR_CHARS,
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
@@ -71,6 +71,8 @@ CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
 LONGEST_FIRST_BACKOFF = 1
 NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
 KEY = "sk-not-a-real-key-0123456789"
+# No shape litellm's own redactor knows: only r3con's masking can hide it.
+PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 
 
@@ -484,6 +486,25 @@ def test_each_resend_is_logged_as_a_warning_naming_the_error_and_the_wait(
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_resend_warning_masks_the_key_the_error_echoes(httpserver, caplog, model):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    echoed = {"error": {"message": f"slow down, {PLAIN_KEY}", "type": "server_error"}}
+    answers_in_turn(httpserver, (429, echoed), OK)
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=model,
+        api_base=httpserver.url_for("/v1"),
+        api_key=PLAIN_KEY,
+    )
+    [resend] = caplog.records
+    assert "as it raised RateLimitError" in resend.getMessage()
+    assert "slow down, REDACTED" in caplog.text
+    assert PLAIN_KEY not in caplog.text
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
 @pytest.mark.parametrize(
     ("own_setting", "requests"),
     [
@@ -636,7 +657,7 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
         (
             refused(f"bad key Bearer {KEY}"),
             KEY,
-            f"{BAD_REQUEST}bad key Bearer <api_key>",
+            f"{BAD_REQUEST}bad key Bearer REDACTED",
         ),
         (
             refused("maximum context length is 4000 tokens"),

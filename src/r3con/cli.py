@@ -21,6 +21,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
+from r3con.masking import masked
 from r3con.pipeline import (
     ASKS_FOLDER,
     ask_config,
@@ -231,10 +232,13 @@ def _ask(args: argparse.Namespace) -> int:
 
 
 def _failed(error: Exception) -> int:
-    """Report ``error`` and its notes, such as where its artifacts are, on stderr."""
-    print(f"r3con: {type(error).__name__}: {error}", file=sys.stderr)
-    for note in getattr(error, "__notes__", ()):
-        print(note, file=sys.stderr)
+    """Report ``error`` and its notes, such as where its artifacts are, on stderr,
+    keys masked."""
+    lines = [
+        f"r3con: {type(error).__name__}: {error}",
+        *getattr(error, "__notes__", ()),
+    ]
+    print(masked("\n".join(lines)), file=sys.stderr)
     return 1
 
 

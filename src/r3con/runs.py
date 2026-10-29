@@ -59,6 +59,12 @@ A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (
 call that answered or raised an error, plus ``transcript.yaml`` where the stage writes
 one) and ``error.txt``, the traceback.
 
+Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
+``error``, ``error.txt``, the ``error`` of ``run_failed`` and ``ask_failed`` in
+``events.jsonl``, each split's ``error`` in ``splits.json`` and the ``error`` of
+reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key. Prompts,
+replies and documents are written as they are.
+
 Two layers in code:
 
 - ``TaskLogger`` writes structured artifacts under one run-folder. ``write_json("a/b",
@@ -73,12 +79,12 @@ Two layers in code:
   request was sent, more than 1 when a temporary error made r3con resend it, and
   ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
   ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
-  call that raised one, the error's class and the first non-empty line of its message:
-  such a call has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0,
-  as r3con got no reply to price) and, unless skipped, ``transcript.yaml`` (the
-  readable message thread). Aggregate token and cost totals are available via
-  ``compute_totals()`` so callers fold them into the stage's ``result.json``; their
-  ``n_steps`` counts only the calls that answered.
+  call that raised one, the error's class and the first non-empty line of its message,
+  keys masked: such a call has ``tokens``, ``finish_reason`` and ``output`` ``null``
+  and ``usd`` 0, as r3con got no reply to price) and, unless skipped,
+  ``transcript.yaml`` (the readable message thread). Aggregate token and cost totals
+  are available via ``compute_totals()`` so callers fold them into the stage's
+  ``result.json``; their ``n_steps`` counts only the calls that answered.
 """
 
 from __future__ import annotations

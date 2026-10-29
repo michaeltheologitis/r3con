@@ -52,6 +52,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
+from r3con.masking import masked, one_line
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -202,10 +203,11 @@ def _recorded_stage(
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the
     calls that answered or raised an error (a call an interrupt cut short is not
-    recorded) and ``error.txt`` with the traceback, adds a note naming the run folder to
-    the exception, emits ``failed`` with the stage's name as its events give it
-    (``schema`` for ``structuring/schema``) and the error in one line, and re-raises.
-    Without a logger it records nothing, but still emits ``failed``.
+    recorded) and ``error.txt`` with the traceback, keys masked, adds a note naming the
+    run folder to the exception, emits ``failed`` with the stage's name as its events
+    give it (``schema`` for ``structuring/schema``) and the error in one line
+    (:func:`r3con.masking.one_line`), and re-raises. Without a logger it records
+    nothing, but still emits ``failed``.
     """
     run = (
         None
@@ -223,16 +225,10 @@ def _recorded_stage(
     except BaseException as error:
         if run is not None:
             run.flush(write_transcript=transcript)
-            run.task_logger.write_text(f"{stage}/error", traceback.format_exc())
+            run.task_logger.write_text(f"{stage}/error", masked(traceback.format_exc()))
             error.add_note(f"r3con: partial artifacts in {run.task_logger.dir}")
-        emit(failed, stage=stage.rpartition("/")[2], error=_one_line(error))
+        emit(failed, stage=stage.rpartition("/")[2], error=one_line(error))
         raise
-
-
-def _one_line(error: BaseException) -> str:
-    """``error``'s type and message, on one line."""
-    text = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
-    return " ".join(text.split())
 
 
 def _spent(runs: Sequence[StageRun | None]) -> dict[str, Any]:
@@ -312,7 +308,9 @@ def run_pipeline(
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
-      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, one line.
+      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, the
+      error's class and the first non-empty line of its message, keys masked
+      (:func:`r3con.masking.one_line`).
 
     Each event is appended to ``events.jsonl`` in the run folder, when there is one,
     and handed to ``on_event``, when given, as a copy. ``on_event`` is called from the
@@ -567,7 +565,7 @@ def _in_one_line(error: Exception) -> str:
     """``error`` on one line: each setting pydantic refused and why, else its type and
     message."""
     if not isinstance(error, ValidationError):
-        return _one_line(error)
+        return one_line(error)
     settings = (
         (".".join(str(part) for part in e["loc"] if part != "[key]"), e["msg"])
         for e in error.errors()

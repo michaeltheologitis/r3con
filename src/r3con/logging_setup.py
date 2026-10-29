@@ -10,6 +10,10 @@ one knob:
 
 No handler is attached until ``configure_logging`` runs, so importing the library
 in a notebook/test stays silent.
+
+Each logger masks keys in its records' messages and tracebacks before any handler sees
+them (:func:`r3con.masking.masked`), so they reach the application's own handlers
+masked too: tenacity logs each error it resends, and a provider's error may echo a key.
 """
 
 from __future__ import annotations
@@ -18,12 +22,24 @@ import logging
 import os
 import sys
 
+from r3con.masking import masked
+
 _NAME = "r3con"
 
 
 def get_logger(name: str | None = None) -> logging.Logger:
-    """The pipeline logger (``r3con`` or ``r3con.<name>``)."""
-    return logging.getLogger(_NAME if name is None else f"{_NAME}.{name}")
+    """The pipeline logger (``r3con`` or ``r3con.<name>``), masking what it logs."""
+    logger = logging.getLogger(_NAME if name is None else f"{_NAME}.{name}")
+    logger.addFilter(_masked_record)
+    return logger
+
+
+def _masked_record(record: logging.LogRecord) -> bool:
+    """Mask ``record``'s message and its traceback, as a formatter writes it."""
+    record.msg, record.args = masked(record.getMessage()), ()
+    if record.exc_info and not record.exc_text:
+        record.exc_text = masked(logging.Formatter().formatException(record.exc_info))
+    return True
 
 
 def configure_logging(level: str | int | None = None) -> None:

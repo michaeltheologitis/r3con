@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.masking import masked
 from r3con.runs import TaskLogger
 from r3con.runtime.llm import count_tokens, quiet_litellm, schema_as_sent
 
@@ -326,9 +327,9 @@ class Splits:
         refusal: ContextWindowExceededError | None,
     ) -> None:
         """Record a split or stop with the parts it leaves and the provider's message,
-        if a refusal caused it."""
+        keys masked, if a refusal caused it."""
         n_parts = len(self._cuts[doc]) + 1
-        error = None if refusal is None else str(refusal)
+        error = None if refusal is None else masked(str(refusal))
         with self._lock:
             entry = self._record["documents"].setdefault(
                 str(doc), {"cuts": [], "parts": {}, "events": []}

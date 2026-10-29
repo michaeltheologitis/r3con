@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -19,6 +20,9 @@ DOCS = ["Halloran memo", "Merrow memo", "Calder memo"]
 JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 GPT_4O = "openai/gpt-4o"
+# No shape litellm's own redactor knows: only r3con's masking can hide it.
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+NAMES_A_KEY = "The setup memo's example config reads api_key=abcdefgh12345."
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 ASK_FILES = {
     "manifest.json",
@@ -728,3 +732,39 @@ def test_the_version_lookup_leaves_nothing_in_the_package_namespace():
 
 def test_the_version_is_the_installed_distributions():
     assert r3con.__version__ == importlib.metadata.version("r3context")
+
+
+@pytest.mark.parametrize("given", ["api_key", "environment"])
+def test_a_failed_run_writes_and_logs_no_key_but_keeps_the_documents_text(
+    answering_llm, events_in, monkeypatch, tmp_path, caplog, given
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    if given == "environment":
+        monkeypatch.setenv("OPENAI_API_KEY", KEY)
+    echoing = {
+        "message": f"Incorrect API key provided: {KEY}",
+        "llm_provider": "openai",
+        "model": "gpt-6-luna",
+    }
+    answering_llm.replies(
+        litellm.InternalServerError(**echoing), litellm.AuthenticationError(**echoing)
+    )
+    monkeypatch.setattr(litellm, "completion", answering_llm)
+    options = {"api_key": KEY} if given == "api_key" else {}
+
+    with pytest.raises(litellm.AuthenticationError):
+        run("Who?", [NAMES_A_KEY], logs_dir=tmp_path / "logs", **options)
+
+    [run_dir] = (tmp_path / "logs").iterdir()
+    files = [path for path in run_dir.rglob("*") if path.is_file()]
+    assert [path for path in files if KEY in path.read_text()] == []
+    assert KEY not in caplog.text
+    line = (
+        "AuthenticationError: litellm.AuthenticationError: Incorrect API key provided: "
+    )
+    [call] = json.loads((run_dir / "relevance" / "calls.json").read_text())
+    assert call["error"] == f"{line}REDACTED"
+    assert events_in(run_dir)[-1]["error"] == f"{line}REDACTED"
+    assert f"{line}REDACTED" in (run_dir / "relevance" / "error.txt").read_text()
+    assert "Incorrect API key provided: REDACTED" in caplog.text
+    assert NAMES_A_KEY in call["prompt"][1]["content"]

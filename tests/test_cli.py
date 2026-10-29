@@ -14,6 +14,7 @@ from r3con.r3con import read_documents
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 
 
 def r3con(*argv: str) -> int:
@@ -322,3 +323,15 @@ def test_verbose_streams_stage_progress_to_stderr(answering, capsys):
     assert out == f"{ANSWER}\n"
     assert "stage 1/3" in err
     assert "stage 3/3" in err
+
+
+def test_a_failed_run_shows_no_key_on_stderr(answering, capsys):
+    bad_key = litellm.AuthenticationError(
+        f"Incorrect API key provided: {KEY}", llm_provider="openai", model="m"
+    )
+    answering.answers(relevance=bad_key)
+    assert r3con("run", "Who?", str(MEMOS), "--api-key", KEY, "-v") == 1
+    err = capsys.readouterr().err
+    assert "r3con: AuthenticationError: " in err
+    assert "Incorrect API key provided: REDACTED" in err
+    assert KEY not in err

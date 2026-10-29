@@ -54,8 +54,11 @@ called as it is, once per request, and owns its retrying: a ``litellm.Router`` r
 the same status rule, with its own cooldowns and fallbacks. A recorded call's ``sends``
 and ``resend_wait_seconds`` come from tenacity, and are ``None`` for a call r3con did not
 resend itself. A call that raises an error, once r3con stops resending it, is recorded
-too, with the error's class and first non-empty line, its ``api_key`` masked, and then
-the error is raised as it was.
+too, with the error's class and first non-empty line, keys masked
+(:func:`r3con.masking.one_line`), and then the error is raised as it was. Each call's
+``api_key`` is registered for masking (:func:`r3con.masking.register_key`) before it is
+sent, so the warning logged before a resend, and any error r3con writes later, mask it
+too.
 """
 
 from __future__ import annotations
@@ -76,6 +79,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.masking import one_line, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -90,10 +94,6 @@ _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
 _WAIT_DIGITS = 2
-_ERROR_CHARS = 300
-_MASKED_KEY = "<api_key>"
-# A shorter api_key is a placeholder, such as vLLM's "EMPTY", not a secret.
-_MIN_MASKED_KEY_CHARS = 8
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
@@ -236,6 +236,7 @@ def litellm_chat_completion_full(
         }
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
+    register_key(api_key)
 
     def record(**outcome: Any) -> None:
         if run is not None:
@@ -253,7 +254,7 @@ def litellm_chat_completion_full(
         else:
             response = (completion or litellm.completion)(**request)
     except Exception as error:
-        record(response={}, usd=0.0, error=_error_line(error, api_key))
+        record(response={}, usd=0.0, error=one_line(error))
         raise
 
     record(
@@ -438,16 +439,6 @@ def _resend_temporary_errors(request: dict[str, Any], resends: dict[str, Any]) -
         reraise=True,
     )
     return resending(litellm.completion, **request, num_retries=0)
-
-
-def _error_line(error: Exception, api_key: str | None) -> str:
-    """``error``'s class and the first non-empty line of its message, ``api_key``
-    masked unless it is a placeholder, cut to :data:`_ERROR_CHARS`. A provider may echo
-    the key back, and litellm passes it on."""
-    first_line = str(error).strip().partition("\n")[0]
-    if api_key and len(api_key) >= _MIN_MASKED_KEY_CHARS:
-        first_line = first_line.replace(api_key, _MASKED_KEY)
-    return f"{type(error).__name__}: {first_line}"[:_ERROR_CHARS]
 
 
 def is_temporary(error: BaseException) -> bool:
