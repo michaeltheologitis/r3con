@@ -46,9 +46,9 @@ Layout per ``logs/<run-folder>/``:
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
-- ``asks/<NNN>-<model>/`` — one folder per :func:`r3con.ask` over the run, numbered
-  from 001: ``ask.json`` (``{question, model, reasoning, prompts, params, created}``)
-  and ``reasoning/`` as above.
+- ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
+  is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
+  run folder's name, and ``reasoning/`` as above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and
@@ -174,6 +174,7 @@ def write_manifest(
     n_docs: int,
     context_chars: int | None = None,
     settings: Mapping[str, int] | None = None,
+    ask_of: str | None = None,
 ) -> Path:
     """Write ``<run-folder>/manifest.json`` — the run's identity card.
 
@@ -181,7 +182,8 @@ def write_manifest(
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
     model string litellm is called with (``litellm_model``), the runtime caps it ran
     under (``settings``, else :func:`r3con.settings.settings_snapshot` taken now), and
-    the package version.
+    the package version; for an ask (:func:`r3con.ask`), ``ask_of``, the name of the
+    run folder it answered over.
     Written before the first stage, so even a crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
@@ -203,36 +205,32 @@ def write_manifest(
     overrides = config_block.get("overrides") or {}
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
-    return task_logger.write_json(
-        "manifest",
-        {
-            "r3con_version": __version__,
-            "task": task,
-            "n_docs": n_docs,
-            "context_chars": context_chars,
-            "run_folder": task_logger.folder,
-            # --- what shapes the output (the run's identity) ---
-            "config": config_block,
-            # The bare name in `config` is what labels and grouping compare; the full
-            # string is what litellm routes by, so r3con.ask can call the same model.
-            "litellm_model": litellm_model,
-            # --- where the config and each prompt actually came from ---
-            # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
-            # overlaid file is invisible in the run label — so record the winning path.
-            "sources": _sources(
-                config_block.get("name"),
-                config_block.get("prompts") or {},
-                PROMPT_STAGES,
-                resolve_config_path,
-                resolve_prompt_path,
-            ),
-            # --- runtime knobs (parallelism / resilience) ---
-            "settings": dict(settings) if settings is not None else settings_snapshot(),
-            "created": datetime.datetime.now(datetime.UTC).isoformat(
-                timespec="seconds"
-            ),
-        },
-    )
+    manifest = {
+        "r3con_version": __version__,
+        "task": task,
+        "n_docs": n_docs,
+        "context_chars": context_chars,
+        "run_folder": task_logger.folder,
+        # --- what shapes the output (the run's identity) ---
+        "config": config_block,
+        "litellm_model": litellm_model,
+        # --- where the config and each prompt actually came from ---
+        # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
+        # overlaid file is invisible in the run label — so record the winning path.
+        "sources": _sources(
+            config_block.get("name"),
+            config_block.get("prompts") or {},
+            PROMPT_STAGES,
+            resolve_config_path,
+            resolve_prompt_path,
+        ),
+        # --- runtime knobs (parallelism / resilience) ---
+        "settings": dict(settings) if settings is not None else settings_snapshot(),
+        "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+    }
+    if ask_of is not None:
+        manifest["ask_of"] = ask_of
+    return task_logger.write_json("manifest", manifest)
 
 
 def _sources(

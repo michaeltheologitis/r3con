@@ -67,12 +67,14 @@ def finished_run(capsys) -> Path:
     return path_after("artifacts: ", capsys.readouterr().err)
 
 
-def without_a_reasoning_path(manifest: dict) -> None:
-    del manifest["config"]["reasoning"]
+def as_written_before_ids(run_dir: Path) -> None:
+    (run_dir / "ids.json").unlink()
 
 
-def pinning_a_missing_prompt(manifest: dict) -> None:
+def pinning_a_missing_prompt(run_dir: Path) -> None:
+    manifest = json.loads((run_dir / "manifest.json").read_text())
     manifest["config"]["prompts"]["reasoning/coding"] = "v9"
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
 
 
 def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
@@ -81,8 +83,8 @@ def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
     out, err = capsys.readouterr()
     assert out == f"{ANSWER}\n"
     folder = path_after("artifacts: ", err)
-    assert folder == run_dir / "asks" / "001-Qwen3.5-35B-A3B"
-    assert (folder / "ask.json").is_file()
+    assert folder.parent == run_dir / "asks"
+    assert (folder / "manifest.json").is_file()
     asked = answering.requests[-1]
     assert asked["model"] == QWEN
     assert "Who else?" in asked["messages"][1]["content"]
@@ -92,8 +94,8 @@ def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
     ("change", "message"),
     [
         (
-            without_a_reasoning_path,
-            "was written by an older r3con that ask can't read: KeyError: 'reasoning'",
+            as_written_before_ids,
+            "was written by an older r3con that ask can't read: FileNotFoundError",
         ),
         (
             pinning_a_missing_prompt,
@@ -106,9 +108,7 @@ def test_ask_over_a_run_folder_it_cannot_use_exits_2_in_one_line(
     answering, capsys, change, message
 ):
     run_dir = finished_run(capsys)
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    change(manifest)
-    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    change(run_dir)
     sent = len(answering.requests)
     assert r3con("ask", str(run_dir), "Who else?") == 2
     err = capsys.readouterr().err

@@ -199,17 +199,6 @@ def _refused(error: Mapping[str, Any], name: str, overridden: Collection[str]) -
     return f"{where}: `{setting}={reprlib.repr(error['input'])}`: {error['msg']}"
 
 
-def check_reasoning(reasoning: Any, where: str) -> ReasoningPath:
-    """``reasoning`` must name one of :data:`REASONING_PATHS`. Caught here with a
-    one-line message rather than as a validation error of the whole config."""
-    if reasoning not in REASONING_PATHS:
-        raise ValueError(
-            f"{where}: `reasoning` must be one of {list(REASONING_PATHS)}, got "
-            f"{reasoning!r}."
-        )
-    return reasoning
-
-
 def _find(relative: str) -> Path | None:
     """First existing ``relative`` path across the config search path, else ``None``."""
     for root in config_search_path():
@@ -252,6 +241,37 @@ def load_config(
                 f"(params: {{seed: {raw['seed']}}})."
             )
         raise ValueError(message)
+    # A setting left empty in the file takes its default, as an override of None does.
+    fields = {key: value for key, value in raw.items() if value is not None}
+    cfg = configure(
+        fields,
+        name,
+        model=model,
+        relevance_rounds=relevance_rounds,
+        reasoning=reasoning,
+        params=params,
+    )
+    check_prompts(cfg)
+    return cfg
+
+
+def configure(
+    fields: Mapping[str, Any],
+    name: str,
+    *,
+    model: str | None = None,
+    relevance_rounds: int | None = None,
+    reasoning: ReasoningPath | None = None,
+    params: Mapping[str, Any] | None = None,
+) -> RunConfig:
+    """The :class:`RunConfig` named ``name`` with the settings in ``fields``, each
+    override that is not ``None`` taking the place of its value, validated in one pass
+    and recorded on the config.
+
+    Raises:
+        ValueError: for any invalid setting, in ``fields`` or an override, in one line
+            naming each.
+    """
     overrides = {
         "model": model,
         "relevance_rounds": relevance_rounds,
@@ -259,8 +279,6 @@ def load_config(
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
-    # A setting left empty in the file takes its default, as an override of None does.
-    fields = {key: value for key, value in raw.items() if value is not None}
     try:
         cfg = RunConfig.model_validate({**fields, **applied, "name": name})
     except ValidationError as invalid:
@@ -270,7 +288,6 @@ def load_config(
         raise ValueError(f"{problems}.") from None
     # Resolved values, so the manifest shows what each override became.
     cfg.overrides = {key: getattr(cfg, key) for key in applied}
-    check_prompts(cfg)
     return cfg
 
 

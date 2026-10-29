@@ -19,8 +19,7 @@ also record the summaries they used (``result.relevance_provenance``,
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
-:func:`ask` answers a new question over what a finished run built, from its folder,
-running only reasoning: ``r3con.ask(result, "And which site logged the fewest?")``.
+:func:`ask` reruns only reasoning over a finished run, for a new question.
 
 ``documents`` is a list of strings: the documents themselves. To read them off disk,
 :func:`read_documents` turns a folder, a glob or a list of files into that list —
@@ -368,23 +367,25 @@ def ask(
             (``reasoning_effort``, ``extra_body``) can break another's request.
         api_key, api_base, completion: as in :func:`run`.
 
-    Each ask is written to a new ``<run_dir>/asks/<NNN>-<model>/``, numbered from 001:
-    ``ask.json`` (the question, the model and params sent, the reasoning path, the
-    prompt versions and the time) and ``reasoning/``, as a run writes it. The run's own
-    files are left as they are.
+    Each ask is written to a new folder in the run folder's ``asks/``, named as a run
+    folder is: a ``manifest.json`` as a run writes one, for the run's config with this
+    ask's overrides (its ``task`` the question, ``ask_of`` the run folder's name), and
+    ``reasoning/`` as a run writes it. The run's own files are left as they are.
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
         reasoning, and whose other fields are the run's; ``run_dir`` is the run folder.
 
     Raises:
+        FileNotFoundError: if ``source`` is not a run folder, if its run never finished
+            parsing, or if a prompt version it pins has no file.
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
             with ``save_artifacts=False``), if its folder was written by an older r3con
-            that ask can't read, if ``reasoning`` is not a reasoning path, or if a
-            setting in :mod:`r3con.settings` is out of range.
-        FileNotFoundError: if ``source`` is not a run folder, if its run never finished
-            parsing, or if a reasoning prompt version it pins has no file.
-        Each of these is raised before any request and before the ask's folder exists.
+            that ask can't read, if it leaves a prompt version unpinned, if an override
+            is not valid for its setting, or if a setting in :mod:`r3con.settings` is
+            out of range.
+        Each of these is raised in one line, before any request and before the ask's
+        folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left
         its completed calls and ``error.txt``.
     """

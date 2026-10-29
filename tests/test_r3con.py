@@ -1,6 +1,7 @@
 import importlib.metadata
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,17 +20,12 @@ JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 GPT_4O = "openai/gpt-4o"
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
-# The fields an ask's Answer takes from the run's.
-FROM_THE_RUN = (
-    "relevant_context",
-    "structured_context",
-    "schema_code",
-    "source_docs",
-    "run_dir",
-    "document_ids",
-    "relevance_provenance",
-    "parsing_provenance",
-)
+ASK_FILES = {
+    "manifest.json",
+    "reasoning/calls.json",
+    "reasoning/result.json",
+    "reasoning/transcript.yaml",
+}
 
 
 def finished_run(llm, tmp_path: Path, documents=DOCS, **options) -> Answer:
@@ -76,8 +72,9 @@ def without_provenance(result: dict) -> None:
     del result["provenance"]
 
 
-def without_a_reasoning_path(manifest: dict) -> None:
-    del manifest["config"]["reasoning"]
+def with_a_seed(manifest: dict) -> None:
+    """As r3con before 0.2.0 recorded its config."""
+    manifest["config"]["seed"] = 7
 
 
 def with_one_reasoning_prompt(manifest: dict) -> None:
@@ -366,22 +363,20 @@ def test_a_folder_read_with_read_documents_can_be_answered_over(
 def test_an_ask_answers_over_the_runs_representation_citing_only_its_ids(
     answering_llm, tmp_path, rounds
 ):
-    built = finished_run(answering_llm, tmp_path, relevance_rounds=rounds)
-    asked = ask(built, "Who else?", completion=answering_llm)
+    result = finished_run(answering_llm, tmp_path, relevance_rounds=rounds)
+    asked = ask(result, "Who else?", completion=answering_llm)
     assert asked.answer == JOINED
     cited = {id_.partition(".")[0] for ids in asked.provenance.values() for id_ in ids}
     assert cited
-    assert cited <= set(built.document_ids)
-    assert [getattr(asked, f) for f in FROM_THE_RUN] == [
-        getattr(built, f) for f in FROM_THE_RUN
-    ]
+    assert cited <= set(result.document_ids)
+    assert replace(asked, answer=result.answer, provenance=result.provenance) == result
 
 
 def test_an_ask_sends_the_runs_reasoning_prompt_with_the_new_question(
     answering_llm, tmp_path
 ):
-    built = finished_run(answering_llm, tmp_path)
-    ask(built.run_dir, "Which memo came first?", completion=answering_llm)
+    result = finished_run(answering_llm, tmp_path)
+    ask(result.run_dir, "Which memo came first?", completion=answering_llm)
     ran, asked = answering_llm.requests_for("reasoning")
     system, user = asked["messages"]
     assert system == ran["messages"][0]
@@ -391,41 +386,43 @@ def test_an_ask_sends_the_runs_reasoning_prompt_with_the_new_question(
     assert asked["response_format"] == ran["response_format"]
 
 
-def test_each_ask_takes_the_next_numbered_folder_and_the_runs_files_stay_as_they_were(
+def test_each_ask_writes_a_folder_of_its_own_and_leaves_the_runs_files_as_they_were(
     answering_llm, tmp_path
 ):
-    built = finished_run(answering_llm, tmp_path)
-    before = the_runs_own_files(built.run_dir)
-    ask(built, "Who else?", completion=answering_llm)
-    ask(built, "Who else?", model=QWEN, completion=answering_llm)
-    asks = built.run_dir / "asks"
-    assert sorted(p.name for p in asks.iterdir()) == [
-        "001-gpt-6-luna",
-        "002-Qwen3.5-35B-A3B",
+    result = finished_run(answering_llm, tmp_path)
+    before = the_runs_own_files(result.run_dir)
+    ask(result, "Who else?", completion=answering_llm)
+    ask(result, "Who else?", model=QWEN, completion=answering_llm)
+    folders = list((result.run_dir / "asks").iterdir())
+    assert [{str(p.relative_to(f)) for p in f.rglob("*.*")} for f in folders] == [
+        ASK_FILES,
+        ASK_FILES,
     ]
-    first = asks / "001-gpt-6-luna"
-    assert {str(p.relative_to(first)) for p in first.rglob("*.*")} == {
-        "ask.json",
-        "reasoning/calls.json",
-        "reasoning/result.json",
-        "reasoning/transcript.yaml",
+    assert the_runs_own_files(result.run_dir) == before
+
+
+def test_an_asks_manifest_records_its_question_its_run_and_the_config_it_ran_under(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, model=QWEN, params=RUN_PARAMS)
+    ask(result, "Who else?", reasoning="coding", completion=answering_llm)
+    [folder] = (result.run_dir / "asks").iterdir()
+    ran = json.loads((result.run_dir / "manifest.json").read_text())
+    asked = json.loads((folder / "manifest.json").read_text())
+    assert (asked["task"], asked["ask_of"]) == ("Who else?", result.run_dir.name)
+    assert asked["run_folder"] == folder.name
+    assert asked["litellm_model"] == QWEN
+    assert asked["config"] == {
+        **ran["config"],
+        "reasoning": "coding",
+        "overrides": {"reasoning": "coding"},
     }
-    pins = json.loads((built.run_dir / "manifest.json").read_text())["config"]
-    record = json.loads((first / "ask.json").read_text())
-    assert record.pop("created")
-    assert record == {
-        "question": "Who else?",
-        "model": "openai/gpt-6-luna",
-        "reasoning": "direct",
-        "prompts": {
-            stage: pins["prompts"][stage]
-            for stage in ("reasoning/direct", "reasoning/coding")
-        },
-        "params": {},
-    }
-    result = json.loads((first / "reasoning" / "result.json").read_text())
-    assert (result["answer"], result["path"]) == (JOINED, "direct")
-    assert the_runs_own_files(built.run_dir) == before
+    assert [asked[key] for key in ("sources", "settings", "r3con_version")] == [
+        ran[key] for key in ("sources", "settings", "r3con_version")
+    ]
+    assert "ask_of" not in ran
+    reasoned = json.loads((folder / "reasoning" / "result.json").read_text())
+    assert (reasoned["answer"], reasoned["path"]) == (JOINED, "coding")
 
 
 @pytest.mark.parametrize(
@@ -445,8 +442,8 @@ def test_each_ask_takes_the_next_numbered_folder_and_the_runs_files_stay_as_they
 def test_an_ask_sends_the_runs_params_only_on_the_runs_model_unless_given_its_own(
     answering_llm, tmp_path, options, model, params
 ):
-    built = finished_run(answering_llm, tmp_path, model=QWEN, params=RUN_PARAMS)
-    ask(built, "Who else?", completion=answering_llm, **options)
+    result = finished_run(answering_llm, tmp_path, model=QWEN, params=RUN_PARAMS)
+    ask(result, "Who else?", completion=answering_llm, **options)
     ran, asked = answering_llm.requests_for("reasoning")
     assert ran["model"] == QWEN
     assert asked["model"] == model
@@ -454,27 +451,27 @@ def test_an_ask_sends_the_runs_params_only_on_the_runs_model_unless_given_its_ow
         key: asked[key] for key in RUN_PARAMS.keys() | params.keys() if key in asked
     }
     assert sent == params
-    [folder] = (built.run_dir / "asks").iterdir()
-    recorded = json.loads((folder / "ask.json").read_text())
-    assert (recorded["model"], recorded["params"]) == (model, params)
+    [folder] = (result.run_dir / "asks").iterdir()
+    manifest = json.loads((folder / "manifest.json").read_text())
+    assert (manifest["litellm_model"], manifest["config"]["params"]) == (model, params)
 
 
 def test_an_ask_over_a_run_recorded_without_its_litellm_model_uses_the_bare_name(
     answering_llm, tmp_path
 ):
-    built = finished_run(answering_llm, tmp_path)
-    manifest_path = built.run_dir / "manifest.json"
+    result = finished_run(answering_llm, tmp_path)
+    manifest_path = result.run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     del manifest["litellm_model"]
     manifest_path.write_text(json.dumps(manifest))
-    ask(built, "Who else?", completion=answering_llm)
+    ask(result, "Who else?", completion=answering_llm)
     ran, asked = answering_llm.requests_for("reasoning")
     assert (ran["model"], asked["model"]) == ("openai/gpt-6-luna", "gpt-6-luna")
 
 
 def test_an_ask_reasons_on_the_path_given_instead_of_the_runs(answering_llm, tmp_path):
-    built = finished_run(answering_llm, tmp_path, reasoning="direct")
-    asked = ask(built, "Who else?", reasoning="coding", completion=answering_llm)
+    result = finished_run(answering_llm, tmp_path, reasoning="direct")
+    asked = ask(result, "Who else?", reasoning="coding", completion=answering_llm)
     assert asked.answer == JOINED
     _, turn = answering_llm.requests_for("reasoning")
     assert "final_answer(" in turn["messages"][0]["content"]
@@ -485,13 +482,13 @@ def test_a_document_read_in_parts_keeps_its_part_headings_in_an_ask(
 ):
     model = window(5_000)
     documents = ["Halloran memo", grown_registry(40_000), "Merrow memo"]
-    built = finished_run(answering_llm, tmp_path, documents, model=model)
+    result = finished_run(answering_llm, tmp_path, documents, model=model)
     sent = len(answering_llm.requests)
-    ask(built, "How?", model=model, completion=answering_llm)
+    ask(result, "How?", model=model, completion=answering_llm)
     [ran, *_] = answering_llm.requests_for("reasoning")
     asked = answering_llm.requests[sent]
     assert asked["messages"][0] == ran["messages"][0]
-    registry = built.document_ids[1]
+    registry = result.document_ids[1]
     system = asked["messages"][0]["content"]
     assert f"### Document ID: {registry}.1\n" in system
     assert f"### Document ID: {registry}.2\n" in system
@@ -517,10 +514,13 @@ def test_a_folder_that_is_not_a_run_folder_cannot_be_asked(llm, tmp_path, folder
             in_json("structuring/parsing/result.json", without_provenance),
             "KeyError: 'provenance'",
         ),
-        (in_json("manifest.json", without_a_reasoning_path), "KeyError: 'reasoning'"),
         (
             in_json("manifest.json", with_one_reasoning_prompt),
-            "KeyError: 'reasoning/direct'",
+            "`prompts.reasoning`: Input should be 'relevance/first-round'",
+        ),
+        (
+            in_json("manifest.json", with_a_seed),
+            "`seed`: Extra inputs are not permitted",
         ),
         (lambda run_dir: (run_dir / "ids.json").unlink(), "FileNotFoundError"),
     ],
@@ -528,26 +528,26 @@ def test_a_folder_that_is_not_a_run_folder_cannot_be_asked(llm, tmp_path, folder
         "snippets-without-provenance",
         "snippets-as-plain-text",
         "parse-without-provenance",
-        "manifest-without-reasoning",
         "one-reasoning-prompt",
+        "config-with-a-seed",
         "no-ids",
     ],
 )
 def test_a_run_folder_an_older_r3con_wrote_is_refused_in_one_line(
     answering_llm, tmp_path, make_older, error
 ):
-    built = finished_run(answering_llm, tmp_path)
-    make_older(built.run_dir)
+    result = finished_run(answering_llm, tmp_path)
+    make_older(result.run_dir)
     sent = len(answering_llm.requests)
     with pytest.raises(ValueError) as refused:
-        ask(built, "Who else?", completion=answering_llm)
+        ask(result, "Who else?", completion=answering_llm)
     message = str(refused.value)
     assert message.startswith(
-        f"{built.run_dir} was written by an older r3con that ask can't read: {error}"
+        f"{result.run_dir} was written by an older r3con that ask can't read: {error}"
     )
     assert "\n" not in message
     assert len(answering_llm.requests) == sent
-    assert not (built.run_dir / "asks").exists()
+    assert not (result.run_dir / "asks").exists()
 
 
 def test_a_run_that_never_finished_parsing_cannot_be_asked(answering_llm, tmp_path):
@@ -576,10 +576,10 @@ def test_a_run_that_failed_in_reasoning_can_still_be_asked(answering_llm, tmp_pa
 
 
 def test_an_answer_without_a_run_folder_cannot_be_asked(answering_llm):
-    built = run("Who?", DOCS, completion=answering_llm, save_artifacts=False)
+    result = run("Who?", DOCS, completion=answering_llm, save_artifacts=False)
     sent = len(answering_llm.requests)
     with pytest.raises(ValueError) as refused:
-        ask(built, "Who else?", completion=answering_llm)
+        ask(result, "Who else?", completion=answering_llm)
     assert str(refused.value) == (
         "ask needs the run folder, and this Answer has none: its run was made with "
         "save_artifacts=False."
@@ -590,22 +590,25 @@ def test_an_answer_without_a_run_folder_cannot_be_asked(answering_llm):
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_an_ask_folder(
     answering_llm, tmp_path
 ):
-    built = finished_run(answering_llm, tmp_path)
-    with pytest.raises(ValueError, match="ask: `reasoning` must be one of"):
-        ask(built, "Who else?", reasoning="agent", completion=answering_llm)
-    assert not (built.run_dir / "asks").exists()
+    result = finished_run(answering_llm, tmp_path)
+    with pytest.raises(ValueError) as refused:
+        ask(result, "Who else?", reasoning="agent", completion=answering_llm)
+    assert str(refused.value) == (
+        "override: `reasoning='agent'`: Input should be 'direct' or 'coding'."
+    )
+    assert not (result.run_dir / "asks").exists()
 
 
 def test_a_failed_ask_leaves_its_folder_with_its_error_and_names_it(
     answering_llm, tmp_path
 ):
-    built = finished_run(answering_llm, tmp_path)
+    result = finished_run(answering_llm, tmp_path)
     answering_llm.answers(reasoning=bad_key())
     with pytest.raises(litellm.AuthenticationError) as failed:
-        ask(built, "Who else?", completion=answering_llm)
-    folder = built.run_dir / "asks" / "001-gpt-6-luna"
+        ask(result, "Who else?", completion=answering_llm)
+    [folder] = (result.run_dir / "asks").iterdir()
     assert failed.value.__notes__ == [f"r3con: partial artifacts in {folder}"]
-    assert (folder / "ask.json").is_file()
+    assert (folder / "manifest.json").is_file()
     assert "bad key" in (folder / "reasoning" / "error.txt").read_text()
     assert not (folder / "reasoning" / "result.json").exists()
 

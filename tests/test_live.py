@@ -35,9 +35,9 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning
 
 
 def test_an_ask_answers_a_new_question_over_a_finished_run(tmp_path):
-    built = run(QUESTION, read_documents(MEMOS), logs_dir=tmp_path)
-    asked = ask(built, "Which site logged the fewest equipment incidents in Q3?")
-    assert asked.answer.strip()
+    result = run(QUESTION, read_documents(MEMOS), logs_dir=tmp_path)
+    asked = ask(result, "Which site logged the fewest equipment incidents in Q3?")
+    assert "northgate" in asked.answer.lower()
     used = {id_.split(".")[0] for ids in asked.provenance.values() for id_ in ids}
     assert used
-    assert used <= set(built.document_ids)
+    assert used <= set(result.document_ids)

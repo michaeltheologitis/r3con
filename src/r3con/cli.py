@@ -5,9 +5,9 @@
 
 Everything the pipeline did is left in a run folder under ``./logs`` — the relevance
 snippets, the proposed schema, the parse, and the reasoning transcript — because the
-answer alone rarely tells you whether to trust it. ``ask`` answers a new question over
-what a run built, running only reasoning, and leaves its own folder in the run's
-``asks/``.
+answer alone rarely tells you whether to trust it.
+
+``r3con ask`` reruns only reasoning over a finished run's folder (:func:`r3con.ask`).
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from dotenv import find_dotenv, load_dotenv
 from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.pipeline import (
+    ASKS_FOLDER,
     ask_pipeline,
-    new_ask_logger,
     read_representation,
     run_pipeline,
 )
@@ -40,9 +40,30 @@ def build_parser() -> argparse.ArgumentParser:
         description="Just-in-time reasoning over a collection of documents.",
     )
     sub = p.add_subparsers(dest="command", required=True)
+    common = argparse.ArgumentParser(add_help=False)
+    # --- transport (not part of the run identity) ---
+    common.add_argument(
+        "--api-key",
+        default=None,
+        help="Provider API key. Usually unnecessary — litellm reads the provider's own "
+        "variable (OPENAI_API_KEY, ANTHROPIC_API_KEY, …), and a .env here is loaded.",
+    )
+    common.add_argument(
+        "--base-url",
+        default=None,
+        help="Provider base URL, e.g. a self-hosted endpoint.",
+    )
+    # --- runtime ---
+    common.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Stream per-stage progress to stderr.",
+    )
 
     run_cmd = sub.add_parser(
         "run",
+        parents=[common],
         help="Answer a question over a collection of documents.",
         description=(
             "Answer a question over a collection of documents. Sources may be "
@@ -87,7 +108,6 @@ def build_parser() -> argparse.ArgumentParser:
         "the whole parse; coding = an agent that reads the parse with code, which a "
         "direct run also uses when its prompt does not fit the model's window).",
     )
-    _add_transport(run_cmd)
     # --- runtime ---
     run_cmd.add_argument(
         "--doc-workers",
@@ -109,10 +129,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Don't write a run folder. You lose the record of what the run did.",
     )
-    _add_verbose(run_cmd)
 
     ask_cmd = sub.add_parser(
         "ask",
+        parents=[common],
         help="Answer a new question over a finished run.",
         description=(
             "Answer a new question over what a finished run built, running only "
@@ -132,33 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="How reasoning answers (default: the run's).",
     )
-    _add_transport(ask_cmd)
-    _add_verbose(ask_cmd)
     return p
-
-
-def _add_transport(cmd: argparse.ArgumentParser) -> None:
-    """Transport options, not part of the run identity."""
-    cmd.add_argument(
-        "--api-key",
-        default=None,
-        help="Provider API key. Usually unnecessary — litellm reads the provider's own "
-        "variable (OPENAI_API_KEY, ANTHROPIC_API_KEY, …), and a .env here is loaded.",
-    )
-    cmd.add_argument(
-        "--base-url",
-        default=None,
-        help="Provider base URL, e.g. a self-hosted endpoint.",
-    )
-
-
-def _add_verbose(cmd: argparse.ArgumentParser) -> None:
-    cmd.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Stream per-stage progress to stderr.",
-    )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -217,14 +211,13 @@ def _ask(args: argparse.Namespace) -> int:
     except (FileNotFoundError, ValueError) as e:
         print(f"r3con: {e}", file=sys.stderr)
         return 2
-    model = built.model if args.model is None else args.model
+    task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
+    print(f"artifacts: {task_logger.dir}", file=sys.stderr)
     try:
-        task_logger = new_ask_logger(built.run_dir, model)
-        print(f"artifacts: {task_logger.dir}", file=sys.stderr)
         result = ask_pipeline(
             built,
             task=args.question,
-            model=model,
+            model=args.model,
             path=args.reasoning,
             task_logger=task_logger,
             api_base=args.base_url,

@@ -146,7 +146,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   ├── result.json              <- the answer
 │   ├── calls.json
 │   └── transcript.yaml
-└── asks/                        <- one folder per r3con.ask: ask.json and reasoning/
+└── asks/<folder>/               <- one per r3con.ask: manifest.json and reasoning/
 ```
 
 ## Evaluation
