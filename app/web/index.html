@@ -289,13 +289,14 @@ p { margin: 0; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
+.inspector .insp-head { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.inspector.moving .insp-head { cursor: grabbing; }
 .insp-title { font-weight: 600; overflow-wrap: anywhere; }
 .insp-title .g { color: var(--fg); }
 .insp-title .g.accent { color: var(--accent); }
 .insp-text { overflow-wrap: anywhere; }
 .insp-text.strong { font-weight: 600; }
 .row { overflow-wrap: anywhere; }
-.row > .k:first-child { margin-right: 1ch; }
 .ref {
   font: inherit;
   color: var(--fg);
@@ -999,6 +1000,7 @@ p { margin: 0; }
     hovered: null,
     userMoved: false,
     layout: new Map(),
+    inspectorDroppedAt: null,
   };
   const view = { x: 0, y: 0, k: 1 };
   // Model and endpoint may be remembered in this browser. The API key is never kept: the prototype
@@ -1190,11 +1192,6 @@ p { margin: 0; }
       }
     }
     return { nodes, edges };
-  }
-
-  // Only settled nodes count: a node still working hasn't cited anything yet.
-  function citedBy(run, id) {
-    return [...state.nodes.values()].filter((n) => !n.el.classList.contains('working') && cites(run, n.id).includes(id)).map((n) => n.id);
   }
 
   // ---------- panel: view ----------
@@ -1562,7 +1559,7 @@ p { margin: 0; }
   }
 
   function row(key, ...value) {
-    return h('div', { class: 'row' }, h('span', { class: 'k' }, key), value);
+    return h('div', { class: 'row' }, h('span', { class: 'k' }, key), ' ', value);
   }
 
   function textBlock(text, empty = 'nothing relevant') {
@@ -1618,15 +1615,13 @@ p { margin: 0; }
 
   function snippetBody(run, kind, d) {
     const id = `${kind}-${d}`;
-    const parts = [textBlock(run[kind][d].summary), row('read', refs([docId(run.docs[d])]))];
-    if (kind === 'r2') {
-      parts.push(row('shown', `round 1 summaries of the other ${plural(run.docs.length - 1, 'document')}`));
-      parts.push(row('drew on', refs(cites(run, id))));
-    }
-    parts.push(row('cited by', refs(citedBy(run, id))));
-    parts.push(callMeta(run, id));
-    parts.push(openFileButton(run.docs[d], 'open document ›'));
-    return parts;
+    return [
+      textBlock(run[kind][d].summary),
+      row('read', refs([docId(run.docs[d])])),
+      kind === 'r2' ? row('drew on', refs(cites(run, id))) : null,
+      callMeta(run, id),
+      openFileButton(run.docs[d], 'open document ›'),
+    ];
   }
 
   function inspectorBody(id) {
@@ -1638,7 +1633,7 @@ p { margin: 0; }
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
-        textBlock(run.schema.thought, ''),
+        run.schema.thought ? row('why', run.schema.thought) : null,
         h('pre', { class: 'code' }, run.schema.code),
         row('fills', plural(run.docs.length, 'parsed document')),
         callMeta(run, 'schema'),
@@ -1649,10 +1644,8 @@ p { margin: 0; }
       return [
         records.length ? recordBlock(records) : textBlock('', 'no records'),
         row('read', refs([docId(run.docs[d])])),
-        row('shown', `round 2 summaries of all ${plural(run.docs.length, 'document')}`),
         row('drew on', refs(cites(run, id))),
         row('filled from', refs(['schema'])),
-        row('cited by', refs(citedBy(run, id))),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
       ];
@@ -1661,7 +1654,6 @@ p { margin: 0; }
       run.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, run.answer.text),
       row('asked', run.question),
-      row('shown', `round 2 summaries and parses of all ${plural(run.docs.length, 'document')}`),
       row('drew on summaries', refs(run.answer.provenance.summary_ids.map((d) => `r2-${d}`))),
       row('drew on parses', refs(run.answer.provenance.parse_ids.map((d) => `parsed-${d}`))),
       h('div', { class: 'k' }, runSummary(run)),
@@ -1708,21 +1700,23 @@ p { margin: 0; }
 
   function positionInspector() {
     if (inspector.hidden) return;
+    if (state.inspectorDroppedAt) return placeInspector(state.inspectorDroppedAt);
     const node = state.nodes.get(state.selected);
     if (!node) return;
-    const pw = panel.clientWidth;
-    const ph = panel.clientHeight;
     const w = inspector.offsetWidth;
-    const ht = inspector.offsetHeight;
     const halfW = (node.el.offsetWidth / 2) * view.k;
     const cx = view.x + node.x * view.k;
     const cy = view.y + node.y * view.k;
     let left = cx + halfW + POPOVER_GAP;
-    if (left + w > pw - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
-    left = clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, pw - w - POPOVER_MARGIN));
-    const top = clamp(cy - iconHalf(node.kind) * view.k - 6, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, ph - ht - POPOVER_MARGIN));
-    inspector.style.left = `${left}px`;
-    inspector.style.top = `${top}px`;
+    if (left + w > panel.clientWidth - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
+    placeInspector({ left, top: cy - iconHalf(node.kind) * view.k - 6 });
+  }
+
+  function placeInspector({ left, top }) {
+    const maxLeft = panel.clientWidth - inspector.offsetWidth - POPOVER_MARGIN;
+    const maxTop = panel.clientHeight - inspector.offsetHeight - POPOVER_MARGIN;
+    inspector.style.left = `${clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft))}px`;
+    inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
   function jumpTo(id) {
@@ -2266,7 +2260,6 @@ p { margin: 0; }
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.target.closest('.inspector, .panel-tools')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    panel.setPointerCapture(e.pointerId);
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
     const nodeEl = e.target.closest('.node');
@@ -2280,6 +2273,8 @@ p { margin: 0; }
   function onPointerMove(e) {
     const p = gesture.pointers.get(e.pointerId);
     if (!p) return;
+    // A mouse released outside the panel before the gesture was captured sent its pointerup elsewhere.
+    if (e.pointerType === 'mouse' && !e.buttons) return onPointerEnd(e);
     p.x = e.clientX;
     p.y = e.clientY;
     if (gesture.mode === 'pinch') return updatePinch();
@@ -2287,6 +2282,7 @@ p { margin: 0; }
     const dx = e.clientX - gesture.origin.x;
     const dy = e.clientY - gesture.origin.y;
     if (!gesture.moved && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    if (!gesture.moved) panel.setPointerCapture(e.pointerId);
     gesture.moved = true;
     if (gesture.mode === 'drag') {
       gesture.node.x = gesture.from.x + dx / view.k;
@@ -2309,10 +2305,7 @@ p { margin: 0; }
       if (!gesture.pointers.size) gesture.mode = null;
       return;
     }
-    if (e.type === 'pointerup' && !gesture.moved) {
-      if (gesture.mode === 'drag') openInspector(gesture.node.id);
-      else if (gesture.mode === 'pan') closeInspector();
-    }
+    if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();
     gesture.mode = null;
     gesture.node = null;
     panel.classList.remove('panning');
@@ -2333,6 +2326,25 @@ p { margin: 0; }
     state.userMoved = true;
   }
 
+  const inspectorGrab = { x: 0, y: 0, left: 0, top: 0 };
+
+  function onInspectorGrab(e) {
+    if (!e.target.closest('.insp-head') || e.target.closest('button')) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    Object.assign(inspectorGrab, { x: e.clientX, y: e.clientY, left: inspector.offsetLeft, top: inspector.offsetTop });
+    inspector.setPointerCapture(e.pointerId);
+  }
+
+  function onInspectorMove(e) {
+    if (!inspector.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - inspectorGrab.x;
+    const dy = e.clientY - inspectorGrab.y;
+    if (!inspector.classList.contains('moving') && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    inspector.classList.add('moving');
+    state.inspectorDroppedAt = { left: inspectorGrab.left + dx, top: inspectorGrab.top + dy };
+    placeInspector(state.inspectorDroppedAt);
+  }
+
   function hoverFrom(e) {
     const el = e.target.closest('.node');
     return el ? el.dataset.id : null;
@@ -2346,6 +2358,9 @@ p { margin: 0; }
     panel.addEventListener('pointerup', onPointerEnd);
     panel.addEventListener('pointercancel', onPointerEnd);
     panel.addEventListener('wheel', onWheel, { passive: false });
+    inspector.addEventListener('pointerdown', onInspectorGrab);
+    inspector.addEventListener('pointermove', onInspectorMove);
+    inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
 
     nodesLayer.addEventListener('pointerover', (e) => {
       state.hovered = hoverFrom(e);
@@ -2363,6 +2378,13 @@ p { margin: 0; }
     nodesLayer.addEventListener('focusout', () => {
       state.hovered = null;
       refreshHighlight();
+    });
+    // On click, not pointerup: a tap's click would otherwise land on the inspector that just opened under it.
+    panel.addEventListener('click', (e) => {
+      const id = hoverFrom(e);
+      // element.click() and assistive tech send detail 0: no pointer behind them, so no drag to skip.
+      const endsDrag = gesture.moved && e.detail > 0;
+      if (id && !endsDrag) openInspector(id);
     });
     nodesLayer.addEventListener('keydown', (e) => {
       const id = hoverFrom(e);
