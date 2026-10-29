@@ -11,8 +11,9 @@ fact by reading each manifest (e.g. by the config's run label,
 Layout per ``logs/<run-folder>/``:
 
 - ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
-  snapshot — the task, a ``config`` block (the resolved
-  :class:`RunConfig` — model, relevance_rounds, prompts, params, …), and a
+  snapshot — the task, a ``config`` block (the resolved :class:`RunConfig` — model,
+  relevance_rounds, prompts, params, …), ``litellm_model`` (the model string exactly as
+  litellm was called with it, where ``config`` keeps only the bare name), and a
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
   block (:meth:`r3con.config.RunConfig.label`).
@@ -45,6 +46,9 @@ Layout per ``logs/<run-folder>/``:
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
+- ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
+  is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
+  run folder's name, and ``reasoning/`` as above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and
@@ -170,13 +174,16 @@ def write_manifest(
     n_docs: int,
     context_chars: int | None = None,
     settings: Mapping[str, int] | None = None,
+    ask_of: str | None = None,
 ) -> Path:
     """Write ``<run-folder>/manifest.json`` — the run's identity card.
 
     The folder name is opaque **by design**, so this file is the only thing that says
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
-    runtime caps it ran under (``settings``, else
-    :func:`r3con.settings.settings_snapshot` taken now), and the package version.
+    model string litellm is called with (``litellm_model``), the runtime caps it ran
+    under (``settings``, else :func:`r3con.settings.settings_snapshot` taken now), and
+    the package version; for an ask (:func:`r3con.ask`), ``ask_of``, the name of the
+    run folder it answered over.
     Written before the first stage, so even a crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
@@ -192,38 +199,38 @@ def write_manifest(
     config_block = (
         config.model_dump() if hasattr(config, "model_dump") else dict(config)
     )
+    litellm_model = config_block.get("model")
     if "model" in config_block:
         config_block["model"] = normalize_model_name(config_block["model"])
     overrides = config_block.get("overrides") or {}
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
-    return task_logger.write_json(
-        "manifest",
-        {
-            "r3con_version": __version__,
-            "task": task,
-            "n_docs": n_docs,
-            "context_chars": context_chars,
-            "run_folder": task_logger.folder,
-            # --- what shapes the output (the run's identity) ---
-            "config": config_block,
-            # --- where the config and each prompt actually came from ---
-            # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
-            # overlaid file is invisible in the run label — so record the winning path.
-            "sources": _sources(
-                config_block.get("name"),
-                config_block.get("prompts") or {},
-                PROMPT_STAGES,
-                resolve_config_path,
-                resolve_prompt_path,
-            ),
-            # --- runtime knobs (parallelism / resilience) ---
-            "settings": dict(settings) if settings is not None else settings_snapshot(),
-            "created": datetime.datetime.now(datetime.UTC).isoformat(
-                timespec="seconds"
-            ),
-        },
-    )
+    manifest = {
+        "r3con_version": __version__,
+        "task": task,
+        "n_docs": n_docs,
+        "context_chars": context_chars,
+        "run_folder": task_logger.folder,
+        # --- what shapes the output (the run's identity) ---
+        "config": config_block,
+        "litellm_model": litellm_model,
+        # --- where the config and each prompt actually came from ---
+        # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
+        # overlaid file is invisible in the run label — so record the winning path.
+        "sources": _sources(
+            config_block.get("name"),
+            config_block.get("prompts") or {},
+            PROMPT_STAGES,
+            resolve_config_path,
+            resolve_prompt_path,
+        ),
+        # --- runtime knobs (parallelism / resilience) ---
+        "settings": dict(settings) if settings is not None else settings_snapshot(),
+        "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+    }
+    if ask_of is not None:
+        manifest["ask_of"] = ask_of
+    return task_logger.write_json("manifest", manifest)
 
 
 def _sources(

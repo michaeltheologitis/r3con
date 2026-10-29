@@ -20,6 +20,7 @@ from r3con.runs import (
 from r3con.settings import settings_snapshot
 
 MODEL = "openai/gpt-6-luna"
+QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 
 
 class Sample(BaseModel):
@@ -293,6 +294,13 @@ def test_the_manifest_records_the_identity_and_the_installed_version(logger):
     assert recorded["prompts"] == dict.fromkeys(PROMPT_STAGES, "v1")
     assert manifest["settings"]["reasoning_max_turns"] == settings.REASONING_MAX_TURNS
     assert manifest["created"].startswith("20")
+
+
+def test_the_manifest_keeps_the_model_string_litellm_is_called_with(logger):
+    write_manifest(logger, task="q", config=config(model=QWEN), n_docs=1)
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    assert manifest["litellm_model"] == QWEN
+    assert manifest["config"]["model"] == "Qwen3.5-35B-A3B"
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):

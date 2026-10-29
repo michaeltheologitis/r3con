@@ -105,7 +105,7 @@ class RunConfig(BaseModel):
 
     # the config it was loaded from (the run label's base)
     name: str = DEFAULT_CONFIG
-    model: str
+    model: Annotated[str, Field(min_length=1)]
     # keep in sync with configs/default.yaml (the shipped default); 0 skips relevance
     relevance_rounds: Annotated[int, Field(ge=0, strict=True)] = 2
     # keep in sync with configs/default.yaml
@@ -241,6 +241,37 @@ def load_config(
                 f"(params: {{seed: {raw['seed']}}})."
             )
         raise ValueError(message)
+    # A setting left empty in the file takes its default, as an override of None does.
+    fields = {key: value for key, value in raw.items() if value is not None}
+    cfg = configure(
+        fields,
+        name,
+        model=model,
+        relevance_rounds=relevance_rounds,
+        reasoning=reasoning,
+        params=params,
+    )
+    check_prompts(cfg)
+    return cfg
+
+
+def configure(
+    fields: Mapping[str, Any],
+    name: str,
+    *,
+    model: str | None = None,
+    relevance_rounds: int | None = None,
+    reasoning: ReasoningPath | None = None,
+    params: Mapping[str, Any] | None = None,
+) -> RunConfig:
+    """The :class:`RunConfig` named ``name`` with the settings in ``fields``, each
+    override that is not ``None`` taking the place of its value, validated in one pass
+    and recorded on the config.
+
+    Raises:
+        ValueError: for any invalid setting, in ``fields`` or an override, in one line
+            naming each.
+    """
     overrides = {
         "model": model,
         "relevance_rounds": relevance_rounds,
@@ -248,8 +279,6 @@ def load_config(
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
-    # A setting left empty in the file takes its default, as an override of None does.
-    fields = {key: value for key, value in raw.items() if value is not None}
     try:
         cfg = RunConfig.model_validate({**fields, **applied, "name": name})
     except ValidationError as invalid:
@@ -259,7 +288,6 @@ def load_config(
         raise ValueError(f"{problems}.") from None
     # Resolved values, so the manifest shows what each override became.
     cfg.overrides = {key: getattr(cfg, key) for key in applied}
-    check_prompts(cfg)
     return cfg
 
 
