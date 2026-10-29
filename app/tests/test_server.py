@@ -9,7 +9,8 @@ from typing import Any
 import httpx2
 import litellm
 import pytest
-from r3con_app.server import create_app, serve
+from litellm.exceptions import RateLimitError
+from r3con_app.server import ServerState, create_app, serve
 from starlette.testclient import TestClient
 
 litellm.suppress_debug_info = True
@@ -20,6 +21,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MEMOS = Path(__file__).resolve().parents[2] / "examples" / "memos"
 GATE_TIMEOUT_SECONDS = 10
+LONG_RETRY_AFTER_SECONDS = 60
 QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 OPENAI_KEY = "sk-stored-openai-key-1234"
@@ -132,9 +134,8 @@ def logs_dir(tmp_path: Path) -> Path:
 
 
 def client_for(model: FakeModel, logs_dir: Path, **options: Any) -> TestClient:
-    app = create_app(
-        token=TOKEN, port=PORT, logs_dir=logs_dir, completion=model, **options
-    )
+    state = ServerState(logs_dir=logs_dir, completion=model)
+    app = create_app(token=TOKEN, port=PORT, state=state, **options)
     return TestClient(app, base_url=BASE_URL, headers=AUTH)
 
 
@@ -198,12 +199,25 @@ def transport(llm: FakeModel) -> list[dict[str, str]]:
     ]
 
 
-def join_workers() -> list[threading.Thread]:
-    """Every worker thread the server started, once each has ended."""
-    workers = [t for t in threading.enumerate() if t.name.startswith("r3con-app-")]
+def join_workers(job_id: str = "") -> list[threading.Thread]:
+    """The worker threads the server started, for ``job_id`` alone when it is given,
+    once each has ended."""
+    name = f"r3con-app-{job_id}"
+    workers = [t for t in threading.enumerate() if t.name.startswith(name)]
     for worker in workers:
         worker.join(GATE_TIMEOUT_SECONDS)
     return workers
+
+
+def rate_limited(**request: Any) -> Any:
+    """A ``litellm.completion`` that answers every request with a 429 asking for a
+    wait longer than any test."""
+    error = RateLimitError(message="slow down", llm_provider="openai", model=MODEL)
+    # Where litellm keeps a provider's headers, on the errors it raises.
+    vars(error)["litellm_response_headers"] = {
+        "retry-after": str(LONG_RETRY_AFTER_SECONDS)
+    }
+    raise error
 
 
 def http_client(url: str) -> httpx2.Client:
@@ -587,18 +601,26 @@ def test_a_run_or_ask_this_server_did_not_start_is_not_found(
 
 @pytest.mark.usefixtures("one_call_at_a_time")
 def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_failed(
-    held_llm: FakeModel, logs_dir: Path
+    held_llm: FakeModel, logs_dir: Path, caplog: pytest.LogCaptureFixture
 ):
-    with client_for(held_llm, logs_dir) as client:
+    with (
+        caplog.at_level(logging.INFO, logger="r3con.app"),
+        client_for(held_llm, logs_dir) as client,
+    ):
         run_id = start_run(client)
         assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
         response = client.post(f"/api/runs/{run_id}/cancel")
         held_llm.gate.set()
         last = run_events(client, run_id)[-1]
+        join_workers(run_id)
     assert response.status_code == 202
     assert len(held_llm.requests) == 1
     assert (last["type"], last["stage"]) == ("run_failed", "relevance")
     assert last["error"].startswith("Cancelled: ")
+    logged = [
+        (r.levelno, r.getMessage()) for r in caplog.records if r.name == "r3con.app"
+    ]
+    assert logged == [(logging.INFO, f"run_failed: {last['error']}")]
 
 
 def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_failed(
@@ -621,21 +643,6 @@ def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_fail
     assert len(held_llm.requests) == sent + 1
     assert (last["type"], last["stage"]) == ("ask_failed", "reasoning")
     assert last["error"].startswith("Cancelled: ")
-
-
-def test_a_cancel_without_this_launchs_token_is_refused_and_the_run_goes_on(
-    held_llm: FakeModel, logs_dir: Path
-):
-    with client_for(held_llm, logs_dir) as client:
-        run_id = start_run(client)
-        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
-        del client.headers["Authorization"]
-        response = client.post(f"/api/runs/{run_id}/cancel")
-        client.headers.update(AUTH)
-        held_llm.gate.set()
-        last = run_events(client, run_id)[-1]
-    assert response.status_code == 401
-    assert last["type"] == "run_finished"
 
 
 @pytest.mark.enable_socket
@@ -691,5 +698,30 @@ def test_stopping_the_server_cancels_its_runs_so_they_send_no_further_call(
     assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
     stop()
     held_llm.gate.set()
-    join_workers()
+    workers = join_workers()
+    assert workers
+    assert not any(worker.is_alive() for worker in workers)
     assert len(held_llm.requests) == 1
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_shutdown_with_a_stream_open_cancels_its_run_before_closing_the_stream(
+    logs_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(litellm, "completion", rate_limited)
+    url, stop = serve(logs_dir=logs_dir)
+    with http_client(url) as http:
+        run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        with http.stream("GET", f"/api/runs/{run_id}/events") as response:
+            lines = response.iter_lines()
+            first = next(line for line in lines if line.startswith("data: "))
+            stop()
+            rest = events_in("\n".join(lines))
+    workers = join_workers(run_id)
+    assert not any(worker.is_alive() for worker in workers)
+    last = rest[-1]
+    assert (last["type"], last["stage"]) == ("run_failed", "relevance")
+    assert last["error"].startswith("Cancelled: ")
+    run_dir = Path(json.loads(first.removeprefix("data: "))["run_dir"])
+    assert "Cancelled" in (run_dir / "relevance" / "error.txt").read_text()

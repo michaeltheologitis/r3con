@@ -64,7 +64,7 @@ from r3con.runs import (
     write_manifest,
 )
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
-from r3con.runtime.llm import register_credentials
+from r3con.runtime.llm import raise_if_cancelled, register_credentials
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
@@ -196,9 +196,13 @@ def _recorded_stage(
     *,
     transcript: bool,
     emit: Emit,
+    cancel: threading.Event | None,
     failed: str = "run_failed",
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
+
+    A stage does not start once ``cancel`` is set: it raises
+    :class:`~r3con.runtime.llm.Cancelled` at once, and fails as below.
 
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
     fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
@@ -218,6 +222,7 @@ def _recorded_stage(
     )
     record = _StageRecord(run=run)
     try:
+        raise_if_cancelled(cancel)
         yield record
         if run is not None:
             run.flush(write_transcript=transcript)
@@ -291,8 +296,8 @@ def run_pipeline(
     carries a note naming the run folder.
 
     ``cancel`` stops the run as :func:`r3con.run` says: once it is set, no new model
-    call is sent, and the stage then under way raises
-    :class:`~r3con.runtime.llm.Cancelled` as any failing stage raises.
+    call is sent and no stage starts, and the stage then under way, or the next one,
+    raises :class:`~r3con.runtime.llm.Cancelled` as any failing stage raises.
 
     The run reports its progress as events, each a dict of JSON values with its
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
@@ -378,7 +383,7 @@ def run_pipeline(
         len(documents),
     )
     with _recorded_stage(
-        task_logger, "relevance", model, transcript=False, emit=emit
+        task_logger, "relevance", model, transcript=False, emit=emit, cancel=cancel
     ) as record:
         relevance = surface_relevance(
             task=task,
@@ -413,7 +418,12 @@ def run_pipeline(
     _log.info("stage 2/3 · structuring · proposing the schema")
     emit("schema_started")
     with _recorded_stage(
-        task_logger, "structuring/schema", model, transcript=True, emit=emit
+        task_logger,
+        "structuring/schema",
+        model,
+        transcript=True,
+        emit=emit,
+        cancel=cancel,
     ) as record:
         proposal = propose_schema(
             task=task,
@@ -442,7 +452,12 @@ def run_pipeline(
     # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     with _recorded_stage(
-        task_logger, "structuring/parsing", model, transcript=False, emit=emit
+        task_logger,
+        "structuring/parsing",
+        model,
+        transcript=False,
+        emit=emit,
+        cancel=cancel,
     ) as record:
         extraction = parse_documents(
             documents=documents,
@@ -473,7 +488,7 @@ def run_pipeline(
     _log.info("stage 3/3 · reasoning")
     emit("reasoning_started", question=task, model=model)
     with _recorded_stage(
-        task_logger, "reasoning", model, transcript=True, emit=emit
+        task_logger, "reasoning", model, transcript=True, emit=emit, cancel=cancel
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -655,6 +670,7 @@ def ask_pipeline(
         config.model,
         transcript=True,
         emit=emit,
+        cancel=cancel,
         failed="ask_failed",
     ) as record:
         result = reasoning.reason(

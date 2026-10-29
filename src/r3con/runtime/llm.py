@@ -63,11 +63,12 @@ resend, and any error r3con writes later, mask it.
 every stage and every document's worker thread, goes through
 :func:`litellm_chat_completion_full`, which checks its ``cancel``, a
 ``threading.Event``, right before it sends, and raises :class:`Cancelled` instead once
-it is set. A resend waits on that event rather than sleeping, so the wait ends the
-moment it is set, and raises :class:`Cancelled` instead of resending. A call already
-sent is not interrupted, since litellm cannot stop one: it finishes and is recorded. A
-supplied ``completion=`` owns its retrying, and its waits between resends run their
-course.
+it is set. A resend waits on that event (:func:`_sleep`), so the wait ends the moment
+it is set, and raises :class:`Cancelled` instead of resending. A call already sent is
+not interrupted, since litellm cannot stop one: it finishes and is recorded. Resends
+r3con does not make itself run their course: a supplied ``completion=``'s, such as a
+``litellm.Router``'s, and litellm's own for a request that carries the caller's
+``num_retries``, ``max_retries`` or ``retry_policy``.
 """
 
 from __future__ import annotations
@@ -109,16 +110,25 @@ _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
-_sleep = time.sleep
 
 
 class Cancelled(Exception):
     """Raised in place of a model call once the ``cancel`` event it was given is set."""
 
 
-def _raise_if_cancelled(cancel: threading.Event | None) -> None:
+def raise_if_cancelled(cancel: threading.Event | None) -> None:
+    """Raise :class:`Cancelled` if ``cancel`` is set."""
     if cancel is not None and cancel.is_set():
         raise Cancelled(_CANCELLED)
+
+
+def _sleep(seconds: float, cancel: threading.Event | None) -> None:
+    """Wait ``seconds`` before a resend, or with ``cancel``, until it is set if that is
+    sooner."""
+    if cancel is None:
+        time.sleep(seconds)
+    else:
+        cancel.wait(seconds)
 
 
 def _enforce_strict_objects(schema: Any) -> Any:
@@ -273,7 +283,7 @@ def litellm_chat_completion_full(
                 **outcome,
             )
 
-    _raise_if_cancelled(cancel)
+    raise_if_cancelled(cancel)
     try:
         if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
             response = _resend_temporary_errors(request, resends, cancel)
@@ -487,11 +497,8 @@ def _resend_temporary_errors(
         resends["resend_wait_seconds"] = round(state.idle_for, _WAIT_DIGITS)
 
     def wait(seconds: float) -> None:
-        if cancel is None:
-            _sleep(seconds)
-        else:
-            cancel.wait(seconds)
-        _raise_if_cancelled(cancel)
+        _sleep(seconds, cancel)
+        raise_if_cancelled(cancel)
 
     resending = tenacity.Retrying(
         sleep=wait,

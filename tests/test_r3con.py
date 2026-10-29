@@ -36,6 +36,15 @@ REFUSED_LINE = (
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
+SCHEMA_REPLY = """Thought: one row per memo.
+<schema>
+class Row(BaseModel):
+    who: str
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+</schema>"""
 ASK_FILES = {
     "manifest.json",
     "events.jsonl",
@@ -751,6 +760,26 @@ def test_a_run_cancelled_during_relevance_sends_no_further_call_and_fails_there(
     calls = json.loads((run_dir / "relevance" / "calls.json").read_text())
     assert [call["error"] for call in calls] == [None] * len(DOCS)
     assert CANCELLED in (run_dir / "relevance" / "error.txt").read_text()
+
+
+def test_a_run_cancelled_during_a_stages_last_call_stops_as_the_next_one_starts(
+    answering_llm, tmp_path
+):
+    cancel = threading.Event()
+
+    def schema_while_cancelled(request: dict[str, Any]) -> str:
+        cancel.set()
+        return SCHEMA_REPLY
+
+    answering_llm.answers(schema=schema_while_cancelled)
+    events = []
+    with pytest.raises(r3con.Cancelled):
+        finished_run(answering_llm, tmp_path, on_event=events.append, cancel=cancel)
+    types = [event["type"] for event in events]
+    assert types[types.index("schema_finished") :] == ["schema_finished", "run_failed"]
+    assert events[-1]["stage"] == "parsing"
+    parsing = Path(events[0]["run_dir"]) / "structuring" / "parsing"
+    assert CANCELLED in (parsing / "error.txt").read_text()
 
 
 def test_an_ask_cancelled_during_reasoning_sends_no_further_call_and_fails_there(

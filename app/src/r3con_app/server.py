@@ -28,8 +28,13 @@ opened URL's fragment, ``#token=...``.
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with the
   ``run_failed`` or ``ask_failed`` r3con emits, naming the stage it stopped in. A run or
-  ask that has ended is left as it was. When the server shuts down, it cancels every run
-  and ask still going, so none goes on calling the model.
+  ask that has ended is left as it was.
+
+When the server stops (``serve``'s ``stop``, or Ctrl-C), it cancels every run and ask
+still going as its shutdown begins, before it waits for open connections such as the
+page's event stream, so none sends a new model call. ``r3con-app`` then waits up to
+``WORKERS_EXIT_SECONDS`` for them to end, so each finishes its call in flight and writes
+its run folder, ``error.txt`` and ``run_failed`` included, before the process exits.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -47,6 +52,7 @@ import os
 import secrets
 import socket
 import threading
+import time
 import webbrowser
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -93,6 +99,8 @@ TOKEN_BYTES = 32
 ID_BYTES = 8
 MAX_BODY_BYTES = 64 * 1024 * 1024
 SHUTDOWN_GRACE_SECONDS = 1
+WORKERS_EXIT_SECONDS = 60
+WORKER_PREFIX = "r3con-app-"
 KEY_VARIABLES: dict[Provider, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -278,7 +286,9 @@ def _work(
     except Exception as error:  # noqa: BLE001 — logged below, as one masked line
         # No traceback: r3con writes it to the failed stage's error.txt.
         line = one_line(error)
-        logger.error("%s: %s", failed, line)
+        # A cancel was asked for, by the user or by the server stopping: no error.
+        log = logger.info if isinstance(error, r3con.Cancelled) else logger.error
+        log("%s: %s", failed, line)
         EventRecorder(on_event, None)(failed, stage=None, error=line)
 
 
@@ -289,7 +299,7 @@ def _start(state: ServerState, kind: Kind, call: Callable[..., Any]) -> str:
     state.jobs[kind][job_id] = job = Job()
     args = (job, asyncio.get_running_loop(), call, f"{kind}_failed")
     worker = threading.Thread(
-        target=_work, args=args, name=f"r3con-app-{job_id}", daemon=True
+        target=_work, args=args, name=f"{WORKER_PREFIX}{job_id}", daemon=True
     )
     worker.start()
     return job_id
@@ -386,10 +396,8 @@ async def cancel(request: Request, *, kind: Kind) -> Response:
     return Response(status_code=202)
 
 
-@contextlib.asynccontextmanager
-async def _cancel_on_shutdown(app: Starlette) -> AsyncIterator[None]:
-    yield
-    for jobs in app.state.server.jobs.values():
+def _cancel_jobs(state: ServerState) -> None:
+    for jobs in state.jobs.values():
         for job in jobs.values():
             job.cancel.set()
 
@@ -447,13 +455,12 @@ def create_app(
     *,
     token: str,
     port: int,
-    logs_dir: Path = LOGS_DIR,
-    completion: Callable[..., Any] | None = None,
+    state: ServerState,
     max_body_bytes: int = MAX_BODY_BYTES,
 ) -> ASGIApp:
-    """The server's ASGI app, for requests to 127.0.0.1 or localhost on ``port`` that
-    carry ``token``. Run folders go in ``logs_dir``; ``completion`` is passed to r3con
-    as its own ``completion`` is. Its shutdown cancels every job."""
+    """The server's ASGI app over ``state``, for requests to 127.0.0.1 or localhost on
+    ``port`` that carry ``token``. Run folders go in ``state.logs_dir``;
+    ``state.completion`` is passed to r3con as its own ``completion`` is."""
     app = Starlette(
         routes=[
             Route("/", page),
@@ -477,15 +484,30 @@ def create_app(
         ],
         exception_handlers={HTTPException: _error},
         max_body_size=max_body_bytes,
-        lifespan=_cancel_on_shutdown,
     )
-    app.state.server = ServerState(logs_dir=logs_dir, completion=completion)
+    app.state.server = state
     return guard(app, token=token, port=port)
+
+
+class _Server(uvicorn.Server):
+    """uvicorn's server, cancelling every job as its shutdown begins: before it waits
+    for open connections to close, which the page's event stream never does by
+    itself."""
+
+    def __init__(self, config: uvicorn.Config, state: ServerState) -> None:
+        super().__init__(config)
+        self.app_state = state
+
+    async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        _cancel_jobs(self.app_state)
+        await super().shutdown(sockets)
+        # Again, for a job started while the open connections were closing.
+        _cancel_jobs(self.app_state)
 
 
 def _server(
     port: int, logs_dir: Path, completion: Callable[..., Any] | None
-) -> tuple[uvicorn.Server, socket.socket, str]:
+) -> tuple[_Server, socket.socket, str]:
     """A server for a socket already listening on ``port`` (0 for a free one), and the
     URL that opens its page."""
     listener = socket.socket()
@@ -494,9 +516,24 @@ def _server(
     listener.listen()
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
-    app = create_app(token=token, port=port, logs_dir=logs_dir, completion=completion)
+    state = ServerState(logs_dir=logs_dir, completion=completion)
+    app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
-    return uvicorn.Server(config), listener, f"http://{HOST}:{port}/#token={token}"
+    return _Server(config, state), listener, f"http://{HOST}:{port}/#token={token}"
+
+
+def _join_workers(seconds: float) -> None:
+    """Wait up to ``seconds`` in all for every job's worker to end."""
+    workers = [t for t in threading.enumerate() if t.name.startswith(WORKER_PREFIX)]
+    if workers:
+        print(
+            f"r3con app: waiting up to {seconds} s for {len(workers)} run(s) or ask(s) "
+            "to finish their calls in flight; Ctrl-C again to quit now",
+            flush=True,
+        )
+    deadline = time.monotonic() + seconds
+    for worker in workers:
+        worker.join(max(0.0, deadline - time.monotonic()))
 
 
 def serve(
@@ -548,3 +585,6 @@ def main(argv: list[str] | None = None) -> None:
     # uvicorn shuts down on Ctrl-C, then raises it again, as its own run() expects.
     with contextlib.suppress(KeyboardInterrupt):
         server.run(sockets=[listener])
+    # A second Ctrl-C ends the wait, and the process with its workers.
+    with contextlib.suppress(KeyboardInterrupt):
+        _join_workers(WORKERS_EXIT_SECONDS)

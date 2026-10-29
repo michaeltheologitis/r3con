@@ -284,16 +284,19 @@ def run(
             raises, the error is logged and the run goes on. The run folder's
             ``events.jsonl`` records the same events, whether or not it is given.
         cancel: a ``threading.Event`` that stops the run once it is set, from any
-            thread. From then on no new model call is sent, and a wait to resend a
-            rate-limited call ends at once; the stage under way raises
+            thread. From then on no new model call is sent, no stage starts, and a
+            wait to resend a rate-limited call ends at once; the stage under way, or
+            the next one if the last call of one was in flight, raises
             :class:`Cancelled` and fails as any stage does, with ``run_failed``
             naming it and, with artifacts on, its folder holding the calls it made
             and ``error.txt``, beside the earlier stages' artifacts. What is already
-            under way is not interrupted: a call already sent finishes (litellm cannot
-            stop one) and is recorded, a step the coding path is running in its
-            sandbox runs to its end or its timeout, and a supplied ``completion``'s
-            own waits between resends run their course. A run that has sent its last
-            call by then finishes as usual.
+            under way runs its course: a call already sent (litellm cannot stop one),
+            which is recorded, so a run whose last call is in flight finishes as
+            usual; the resends r3con does not make itself, a supplied
+            ``completion``'s (a ``litellm.Router``'s, say) and those of
+            ``num_retries``, ``max_retries`` or ``retry_policy`` in ``params``; and a
+            step the coding path is running in its sandbox, to its end or its
+            timeout.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
@@ -323,7 +326,7 @@ def run(
         document leave it no room in the model's window. With
         artifacts on, an exception from a stage carries a note naming the run folder,
         where the stage left its completed calls and ``error.txt``.
-        Cancelled: once ``cancel`` is set, in place of the next model call.
+        Cancelled: once ``cancel`` is set, in place of the next model call or stage.
     """
     # `run` is the batteries-included path, so it loads the caller's .env (from THEIR
     # working directory) the way the CLI does. Importing r3con does not.
