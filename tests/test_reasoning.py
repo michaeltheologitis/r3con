@@ -681,7 +681,7 @@ def test_a_first_turn_refused_with_samples_is_raised(llm, refusal):
 
 def test_a_direct_prompt_that_fits_without_the_enum_it_drops_is_sent(llm, window):
     ids = [f"d{n:03x}" for n in range(1_001)]
-    # About 14,070 tokens as sent, but 18,880 counting the ids' enum: the line is 17,000.
+    # About 14,070 tokens as sent, about 18,900 with the ids' enum; the line is 17,000.
     result = ask(
         llm,
         citing("direct"),

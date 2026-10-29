@@ -22,6 +22,8 @@ Structured output goes out in OpenAI strict mode, which demands more of a JSON s
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
 :func:`_drop_refused_constraints` removes what it refuses: enums, the largest first, until
 those left hold no more than 1,000 values together, and a pattern with a lookaround.
+:func:`schema_as_sent` builds the schema as sent, for the request and for the token
+budgets.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -86,8 +88,7 @@ _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
 _WAIT_DIGITS = 2
-# OpenAI Structured Outputs: "up to 1000 enum values across all enum properties", so a
-# limit on all of a schema's enums together, not on each one.
+# OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
@@ -109,15 +110,10 @@ def _enforce_strict_objects(schema: Any) -> Any:
     ``anyOf: [..., {"type": "null"}]``), so optionality is preserved at the
     value level; only the *key* is forced to appear.
     """
-    if isinstance(schema, dict):
-        if schema.get("type") == "object" and "properties" in schema:
-            schema.setdefault("additionalProperties", False)
-            schema["required"] = list(schema["properties"].keys())
-        for v in schema.values():
-            _enforce_strict_objects(v)
-    elif isinstance(schema, list):
-        for item in schema:
-            _enforce_strict_objects(item)
+    for node in _dicts_in(schema):
+        if node.get("type") == "object" and "properties" in node:
+            node.setdefault("additionalProperties", False)
+            node["required"] = list(node["properties"].keys())
     return schema
 
 
