@@ -16,6 +16,8 @@ from starlette.testclient import TestClient
 from starlette.types import ASGIApp
 
 from r3con.app.server import ServerState, _server, create_app, listen, serve
+from r3con.r3con import read_documents
+from tests.pdfs import write_pdf
 
 litellm.suppress_debug_info = True
 
@@ -42,6 +44,9 @@ STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
 ASK = {"question": "Which site logged the fewest?", "model": MODEL}
+PDF_TEXT = "Incidents this quarter: 7."
+CORRUPT_PDF = b"%PDF-1.4 truncated garbage"
+DOCUMENT_TEXT = "/api/documents/text"
 RUN_EVENTS = [
     "run_started",
     "relevance_started",
@@ -201,6 +206,13 @@ def finished_run(client: TestClient, model: str = MODEL) -> str:
     return run_id
 
 
+def text_of(client: TestClient, path: Path) -> httpx2.Response:
+    """The server's answer for the text of the file at ``path``, sent as it is."""
+    return client.post(
+        DOCUMENT_TEXT, params={"name": path.name}, content=path.read_bytes()
+    )
+
+
 def transport(llm: FakeModel) -> list[dict[str, str]]:
     """The key and endpoint each request was sent with."""
     return [
@@ -309,15 +321,19 @@ def test_the_page_and_its_files_are_revalidated_on_every_load(
 
 
 @pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/api/keys"), ("POST", f"{DOCUMENT_TEXT}?name=memo.pdf")],
+)
+@pytest.mark.parametrize(
     "authorization",
     [None, "Bearer wrong-token", "the-launch-token", "Basic the-launch-token"],
 )
 def test_an_api_call_without_this_launchs_token_is_refused(
-    client: TestClient, authorization: str | None
+    client: TestClient, method: str, path: str, authorization: str | None
 ):
     del client.headers["Authorization"]
     headers = {} if authorization is None else {"Authorization": authorization}
-    response = client.get("/api/keys", headers=headers)
+    response = client.request(method, path, headers=headers, content=CORRUPT_PDF)
     assert response.status_code == 401
     assert "token" in response.json()["error"]
 
@@ -606,12 +622,97 @@ def test_a_body_that_is_not_json_is_refused(client: TestClient):
     assert response.json()["error"].startswith("body: Invalid JSON")
 
 
-def test_a_body_over_the_limit_is_refused(llm: FakeModel, logs_dir: Path):
+@pytest.mark.parametrize("path", ["/api/runs", f"{DOCUMENT_TEXT}?name=memo.pdf"])
+# Streamed, the body has no Content-Length, so only reading it can find it too long.
+@pytest.mark.parametrize("streamed", [False, True], ids=["sized", "streamed"])
+def test_a_body_over_the_limit_is_refused(
+    llm: FakeModel, logs_dir: Path, path: str, streamed: bool
+):
     body = {"question": QUESTION, "model": MODEL, "documents": ["x" * 1_001]}
+    content = json.dumps(body).encode()
     with client_for(llm, logs_dir, max_body_bytes=1_000) as client:
-        response = client.post("/api/runs", json=body)
+        response = client.post(path, content=iter([content]) if streamed else content)
     assert response.status_code == 413
     assert llm.requests == []
+
+
+@pytest.mark.parametrize(
+    ("text", "to_unicode", "extracted"),
+    [
+        (PDF_TEXT, None, PDF_TEXT),
+        # pypdf reads a ToUnicode CMap with surrogatepass: half a pair stays half.
+        ("Memo A here", {"A": "D800"}, "Memo \ufffd here"),
+        ("Memo A here", {"A": "D83DDE00"}, "Memo \U0001f600 here"),
+        # A pair mapped from two codes comes as two code units.
+        ("Memo AB here", {"A": "D83D", "B": "DE00"}, "Memo \U0001f600 here"),
+    ],
+    ids=["plain", "half-a-pair", "pair", "pair-from-two-codes"],
+)
+def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
+    client: TestClient,
+    tmp_path: Path,
+    text: str,
+    to_unicode: dict[str, str] | None,
+    extracted: str,
+):
+    pdf = tmp_path / "memo.pdf"
+    write_pdf(pdf, text, to_unicode=to_unicode)
+    response = text_of(client, pdf)
+    assert response.status_code == 200
+    assert response.json() == {"text": extracted}
+    assert read_documents(pdf) == [extracted]
+
+
+@pytest.mark.parametrize(
+    ("write", "logged"),
+    [
+        (
+            write_pdf,
+            (
+                "memo.pdf: no extractable text — a scanned PDF needs OCR first; "
+                "skipping it"
+            ),
+        ),
+        (
+            lambda path: path.write_bytes(CORRUPT_PDF),
+            "memo.pdf: not readable as a PDF (PdfStreamError); skipping it",
+        ),
+    ],
+    ids=["scanned", "corrupt"],
+)
+def test_a_pdf_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
+    client: TestClient,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    write: Callable[[Path], None],
+    logged: str,
+):
+    pdf = tmp_path / "memo.pdf"
+    write(pdf)
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        response = text_of(client, pdf)
+    assert response.status_code == 200
+    assert response.json() == {"text": ""}
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        logged
+    ]
+
+
+@pytest.mark.parametrize(
+    ("params", "wrong"),
+    [
+        ({}, "name: Field required"),
+        ({"name": " "}, "name: must not be blank"),
+        ({"name": "memo.pdf", "pages": "1"}, "pages: Extra inputs are not permitted"),
+        ({"name": "memo.pdf", "content": "x"}, "content: Extra inputs"),
+    ],
+)
+def test_a_pdf_without_a_valid_name_is_refused_with_what_is_wrong(
+    client: TestClient, params: dict[str, str], wrong: str
+):
+    response = client.post(DOCUMENT_TEXT, params=params, content=CORRUPT_PDF)
+    assert response.status_code == 422
+    assert wrong in response.json()["error"]
 
 
 @pytest.mark.parametrize(

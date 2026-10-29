@@ -18,6 +18,10 @@ opened URL's fragment, ``#token=...``.
   and masks in every event's ``error``, in what it writes to the logs dir and in what
   it logs (:mod:`r3con.masking`), the environment's keys too; the server's own log
   line of a failure goes through the same masking.
+- ``POST /api/documents/text?name=<file name>``, with a PDF's bytes as the body,
+  answers ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""``
+  for a scan or a file pypdf can't read, as the server's log then says. The page sends
+  each PDF it is given here, and reads other files itself.
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -51,6 +55,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import io
 import json
 import os
 import secrets
@@ -81,6 +86,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
@@ -153,6 +159,11 @@ class RunRequest(BaseModel):
     documents: list[Text] = Field(min_length=1)
 
 
+class DocumentQuery(BaseModel):
+    model_config = FORBID_EXTRA
+    name: Text
+
+
 class AskRequest(BaseModel):
     model_config = FORBID_EXTRA
     question: Text
@@ -211,11 +222,15 @@ def _state(request: Request) -> ServerState:
     return request.app.state.server
 
 
-async def _read(request: Request, parse: Callable[[bytes], Parsed]) -> Parsed:
+def _valid(parse: Callable[[Any], Parsed], given: Any) -> Parsed:
     try:
-        return parse(await request.body())
+        return parse(given)
     except ValidationError as error:
         raise HTTPException(422, _explain(error)) from None
+
+
+async def _read(request: Request, parse: Callable[[bytes], Parsed]) -> Parsed:
+    return _valid(parse, await request.body())
 
 
 def _explain(error: ValidationError) -> str:
@@ -375,6 +390,14 @@ async def forget_key(request: Request) -> Response:
     return JSONResponse(_key_status(state))
 
 
+async def document_text(request: Request) -> Response:
+    query = _valid(DocumentQuery.model_validate, dict(request.query_params))
+    pdf = io.BytesIO(await request.body())
+    # pypdf is CPU-bound: on the event loop, it would hold up every other request.
+    text = await run_in_threadpool(r3con._pdf_text, query.name, pdf)
+    return JSONResponse({"text": text})
+
+
 async def start_run(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, RunRequest.model_validate_json)
@@ -490,6 +513,7 @@ def create_app(
             Route("/api/keys", keys, methods=["GET"]),
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
+            Route("/api/documents/text", document_text, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(

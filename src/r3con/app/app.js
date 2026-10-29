@@ -9,7 +9,9 @@
   /** @typedef {{ x: number, y: number, k: number }} View */
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
-  /** @typedef {{ name: string, text: string, size: number, sample: boolean, uid: number }} LoadedFile */
+  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
+  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
+  /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
   /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
   /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
@@ -119,7 +121,7 @@
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
-   * @property {(file: File) => Blob} readable
+   * @property {(file: File) => Promise<FileRead>} readPdf
    * @property {(question: string) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
@@ -520,8 +522,15 @@
 
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
-  const READ_BYTES = 20000;
+  const PREVIEW_CHARS = 20000;
   const MAX_FILES = 40;
+  const PDF_SUFFIX = '.pdf';
+  // A NUL byte this near a file's start means it isn't text, as git judges it.
+  const SNIFF_BYTES = 8000;
+  const UTF16_BOMS = [
+    [0xff, 0xfe],
+    [0xfe, 0xff],
+  ];
   const MAX_SIMULATED_CITES = 4;
   const SIMULATED_SUMMARY_STRIDE = 2;
   const SIMULATED_PARSE_STRIDE = 3;
@@ -567,6 +576,7 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
+  const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
@@ -584,6 +594,8 @@
     "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
+  const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
+  const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -654,12 +666,12 @@
 
   let nextUid = 0;
 
-  /** @param {Omit<LoadedFile, 'uid'>} file @returns {LoadedFile} */
-  function withUid(file) {
-    return { ...file, uid: nextUid++ };
+  /** @param {Omit<LoadedFile, 'bytes' | 'uid'>} file @returns {LoadedFile} */
+  function loaded(file) {
+    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++ };
   }
 
-  const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
+  const SAMPLE_FILES = SAMPLE.docs.map((d) => loaded({ ...d, sample: true }));
 
   /** @param {LoadedFile} file */
   const docId = (file) => `doc-${file.uid}`;
@@ -784,10 +796,14 @@
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
   /** @param {LoadedFile} file */
   const fileLabel = (file) => shortLabel(stripExt(file.name));
+  /** @param {{ name: string }} file */
+  const isPdf = (file) => file.name.toLowerCase().endsWith(PDF_SUFFIX);
   /** @param {string} model */
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
   const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
+  /** @param {LoadedFile[]} files */
+  const textBytes = (files) => files.reduce((sum, f) => sum + f.bytes, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Every event handled here starts at an element.
   /** @param {Event} event */
@@ -885,12 +901,14 @@
 
   /** @param {string} path @param {{ method?: string, body?: unknown }} [request] */
   async function api(path, { method = 'GET', body } = {}) {
+    const headers = { Authorization: `Bearer ${token}` };
+    const json = body !== undefined && !(body instanceof Blob);
     let response;
     try {
       response = await fetch(path, {
         method,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: json ? { ...headers, 'Content-Type': 'application/json' } : headers,
+        body: json ? JSON.stringify(body) : /** @type {Blob | undefined} */ (body),
       });
     } catch {
       connectionProblem = LOST_CONNECTION;
@@ -1714,13 +1732,13 @@
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
     if (isPending(state.shown, file)) meta.push('not run yet');
-    if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    if (file.text.length > PREVIEW_CHARS) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
     return meta.join(' · ');
   }
 
   /** @param {LoadedFile} file */
   function fileText(file) {
-    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, READ_BYTES)) : h('p', { class: 'k' }, 'This file has no readable text.');
+    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, PREVIEW_CHARS)) : h('p', { class: 'k' }, 'This file has no readable text.');
   }
 
   /** @param {LoadedFile} file @param {string} label */
@@ -2324,7 +2342,7 @@
       narr.phase(`reading · ${rank + 1} of ${n}`);
     }, PACE.read);
     at(t, () => {
-      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`);
+      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(textBytes(run.docs))}`);
       narr.stage = null;
     });
 
@@ -2386,7 +2404,7 @@
       case 'run_started':
         if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
         run.ids = event.document_ids;
-        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(totalBytes(run.docs))}`);
+        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         if (!hasNodes(tab, `r${event.round}`)) beginStage(tab, narr, `r${event.round}`);
@@ -2761,22 +2779,75 @@
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => resolve('');
-      reader.readAsText(mode.readable(file));
+      reader.readAsText(file);
     });
   }
 
+  // No text holds a NUL byte but UTF-16, which readText decodes after a byte-order mark, as Windows writes it;
+  // even then, no code unit of text is zero, as one of UTF-32 or of binary that starts the same way is.
+  /** @param {Uint8Array} start */
+  function looksLikeText(start) {
+    if (!UTF16_BOMS.some(([first, second]) => start[0] === first && start[1] === second)) return !start.includes(0);
+    for (let i = 2; i + 1 < start.length; i += 2) if (!start[i] && !start[i + 1]) return false;
+    return true;
+  }
+
+  /** @param {File} file @returns {Promise<FileRead>} */
+  async function readFile(file) {
+    if (isPdf(file)) return mode.readPdf(file);
+    // A file that can't be read goes on to readText, which reads it as no text.
+    const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
+    return looksLikeText(start) ? { text: await readText(file) } : { why: NOT_TEXT };
+  }
+
+  // Batches are read and added one after another, so that each one's lines in the files pane stand.
+  let adding = Promise.resolve();
+
   /** @param {Iterable<File | null>} list */
-  async function addFiles(list) {
-    const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+  function addFiles(list) {
+    // Copied now: a file input's list empties once its value is reset.
+    const files = [...list];
+    adding = adding.then(() => addBatch(files)).catch(failedToAdd);
+  }
+
+  // Shown before it is filled, so that the alert is announced.
+  /** @param {string} text */
+  function showFilesError(text) {
     const error = $('files-error');
+    error.hidden = false;
+    error.textContent = text;
+  }
+
+  /** @param {unknown} error */
+  function failedToAdd(error) {
+    $('files-said').textContent = '';
+    showFilesError(explain(error, "Couldn't add those files.", "couldn't add files"));
+  }
+
+  /** @param {(File | null)[]} files */
+  async function addBatch(files) {
+    const picked = files.filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    picked.sort((a, b) => a.name.localeCompare(b.name));
     if (!picked.length) {
-      error.textContent = 'No files found there. Try picking the files themselves.';
-      error.hidden = false;
+      showFilesError('No files found there. Try picking the files themselves.');
       return;
     }
-    error.hidden = true;
-    const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
-    read.sort((a, b) => a.name.localeCompare(b.name));
+    $('files-error').hidden = true;
+    $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
+    const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
+    /** @type {LoadedFile[]} */
+    const read = [];
+    /** @type {Map<string, string[]>} */
+    const refused = new Map();
+    for (const r of reads) {
+      if ('why' in r) refused.set(r.why, [...(refused.get(r.why) ?? []), r.file.name]);
+      else read.push(loaded({ name: r.file.name, size: r.file.size, text: r.text, sample: false }));
+    }
+    if (refused.size) showFilesError([...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' '));
+    if (!read.length) {
+      $('files-said').textContent = '';
+      return;
+    }
     // Files added over the sample memos take the place of any that are left.
     const replaced = state.files.filter((f) => f.sample).length;
     state.files = [...state.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
@@ -3347,8 +3418,7 @@
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
-    // It shows a file's start only, so it reads no more than that.
-    readable: (file) => file.slice(0, READ_BYTES),
+    readPdf: async () => ({ why: PDFS_NEED_APP }),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
@@ -3372,7 +3442,15 @@
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
-    readable: (file) => file,
+    async readPdf(file) {
+      try {
+        const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+        const { text } = await extracted.json();
+        return text.trim() ? { text } : { why: NO_TEXT_LAYER };
+      } catch (error) {
+        return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a PDF's text")}.` };
+      }
+    },
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
