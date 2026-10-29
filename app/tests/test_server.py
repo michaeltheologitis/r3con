@@ -77,13 +77,15 @@ def opened() -> threading.Event:
 
 @dataclass
 class FakeModel:
-    """A ``completion=`` that answers r3con's requests as a model would, through
-    litellm's own mock, and keeps them. Each request waits at ``gate``; a request for
-    the reply named ``fail_on`` raises ``error`` instead of being answered."""
+    """A ``completion=`` that answers r3con's requests as a model would, with
+    ``replies``, through litellm's own mock, and keeps them. Each request waits at
+    ``gate``; a request for the reply named ``fail_on`` raises ``error`` instead of
+    being answered."""
 
     gate: threading.Event = field(default_factory=opened)
     fail_on: str | None = None
     error: Exception = field(default_factory=lambda: RuntimeError("the model is down"))
+    replies: dict[str, str] = field(default_factory=lambda: dict(REPLIES))
     requests: list[dict[str, Any]] = field(default_factory=list)
     called: threading.Event = field(default_factory=threading.Event)
 
@@ -98,7 +100,7 @@ class FakeModel:
         choice = {
             "index": 0,
             "finish_reason": "stop",
-            "message": {"content": REPLIES[name]},
+            "message": {"content": self.replies[name]},
         }
         return litellm.completion(
             **request, mock_response={"choices": [choice], "usage": USAGE}
@@ -116,6 +118,12 @@ def held_llm() -> FakeModel:
     model = FakeModel()
     model.gate.clear()
     return model
+
+
+@pytest.fixture
+def one_call_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3con reads one document at a time, so a held model holds the only call."""
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
 
 @pytest.fixture
@@ -188,6 +196,14 @@ def transport(llm: FakeModel) -> list[dict[str, str]]:
         {name: call[name] for name in ("api_key", "api_base") if name in call}
         for call in llm.requests
     ]
+
+
+def join_workers() -> list[threading.Thread]:
+    """Every worker thread the server started, once each has ended."""
+    workers = [t for t in threading.enumerate() if t.name.startswith("r3con-app-")]
+    for worker in workers:
+        worker.join(GATE_TIMEOUT_SECONDS)
+    return workers
 
 
 def http_client(url: str) -> httpx2.Client:
@@ -556,7 +572,9 @@ def test_a_key_body_that_is_not_valid_is_refused_without_echoing_the_key(
     [
         ("GET", "/api/runs/nothing/events"),
         ("POST", "/api/runs/nothing/asks"),
+        ("POST", "/api/runs/nothing/cancel"),
         ("GET", "/api/asks/nothing/events"),
+        ("POST", "/api/asks/nothing/cancel"),
     ],
 )
 def test_a_run_or_ask_this_server_did_not_start_is_not_found(
@@ -565,6 +583,59 @@ def test_a_run_or_ask_this_server_did_not_start_is_not_found(
     response = client.request(method, path, json=ASK)
     assert response.status_code == 404
     assert "nothing" in response.json()["error"]
+
+
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_failed(
+    held_llm: FakeModel, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.post(f"/api/runs/{run_id}/cancel")
+        held_llm.gate.set()
+        last = run_events(client, run_id)[-1]
+    assert response.status_code == 202
+    assert len(held_llm.requests) == 1
+    assert (last["type"], last["stage"]) == ("run_failed", "relevance")
+    assert last["error"].startswith("Cancelled: ")
+
+
+def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_failed(
+    held_llm: FakeModel, logs_dir: Path
+):
+    held_llm.gate.set()
+    with client_for(held_llm, logs_dir) as client:
+        run_id = finished_run(client)
+        held_llm.gate.clear()
+        held_llm.called.clear()
+        # A reply that does not fit, which the ask would send again.
+        held_llm.replies["ReasoningAnswer"] = "not an answer"
+        sent = len(held_llm.requests)
+        ask_id = client.post(f"/api/runs/{run_id}/asks", json=ASK).json()["ask_id"]
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.post(f"/api/asks/{ask_id}/cancel")
+        held_llm.gate.set()
+        last = events_of(client, f"/api/asks/{ask_id}/events")[-1]
+    assert response.status_code == 202
+    assert len(held_llm.requests) == sent + 1
+    assert (last["type"], last["stage"]) == ("ask_failed", "reasoning")
+    assert last["error"].startswith("Cancelled: ")
+
+
+def test_a_cancel_without_this_launchs_token_is_refused_and_the_run_goes_on(
+    held_llm: FakeModel, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        del client.headers["Authorization"]
+        response = client.post(f"/api/runs/{run_id}/cancel")
+        client.headers.update(AUTH)
+        held_llm.gate.set()
+        last = run_events(client, run_id)[-1]
+    assert response.status_code == 401
+    assert last["type"] == "run_finished"
 
 
 @pytest.mark.enable_socket
@@ -601,10 +672,24 @@ def test_a_run_the_server_stops_under_ends_without_an_unhandled_error(
     assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
     stop()
     held_llm.gate.set()
-    workers = [t for t in threading.enumerate() if t.name.startswith("r3con-app-")]
+    workers = join_workers()
     assert workers
-    for worker in workers:
-        worker.join(GATE_TIMEOUT_SECONDS)
     assert not any(worker.is_alive() for worker in workers)
     assert unhandled == []
     assert not [r for r in caplog.records if "on_event raised" in r.getMessage()]
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_stopping_the_server_cancels_its_runs_so_they_send_no_further_call(
+    held_llm: FakeModel, logs_dir: Path
+):
+    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
+    with http_client(url) as http:
+        assert http.post("/api/runs", json=run_body()).status_code == 202
+    assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+    stop()
+    held_llm.gate.set()
+    join_workers()
+    assert len(held_llm.requests) == 1

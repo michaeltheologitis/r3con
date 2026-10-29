@@ -24,6 +24,12 @@ opened URL's fragment, ``#token=...``.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model}``) starts ``r3con.ask`` over a
   run that has ended and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events``
   streams its events until ``ask_finished`` or ``ask_failed``.
+- ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
+  run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
+  new model call; a call in flight finishes, and the stream then ends with the
+  ``run_failed`` or ``ask_failed`` r3con emits, naming the stage it stopped in. A run or
+  ask that has ended is left as it was. When the server shuts down, it cancels every run
+  and ask still going, so none goes on calling the model.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -157,10 +163,12 @@ KEY_BODY: TypeAdapter[ProviderKey | OtherEndpoint] = TypeAdapter(
 
 @dataclass
 class Job:
-    """One run's or ask's events so far. Only the event loop's thread touches it."""
+    """One run's or ask's events so far, and the event that cancels it. Only the event
+    loop's thread touches ``events`` and ``wake``; its worker reads ``cancel``."""
 
     events: list[dict[str, Any]] = field(default_factory=list)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    cancel: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass
@@ -266,7 +274,7 @@ def _work(
 ) -> None:
     on_event = partial(_relay, loop, job)
     try:
-        call(on_event=on_event)
+        call(on_event=on_event, cancel=job.cancel)
     except Exception as error:  # noqa: BLE001 — logged below, as one masked line
         # No traceback: r3con writes it to the failed stage's error.txt.
         line = one_line(error)
@@ -373,6 +381,19 @@ async def events(request: Request, *, kind: Kind) -> Response:
     return StreamingResponse(_stream(job), media_type="text/event-stream")
 
 
+async def cancel(request: Request, *, kind: Kind) -> Response:
+    _job(_state(request).jobs[kind], request.path_params["job_id"], kind).cancel.set()
+    return Response(status_code=202)
+
+
+@contextlib.asynccontextmanager
+async def _cancel_on_shutdown(app: Starlette) -> AsyncIterator[None]:
+    yield
+    for jobs in app.state.server.jobs.values():
+        for job in jobs.values():
+            job.cancel.set()
+
+
 async def _error(request: Request, error: Exception) -> Response:
     # Starlette types every handler as taking any Exception; this one is HTTPException's.
     assert isinstance(error, HTTPException)
@@ -432,7 +453,7 @@ def create_app(
 ) -> ASGIApp:
     """The server's ASGI app, for requests to 127.0.0.1 or localhost on ``port`` that
     carry ``token``. Run folders go in ``logs_dir``; ``completion`` is passed to r3con
-    as its own ``completion`` is."""
+    as its own ``completion`` is. Its shutdown cancels every job."""
     app = Starlette(
         routes=[
             Route("/", page),
@@ -441,11 +462,22 @@ def create_app(
             Route("/api/keys", forget_key, methods=["DELETE"]),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
+            Route(
+                "/api/runs/{job_id}/cancel",
+                partial(cancel, kind="run"),
+                methods=["POST"],
+            ),
             Route("/api/runs/{run_id}/asks", start_ask, methods=["POST"]),
             Route("/api/asks/{job_id}/events", partial(events, kind="ask")),
+            Route(
+                "/api/asks/{job_id}/cancel",
+                partial(cancel, kind="ask"),
+                methods=["POST"],
+            ),
         ],
         exception_handlers={HTTPException: _error},
         max_body_size=max_body_bytes,
+        lifespan=_cancel_on_shutdown,
     )
     app.state.server = ServerState(logs_dir=logs_dir, completion=completion)
     return guard(app, token=token, port=port)
