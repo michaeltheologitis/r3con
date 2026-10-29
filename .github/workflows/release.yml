@@ -71,3 +71,28 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    if: github.ref_type == 'tag'
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      # The release commit's body is the notes; its trailers are attribution, not notes.
+      - name: Build the notes
+        run: |
+          git log -1 --format=%b "$GITHUB_SHA" |
+            sed -E '/^(Co-Authored-By|Claude-Session): /Id' |
+            git stripspace > notes.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file notes.md --verify-tag
