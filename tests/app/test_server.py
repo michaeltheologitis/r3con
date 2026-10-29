@@ -1,6 +1,7 @@
 import contextlib
 import json
 import logging
+import socket
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -767,6 +768,26 @@ def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
     )
     assert not logs_dir.exists()
     assert llm.requests == []
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_connection_the_server_accepts_sends_with_tcp_nodelay(logs_dir: Path):
+    listener = listen(0)
+    server, url = _server(listener, logs_dir, None)
+    serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    serving.start()
+    try:
+        with http_client(url) as http:
+            assert http.get("/api/keys").status_code == 200
+            (connection,) = server.server_state.connections
+            accepted = connection.transport.get_extra_info("socket")
+            nodelay = accepted.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY)
+    finally:
+        server.should_exit = True
+        serving.join(GATE_TIMEOUT_SECONDS)
+    assert not serving.is_alive()
+    assert nodelay
 
 
 @pytest.mark.enable_socket
