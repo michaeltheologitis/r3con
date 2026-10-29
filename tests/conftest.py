@@ -320,6 +320,14 @@ def summary_ids_shown(request: Request) -> list[str]:
     return re.findall(r"^### Summary ID: (\S+)$", shown, re.MULTILINE)
 
 
+def prompt_sections(prompt: str) -> dict[str, str]:
+    """A prompt's ``## `` sections, in order, each heading to its body, stripped,
+    without its examples'."""
+    instructions = prompt.split("\n\nExamples:\n\n", 1)[0]
+    _, *parts = re.split(r"^(## .+)$", instructions, flags=re.MULTILINE)
+    return {heading: body.strip() for heading, body in zip(parts[::2], parts[1::2])}
+
+
 def _first_line(request: Request) -> str:
     """The first line of the document a request sends, below a parse request's
     ``Document ID`` line."""
@@ -396,6 +404,11 @@ def quiet_sites() -> Callable[[int], list[str]]:
 @pytest.fixture
 def shown_ids() -> Callable[[Request], list[str]]:
     return summary_ids_shown
+
+
+@pytest.fixture
+def sections() -> Callable[[str], dict[str, str]]:
+    return prompt_sections
 
 
 @pytest.fixture

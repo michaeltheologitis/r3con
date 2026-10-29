@@ -259,16 +259,18 @@ def test_round_one_sends_the_first_round_prompt_and_reads_plain_text(llm):
     ]
 
 
-def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(llm):
+def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(
+    llm, sections
+):
     surface(llm, ["DOC0", "DOC1", "DOC2"], rounds=2, workers=1)
     [request] = reads_of(llm, "DOC0")[1:]
-    assert request["messages"][0]["content"] == load_prompt(
-        "relevance/later-rounds",
-        version="v2",
-        task=TASK,
-        other_snippets=(
-            "### Summary ID: 1b1b1b\nN(DOC1,r1)\n\n### Summary ID: 2c2c2c\nN(DOC2,r1)"
-        ),
+    prompt = request["messages"][0]["content"]
+    assert "<task>\nWhich filing reports higher revenue?\n</task>" in prompt
+    shown = sections(prompt)
+    others = "## Task-conditioned summaries of the other documents (previous round)"
+    assert list(shown) == [others, "## Output"]
+    assert shown[others].endswith(
+        "### Summary ID: 1b1b1b\nN(DOC1,r1)\n\n### Summary ID: 2c2c2c\nN(DOC2,r1)"
     )
     schema = request["response_format"]["json_schema"]
     assert (schema["name"], schema["strict"]) == ("RelevanceSummary", True)
