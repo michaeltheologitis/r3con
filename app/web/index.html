@@ -279,7 +279,7 @@ p { margin: 0; }
 }
 .keys label { font-weight: 600; }
 #key-other { grid-column: 2; }
-.settings input, #model-other {
+.field {
   width: 100%;
   min-width: 0;
   padding: 0.3em 1ch;
@@ -289,7 +289,7 @@ p { margin: 0; }
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-.settings input:focus-visible, #model-other:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+.field:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
 .field-row { display: flex; align-items: baseline; gap: 2ch; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
@@ -417,7 +417,7 @@ p { margin: 0; }
   resize: none;
 }
 #question:placeholder-shown { padding-left: 0; }
-.settings input::placeholder, #model-other::placeholder, #question::placeholder { color: var(--dim); opacity: 1; }
+.field::placeholder, #question::placeholder { color: var(--dim); opacity: 1; }
 .ask-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; color: var(--dim); }
 .pick { position: relative; display: flex; min-width: 0; }
 .pick::after { content: "▾"; position: absolute; right: 0; pointer-events: none; }
@@ -433,7 +433,6 @@ p { margin: 0; }
   text-overflow: ellipsis;
   background: none;
   border: 0;
-  border-radius: 3px;
   cursor: pointer;
 }
 #model-pick optgroup, #model-pick option { color: var(--fg); background: var(--bg); }
@@ -520,26 +519,12 @@ p { margin: 0; }
         <div class="insp-title"><span class="g">● </span>settings</div>
         <button class="btn" id="settings-close" type="button" popovertarget="settings" popovertargetaction="hide" aria-label="close settings">esc</button>
       </div>
-      <div class="keys">
-        <label for="key-openai">OpenAI</label>
-        <input class="key" id="key-openai" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" autofocus aria-describedby="state-openai">
-        <span class="k" id="state-openai"></span>
-        <label for="key-anthropic">Anthropic</label>
-        <input class="key" id="key-anthropic" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" aria-describedby="state-anthropic">
-        <span class="k" id="state-anthropic"></span>
-        <label for="key-gemini">Google</label>
-        <input class="key" id="key-gemini" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" aria-describedby="state-gemini">
-        <span class="k" id="state-gemini"></span>
-        <label for="endpoint-other">Other</label>
-        <input id="endpoint-other" form="settings-form" type="text" inputmode="url" pattern="https?://\S+" title="starts with http:// or https://" spellcheck="false" autocapitalize="off" placeholder="http://localhost:8000/v1" aria-describedby="state-other other-hint">
-        <span class="k" id="state-other"></span>
-        <input class="key" id="key-other" type="password" autocomplete="new-password" data-1p-ignore data-lpignore="true" spellcheck="false" autocapitalize="off" placeholder="key, if it needs one" aria-label="Other key">
-      </div>
+      <div class="keys" id="keys"></div>
       <p class="k" id="other-hint">Other is a self-hosted or OpenAI-compatible server, such as vLLM: pick other model… under the question and type its model.</p>
       <p class="k">Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.</p>
       <div class="field-row">
         <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
-        <button class="btn" id="keys-show" type="button" aria-controls="key-openai key-anthropic key-gemini key-other">show keys</button>
+        <button class="btn" id="keys-show" type="button">show keys</button>
         <span class="k" id="settings-saved" aria-live="polite"></span>
       </div>
     </div>
@@ -581,7 +566,7 @@ p { margin: 0; }
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
             <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
           </div>
-          <input id="model-other" type="text" required pattern=".*\S.*" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
+          <input class="field" id="model-other" type="text" required pattern=".*\S.*" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
         </form>
       </section>
@@ -950,12 +935,15 @@ p { margin: 0; }
   ].join('\n');
   const THEME_KEY = 'r3con-proto-theme';
   const MODEL_KEY = 'r3con-proto-model';
+  // Earlier prototypes kept a model and an endpoint here.
+  const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
-  // Taken from LiteLLM's model list on 2026-10-29, and updated by hand.
-  const MODELS = {
-    openai: ['openai/gpt-6.1-sol', 'openai/gpt-6.1-terra', 'openai/gpt-6-luna'],
-    anthropic: ['anthropic/claude-fable-5-1', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5'],
-    gemini: ['gemini/gemini-3.8-flash', 'gemini/gemini-3.1-pro-preview'],
+  // Models taken from LiteLLM's model list on 2026-10-29, and updated by hand.
+  const PROVIDERS = {
+    openai: { label: 'OpenAI', models: ['openai/gpt-6.1-sol', 'openai/gpt-6.1-terra', 'openai/gpt-6-luna'] },
+    anthropic: { label: 'Anthropic', models: ['anthropic/claude-fable-5-1', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5'] },
+    gemini: { label: 'Google', models: ['gemini/gemini-3.8-flash', 'gemini/gemini-3.1-pro-preview'] },
+    other: { label: 'Other', models: [] },
   };
   const OTHER = 'other';
   const SAVED_MS = 1800;
@@ -1035,6 +1023,7 @@ p { margin: 0; }
   const view = { x: 0, y: 0, k: 1 };
 
   const filesAreSample = () => state.files === SAMPLE_FILES;
+  const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
   const isPending = (file) => Boolean(state.run) && !state.run.docs.includes(file);
 
@@ -1087,6 +1076,14 @@ p { margin: 0; }
       localStorage.setItem(key, value);
     } catch {
       // Storage can be blocked; the page works without it for this visit.
+    }
+  }
+
+  function removeStored(key) {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // Blocked storage holds nothing to remove.
     }
   }
 
@@ -1157,7 +1154,7 @@ p { margin: 0; }
     return cites;
   }
 
-  function simulatedRun(files, question) {
+  function simulatedRun(files, question, model) {
     const n = files.length;
     const order = range(n);
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
@@ -1183,13 +1180,13 @@ p { margin: 0; }
       },
       calls: null,
       totals: null,
-      model: null,
+      model,
       order: { r1: order, r2: order, parsed: order },
     };
   }
 
   function runSummary(run) {
-    if (run.simulated) return 'simulated run · nothing was sent to a model';
+    if (run.simulated) return `simulated run · ${run.model} · nothing was sent`;
     return `recorded run · ${run.model} · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
   }
 
@@ -1823,10 +1820,12 @@ p { margin: 0; }
   }
 
   function readyStatus() {
-    if (!state.run) setStatus(`${plural(state.files.length, 'document')} ready · ${pickedModel() || 'no model yet'}`);
+    if (state.run) return;
+    const kind = replaysRecording(questionEl.value.trim()) ? 'recorded run' : 'simulated run';
+    setStatus(`${plural(state.files.length, 'document')} ready · ${kind} · ${pickedModel() || 'no model yet'}`);
   }
 
-  function updateAskFoot() {
+  function updateRunLabel() {
     $('run-btn').textContent = state.run && !state.filesDirty ? 'send ⏎' : 'run ⏎';
   }
 
@@ -1852,7 +1851,7 @@ p { margin: 0; }
     } else {
       startRun(question);
     }
-    updateAskFoot();
+    updateRunLabel();
   }
 
   function followUp(question) {
@@ -2060,8 +2059,7 @@ p { margin: 0; }
   }
 
   function startRun(question) {
-    const recorded = filesAreSample() && question === SAMPLE.question;
-    const run = recorded ? sampleRun() : simulatedRun(state.files, question);
+    const run = replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel());
     state.filesDirty = false;
     state.runTurn = addTurn(question);
     playRun(run);
@@ -2143,7 +2141,7 @@ p { margin: 0; }
     state.filesDirty = true;
     closeFile();
     renderFiles();
-    updateAskFoot();
+    updateRunLabel();
     syncDocNodes();
     readyStatus();
     transcript.append(line('main', message, { dim: true }));
@@ -2208,7 +2206,7 @@ p { margin: 0; }
 
   async function refreshKeys() {
     const providers = await providersWithKeys();
-    for (const provider of [...Object.keys(MODELS), OTHER]) {
+    for (const provider of Object.keys(PROVIDERS)) {
       $(`state-${provider}`).textContent = providers.includes(provider) ? 'set' : '';
     }
     renderPicker(providers);
@@ -2221,17 +2219,20 @@ p { margin: 0; }
     return $('model-pick').value || $('model-other').value.trim();
   }
 
-  // The current choice stays shown even when its provider has no key, as after a reload.
+  // The remembered model stays listed without its key, as after a reload; a chosen "other model…" stays chosen.
   function renderPicker(providers) {
-    const model = pickedModel() || readStored(MODEL_KEY) || DEFAULT_MODEL;
-    const groups = Object.entries(MODELS).filter(([provider]) => providers.includes(provider));
-    const listed = groups.flatMap(([, models]) => models);
-    const option = (name) => h('option', { value: name }, name);
-    const label = (provider) => $(`key-${provider}`).labels[0].textContent;
-    const group = ([provider, models]) => h('optgroup', { label: label(provider) }, models.map(option));
-    const other = h('option', { value: '' }, 'other model…');
-    fill($('model-pick'), listed.includes(model) ? null : option(model), groups.map(group), other);
-    $('model-pick').value = model;
+    const select = $('model-pick');
+    const remembered = readStored(MODEL_KEY) || DEFAULT_MODEL;
+    const groups = Object.entries(PROVIDERS)
+      .filter(([provider, { models }]) => models.length && providers.includes(provider))
+      .map(([, group]) => group);
+    const listed = groups.flatMap(({ models }) => models);
+    const current = select.options.length ? select.value : remembered;
+    const option = (value, text = value) => h('option', { value }, text);
+    const optgroup = ({ label, models }) => h('optgroup', { label }, models.map((model) => option(model)));
+    const unlisted = listed.includes(remembered) ? null : option(remembered);
+    fill(select, unlisted, groups.map(optgroup), option('', 'other model…'));
+    select.value = current === '' || listed.includes(current) ? current : remembered;
     $('model-hint').hidden = providers.length > 0;
     showOtherModel();
   }
@@ -2241,14 +2242,67 @@ p { margin: 0; }
     other.hidden = other.disabled = $('model-pick').value !== '';
   }
 
-  function onPick() {
-    showOtherModel();
+  function rememberModel() {
     const model = pickedModel();
     if (model) writeStored(MODEL_KEY, model);
+  }
+
+  function onPick() {
+    showOtherModel();
+    rememberModel();
     readyStatus();
   }
 
   // ---------- settings ----------
+
+  function keyField(provider, props) {
+    return h('input', {
+      class: 'field key',
+      id: `key-${provider}`,
+      type: 'password',
+      autocomplete: 'new-password',
+      'data-1p-ignore': true,
+      'data-lpignore': 'true',
+      spellcheck: 'false',
+      autocapitalize: 'off',
+      ...props,
+    });
+  }
+
+  function endpointField(describedBy) {
+    return h('input', {
+      class: 'field',
+      id: 'endpoint-other',
+      form: 'settings-form',
+      type: 'text',
+      inputmode: 'url',
+      pattern: 'https?://\\S+',
+      title: 'starts with http:// or https://',
+      spellcheck: 'false',
+      autocapitalize: 'off',
+      placeholder: 'http://localhost:8000/v1',
+      'aria-describedby': describedBy,
+    });
+  }
+
+  // A row is a label, a field and the provider's state; Other's field is its endpoint, with its key below.
+  function keyRows() {
+    return Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
+      const state = h('span', { class: 'k', id: `state-${provider}` });
+      if (provider !== OTHER) {
+        const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': state.id });
+        return [h('label', { for: key.id }, label), key, state];
+      }
+      const endpoint = endpointField(`${state.id} other-hint`);
+      const key = keyField(provider, { placeholder: 'key, if it needs one', 'aria-label': `${label} key` });
+      return [h('label', { for: endpoint.id }, label), endpoint, state, key];
+    });
+  }
+
+  function buildSettings() {
+    fill($('keys'), keyRows());
+    $('keys-show').setAttribute('aria-controls', Object.keys(PROVIDERS).map((provider) => `key-${provider}`).join(' '));
+  }
 
   function showKeys(show) {
     for (const input of document.querySelectorAll('.key')) input.type = show ? 'text' : 'password';
@@ -2275,22 +2329,28 @@ p { margin: 0; }
     clearSettings();
     if (e.newState !== 'open') return;
     placeSettings();
-    $('settings-saved').textContent = '';
+    showSaveResult('');
   }
 
   let savedTimer = 0;
 
-  async function saveSettings() {
-    const entered = (provider) => $(`key-${provider}`).value.trim();
-    const endpoint = $('endpoint-other').value.trim();
-    const saves = Object.keys(MODELS).filter(entered).map((provider) => saveKey(provider, entered(provider)));
-    if (endpoint) saves.push(saveKey(OTHER, entered(OTHER), endpoint));
-    clearSettings();
-    await Promise.all(saves);
-    await refreshKeys();
-    $('settings-saved').textContent = 'saved';
+  function showSaveResult(text) {
     clearTimeout(savedTimer);
-    savedTimer = setTimeout(() => ($('settings-saved').textContent = ''), SAVED_MS);
+    $('settings-saved').textContent = text;
+  }
+
+  // Other is entered once it has an endpoint; on failure the fields keep what was typed until they close.
+  async function saveSettings() {
+    const endpoint = $('endpoint-other').value;
+    const entered = Object.keys(PROVIDERS)
+      .map((provider) => [provider, $(`key-${provider}`).value.trim()])
+      .filter(([provider, key]) => (provider === OTHER ? endpoint : key));
+    if (!entered.length) return showSaveResult('nothing to save');
+    await Promise.all(entered.map(([provider, key]) => saveKey(provider, key, provider === OTHER ? endpoint : undefined)));
+    clearSettings();
+    await refreshKeys();
+    showSaveResult('saved');
+    savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
 
   // ---------- gestures ----------
@@ -2470,7 +2530,7 @@ p { margin: 0; }
     $('arrange-btn').addEventListener('click', arrange);
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
-    $('keys-show').addEventListener('click', () => showKeys($('key-openai').type === 'password'));
+    $('keys-show').addEventListener('click', () => showKeys(document.querySelector('.key').type === 'password'));
     $('key-other').addEventListener('input', () => ($('endpoint-other').required = Boolean($('key-other').value.trim())));
     // The key fields sit outside the form, so Enter there doesn't submit it on its own.
     $('settings').addEventListener('keydown', (e) => {
@@ -2478,9 +2538,14 @@ p { margin: 0; }
       e.preventDefault();
       $('settings-form').requestSubmit();
     });
-    $('settings-form').addEventListener('submit', (e) => {
+    $('settings-form').addEventListener('submit', async (e) => {
       e.preventDefault();
-      saveSettings();
+      try {
+        await saveSettings();
+      } catch (error) {
+        console.error("couldn't save the keys", error);
+        showSaveResult("couldn't save");
+      }
     });
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
@@ -2503,8 +2568,10 @@ p { margin: 0; }
         $('ask-form').requestSubmit();
       }
     });
-    $('model-pick').addEventListener('input', onPick);
-    $('model-other').addEventListener('input', onPick);
+    $('model-pick').addEventListener('change', onPick);
+    $('model-other').addEventListener('input', readyStatus);
+    $('model-other').addEventListener('change', rememberModel);
+    questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
       const input = $(id);
@@ -2543,9 +2610,11 @@ p { margin: 0; }
 
   function init() {
     restoreTheme();
+    removeStored(RETIRED_SETTINGS_KEY);
+    buildSettings();
     questionEl.value = SAMPLE.question;
     renderFiles();
-    updateAskFoot();
+    updateRunLabel();
     refreshKeys();
     transcript.append(line('main', 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.', { dim: true }));
     applyView();

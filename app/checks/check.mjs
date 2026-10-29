@@ -48,10 +48,12 @@ const POPUP_ROWS = {
   answer: ['asked', 'drew on summaries', 'drew on parses'],
 };
 const MODEL_KEY = 'r3con-proto-model';
+const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
+const NEW_QUESTION = 'Which memo mentions the storm?';
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 
@@ -66,22 +68,23 @@ function check(area, name, pass, detail = '') {
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
 async function withPage(area, { layout = LAYOUTS.desktop, sample = true }, body) {
-  const errors = [];
+  const messages = [];
   let context;
   try {
     context = await browser.newContext({ reducedMotion: 'reduce', ...layout.options });
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
     const page = await context.newPage();
-    page.on('console', (m) => ['error', 'warning'].includes(m.type()) && errors.push(m.text()));
-    page.on('pageerror', (e) => errors.push(e.message));
+    page.on('console', (m) => messages.push({ type: m.type(), text: m.text() }));
+    page.on('pageerror', (e) => messages.push({ type: 'error', text: e.message }));
     await page.goto(PAGE_URL);
     if (sample) await runSample(page);
-    await body(page);
+    await body(page, messages);
   } catch (error) {
     check(area, firstLine(error), false);
   } finally {
     await context?.close();
   }
+  const errors = messages.filter((m) => ['error', 'warning'].includes(m.type)).map((m) => m.text);
   check(area, `${layout.name}: no console errors or warnings`, errors.length === 0, errors.slice(0, 3).join(' | '));
 }
 
@@ -244,7 +247,8 @@ function placesHolding(key) {
   const holding = (store) => Object.keys(store).filter((k) => store.getItem(k).includes(key));
   const stores = [localStorage, sessionStorage].flatMap(holding);
   const markup = document.documentElement.outerHTML.includes(key) ? ['markup'] : [];
-  return [...fields.map((el) => `#${el.id}`), ...stores, ...markup];
+  const address = location.href.includes(key) ? ['location'] : [];
+  return [...fields.map((el) => `#${el.id}`), ...stores, ...markup, ...address];
 }
 
 function pickerState() {
@@ -308,8 +312,8 @@ async function beforeRun() {
     const ready = `${SAMPLE_DOCS} documents · ready to run`;
     check('before a run', 'the hint says the documents are ready to run', hint === ready, hint);
     const status = await page.textContent('#run-status');
-    const named = `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;
-    check('before a run', 'the status names the default model', status === named, status);
+    const named = `${SAMPLE_DOCS} documents ready · recorded run · ${DEFAULT_MODEL}`;
+    check('before a run', 'the status names a recorded run and the default model', status === named, status);
   });
 }
 
@@ -400,31 +404,38 @@ async function files() {
 
 async function settings() {
   for (const layout of Object.values(LAYOUTS)) {
-    await withPage('settings', { layout, sample: false }, async (page) => {
-      await keys(page, layout.name);
-      await picker(page, layout.name);
+    const checkAt = (name, pass, detail) => check('settings', `${layout.name}: ${name}`, pass, detail);
+    await withPage('settings', { layout, sample: false }, async (page, messages) => {
+      await keys(page, checkAt);
+      await picker(page, checkAt);
+      const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
+      checkAt('no console message holds the key', leaks === 0, `${messages.length} messages`);
     });
   }
 }
 
-async function keys(page, layoutName) {
-  const at = (name) => `${layoutName}: ${name}`;
+async function keys(page, checkAt) {
   const states = () => page.evaluate(keyStates);
-  const blocked = async () => (await page.textContent('#settings-saved')) === '' && (await states()).length === 0;
+  const saved = () => page.textContent('#settings-saved');
+  const blocked = async () => (await saved()) === '' && (await states()).length === 0;
+  await page.evaluate((key) => localStorage.setItem(key, '{"model":"hosted_vllm/old"}'), RETIRED_SETTINGS_KEY);
+  await page.reload();
+  const retired = await page.evaluate((key) => localStorage.getItem(key), RETIRED_SETTINGS_KEY);
+  checkAt('loading removes the old settings entry', retired === null, retired);
   const fresh = await page.evaluate(pickerState);
   const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL, ''], hint: true };
   const freshName = 'with no keys the picker shows the default model, other model… and the hint';
-  check('settings', at(freshName), isDeepStrictEqual(fresh, defaultOnly), JSON.stringify(fresh));
+  checkAt(freshName, isDeepStrictEqual(fresh, defaultOnly), JSON.stringify(fresh));
 
   await page.click(nodeSel('doc-0'));
   await page.click('#settings-btn');
   await page.fill('#endpoint-other', 'localhost:8000/v1');
   await page.click('#settings-save');
-  check('settings', at('an endpoint without http(s) blocks the save'), await blocked());
+  checkAt('an endpoint without http(s) blocks the save', await blocked());
   await page.fill('#endpoint-other', '');
   await page.fill('#key-other', TEST_KEY);
   await page.click('#settings-save');
-  check('settings', at('an Other key without an endpoint blocks the save'), await blocked());
+  checkAt('an Other key without an endpoint blocks the save', await blocked());
 
   await page.fill('#endpoint-other', TEST_ENDPOINT);
   await page.fill('#key-openai', TEST_KEY);
@@ -433,57 +444,82 @@ async function keys(page, layoutName) {
   await becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
   const set = await states();
   const marked = isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
-  check('settings', at('a save marks OpenAI, Google and Other as set'), marked, set.join(', '));
+  checkAt('a save marks OpenAI, Google and Other as set', marked, set.join(', '));
   const keyed = await page.evaluate(pickerState);
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
   const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google']) && noAnthropic && !keyed.hint;
-  check('settings', at('the picker offers only the providers with a key'), onlyKeyed, keyed.groups.join(', '));
+  checkAt('the picker offers only the providers with a key', onlyKeyed, keyed.groups.join(', '));
+  await page.click('#settings-save');
+  const nothing = await saved();
+  const unchanged = isDeepStrictEqual(await states(), set);
+  checkAt('a save with no field filled says so', nothing === 'nothing to save' && unchanged, nothing);
 
   await page.keyboard.press('Escape');
   const settingsOpen = await page.$eval('#settings', (el) => el.matches(':popover-open'));
-  check('settings', at('Escape closes the settings but not the popup'), !settingsOpen && Boolean(await popup(page)));
+  checkAt('Escape closes the settings but not the popup', !settingsOpen && Boolean(await popup(page)));
   const holding = (value) => page.evaluate(placesHolding, value);
   const holders = [...(await holding(TEST_KEY)), ...(await holding(TEST_ENDPOINT))];
-  const notKept = 'once closed, no field, storage or markup holds a key or the endpoint';
-  check('settings', at(notKept), holders.length === 0, holders.join(', '));
+  const notKept = 'once closed, no field, storage, address or markup holds a key or the endpoint';
+  checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
   const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
   const reopened = filled.length === 0 && isDeepStrictEqual(await states(), set);
-  check('settings', at('reopened, every field is empty and the providers are still set'), reopened, filled.join(', '));
+  checkAt('reopened, every field is empty and the providers are still set', reopened, filled.join(', '));
   await page.keyboard.press('Escape');
 }
 
-async function picker(page, layoutName) {
-  const at = (name) => `${layoutName}: ${name}`;
+async function picker(page, checkAt) {
   const status = () => page.textContent('#run-status');
   const stored = () => page.evaluate(storedEntries);
+  const ready = (kind, model) => `${SAMPLE_DOCS} documents ready · ${kind} · ${model}`;
   await page.selectOption('#model-pick', LISTED_MODEL);
   const named = await status();
-  const namesIt = named === `${SAMPLE_DOCS} documents ready · ${LISTED_MODEL}`;
-  check('settings', at('the status names the picked model'), namesIt, named);
+  checkAt('the status names the picked model', named === ready('recorded run', LISTED_MODEL), named);
 
   await page.selectOption('#model-pick', '');
+  await page.click('#settings-btn');
+  await page.fill('#key-anthropic', TEST_KEY);
+  await page.click('#settings-save');
+  await becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
+  await page.keyboard.press('Escape');
+  const afterSave = await page.evaluate(pickerState);
+  const fieldShown = await page.$eval('#model-other', (el) => !el.hidden);
+  const stays = afterSave.value === '' && fieldShown && afterSave.groups.includes('Anthropic');
+  checkAt('other model… stays chosen through a key save', stays, JSON.stringify(afterSave));
+
   await page.click('#run-btn');
   const invalid = await page.$eval('#model-other', (el) => !el.hidden && el.matches(':invalid'));
   const noRun = (await count(page, '.turn')) === 0;
   const kept = await stored();
   const rejected = invalid && noRun && isDeepStrictEqual(kept, { [MODEL_KEY]: LISTED_MODEL });
-  const rejectName = 'other model… rejects an empty model and keeps the last choice';
-  check('settings', at(rejectName), rejected, JSON.stringify(kept));
+  checkAt('other model… rejects an empty model and keeps the last choice', rejected, JSON.stringify(kept));
+  await page.focus('#model-other');
+  await page.keyboard.type('abc');
+  await page.keyboard.press('Backspace');
+  const whileTyping = await stored();
   await page.fill('#model-other', OTHER_MODEL);
+  await page.$eval('#model-other', (el) => el.blur());
   const typed = await stored();
-  const onlyModel = isDeepStrictEqual(typed, { [MODEL_KEY]: OTHER_MODEL });
-  const typedName = 'other model… takes a typed model, and storage holds only that string';
-  check('settings', at(typedName), onlyModel, JSON.stringify(typed));
+  const onLeave = isDeepStrictEqual(whileTyping, kept) && isDeepStrictEqual(typed, { [MODEL_KEY]: OTHER_MODEL });
+  const onLeaveName = 'a typed model is stored once the field is left, not while typing, and alone';
+  checkAt(onLeaveName, onLeave, `${JSON.stringify(whileTyping)} → ${JSON.stringify(typed)}`);
+
+  const recordedCue = await status();
+  await page.fill('#question', NEW_QUESTION);
+  const simulatedCue = await status();
+  const recorded = recordedCue === ready('recorded run', OTHER_MODEL);
+  const cues = recorded && simulatedCue === ready('simulated run', OTHER_MODEL);
+  checkAt('the status says whether a run replays the recording or is simulated', cues, simulatedCue);
   await page.click('#run-btn');
-  const ran = await becomes(page, () => document.querySelector('#panel.is-lit'));
-  check('settings', at('a run starts with the typed model'), ran);
+  const done = `● done · simulated run · ${OTHER_MODEL} · nothing was sent`;
+  const namesModel = await becomes(page, (text) => document.getElementById('run-status').textContent === text, done);
+  checkAt("a simulated run's status names the typed model", namesModel, await status());
 
   await page.reload();
   const after = await page.evaluate(pickerState);
   const keysGone = after.groups.length === 0 && after.hint && (await page.evaluate(keyStates)).length === 0;
-  const survives = after.value === OTHER_MODEL && keysGone && (await status()).endsWith(OTHER_MODEL);
-  check('settings', at('after a reload the choice is kept and the keys are not'), survives, JSON.stringify(after));
+  const survives = after.value === OTHER_MODEL && keysGone && (await status()) === ready('recorded run', OTHER_MODEL);
+  checkAt('after a reload the choice is kept and the keys are not', survives, JSON.stringify(after));
 }
 
 async function popupArea() {
