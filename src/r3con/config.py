@@ -38,20 +38,13 @@ Config file shape (``configs/<name>.yaml``)::
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import reprlib
+from collections.abc import Collection, Mapping
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Annotated, Any, Literal, get_args
 
 import yaml
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    NonNegativeInt,
-    ValidationError,
-    field_validator,
-)
-from pydantic_core import ErrorDetails
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from r3con import settings
 from r3con.prompts import require_prompt_path
@@ -113,7 +106,7 @@ class RunConfig(BaseModel):
     name: str = DEFAULT_CONFIG
     model: str
     # keep in sync with configs/default.yaml (the shipped default); 0 skips relevance
-    relevance_rounds: NonNegativeInt = 2
+    relevance_rounds: Annotated[int, Field(ge=0, strict=True)] = 2
     # keep in sync with configs/default.yaml
     reasoning: ReasoningPath = "direct"
     prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
@@ -208,23 +201,28 @@ def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
         )
 
 
-def _validated(fields: Mapping[str, Any], where: str) -> RunConfig:
-    """``fields`` as a :class:`RunConfig`, else a one-line ``ValueError`` naming
-    ``where`` they were set and each setting refused."""
+def _validated(
+    fields: Mapping[str, Any], name: str, overridden: Collection[str]
+) -> RunConfig:
+    """``fields`` as a :class:`RunConfig`, else a one-line ``ValueError`` naming each
+    setting refused and whether it was an override or set in config ``name``."""
     try:
         return RunConfig.model_validate(fields)
     except ValidationError as invalid:
-        problems = "; ".join(map(_refused, invalid.errors()))
-        raise ValueError(f"{where}: {problems}.") from None
+        problems = "; ".join(
+            _refused(error, name, overridden) for error in invalid.errors()
+        )
+        raise ValueError(f"{problems}.") from None
 
 
-def _refused(error: ErrorDetails) -> str:
-    """One setting pydantic refused: its name, the value given unless it was
-    missing, and why."""
+def _refused(error: Mapping[str, Any], name: str, overridden: Collection[str]) -> str:
+    """One setting pydantic refused: whether it was an override or set in config
+    ``name``, its name, a short repr of the value given, and why."""
+    where = "override" if error["loc"][0] in overridden else f"config {name!r}"
     setting = ".".join(map(str, error["loc"]))
-    if error["type"] != "missing":
-        setting += f"={error['input']!r}"
-    return f"`{setting}`: {error['msg']}"
+    if error["type"] == "missing":
+        return f"{where}: `{setting}` is empty or missing"
+    return f"{where}: `{setting}={reprlib.repr(error['input'])}`: {error['msg']}"
 
 
 def _find(relative: str) -> Path | None:
@@ -244,14 +242,14 @@ def load_config(
     reasoning: ReasoningPath | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> RunConfig:
-    """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, then apply each override
-    that is not ``None``. Every override is recorded on the config and shows up in its
-    label, because each of them shapes the output.
+    """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, each override that is not
+    ``None`` taking the place of the file's value. Every override is recorded on the
+    config and shows up in its label, because each of them shapes the output.
 
     Raises ``KeyError`` for an unknown config name, ``ValueError`` if the config sets a
-    field r3con does not read, omits a required field or a prompt version for any
-    stage, pins a prompt for a stage r3con does not have, or if a setting in the file
-    or an override is not valid for its field (in one line naming each), and
+    field r3con does not read, pins a prompt for a stage r3con does not have or none
+    for some stage, if neither it nor an override sets a ``model``, or if a setting in
+    the file or an override is not valid for its field (in one line naming each), and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -272,9 +270,6 @@ def load_config(
             )
         raise ValueError(message)
     _check_stages(raw.get("prompts") or {}, f"config {name!r}")
-    # A setting left empty in the file takes its default, as an override of None does.
-    fields = {key: value for key, value in raw.items() if value is not None}
-    cfg = _validated({**fields, "name": name}, f"config {name!r}")
 
     overrides = {
         "model": model,
@@ -283,11 +278,13 @@ def load_config(
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
-    if applied:
-        cfg = _validated({**cfg.model_dump(), **applied}, "override")
-        # Recorded as resolved, so the manifest shows both the value and that it was
-        # overridden.
-        cfg.overrides = {key: getattr(cfg, key) for key in applied}
+    # A setting left empty in the file takes its default, as an override of None does;
+    # empty prompts are left to check_prompts, which names the stages missing.
+    fields = {key: value for key, value in raw.items() if value is not None}
+    cfg = _validated({"prompts": {}, **fields, **applied, "name": name}, name, applied)
+    # Recorded as resolved, so the manifest shows both the value and that it was
+    # overridden.
+    cfg.overrides = {key: getattr(cfg, key) for key in applied}
     check_prompts(cfg)
     return cfg
 

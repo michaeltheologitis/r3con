@@ -68,7 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="Override how many rounds of relevance surfacing to run "
-        "(1 = each document read alone; 2+ = re-read in light of the others).",
+        "(0 = skip relevance; 1 = each document read alone; 2+ = re-read in light of "
+        "the others).",
     )
     run_cmd.add_argument(
         "--reasoning",
