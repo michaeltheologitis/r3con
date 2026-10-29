@@ -173,7 +173,7 @@ def test_the_direct_reply_cites_from_an_enum_of_summaries_and_one_of_parses_show
 
 @PATHS
 def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
-    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    caplog.set_level(logging.WARNING, logger="r3con.provenance")
     cited = [IDS[1], f"{IDS[2]}.2"]
     result = cite(llm, path, citing(path, summary_ids=cited), documents=THREE_DOCUMENTS)
     assert result.provenance == {"summary_ids": [f"{IDS[2]}.2"], "parse_ids": []}
@@ -190,7 +190,7 @@ def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
 
 @PATHS
 def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, path):
-    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    caplog.set_level(logging.WARNING, logger="r3con.provenance")
     cited = [IDS[2], IDS[1]]
     result = cite(llm, path, citing(path, parse_ids=cited), documents=THREE_DOCUMENTS)
     assert result.provenance == {"summary_ids": [], "parse_ids": [IDS[1]]}
@@ -208,7 +208,7 @@ def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, p
 def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropped(
     llm, caplog, path
 ):
-    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    caplog.set_level(logging.WARNING, logger="r3con.provenance")
     unstamped = {"parsed": {"rows": [{"who": "Halloran"}]}, "document_ids": IDS[:1]}
     reply = citing(path, summary_ids=[IDS[0]], parse_ids=[IDS[0]])
     result = cite(llm, path, reply, documents=unstamped)
@@ -388,7 +388,7 @@ def test_fewer_than_one_attempt_is_refused_before_any_request(llm):
 def test_only_the_shown_ids_are_kept_in_order_once_each(
     llm, caplog, path, summary_ids, parse_ids, kept, dropped
 ):
-    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    caplog.set_level(logging.WARNING, logger="r3con.provenance")
     result = cite(llm, path, citing(path, summary_ids, parse_ids))
     assert result.provenance == {"summary_ids": kept[0], "parse_ids": kept[1]}
     assert caplog.messages == [

@@ -4,12 +4,12 @@ from pathlib import Path
 
 import litellm
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 
 from r3con.runs import TaskLogger
 from r3con.runtime.llm import litellm_chat_completion_full
 from r3con.splitting import Splits, halve
-from r3con.stages.relevance import provenance_schema
+from r3con.stages.provenance import ids_field
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -71,7 +71,9 @@ def read(document, send, *, model=QWEN, rest=REST, schema=None, task_logger=None
 
 def citing(n_ids: int) -> type[BaseModel]:
     """A reply's schema whose ``provenance_ids`` cite from among ``n_ids`` shown ids."""
-    return provenance_schema("Reply", BaseModel, [f"S{i}" for i in range(n_ids)])
+    return create_model(
+        "Reply", provenance_ids=ids_field([f"S{i}" for i in range(n_ids)])
+    )
 
 
 HALVES = {

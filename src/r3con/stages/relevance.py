@@ -36,11 +36,9 @@ for inspection.
 from __future__ import annotations
 
 import random
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, NamedTuple, TypeVar, cast
-
-from pydantic import BaseModel, Field, create_model
+from typing import Any, cast
 
 from r3con import settings
 from r3con.config import PromptStage
@@ -48,16 +46,14 @@ from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import Emit, StageRun, no_events
-from r3con.runtime.llm import send_until_valid
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
+from r3con.stages.provenance import CitingRequest, citing_schema, read_citing
 
 _log = get_logger("relevance")
 
 _ID_HEX_DIGITS = 6
 _REWRITE = "Write the summary of the same document again"
-
-_ReplyT = TypeVar("_ReplyT", bound=BaseModel)
 
 Snippet = str | list[str]
 """A document's relevance snippet, or, for a document read in parts, one per part."""
@@ -109,20 +105,6 @@ class RelevantContext:
 
     def _final_round(self) -> list[list[SnippetRecord]]:
         return self.records[-1] if self.records else []
-
-
-class _Reply(BaseModel):
-    summary: str | None
-    provenance_ids: list[str]
-
-
-class _Request(NamedTuple):
-    """What a document's calls in one round send beside it: the system prompt, the
-    reply's schema (``None`` for plain text), and the snippets shown, by id."""
-
-    system_prompt: str
-    schema: type[_Reply] | None
-    shown: dict[str, str]
 
 
 def draw_document_ids(n: int) -> list[str]:
@@ -219,48 +201,26 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
-def list_of_ids(shown_ids: Sequence[str]) -> Any:
-    """The type of a reply's list of the ids a call shows. The shown ids reach only the
-    JSON schema, as an ``enum``, or, when there are none, as any string, since an empty
-    enum is refused; the reply itself is read as plain strings and checked by
-    :func:`cited`."""
-    if not shown_ids:
-        return list[str]
-    return list[Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]]
-
-
-def provenance_schema(
-    name: str, base: type[_ReplyT], shown_ids: Sequence[str]
-) -> type[_ReplyT]:
-    """``base``, named ``name``, with its ``provenance_ids`` a :func:`list_of_ids` the
-    call shows. A reply without ``provenance_ids`` cites nothing, though the strict
-    schema sent requires it."""
-    # A default_factory stays out of the schema; strict mode refuses a default.
-    return create_model(
-        name,
-        __base__=base,
-        provenance_ids=(list_of_ids(shown_ids), Field(default_factory=list)),
-    )
-
-
 def _request(
     task: str, shown: dict[str, str], prompts: Mapping[PromptStage, str]
-) -> _Request:
+) -> CitingRequest:
     """A document's request in one round, given the OTHER documents' non-empty snippets
     it shows, by id: the first-round prompt and plain text when there are none, else
     the later-rounds prompt and its ``{summary, provenance_ids}`` reply."""
     if not shown:
         version = prompts["relevance/first-round"]
         prompt = load_prompt("relevance/first-round", version=version, task=task)
-        return _Request(prompt, None, shown)
+        return CitingRequest(prompt, None, [])
     prompt = load_prompt(
         "relevance/later-rounds",
         version=prompts["relevance/later-rounds"],
         task=task,
         other_snippets=_render_other_snippets(shown),
     )
-    schema = provenance_schema("RelevanceSummary", _Reply, list(shown))
-    return _Request(prompt, schema, shown)
+    ids = list(shown)
+    return CitingRequest(
+        prompt, citing_schema("RelevanceSummary", ids, "summary", str | None), ids
+    )
 
 
 def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
@@ -269,36 +229,21 @@ def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
     return list(dict.fromkeys(id_ for ids in ids_per_part for id_ in ids))
 
 
-def cited(provenance: Sequence[str], shown: Collection[str], kind: str) -> list[str]:
-    """The ids a reply cites, in order and without repeats, less those the call did not
-    show, which are dropped with a warning."""
-    unshown = [id_ for id_ in provenance if id_ not in shown]
-    if unshown:
-        _log.warning(
-            "%s: dropped provenance id(s) the call did not show: %s", kind, unshown
-        )
-    return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown))
-
-
 def _read(
-    request: _Request, part: str, *, kind: str, max_attempts: int, **llm_call: Any
+    request: CitingRequest, part: str, *, kind: str, max_attempts: int, **llm_call: Any
 ) -> tuple[str, list[str]]:
     """``part`` (a document or one part of one) read under ``request`` by
-    :func:`send_until_valid`: its snippet, stripped, and the shown ids it used."""
-    reply = send_until_valid(
-        request.system_prompt,
+    :func:`~r3con.stages.provenance.read_citing`: its snippet, stripped, and the shown
+    ids it used."""
+    summary, provenance = read_citing(
+        request,
         part,
-        schema=request.schema,
         rewrite=_REWRITE,
         kind=kind,
         max_attempts=max_attempts,
         **llm_call,
     )
-    if request.schema is None:
-        return cast(str, reply).strip(), []
-    reply = cast(_Reply, reply)
-    summary = (reply.summary or "").strip()
-    return summary, cited(reply.provenance_ids, request.shown, kind)
+    return (cast(str | None, summary) or "").strip(), provenance
 
 
 def _report_snippets(
