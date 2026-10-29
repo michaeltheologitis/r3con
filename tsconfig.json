@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "checkJs": true,
+    "noEmit": true,
+    "strict": true,
+    "strictNullChecks": false,
+    "target": "es2024"
+  },
+  "files": ["src/r3con/app/app.js"]
+}

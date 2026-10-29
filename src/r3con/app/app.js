@@ -1,6 +1,135 @@
 (() => {
   'use strict';
 
+  /** @typedef {'doc' | 'r1' | 'r2' | 'schema' | 'parsed' | 'answer'} NodeKind */
+  /** @typedef {'r1' | 'r2' | 'parsed'} PerDocumentKind */
+  /** @typedef {Exclude<NodeKind, 'doc'>} StageKind */
+  /** @typedef {'flow' | 'cite' | 'self' | 'context'} EdgeKind */
+  /** @typedef {{ x: number, y: number }} Point */
+  /** @typedef {{ x: number, y: number, k: number }} View */
+  /** @typedef {{ left: number, top: number }} Offset */
+  /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
+  /** @typedef {{ name: string, text: string, size: number, sample: boolean, uid: number }} LoadedFile */
+  /** @typedef {{ summary: string, provenance: number[] }} Summary */
+  /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
+  /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
+  /** @typedef {{ code: string, thought: string }} Schema */
+  /** @typedef {{ summary_ids: number[], parse_ids: number[] }} Provenance */
+  /** @typedef {{ step: number, tokens: number, usd: number }} Call */
+  /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
+  /**
+   * The run's own answer or an ask's; an ask also has its source and totals, and live, the server's id
+   * for it. The text and provenance are null until it lands.
+   * @typedef {object} Answer
+   * @property {string} question
+   * @property {string} model
+   * @property {string | null} text
+   * @property {Provenance | null} provenance
+   * @property {'recorded' | 'simulated' | 'live'} [source]
+   * @property {Totals | null} [totals]
+   * @property {string | null} [id]
+   */
+  /**
+   * A recorded, simulated or live run; answers[0] is its own, the rest asks over it. A replay has the
+   * order its calls finished in; a live run, the server's id for it and r3con's document ids.
+   * @typedef {object} Run
+   * @property {boolean} simulated
+   * @property {LoadedFile[]} docs
+   * @property {Summary[]} r1
+   * @property {Summary[]} r2
+   * @property {Schema | null} schema
+   * @property {Parse[]} parsed
+   * @property {Answer[]} answers
+   * @property {Record<string, Call> | null} calls
+   * @property {Totals | null} totals
+   * @property {string} [source]
+   * @property {Record<PerDocumentKind, number[]>} [order]
+   * @property {string | null} [id]
+   * @property {string[]} [ids]
+   * @property {string | null} [lit]
+   */
+  /**
+   * @typedef {object} RecordedRun
+   * @property {string} question
+   * @property {string} model
+   * @property {string} version
+   * @property {string} runFolder
+   * @property {string} created
+   * @property {{ name: string, text: string, size: number }[]} docs
+   * @property {Summary[]} r1
+   * @property {Summary[]} r2
+   * @property {Schema} schema
+   * @property {Parse[]} parsed
+   * @property {{ text: string, provenance: Provenance }} answer
+   * @property {Record<string, Call>} calls
+   * @property {Totals} totals
+   */
+  /**
+   * @typedef {{ question: string, model: string, folder: string, created: string, text: string,
+   *   provenance: Provenance, totals: Totals }} RecordedAsk
+   */
+  /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement }} PanelNode */
+  /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
+  /**
+   * @typedef {object} Tab
+   * @property {number | null} id
+   * @property {HTMLButtonElement | null} button
+   * @property {HTMLButtonElement | null} close
+   * @property {Run | null} run
+   * @property {HTMLElement | null} turn
+   * @property {(string | Node)[]} status
+   * @property {HTMLElement} drawing
+   * @property {{ base: SVGGElement, mid: SVGGElement, lit: SVGGElement }} layers
+   * @property {HTMLElement} nodesEl
+   * @property {Map<string, PanelNode>} nodes
+   * @property {Map<string, PanelEdge>} edges
+   * @property {Map<string, Point>} layout
+   * @property {View} view
+   * @property {boolean} userMoved
+   * @property {number[]} timers
+   * @property {Narrator | null} narr
+   * @property {number} arrangeFrame
+   */
+  /** @typedef {ReturnType<typeof narrator>} Narrator */
+  /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
+  /**
+   * An event r3con app streams, with the fields this page reads (r3con.pipeline.run_pipeline lists
+   * them all). A round is 1 or 2, since the page refuses a run with more.
+   * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
+   *   | { type: 'relevance_started', round: 1 | 2, doc_id: string }
+   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, summary: string, provenance: string[] }
+   *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
+   *   | { type: 'schema_finished', schema_code: string, thought: string }
+   *   | { type: 'parsing_started', doc_id: string }
+   *   | { type: 'parsing_finished', doc_id: string, n_records: number, provenance: string[] }
+   *   | { type: 'reasoning_finished', answer: string, provenance: { summary_ids: string[], parse_ids: string[] } }
+   *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
+   *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
+   * } ServerEvent
+   */
+  /** @typedef {{ node?: string | null, tab?: Tab | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {Node | string | null | undefined | false | Child[]} Child */
+  /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
+  /**
+   * What differs between the page served by r3con app and the prototype.
+   * @typedef {object} Mode
+   * @property {string} intro
+   * @property {string} note
+   * @property {string} keysNote
+   * @property {(question: string) => string} nextRun
+   * @property {(question: string, asks: boolean) => boolean} needsModel
+   * @property {(files: LoadedFile[]) => string | null} refuseFiles
+   * @property {(file: File) => Blob} readable
+   * @property {(question: string) => Run} newRun
+   * @property {(tab: Tab, narr: Narrator) => void} play
+   * @property {(tab: Tab) => boolean} runGoing
+   * @property {(tab: Tab) => void} stop
+   * @property {(question: string) => void} ask
+   * @property {(provider: string, key: string, endpoint?: string) => Promise<string[]>} saveKey
+   * @property {() => Promise<string[]>} providersWithKeys
+   */
+
+  /** @type {RecordedRun} */
   const SAMPLE = {
  "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many? Give the contractor's name, not its code.",
  "model": "gpt-6-luna",
@@ -270,6 +399,7 @@
 };
 
   // Real r3con.ask answers over SAMPLE's run folder, converted from its asks/ folders by a script.
+  /** @type {RecordedAsk[]} */
   const RECORDED_ASKS = [
  {
   "question": "Which sites does Halloran Services maintain?",
@@ -360,6 +490,7 @@
 
   const GRID = { colGap: 230, rowGap: 112 };
   const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
+  /** @param {string} name */
   const cssPx = (name) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const ICON_PX = cssPx('--icon-size');
   const DOC_ICON_PX = cssPx('--doc-icon-size');
@@ -412,6 +543,7 @@
   const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
   // Models taken from LiteLLM's model list on 2026-10-29, and updated by hand.
+  /** @type {Record<string, { label: string, models: string[] }>} */
   const PROVIDERS = {
     openai: { label: 'OpenAI', models: ['openai/gpt-6.1-sol', 'openai/gpt-6.1-terra', 'openai/gpt-6-luna'] },
     anthropic: { label: 'Anthropic', models: ['anthropic/claude-fable-5-1', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5'] },
@@ -426,6 +558,7 @@
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
   const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema' };
   // The node kinds made once per document, in its row.
+  /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
   const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
@@ -435,6 +568,7 @@
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+  /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
@@ -463,7 +597,9 @@
       <path d="M11.75 16.25h9M11.75 19.5h9M15.75 22.75h5"/>
       <path d="M9 2.8c.45 3.15 1.25 3.95 4.4 4.4-3.15.45-3.95 1.25-4.4 4.4-.45-3.15-1.25-3.95-4.4-4.4 3.15-.45 3.95-1.25 4.4-4.4z" fill="currentColor" stroke-width="1"/>
     </svg>`,
+    /** @param {boolean} filled */
     tree: (filled) => {
+      /** @param {string} cls */
       const f = (cls) => (filled ? ` class="${cls}"` : '');
       return `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true">
         <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
@@ -482,13 +618,26 @@
     },
   };
 
-  const $ = (id) => document.getElementById(id);
+  /**
+   * @template {HTMLElement} [T=HTMLElement]
+   * @param {string} id
+   * @param {new () => T} [type]
+   * @returns {T}
+   */
+  function $(id, type) {
+    const el = document.getElementById(id);
+    if (!(el instanceof (type ?? HTMLElement))) throw new Error(`the page has no #${id} of that type`);
+    return /** @type {T} */ (el);
+  }
+
   const root = document.documentElement;
   const panel = $('panel');
   const world = $('world');
   const inspector = $('inspector');
   const transcript = $('transcript');
-  const questionEl = $('question');
+  const questionEl = $('question', HTMLTextAreaElement);
+  const modelPick = $('model-pick', HTMLSelectElement);
+  const modelOther = $('model-other', HTMLInputElement);
   const side = $('side');
 
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
@@ -505,16 +654,20 @@
 
   let nextUid = 0;
 
+  /** @param {Omit<LoadedFile, 'uid'>} file @returns {LoadedFile} */
   function withUid(file) {
     return { ...file, uid: nextUid++ };
   }
 
   const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
 
+  /** @param {LoadedFile} file */
   const docId = (file) => `doc-${file.uid}`;
+  /** @param {NodeKind} kind */
   const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
 
   // A tab is one run and its own drawing, so a tab in the background keeps drawing its events.
+  /** @returns {Tab} */
   function newTab() {
     const group = () => document.createElementNS(SVG_NS, 'g');
     const layers = { base: group(), mid: group(), lit: group() };
@@ -544,6 +697,10 @@
     };
   }
 
+  /**
+   * @type {{ files: LoadedFile[], tabs: Tab[], shown: Tab, nextTab: number, streams: Set<Stream>,
+   *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
+   */
   const state = {
     files: SAMPLE_FILES,
     // The tabs with a run, in order; before the first run the panel shows a tab with none, never listed.
@@ -560,12 +717,16 @@
 
   // The whole sample set, which the recorded replay needs.
   const filesAreSample = () => state.files === SAMPLE_FILES;
+  /** @param {string} question */
   const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
+  /** @param {Tab} tab @param {LoadedFile} file */
   const isPending = (tab, file) => Boolean(tab.run) && !tab.run.docs.includes(file);
+  /** @param {Tab} tab */
   const pendingFiles = (tab) => state.files.filter((f) => isPending(tab, f));
   const fileCount = () => plural(state.files.length, 'document');
 
+  /** @param {Tab} tab */
   function panelFiles(tab) {
     const runDocs = tab.run?.docs ?? [];
     return [...runDocs, ...state.files.filter((f) => !runDocs.includes(f))];
@@ -573,36 +734,66 @@
 
   // ---------- small helpers ----------
 
+  /**
+   * @template {keyof HTMLElementTagNameMap} K
+   * @param {K} tag
+   * @param {Props} [props]
+   * @param {...Child} children
+   * @returns {HTMLElementTagNameMap[K]}
+   */
   function h(tag, props = {}, ...children) {
     const el = document.createElement(tag);
     for (const [key, value] of Object.entries(props)) {
       if (value == null || value === false) continue;
-      if (key === 'class') el.className = value;
-      else if (key === 'html') el.innerHTML = value;
-      else if (key.startsWith('on')) el.addEventListener(key.slice(2), value);
-      else el.setAttribute(key, value === true ? '' : value);
+      if (key === 'class') el.className = String(value);
+      else if (key === 'html') el.innerHTML = String(value);
+      else if (key.startsWith('on')) el.addEventListener(key.slice(2), /** @type {EventListener} */ (value));
+      else el.setAttribute(key, value === true ? '' : String(value));
     }
-    el.append(...children.flat(Infinity).filter((c) => c != null && c !== false));
+    el.append(...flatChildren(children));
     return el;
   }
 
+  /** @param {Element} el @param {...Child} children */
   function fill(el, ...children) {
-    el.replaceChildren(...children.flat(Infinity).filter((c) => c != null && c !== false));
+    el.replaceChildren(...flatChildren(children));
   }
 
+  // TypeScript can't type what flat(Infinity) returns, hence the casts.
+  /** @param {Child[]} children */
+  function flatChildren(children) {
+    const flat = /** @type {unknown[]} */ (children).flat(Infinity);
+    return /** @type {(Node | string)[]} */ (flat.filter((c) => c != null && c !== false));
+  }
+
+  /** @param {number} v @param {number} lo @param {number} hi */
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  /** @param {number} n */
   const range = (n) => Array.from({ length: n }, (_, i) => i);
+  /** @param {number} n */
   const fmtInt = (n) => n.toLocaleString('en-US');
+  /** @param {number} n */
   const fmtUsd = (n) => `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(2)}`;
+  /** @param {number} n */
   const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+  /** @param {number} n @param {string} one */
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  /** @param {string} name */
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
+  /** @param {string} s */
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
+  /** @param {LoadedFile} file */
   const fileLabel = (file) => shortLabel(stripExt(file.name));
+  /** @param {string} model */
   const bareModel = (model) => model.split('/').pop();
+  /** @param {LoadedFile[]} files */
   const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Every event handled here starts at an element.
+  /** @param {Event} event */
+  const targetOf = (event) => /** @type {Element} */ (event.target);
 
+  /** @param {string} key */
   function readStored(key) {
     try {
       return localStorage.getItem(key);
@@ -611,6 +802,7 @@
     }
   }
 
+  /** @param {string} key @param {string} value */
   function writeStored(key, value) {
     try {
       localStorage.setItem(key, value);
@@ -619,6 +811,7 @@
     }
   }
 
+  /** @param {string} key */
   function removeStored(key) {
     try {
       localStorage.removeItem(key);
@@ -627,6 +820,7 @@
     }
   }
 
+  /** @param {string} text @param {number} max */
   function excerpt(text, max) {
     const flat = text.replace(/\s+/g, ' ').trim();
     if (flat.length <= max) return flat;
@@ -635,15 +829,18 @@
     return `${space > max * 0.6 ? cut.slice(0, space) : cut}…`;
   }
 
+  /** @param {string} id */
   function splitId(id) {
     const [kind, doc] = id.split('-');
-    return [kind, doc === undefined ? null : Number(doc)];
+    return /** @type {[NodeKind, number]} */ ([kind, doc === undefined ? null : Number(doc)]);
   }
 
+  /** @param {Run} run @param {number} i */
   function docLabel(run, i) {
     return stripExt(run.docs[i].name);
   }
 
+  /** @param {Tab} tab @param {string} id */
   function nodeName(tab, id) {
     const [kind, d] = splitId(id);
     if (kind === 'doc') return tab.nodes.get(id)?.file.name ?? 'document';
@@ -652,16 +849,19 @@
     return `${docLabel(tab.run, d)} · ${KIND_SUFFIX[kind]}`;
   }
 
+  /** @param {string} code */
   function schemaClasses(code) {
     return [...code.matchAll(/class (\w+)\(BaseModel\)/g)].map((m) => m[1]).filter((c) => c !== 'Parse');
   }
 
+  /** @param {Totals | null | undefined} totals */
   function spent(totals) {
     const { tokens = null, usd = null } = totals ?? {};
     return [tokens !== null && `${fmtInt(tokens)} tokens`, usd !== null && fmtUsd(usd)].filter(Boolean);
   }
 
   // A recorded or simulated parse holds its records; a live one, only how many there were.
+  /** @param {Parse} parse */
   const recordCount = (parse) => parse.records?.length ?? parse.n_records;
 
   // ---------- r3con app ----------
@@ -670,9 +870,11 @@
   class ServerError extends Error {}
 
   // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
+  /** @type {string | null} */
   let connectionProblem = null;
 
   // What to tell the user about `error`; one that is not the server's is a bug, so it also goes to the console.
+  /** @param {unknown} error @param {string} fallback */
   function explain(error, fallback, consoleText = fallback) {
     if (error instanceof ServerError) return error.message;
     console.error(consoleText, error);
@@ -681,6 +883,7 @@
 
   const lostConnection = () => new ServerError(LOST_CONNECTION);
 
+  /** @param {string} path @param {{ method?: string, body?: unknown }} [request] */
   async function api(path, { method = 'GET', body } = {}) {
     let response;
     try {
@@ -701,10 +904,11 @@
       connectionProblem = null;
       return response;
     }
-    const reply = await response.json().catch(() => null);
+    const reply = await response.json().catch(/** @returns {null} */ () => null);
     throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim());
   }
 
+  /** @param {string} frame */
   function frameData(frame) {
     const fields = frame.split(/\r?\n/).filter((field) => field.startsWith('data:'));
     return fields.map((field) => field.slice('data:'.length).replace(/^ /, '')).join('\n');
@@ -712,6 +916,7 @@
 
   // Server-sent events, read with fetch since EventSource can't send the token. A frame ends at a
   // blank line, and a chunk can end anywhere in one.
+  /** @param {ReadableStream<BufferSource>} body @returns {AsyncGenerator<ServerEvent>} */
   async function* serverEvents(body) {
     const reader = body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = '';
@@ -733,8 +938,10 @@
   }
 
   // Hands each of a run's or an ask's events to `onEvent`; a stream that stops before its last event lost the server.
+  /** @param {string} path @param {(event: ServerEvent) => void} onEvent */
   async function follow(path, onEvent) {
     const response = await api(path);
+    /** @type {ServerEvent | null} */
     let last = null;
     for await (const event of serverEvents(response.body)) {
       last = event;
@@ -743,37 +950,46 @@
     if (!ENDINGS.has(last?.type)) throw lostConnection();
   }
 
+  /** @param {Tab} tab */
   const streamsOf = (tab) => [...state.streams].filter((stream) => stream.tab === tab);
+  /** @param {Stream['kind']} kind @param {Tab} tab */
   const streaming = (kind, tab) => streamsOf(tab).some((stream) => stream.kind === kind);
 
+  /** @param {Stream['kind']} kind @param {Tab} tab @param {Stream['job']} job @returns {Stream} */
   function openStream(kind, tab, job) {
     const stream = { kind, tab, job, stopping: false };
     state.streams.add(stream);
     return stream;
   }
 
+  /** @param {Stream} stream */
   function closeStream(stream) {
     state.streams.delete(stream);
     if (stream.stopping) showStatus(stream.tab);
     updateComposer();
   }
 
+  /** @param {Tab} tab */
   const stopping = (tab) => streamsOf(tab).some((stream) => stream.stopping);
+  /** @param {Tab} tab */
   const toStop = (tab) => streamsOf(tab).filter((stream) => !stream.stopping);
 
   // A stop pressed before the job's id has come back is sent as soon as it does.
+  /** @param {Stream} stream */
   function stopJob(stream) {
     stream.stopping = true;
     showStatus(stream.tab);
     if (stream.job.id) sendCancel(stream);
   }
 
+  /** @param {Stream} stream @param {string} id */
   function jobStarted(stream, id) {
     stream.job.id = id;
     if (stream.stopping) sendCancel(stream);
   }
 
   // From the 202 on, r3con sends no new model call, and the stream ends with the job's last event.
+  /** @param {Stream} stream */
   async function sendCancel(stream) {
     try {
       await api(`/api/${stream.kind}s/${stream.job.id}/cancel`, { method: 'POST' });
@@ -782,20 +998,24 @@
       if (!state.streams.has(stream)) return;
       stream.stopping = false;
       updateComposer();
-      if (stream.tab === state.shown) errorStatus(`couldn't stop · ${explain(error, error.message, "couldn't stop")}`);
+      if (stream.tab === state.shown) errorStatus(`couldn't stop · ${explain(error, /** @type {Error} */ (error).message, "couldn't stop")}`);
     }
   }
 
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
+  /** @param {Run} run @param {string[]} ids */
   function docIndices(run, ids) {
     return [...new Set(ids.map((id) => run.ids.indexOf(id.split('.')[0])))];
   }
 
+  /** @param {Run} run @param {{ summary_ids: string[], parse_ids: string[] }} provenance */
   function provenanceOf(run, { summary_ids, parse_ids }) {
     return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids) };
   }
 
+  /** @param {{ tokens: { total: number } | null, usd: number | null }} event */
   const totalsOf = (event) => ({ tokens: event.tokens?.total, usd: event.usd });
+  /** @param {Record<string, unknown>} status */
   const keyedProviders = (status) => Object.keys(PROVIDERS).filter((provider) => status[provider]);
 
   // ---------- spinner ----------
@@ -809,7 +1029,9 @@
 
   // ---------- runs ----------
 
+  /** @returns {Run} */
   function sampleRun() {
+    /** @param {PerDocumentKind} prefix */
     const finishOrder = (prefix) =>
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
     return {
@@ -827,6 +1049,7 @@
     };
   }
 
+  /** @param {number} i @param {number} n */
   function madeUpCitations(i, n) {
     if (n < 2) return [];
     const cites = [(i + 1) % n];
@@ -835,7 +1058,9 @@
   }
 
   // As r3con does, it cites only non-empty round-2 summaries and parses with records.
+  /** @param {Pick<Run, 'docs' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift */
   function madeUpAnswer(run, question, shift) {
+    /** @param {number} stride @param {(i: number) => boolean} citable */
     const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
       text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
@@ -846,18 +1071,23 @@
     };
   }
 
+  /** @param {LoadedFile[]} files @param {string} question @param {string} model @returns {Run} */
   function simulatedRun(files, question, model) {
     const n = files.length;
     const order = range(n);
+    /** @param {LoadedFile} f */
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
     const records = files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : []));
     // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
+    /** @param {number} j */
     const hasSummary = (j) => Boolean(summary(files[j]));
+    /** @param {number} i @param {boolean} hasOutput */
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
+    /** @type {Omit<Run, 'answers'>} */
     const run = {
       simulated: true,
       docs: files,
-      r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
+      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]) })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
@@ -869,11 +1099,14 @@
   }
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
+  /** @param {string} question @param {string} model @returns {Run} */
   function liveRun(question, model) {
+    /** @type {Pick<Run, 'r1' | 'r2' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
     return { simulated: false, id: null, ids: [], docs: state.files, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
+  /** @param {Run} run */
   function runSummary(run) {
     const { model } = run.answers[0];
     if (run.simulated) return `simulated run · ${model} · nothing was sent`;
@@ -882,26 +1115,32 @@
 
   // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live;
   // a live one also has the server's `id` for it.
+  /** @param {Answer} ask */
   function askSummary({ source, model, totals }) {
     const spend = source === 'simulated' ? ['nothing was sent'] : spent(totals);
     return [`${source} ask over this run`, model, ...spend].join(' · ');
   }
 
   // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
+  /** @param {number} k */
   const answerId = (k) => `answer-${k}`;
   const RUN_ANSWER = answerId(0);
 
+  /** @param {Run} run @param {string} id */
   const answerAt = (run, id) => run.answers[splitId(id)[1]];
 
   // An answer with where it came from, as the chat and its popup give it.
+  /** @param {Run} run @param {string} id */
   function answerOf(run, id) {
     const answer = answerAt(run, id);
     if (id === RUN_ANSWER) return { ...answer, simulated: run.simulated, summary: runSummary(run) };
     return { ...answer, simulated: answer.source === 'simulated', summary: askSummary(answer) };
   }
 
+  /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
+  /** @param {Run} run @param {string} id */
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
@@ -913,11 +1152,13 @@
     return [];
   }
 
+  /** @param {Run} run @param {string} id */
   function ownDocument(run, id) {
     const [kind, i] = splitId(id);
     return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
+  /** @param {Run} run @param {string} answerId */
   function answerLineage(run, answerId) {
     const nodes = new Set([answerId]);
     const edges = new Set();
@@ -935,7 +1176,7 @@
   function applyView() {
     const { view } = state.shown;
     world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.k})`;
-    world.style.setProperty('--k', view.k);
+    world.style.setProperty('--k', String(view.k));
     $('zoom-level').textContent = `${Math.round(view.k * 100)}%`;
     positionInspector();
   }
@@ -946,6 +1187,7 @@
     setTimeout(() => world.classList.remove('glide'), GLIDE_MS);
   }
 
+  /** @param {number} px @param {number} py @param {number} k */
   function zoomAt(px, py, k) {
     const { view } = state.shown;
     const next = clamp(k, ZOOM.min, ZOOM.max);
@@ -967,6 +1209,7 @@
 
   const charPx = measureCharWidth();
 
+  /** @param {LoadedFile[]} files @param {Origin} origin @returns {Map<string, Point>} */
   function gridLayout(files, origin) {
     const layout = new Map();
     const origins = files.map((f, i) => origin(i, f));
@@ -981,8 +1224,10 @@
     return layout;
   }
 
+  /** @param {number} i */
   const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
 
+  /** @param {Tab} tab @returns {Origin} */
   function nodeOrigin(tab) {
     return (i, file) => {
       const node = tab.nodes.get(docId(file));
@@ -991,21 +1236,25 @@
   }
 
   // Answer k sits around the run's own answer, one row gap apart: below it, above it, then further out.
+  /** @param {Point} first @param {number} k */
   function answerSpot(first, k) {
     const out = Math.ceil(k / 2);
     return { x: first.x, y: first.y + (k % 2 ? out : -out) * GRID.rowGap };
   }
 
   // The first spot around the run's answer, where it is now, that no answer node holds.
+  /** @param {Tab} tab */
   function freeAnswerSpot(tab) {
     const first = tab.nodes.get(RUN_ANSWER);
     const answers = [...tab.nodes.values()].filter((n) => n.kind === 'answer');
+    /** @param {Point} spot */
     const taken = (spot) => answers.some((n) => Math.abs(n.x - spot.x) < GRID.colGap / 2 && Math.abs(n.y - spot.y) < GRID.rowGap / 2);
     let k = 0;
     while (taken(answerSpot(first, k))) k += 1;
     return answerSpot(first, k);
   }
 
+  /** @param {Tab} tab @param {Origin} origin */
   function plan(tab, origin) {
     const files = tab.run?.docs ?? state.files;
     const layout = gridLayout(files, origin);
@@ -1016,9 +1265,11 @@
     return layout;
   }
 
+  /** @param {Tab} tab */
   function contentBounds(tab) {
     const widest = Math.max('structure'.length, ...panelFiles(tab).map((f) => fileLabel(f).length));
     // Once there is a run, an answer's label is its question and model, often wider than any file's.
+    /** @param {string} id */
     const width = (id) => (tab.run && splitId(id)[0] === 'answer' ? nodeName(tab, id).length : widest) * charPx + NODE_PAD_PX;
     const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
     for (const [id, p] of tab.layout) {
@@ -1064,6 +1315,7 @@
 
   // ---------- panel: nodes and edges ----------
 
+  /** @param {NodeKind} kind @param {boolean} settled */
   function iconFor(kind, settled) {
     if (kind === 'doc') return ICONS.document;
     if (kind === 'r1' || kind === 'r2') return ICONS.snippet;
@@ -1071,12 +1323,14 @@
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
+  /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {LoadedFile | null} file */
   function nodeLabels(tab, id, kind, file) {
     if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
     if (kind === 'doc') return [fileLabel(file), isPending(tab, file) ? 'not run' : null];
     return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
+  /** @param {Tab} tab @param {PanelNode} node */
   function ariaName(tab, node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
@@ -1088,6 +1342,7 @@
     return `${node.file.name}, ${isPending(tab, node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
+  /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {Point} pos @param {{ working?: boolean, file?: LoadedFile | null, enter?: boolean }} [options] */
   function createNode(tab, id, kind, pos, { working = false, file = null, enter = true } = {}) {
     const pending = kind === 'doc' && isPending(tab, file);
     const classes = ['node', kind, working && 'working', pending && 'pending', enter && animates(tab) && 'enter'].filter(Boolean).join(' ');
@@ -1106,18 +1361,22 @@
     return node;
   }
 
+  /** @param {Tab} tab @param {string} id */
   function addNode(tab, id) {
     const [kind, d] = splitId(id);
     return createNode(tab, id, kind, tab.layout.get(id), { working: true, file: PER_DOCUMENT.has(kind) ? tab.run.docs[d] : null });
   }
 
+  /** @param {Tab} tab @param {LoadedFile} file @param {Point} [pos] */
   function addDocNode(tab, file, pos) {
+    /** @type {PanelNode | null} */
     let last = null;
     for (const n of tab.nodes.values()) if (n.kind === 'doc' && (!last || n.y > last.y)) last = n;
     // A node redrawn at its old position (a run starting) is not new, so it doesn't animate in.
     return createNode(tab, docId(file), 'doc', pos ?? (last ? { x: last.x, y: last.y + GRID.rowGap } : tidyOrigin(0)), { file, enter: !pos });
   }
 
+  /** @param {Tab} tab @param {string} id */
   function removeNode(tab, id) {
     if (openIn(tab) === id) closeInspector();
     if (hoveredIn(tab) === id) state.hovered = null;
@@ -1125,8 +1384,10 @@
     tab.nodes.delete(id);
   }
 
+  /** @param {number} t */
   const easeOut = (t) => 1 - (1 - t) ** 3;
 
+  /** @param {Tab} tab */
   function clearPanel(tab) {
     cancelAnimationFrame(tab.arrangeFrame);
     if (openIn(tab)) closeInspector();
@@ -1139,6 +1400,7 @@
   }
 
   // A slide left going in a tab that is no longer shown jumps to where it was going.
+  /** @param {Tab} tab */
   function finishSlide(tab) {
     if (!tab.arrangeFrame) return;
     cancelAnimationFrame(tab.arrangeFrame);
@@ -1150,6 +1412,7 @@
   // Document nodes are created only here: one per loaded or run file, at its position in `at` if it had
   // one, else below the last document node. A run's grid is planned once, when it starts; later syncs
   // only add or drop document entries.
+  /** @param {Tab} tab @param {{ at?: Map<string, Point>, animate?: boolean, replan?: boolean }} [options] */
   function syncDocNodes(tab, { at = new Map(), animate = false, replan = !tab.run } = {}) {
     const files = panelFiles(tab);
     const keep = new Set(files.map(docId));
@@ -1168,11 +1431,13 @@
     fitShown(animate);
   }
 
+  /** @param {PanelNode} node */
   function placeNode(node) {
     node.el.style.left = `${node.x}px`;
     node.el.style.top = `${node.y}px`;
   }
 
+  /** @param {PanelNode} node */
   function drawnAt(node) {
     return { x: parseFloat(node.el.style.left), y: parseFloat(node.el.style.top) };
   }
@@ -1183,6 +1448,7 @@
     cancelAnimationFrame(tab.arrangeFrame);
     tab.layout = plan(tab, tidyOrigin);
     tab.userMoved = false;
+    /** @type {{ node: PanelNode, from: Point }[]} */
     const moves = [];
     for (const node of tab.nodes.values()) {
       const to = tab.layout.get(node.id);
@@ -1201,6 +1467,7 @@
     if (!moves.length || reduceMotion()) return finish();
     const start = performance.now();
     const grabbed = new Set();
+    /** @param {number} now */
     const step = (now) => {
       const t = Math.min(1, (now - start) / ARRANGE_MS);
       if (t === 1) return finish();
@@ -1219,11 +1486,13 @@
     tab.arrangeFrame = requestAnimationFrame(step);
   }
 
+  /** @param {Tab} tab @param {string} id */
   function markWorking(tab, id) {
     tab.nodes.get(id).el.classList.add('working');
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
+  /** @param {Tab} tab @param {string} id */
   function settleNode(tab, id, { empty = false, failed = false } = {}) {
     const node = tab.nodes.get(id);
     node.el.classList.remove('working');
@@ -1238,19 +1507,24 @@
   }
 
   // Ids repeat across tabs; the popup and the hover are only ever on the shown tab's nodes.
+  /** @param {Tab} tab */
   const openIn = (tab) => (tab === state.shown ? state.selected : null);
+  /** @param {Tab} tab */
   const hoveredIn = (tab) => (tab === state.shown ? state.hovered : null);
 
+  /** @param {Tab} tab @param {string} id */
   function rerenderIfOpen(tab, id) {
     if (openIn(tab) === id) renderInspector();
   }
 
   // A node has landed once its call finished without the run or ask stopping first.
+  /** @param {Tab} tab @param {string} id */
   function landed(tab, id) {
     const classes = tab.nodes.get(id)?.el.classList;
     return Boolean(classes) && !classes.contains('working') && !classes.contains('failed');
   }
 
+  /** @param {Tab} tab @param {PanelNode} a @param {PanelNode} b @param {(node: PanelNode) => Point} at */
   function blockers(tab, a, b, at) {
     const pa = at(a);
     const pb = at(b);
@@ -1266,6 +1540,7 @@
   }
 
   // One lane higher per blocker, so bridges from one node nest.
+  /** @param {Tab} tab @param {PanelNode} a @param {PanelNode} b @param {(node: PanelNode) => Point} [at] */
   function edgePath(tab, a, b, at = (n) => n) {
     const pa = at(a);
     const pb = at(b);
@@ -1281,20 +1556,24 @@
     return `M${sx} ${pa.y} Q${sx + ramp} ${top} ${sx + 2 * ramp} ${top} H${tx - 2 * ramp} Q${tx - ramp} ${top} ${tx} ${pb.y}`;
   }
 
+  /** @param {Tab} tab @param {EdgeKind} kind */
   function layerFor(tab, kind) {
     return kind === 'context' || kind === 'self' ? tab.layers.base : tab.layers.mid;
   }
 
   // A tab drawn while hidden would play every animation at once when shown.
+  /** @param {Tab} tab */
   const animates = (tab) => tab === state.shown && !reduceMotion();
 
   // An element put back in the page plays its animation again while the class is on: a line moved to the
   // lit layer, or a drawing shown again.
+  /** @param {Element} el */
   function endAnimation(el) {
     el.classList.remove('enter', 'draw', 'fade');
     el.removeAttribute('pathLength');
   }
 
+  /** @param {Tab} tab @param {Element} el @param {'draw' | 'fade'} how */
   function animateEdge(tab, el, how) {
     if (!animates(tab)) return;
     endAnimation(el);
@@ -1302,6 +1581,7 @@
     el.classList.add(how);
   }
 
+  /** @param {Tab} tab @param {string} from @param {string} to @param {EdgeKind} kind @param {'draw' | 'fade'} [how] */
   function addEdge(tab, from, to, kind, how) {
     const key = `${from}>${to}`;
     let edge = tab.edges.get(key);
@@ -1322,11 +1602,13 @@
     return edge;
   }
 
+  /** @param {Tab} tab @param {PanelEdge} edge */
   function dropEdge(tab, edge) {
     edge.el.remove();
     tab.edges.delete(edge.key);
   }
 
+  /** @param {Tab} tab @param {(node: PanelNode) => Point} [at] */
   function redrawEdges(tab, at) {
     for (const e of tab.edges.values()) e.el.setAttribute('d', edgePath(tab, tab.nodes.get(e.from), tab.nodes.get(e.to), at));
   }
@@ -1339,6 +1621,7 @@
   }
 
   // Lights the lineage of the tab's lit answer; an answer that cites nothing lights nothing.
+  /** @param {Tab} tab */
   function lightPath(tab) {
     const { run } = tab;
     const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
@@ -1356,6 +1639,7 @@
   }
 
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
+  /** @param {Tab} tab @param {string} id */
   function lightAnswer(tab, id) {
     for (const e of [...tab.edges.values()]) {
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
@@ -1368,6 +1652,7 @@
   }
 
   // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open there.
+  /** @param {Tab} tab @param {string} id */
   function lightLanded(tab, id) {
     const open = openIn(tab);
     if (open && open !== id && splitId(open)[0] === 'answer' && landed(tab, open)) return;
@@ -1375,10 +1660,12 @@
   }
 
   // A run lights its own answer, or again the one lit before a replay.
+  /** @param {Tab} tab */
   const lightRun = (tab) => lightAnswer(tab, tab.run.lit ?? RUN_ANSWER);
 
   // ---------- inspector ----------
 
+  /** @param {string[]} ids */
   function refs(ids) {
     if (!ids.length) return [h('span', { class: 'k' }, 'none')];
     return ids.map((id, i) => [
@@ -1389,19 +1676,23 @@
     ]);
   }
 
+  /** @param {string} key @param {...Child} value */
   function row(key, ...value) {
     return h('div', { class: 'row' }, h('span', { class: 'k' }, key), ' ', value);
   }
 
+  /** @param {string} text */
   function textBlock(text, empty = 'nothing relevant') {
     return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
   }
 
+  /** @param {Run} run @param {string} id */
   function callMeta(run, id) {
     const call = run.calls?.[id];
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
   }
 
+  /** @param {ParsedRecord[]} records */
   function recordBlock(records) {
     const block = h('div', { class: 'records' });
     let field = null;
@@ -1419,6 +1710,7 @@
     return block;
   }
 
+  /** @param {LoadedFile} file */
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
     if (isPending(state.shown, file)) meta.push('not run yet');
@@ -1426,14 +1718,17 @@
     return meta.join(' · ');
   }
 
+  /** @param {LoadedFile} file */
   function fileText(file) {
     return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, READ_BYTES)) : h('p', { class: 'k' }, 'This file has no readable text.');
   }
 
+  /** @param {LoadedFile} file @param {string} label */
   function openFileButton(file, label) {
     return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
   }
 
+  /** @param {PanelNode} node */
   function docBody(node) {
     const { run, nodes } = state.shown;
     const index = run ? run.docs.indexOf(node.file) : -1;
@@ -1445,6 +1740,7 @@
     ];
   }
 
+  /** @param {Run} run @param {'r1' | 'r2'} kind @param {number} d */
   function snippetBody(run, kind, d) {
     const id = `${kind}-${d}`;
     return [
@@ -1456,6 +1752,7 @@
     ];
   }
 
+  /** @param {string} id */
   function inspectorBody(id) {
     const { run, nodes } = state.shown;
     const [kind, d] = splitId(id);
@@ -1515,6 +1812,7 @@
   }
 
   // Selecting an answer that has landed also lights it.
+  /** @param {string} id */
   function openInspector(id, { focus = false } = {}) {
     if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
     state.selected = id;
@@ -1550,6 +1848,7 @@
     placeInspector({ left, top: cy - iconHalf(node.kind) * view.k - 6 });
   }
 
+  /** @param {Offset} offset */
   function placeInspector({ left, top }) {
     const maxLeft = panel.clientWidth - inspector.offsetWidth - POPOVER_MARGIN;
     const maxTop = panel.clientHeight - inspector.offsetHeight - POPOVER_MARGIN;
@@ -1557,6 +1856,7 @@
     inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
+  /** @param {string} id */
   function jumpTo(id) {
     const { view } = state.shown;
     const node = state.shown.nodes.get(id);
@@ -1578,6 +1878,7 @@
 
   // ---------- chat ----------
 
+  /** @param {string} kind @param {Child} text @param {LineOptions} [options] */
   function line(kind, text, { node = null, tab = null, glyph = null, dim = false } = {}) {
     const g = glyph ?? { sub: '⎿', user: '›', spin: '✻' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
@@ -1603,20 +1904,26 @@
 
   // Node ids repeat across tabs, so a link from the chat names its tab as well as what it opens. A closed
   // tab is no longer listed, so its links do nothing and nothing in the chat keeps it alive.
+  /** @param {MouseEvent} e */
   function onTranscriptClick(e) {
-    const link = e.target.closest('button[data-tab]');
+    /** @type {HTMLElement | null} */
+    const link = targetOf(e).closest('button[data-tab]');
     const tab = state.tabs.find((t) => String(t.id) === link?.dataset.tab);
     if (!tab) return;
     const { node, answer, offer } = link.dataset;
     switchTab(tab);
     if (node) jumpTo(node);
     if (answer && landed(tab, answer)) lightAnswer(tab, answer);
-    if (offer) prepareAsk(RECORDED_ASKS[offer]);
+    if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
   }
 
+  /** @param {Tab | null} tab @param {HTMLElement} body */
   function narrator(tab, body, { status = true } = {}) {
+    /** @type {HTMLElement | null} */
     let spinner = null;
+    /** @type {Map<string, HTMLElement>} */
     const named = new Map();
+    /** @param {string} kind @param {Child} text @param {LineOptions} [opts] */
     const say = (kind, text, opts) => {
       const el = line(kind, text, { ...opts, tab });
       body.insertBefore(el, spinner);
@@ -1626,13 +1933,16 @@
     return {
       say,
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
+      /** @type {string | null} */
       stage: null,
       // Says a line once under `name`; saying it again rewrites it in place.
+      /** @param {string} name @param {string} kind @param {string} text @param {LineOptions} [opts] */
       sayAs(name, kind, text, opts) {
         const said = named.get(name);
         if (said) said.querySelector('.t').textContent = text;
         else named.set(name, say(kind, text, opts));
       },
+      /** @param {string} text */
       phase(text) {
         if (!spinner) {
           spinner = line('spin', text);
@@ -1650,6 +1960,7 @@
     };
   }
 
+  /** @param {Tab | null} tab @param {string} question @param {string} [answer] */
   function addTurn(tab, question, answer) {
     const body = h('div', { class: 'turn-body' });
     const user = line('user', question);
@@ -1660,33 +1971,42 @@
   }
 
   // The status is a live region, so rewriting it unchanged, as on each keystroke, would talk over the user.
+  /** @param {...(string | Node)} content */
   function setStatus(...content) {
     const text = content.map((part) => (typeof part === 'string' ? part : part.textContent)).join('');
     if ($('run-status').textContent !== text) $('run-status').replaceChildren(...content);
   }
 
+  /** @param {string} text */
   const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
+  /** @param {string} text */
   const errorStatus = (text) => setStatus(...errorLine(text));
+  /** @param {Narrator} narr @param {Child} text */
   const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
+  /** @param {Run} run */
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
 
   // A tab keeps its run's status, which the status line shows while the tab is shown; a stop's line stays
   // until what it stopped has ended.
+  /** @param {Tab} tab */
   function showStatus(tab) {
     if (tab === state.shown) setStatus(...(stopping(tab) ? [STOPPING] : tab.status));
   }
 
+  /** @param {Tab} tab @param {...(string | Node)} content */
   function tabStatus(tab, ...content) {
     tab.status = content;
     showStatus(tab);
   }
 
+  /** @param {string} verb @param {string | null} stage */
   function inStage(verb, stage) {
     if (!stage) return verb;
     return stage === READING ? `${verb} while reading` : `${verb} in ${stage}`;
   }
 
   // A job the page asked to stop ends as stopped; any other failure gives its error.
+  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event */
   const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
 
   function readyStatus() {
@@ -1702,6 +2022,7 @@
   const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
 
   // Hiding or disabling the focused button would drop the focus to the page.
+  /** @param {HTMLButtonElement} button @param {boolean} shown */
   function offer(button, shown, enabled = true) {
     if (!(shown && enabled) && document.activeElement === button) questionEl.focus();
     button.hidden = !shown;
@@ -1711,6 +2032,7 @@
   const newRunCovers = () => `a new run would cover ${fileCount()}`;
 
   // How the files differ from the tab's run, and so what a new run would cover; nothing while they match.
+  /** @param {Tab} tab */
   function coverNote(tab) {
     const added = pendingFiles(tab).length;
     const left = tab.run.docs.filter((f) => !state.files.includes(f)).length;
@@ -1728,8 +2050,8 @@
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
     // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
-    offer($('stop-btn'), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
-    offer($('new-run-btn'), asks);
+    offer($('stop-btn', HTMLButtonElement), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
+    offer($('new-run-btn', HTMLButtonElement), asks);
     const note = $('ask-note');
     note.textContent = asks ? coverNote(state.shown) : '';
     note.hidden = !note.textContent;
@@ -1744,6 +2066,7 @@
   }
 
   // `action` is ask, over the run on the panel, or run, a new one over the files.
+  /** @param {'ask' | 'run'} action */
   function submitQuestion(action) {
     const question = questionEl.value.trim();
     if (!question) {
@@ -1755,7 +2078,7 @@
     const refused = asks || state.files.length ? refusal(question, asks) : null;
     if (refused) {
       setStatus(refused);
-      if (refused === TYPE_A_MODEL) $('model-other').focus();
+      if (refused === TYPE_A_MODEL) modelOther.focus();
       return;
     }
     if (asks) {
@@ -1770,6 +2093,7 @@
   }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
+  /** @param {string} question @param {boolean} asks */
   function refusal(question, asks) {
     if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
@@ -1778,11 +2102,20 @@
 
   // ---------- replay ----------
 
+  /** @param {Tab} tab */
   function cancelTimers(tab) {
     tab.timers.forEach(clearTimeout);
     tab.timers = [];
   }
 
+  /**
+   * @param {(t: number, fn: () => void) => void} at
+   * @param {number} t0
+   * @param {number[]} order
+   * @param {number} n
+   * @param {(i: number) => void} appear
+   * @param {(doc: number, rank: number) => void} settle
+   */
   function stage(at, t0, order, n, appear, settle, pace = PACE.model) {
     const spread = TIMING.maxStageSpread / Math.max(1, n - 1);
     const appearGap = Math.min(pace.appearStagger, spread);
@@ -1796,9 +2129,12 @@
     return last;
   }
 
+  /** @param {Run} run @param {string} id */
   const idLabel = (run, id) => docLabel(run, splitId(id)[1]);
+  /** @param {Run} run @param {string} id */
   const drewOn = (run, id) => `drew on ${cites(run, id).map((c) => idLabel(run, c)).join(', ')}`;
 
+  /** @param {Run} run @param {number} i */
   function roundTwoLine(run, i) {
     const name = docLabel(run, i);
     if (!run.r2[i].summary) return `round 2 · ${name} — nothing relevant`;
@@ -1806,12 +2142,15 @@
     return `round 2 · ${name} — ${drewOn(run, `r2-${i}`)}`;
   }
 
+  /** @param {Run} run @param {number} i */
   function parseLine(run, i) {
     const count = recordCount(run.parsed[i]);
     return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
   }
 
+  /** @param {Tab} tab @param {Provenance} provenance */
   function answerCiteLines(tab, { summary_ids, parse_ids }) {
+    /** @param {string} label @param {string} id */
     const view = (label, id) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-node': id }, label);
     return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
       const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
@@ -1819,8 +2158,10 @@
     });
   }
 
+  /** @param {Run} run @param {string} id */
   function inputsOf(run, id) {
     const [kind, i] = splitId(id);
+    /** @param {string} step @param {(j: number) => unknown} [keep] */
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
     if (kind === 'r2') return every('r1', (j) => j !== i && run.r1[j].summary);
     if (kind === 'parsed' || kind === 'schema') return every('r2');
@@ -1829,12 +2170,14 @@
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
+  /** @param {Tab} tab @param {string} to */
   function showInputs(tab, to) {
     const own = ownDocument(tab.run, to);
     if (own) addEdge(tab, own, to, 'self', 'fade');
     for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context', 'fade');
   }
 
+  /** @param {Tab} tab @param {string} to */
   function showCites(tab, to) {
     for (const from of cites(tab.run, to)) addEdge(tab, from, to, 'cite', 'draw');
   }
@@ -1842,17 +2185,22 @@
   // ---------- drawing a run ----------
   // A replay's timeline and a live run's events both draw through these, so the two look the same.
 
+  /** @param {Tab} tab @param {NodeKind} kind */
   const hasNodes = (tab, kind) => [...tab.nodes.values()].some((n) => n.kind === kind);
+  /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
   // Round 2's first line, rewritten once every document is through it.
   const ROUND_TWO_HEAD = 'round 2 head';
 
+  /** @param {Tab} tab @param {StageKind} kind */
   function stageProgress(tab, kind) {
     return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
   }
 
+  /** @param {Tab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
     const n = tab.run.docs.length;
+    /** @type {Partial<Record<StageKind, string>>} */
     const heads = {
       r1: 'round 1 · one summary per document',
       r2: 'round 2 · each document beside the other summaries',
@@ -1865,6 +2213,7 @@
     narr.phase(stageProgress(tab, kind));
   }
 
+  /** @param {Tab} tab @param {string} id */
   function appear(tab, id) {
     const [kind, i] = splitId(id);
     addNode(tab, id);
@@ -1873,12 +2222,14 @@
     showInputs(tab, id);
   }
 
+  /** @param {Run} run @param {string} id */
   function isVoid(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'r1' || kind === 'r2') return !run[kind][i].summary;
     return kind === 'parsed' && !recordCount(run.parsed[i]);
   }
 
+  /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'r1') return `round 1 · ${docLabel(run, i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`;
@@ -1888,9 +2239,10 @@
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
+  /** @param {Tab} tab @param {Narrator} narr @param {string} id */
   function settle(tab, narr, id) {
     const { run } = tab;
-    const [kind] = splitId(id);
+    const [kind] = /** @type {[StageKind, number | null]} */ (splitId(id));
     const n = run.docs.length;
     settleNode(tab, id, { empty: isVoid(run, id) });
     showCites(tab, id);
@@ -1901,6 +2253,7 @@
     narr.sayAs(ROUND_TWO_HEAD, 'main', `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`);
   }
 
+  /** @param {Tab} tab @param {Narrator} narr @param {Answer} answer @param {string} node */
   function sayAnswer(tab, narr, answer, node) {
     narr.say('answer', answer.text, { node });
     const citeLines = answerCiteLines(tab, answer.provenance);
@@ -1909,11 +2262,13 @@
   }
 
   // An answer's node settles, with solid lines from what it cites.
+  /** @param {Tab} tab @param {string} id */
   function drawAnswer(tab, id) {
     settleNode(tab, id);
     showCites(tab, id);
   }
 
+  /** @param {Tab} tab @param {Narrator} narr */
   function showAnswer(tab, narr, id = RUN_ANSWER) {
     drawAnswer(tab, id);
     narr.done();
@@ -1923,6 +2278,7 @@
     updateComposer();
   }
 
+  /** @param {Tab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
     narr.say('sub', runSummary(tab.run));
     tabStatus(tab, ...doneLine(tab.run));
@@ -1931,6 +2287,7 @@
 
   // Marks every stage node still working as stopped, while a document being read just settles; with no
   // answer, the next question starts a new run.
+  /** @param {Tab} tab @param {Narrator} narr @param {string} text */
   function failRun(tab, narr, text) {
     narr.done();
     for (const node of tab.nodes.values()) {
@@ -1940,11 +2297,15 @@
     tabStatus(tab, ...errorLine(text));
   }
 
+  /** @param {Tab} tab @param {Narrator} narr */
   function buildTimeline(tab, narr) {
     const { run } = tab;
+    /** @type {{ at: number, run: () => void }[]} */
     const steps = [];
+    /** @param {number} t @param {() => void} fn */
     const at = (t, fn) => steps.push({ at: t, run: fn });
     const n = run.docs.length;
+    /** @param {number} t0 @param {PerDocumentKind} kind */
     const perDocument = (t0, kind) => stage(at, t0, run.order[kind], n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
     let t = TIMING.start;
 
@@ -1956,6 +2317,7 @@
       }
       narr.phase(`reading · 0 of ${n}`);
     });
+    /** @param {number} i */
     const docAt = (i) => docId(run.docs[i]);
     t = stage(at, t, range(n), n, (i) => markWorking(tab, docAt(i)), (i, rank) => {
       settleNode(tab, docAt(i));
@@ -1966,7 +2328,7 @@
       narr.stage = null;
     });
 
-    for (const kind of ['r1', 'r2']) {
+    for (const kind of /** @type {const} */ (['r1', 'r2'])) {
       t += TIMING.phaseGap;
       at(t, () => beginStage(tab, narr, kind));
       t = perDocument(t, kind);
@@ -2001,6 +2363,7 @@
     return steps;
   }
 
+  /** @param {Tab} tab @param {Narrator} narr */
   function playTimeline(tab, narr) {
     $('replay-btn').hidden = false;
     const steps = buildTimeline(tab, narr);
@@ -2014,8 +2377,10 @@
   // ---------- live ----------
 
   // Fills in the tab's run from one of its events and draws it, in that tab whether or not it is shown.
+  /** @param {Tab} tab @param {Narrator} narr @param {ServerEvent} event */
   function drawEvent(tab, narr, event) {
     const { run } = tab;
+    /** @param {string} id */
     const doc = (id) => docIndices(run, [id])[0];
     switch (event.type) {
       case 'run_started':
@@ -2066,9 +2431,10 @@
   }
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them.
+  /** @param {Tab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance */
   function addSnippet(tab, narr, id, summary, provenance) {
     const { run } = tab;
-    const [kind, i] = splitId(id);
+    const [kind, i] = /** @type {['r1' | 'r2', number]} */ (splitId(id));
     const earlier = run[kind][i] ?? { summary: '', provenance: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
@@ -2077,6 +2443,7 @@
     settle(tab, narr, id);
   }
 
+  /** @param {Tab} tab @param {Narrator} narr */
   async function streamRun(tab, narr) {
     const { run } = tab;
     const stream = openStream('run', tab, run);
@@ -2087,27 +2454,32 @@
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
     } catch (error) {
-      failRun(tab, narr, explain(error, error.message, 'the live run stopped'));
+      failRun(tab, narr, explain(error, /** @type {Error} */ (error).message, 'the live run stopped'));
     } finally {
       closeStream(stream);
     }
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
+  /** @param {Tab} tab @param {string} question @param {string} model */
   async function askOver(tab, question, model) {
     const { run } = tab;
+    /** @type {Answer} */
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
     const narr = narrator(tab, addTurn(tab, question, id), { status: false });
     const stream = openStream('ask', tab, ask);
     // An ask leaves the status alone, but its stop was asked for there: once that has ended, the status
     // says so until it next changes, and the tab keeps its run's own line.
+    /** @type {string | null} */
     let stopped = null;
+    /** @param {string} text */
     const failed = (text) => {
       narr.done();
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
       sayError(narr, text);
     };
+    /** @param {ServerEvent} event */
     const onEvent = (event) => {
       if (event.type === 'reasoning_finished') {
         Object.assign(ask, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
@@ -2131,21 +2503,23 @@
       jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
-      failed(explain(error, error.message, 'the ask stopped'));
+      failed(explain(error, /** @type {Error} */ (error).message, 'the ask stopped'));
     } finally {
       closeStream(stream);
       if (stopped && tab === state.shown && !stopping(tab)) errorStatus(stopped);
     }
   }
 
+  /** @param {Tab} tab */
   const docPositions = (tab) => new Map([...tab.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
 
   // Plays the shown tab's run, its document nodes starting from `at`.
+  /** @param {Tab} tab */
   function playRun(tab, at = docPositions(tab)) {
     cancelTimers(tab);
     clearPanel(tab);
     // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
-    tab.drawing.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length));
+    tab.drawing.style.setProperty('--context-fade', String(Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length)));
     tab.turn.replaceChildren();
     tab.userMoved = false;
     const narr = (tab.narr = narrator(tab, tab.turn));
@@ -2156,6 +2530,7 @@
   }
 
   // Every run opens a tab of its own, its documents starting where the shown tab has them.
+  /** @param {string} question */
   function startRun(question) {
     const at = docPositions(state.shown);
     const tab = newTab();
@@ -2172,6 +2547,7 @@
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
 
+  /** @param {Tab} tab @param {Answer} ask */
   function addAsk(tab, ask) {
     const id = answerId(tab.run.answers.push(ask) - 1);
     tab.layout.set(id, freeAnswerSpot(tab));
@@ -2181,20 +2557,24 @@
   }
 
   // Draws a landed ask again, as a replay does, without saying it in the chat again.
+  /** @param {Tab} tab @param {string} id */
   function redrawAsk(tab, id) {
     addNode(tab, id);
     drawAnswer(tab, id);
   }
 
   // Shifted per ask, so that each simulated answer cites other documents than the last.
+  /** @param {Run} run @param {string} question @param {string} model @returns {Answer} */
   function simulatedAsk(run, question, model) {
     return { question, model, source: 'simulated', ...madeUpAnswer(run, question, run.answers.length), totals: null };
   }
 
   // A recorded answer when one has this question and model over the recorded run, else a simulated one.
+  /** @param {Tab} tab @param {string} question @param {string} model */
   function prototypeAsk(tab, question, model) {
     const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
+    /** @type {Answer} */
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
     const narr = narrator(tab, addTurn(tab, question, id), { status: false });
@@ -2204,16 +2584,19 @@
   }
 
   // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
+  /** @param {Tab} tab @param {Narrator} narr */
   function offerRecordedAsks(tab, narr) {
+    /** @param {RecordedAsk} ask @param {number} i */
     const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
     narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
     RECORDED_ASKS.forEach((ask, i) => narr.say('sub', offer(ask, i)));
   }
 
+  /** @param {{ question: string, model: string }} ask */
   function prepareAsk({ question, model }) {
-    const listed = [...$('model-pick').options].some((option) => option.value === model);
-    $('model-pick').value = listed ? model : '';
-    if (!listed) $('model-other').value = model;
+    const listed = [...modelPick.options].some((option) => option.value === model);
+    modelPick.value = listed ? model : '';
+    if (!listed) modelOther.value = model;
     onPick();
     questionEl.value = question;
     questionEl.focus();
@@ -2221,12 +2604,16 @@
 
   // ---------- tabs ----------
 
+  /** @param {Tab} tab */
   const tabLabel = (tab) => answerLabel(tab.run.answers[0]);
+  /** @param {Tab} tab */
   const tabButtonId = (tab) => `run-tab-${tab.id}`;
   // A tab can't close while its run or an ask over it is going.
+  /** @param {Tab} tab */
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
   // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
+  /** @param {Tab} tab */
   function openTab(tab) {
     const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
     tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
@@ -2250,6 +2637,7 @@
     panel.setAttribute('aria-labelledby', tabButtonId(state.shown));
   }
 
+  /** @param {Tab} tab */
   function showDrawing(tab) {
     finishSlide(state.shown);
     // A drawing taken out of the page mid-animation never hears the animation end.
@@ -2263,10 +2651,12 @@
   }
 
   // On a phone the tab row scrolls, and the shown tab could be out of sight.
+  /** @param {Tab} tab */
   function revealTab(tab) {
     for (const el of [tab.button, tab.close]) if (!el.hidden) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
+  /** @param {Tab} tab */
   function switchTab(tab) {
     if (tab === state.shown) return;
     showDrawing(tab);
@@ -2277,6 +2667,7 @@
     revealTab(tab);
   }
 
+  /** @param {Tab} tab */
   function closeTab(tab) {
     if (state.tabs.length === 1) return;
     // Only Delete gets here for a busy tab: its × is disabled, and hidden from assistive tech.
@@ -2297,8 +2688,10 @@
     state.shown.button.focus();
   }
 
+  /** @type {Record<string, number>} */
   const TAB_KEYS = { ArrowRight: 1, ArrowLeft: -1 };
 
+  /** @param {KeyboardEvent} e */
   function onTabKey(e) {
     const tab = state.tabs.find((t) => t.button === e.target);
     if (!tab) return;
@@ -2313,6 +2706,7 @@
 
   // ---------- files ----------
 
+  /** @param {'chat' | 'files'} name */
   function showTab(name) {
     for (const tab of ['chat', 'files']) {
       $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
@@ -2333,11 +2727,12 @@
         ),
       ),
     );
-    $('files-count').textContent = state.files.length;
+    $('files-count').textContent = String(state.files.length);
     $('sample-btn').hidden = filesAreSample();
     $('sample-btn').textContent = state.files.some((f) => f.sample) ? `use all ${plural(SAMPLE_FILES.length, 'sample memo')}` : 'use the sample memos';
   }
 
+  /** @param {LoadedFile} file */
   function openFile(file) {
     showTab('files');
     const fileView = $('file-view');
@@ -2360,6 +2755,7 @@
     $('file-list-view').hidden = false;
   }
 
+  /** @param {File} file @returns {Promise<string>} */
   function readText(file) {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -2369,6 +2765,7 @@
     });
   }
 
+  /** @param {Iterable<File | null>} list */
   async function addFiles(list) {
     const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
     const error = $('files-error');
@@ -2392,10 +2789,12 @@
   }
 
   // The re-render drops the clicked button, and the focus with it.
+  /** @param {LoadedFile} file */
   function removeFile(file) {
     const i = state.files.indexOf(file);
     state.files = state.files.filter((f) => f !== file);
     filesChanged(`Removed ${file.name}`);
+    /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
   }
@@ -2408,6 +2807,7 @@
 
   // `what` happened to the files. The chat is hidden while the files tab is shown, so the pane says it too;
   // only the chat, which is history, says what the next run would cover, since that changes as runs do.
+  /** @param {string} what */
   function filesChanged(what) {
     closeFile();
     renderFiles();
@@ -2419,17 +2819,21 @@
     scrollTranscript();
   }
 
+  /** @param {DataTransfer} dataTransfer @returns {Promise<(File | null)[]>} */
   async function filesFromDrop(dataTransfer) {
     const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
     if (!entries.length) return [...dataTransfer.files];
+    /** @type {(File | null)[]} */
     const files = [];
+    /** @param {FileSystemEntry} entry */
     const walk = async (entry) => {
       if (entry.isFile) {
-        files.push(await new Promise((resolve) => entry.file(resolve, () => resolve(null))));
+        files.push(await new Promise((resolve) => /** @type {FileSystemFileEntry} */ (entry).file(resolve, () => resolve(null))));
         return;
       }
-      const reader = entry.createReader();
+      const reader = /** @type {FileSystemDirectoryEntry} */ (entry).createReader();
       for (;;) {
+        /** @type {FileSystemEntry[]} */
         const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
         if (!batch.length) return;
         for (const child of batch) await walk(child);
@@ -2465,8 +2869,10 @@
   // ---------- keys ----------
 
   // The prototype only notes which providers were given a key; r3con app keeps the keys themselves.
+  /** @type {Set<string>} */
   const keyed = new Set();
 
+  /** @param {string[]} providers */
   function renderKeys(providers) {
     for (const provider of Object.keys(PROVIDERS)) {
       $(`state-${provider}`).textContent = providers.includes(provider) ? 'set' : '';
@@ -2482,31 +2888,32 @@
   // ---------- model picker ----------
 
   function pickedModel() {
-    return $('model-pick').value || $('model-other').value.trim();
+    return modelPick.value || modelOther.value.trim();
   }
 
   // The remembered model stays listed without its key, as after a reload; a chosen "other model…" stays chosen.
+  /** @param {string[]} providers */
   function renderPicker(providers) {
-    const select = $('model-pick');
     const remembered = readStored(MODEL_KEY) || DEFAULT_MODEL;
     const groups = Object.entries(PROVIDERS)
       .filter(([provider, { models }]) => models.length && providers.includes(provider))
       .map(([, group]) => group);
     const listed = groups.flatMap(({ models }) => models);
-    const current = select.options.length ? select.value : remembered;
+    const current = modelPick.options.length ? modelPick.value : remembered;
+    /** @param {string} value */
     const option = (value, text = value) => h('option', { value }, text);
+    /** @param {{ label: string, models: string[] }} group */
     const optgroup = ({ label, models }) => h('optgroup', { label }, models.map((model) => option(model)));
-    const typed = current === '' ? $('model-other').value.trim() : '';
+    const typed = current === '' ? modelOther.value.trim() : '';
     const unlisted = listed.includes(remembered) || remembered === typed ? null : option(remembered);
-    fill(select, unlisted, groups.map(optgroup), option('', 'other model…'));
-    select.value = current === '' || listed.includes(current) ? current : remembered;
+    fill(modelPick, unlisted, groups.map(optgroup), option('', 'other model…'));
+    modelPick.value = current === '' || listed.includes(current) ? current : remembered;
     $('model-hint').hidden = providers.length > 0;
     showOtherModel();
   }
 
   function showOtherModel() {
-    const other = $('model-other');
-    other.hidden = other.disabled = $('model-pick').value !== '';
+    modelOther.hidden = modelOther.disabled = modelPick.value !== '';
   }
 
   function onPick() {
@@ -2518,6 +2925,7 @@
 
   // ---------- settings ----------
 
+  /** @param {string} provider @param {Props} props */
   function keyField(provider, props) {
     return h('input', {
       class: 'field key',
@@ -2532,6 +2940,7 @@
     });
   }
 
+  /** @param {Props} props */
   function endpointField(props) {
     return h('input', {
       class: 'field',
@@ -2567,14 +2976,15 @@
     $('keys-show').setAttribute('aria-controls', Object.keys(PROVIDERS).map((provider) => `key-${provider}`).join(' '));
   }
 
+  /** @param {boolean} show */
   function showKeys(show) {
-    for (const input of document.querySelectorAll('.key')) input.type = show ? 'text' : 'password';
+    for (const input of /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.key'))) input.type = show ? 'text' : 'password';
     $('keys-show').textContent = show ? 'hide keys' : 'show keys';
   }
 
   function clearSettings() {
     for (const input of $('settings').querySelectorAll('input')) input.value = '';
-    $('endpoint-other').required = false;
+    $('endpoint-other', HTMLInputElement).required = false;
     showKeys(false);
   }
 
@@ -2588,6 +2998,7 @@
   }
 
   // beforetoggle, not toggle, so the popover is placed and cleared before its first paint.
+  /** @param {ToggleEvent} e */
   function onSettingsToggle(e) {
     clearSettings();
     if (e.newState !== 'open') return;
@@ -2597,16 +3008,18 @@
 
   let savedTimer = 0;
 
+  /** @param {string} text */
   function showSaveResult(text) {
     clearTimeout(savedTimer);
     $('settings-saved').textContent = text;
   }
 
+  /** @param {string} provider */
   function clearKey(provider) {
-    $(`key-${provider}`).value = '';
+    $(`key-${provider}`, HTMLInputElement).value = '';
     if (provider !== OTHER) return;
-    $('endpoint-other').value = '';
-    $('endpoint-other').required = false;
+    $('endpoint-other', HTMLInputElement).value = '';
+    $('endpoint-other', HTMLInputElement).required = false;
   }
 
   let saving = false;
@@ -2626,9 +3039,9 @@
   // its key is saved and the markers following each answer; a failure stops the save, and the fields
   // left keep what was typed until they close.
   async function saveEnteredKeys() {
-    const endpoint = $('endpoint-other').value;
+    const endpoint = $('endpoint-other', HTMLInputElement).value;
     const entered = Object.keys(PROVIDERS)
-      .map((provider) => [provider, $(`key-${provider}`).value.trim()])
+      .map((provider) => [provider, $(`key-${provider}`, HTMLInputElement).value.trim()])
       .filter(([provider, key]) => (provider === OTHER ? endpoint : key));
     if (!entered.length) return showSaveResult('nothing to save');
     for (const [provider, key] of entered) {
@@ -2646,8 +3059,13 @@
 
   // ---------- gestures ----------
 
+  /**
+   * @type {{ pointers: Map<number, Point>, mode: 'pinch' | 'drag' | 'pan' | null, moved: boolean, origin: Point | null,
+   *   from: Point | null, node: PanelNode | null, pinch: { dist: number, mid: Point, view: View } | null }}
+   */
   const gesture = { pointers: new Map(), mode: null, moved: false, origin: null, from: null, node: null, pinch: null };
 
+  /** @param {number} x @param {number} y */
   function panelPoint(x, y) {
     const r = panel.getBoundingClientRect();
     return { x: x - r.left, y: y - r.top };
@@ -2675,14 +3093,16 @@
     applyView();
   }
 
+  /** @param {PointerEvent} e */
   function onPointerDown(e) {
     const { view } = state.shown;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (e.target.closest('.inspector, .panel-tools')) return;
+    if (targetOf(e).closest('.inspector, .panel-tools')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
-    const nodeEl = e.target.closest('.node');
+    /** @type {HTMLElement | null} */
+    const nodeEl = targetOf(e).closest('.node');
     gesture.node = nodeEl ? state.shown.nodes.get(nodeEl.dataset.id) : null;
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
@@ -2690,6 +3110,7 @@
     gesture.from = gesture.node ? drawnAt(gesture.node) : { x: view.x, y: view.y };
   }
 
+  /** @param {PointerEvent} e */
   function onPointerMove(e) {
     const { view } = state.shown;
     const p = gesture.pointers.get(e.pointerId);
@@ -2720,6 +3141,7 @@
     }
   }
 
+  /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
     if (gesture.mode === 'pinch') {
@@ -2732,9 +3154,10 @@
     panel.classList.remove('panning');
   }
 
+  /** @param {WheelEvent} e */
   function onWheel(e) {
     const { view } = state.shown;
-    if (e.target.closest('.inspector')) return;
+    if (targetOf(e).closest('.inspector')) return;
     e.preventDefault();
     const scale = e.deltaMode === 1 ? WHEEL_LINE_PX : 1;
     if (e.ctrlKey || e.metaKey) {
@@ -2750,13 +3173,15 @@
 
   const inspectorGrab = { x: 0, y: 0, left: 0, top: 0 };
 
+  /** @param {PointerEvent} e */
   function onInspectorGrab(e) {
-    if (!e.target.closest('.insp-head') || e.target.closest('button')) return;
+    if (!targetOf(e).closest('.insp-head') || targetOf(e).closest('button')) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     Object.assign(inspectorGrab, { x: e.clientX, y: e.clientY, left: inspector.offsetLeft, top: inspector.offsetTop });
     inspector.setPointerCapture(e.pointerId);
   }
 
+  /** @param {PointerEvent} e */
   function onInspectorMove(e) {
     if (!inspector.hasPointerCapture(e.pointerId)) return;
     const dx = e.clientX - inspectorGrab.x;
@@ -2767,8 +3192,10 @@
     placeInspector(state.inspectorDroppedAt);
   }
 
+  /** @param {Event} e */
   function hoverFrom(e) {
-    const el = e.target.closest('.node');
+    /** @type {HTMLElement | null} */
+    const el = targetOf(e).closest('.node');
     return el ? el.dataset.id : null;
   }
 
@@ -2789,7 +3216,7 @@
       refreshHighlight();
     });
     world.addEventListener('pointerout', (e) => {
-      if (e.relatedTarget && e.target.closest('.node')?.contains(e.relatedTarget)) return;
+      if (e.relatedTarget && targetOf(e).closest('.node')?.contains(/** @type {Node} */ (e.relatedTarget))) return;
       state.hovered = null;
       refreshHighlight();
     });
@@ -2802,7 +3229,7 @@
       refreshHighlight();
     });
     // An animation's class comes off once it has played, so the node or line can play it again.
-    world.addEventListener('animationend', (e) => endAnimation(e.target));
+    world.addEventListener('animationend', (e) => endAnimation(targetOf(e)));
     // On click, not pointerup: a tap's click would otherwise land on the inspector that just opened under it.
     panel.addEventListener('click', (e) => {
       const id = hoverFrom(e);
@@ -2829,13 +3256,13 @@
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('settings').addEventListener('input', () => showSaveResult(''));
-    $('keys-show').addEventListener('click', () => showKeys(document.querySelector('.key').type === 'password'));
-    $('key-other').addEventListener('input', () => ($('endpoint-other').required = Boolean($('key-other').value.trim())));
+    $('keys-show').addEventListener('click', () => showKeys(/** @type {HTMLInputElement} */ (document.querySelector('.key')).type === 'password'));
+    $('key-other').addEventListener('input', () => ($('endpoint-other', HTMLInputElement).required = Boolean($('key-other', HTMLInputElement).value.trim())));
     // The key fields sit outside the form, so Enter there doesn't submit it on its own.
     $('settings').addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' || e.isComposing || !e.target.matches('.key')) return;
+      if (e.key !== 'Enter' || e.isComposing || !targetOf(e).matches('.key')) return;
       e.preventDefault();
-      $('settings-form').requestSubmit();
+      $('settings-form', HTMLFormElement).requestSubmit();
     });
     $('settings-form').addEventListener('submit', (e) => {
       e.preventDefault();
@@ -2867,14 +3294,14 @@
       if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
       if (e.ctrlKey || e.metaKey) submitQuestion('run');
-      else $('ask-form').requestSubmit();
+      else $('ask-form', HTMLFormElement).requestSubmit();
     });
-    $('model-pick').addEventListener('change', onPick);
-    $('model-other').addEventListener('change', onPick);
+    modelPick.addEventListener('change', onPick);
+    modelOther.addEventListener('change', onPick);
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
-      const input = $(id);
+      const input = $(id, HTMLInputElement);
       input.addEventListener('change', () => {
         if (input.files.length) addFiles(input.files);
         input.value = '';
@@ -2882,6 +3309,7 @@
     }
     $('sample-btn').addEventListener('click', useSample);
 
+    /** @param {DragEvent} e */
     const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
     side.addEventListener('dragover', (e) => {
       if (!hasFiles(e)) return;
@@ -2890,7 +3318,7 @@
       side.classList.add('dropping');
     });
     side.addEventListener('dragleave', (e) => {
-      if (!side.contains(e.relatedTarget)) side.classList.remove('dropping');
+      if (!side.contains(/** @type {Node} */ (e.relatedTarget))) side.classList.remove('dropping');
     });
     side.addEventListener('drop', async (e) => {
       if (!hasFiles(e)) return;
@@ -2911,6 +3339,7 @@
   // ---------- modes ----------
   // What differs between the page served by r3con app and the prototype, decided once at load.
 
+  /** @type {Mode} */
   const prototypeMode = {
     intro: PROTOTYPE_INTRO,
     note: PROTOTYPE_MODE_NOTE,
@@ -2935,6 +3364,7 @@
   };
 
   // A provider whose variable is set where r3con app runs counts as having a key.
+  /** @type {Mode} */
   const liveMode = {
     intro: LIVE_INTRO,
     note: LIVE_MODE_NOTE,
@@ -2956,6 +3386,7 @@
   };
 
   // r3con refuses a blank document, so a run with one is not sent.
+  /** @param {LoadedFile[]} files */
   function unreadableFiles(files) {
     const names = files.filter((f) => !f.text.trim()).map((f) => f.name);
     return names.length ? `no readable text in ${names.join(', ')}; nothing was sent` : null;
