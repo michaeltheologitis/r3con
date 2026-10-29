@@ -35,6 +35,7 @@ written to the folder's ``events.jsonl`` and handed to the caller's ``on_event``
 from __future__ import annotations
 
 import json
+import threading
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -63,7 +64,7 @@ from r3con.runs import (
     write_manifest,
 )
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
-from r3con.runtime.llm import register_credentials
+from r3con.runtime.llm import raise_if_cancelled, register_credentials
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
@@ -195,9 +196,13 @@ def _recorded_stage(
     *,
     transcript: bool,
     emit: Emit,
+    cancel: threading.Event | None,
     failed: str = "run_failed",
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
+
+    A stage does not start once ``cancel`` is set: it raises
+    :class:`~r3con.runtime.llm.Cancelled` at once, and fails as below.
 
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
     fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
@@ -217,6 +222,7 @@ def _recorded_stage(
     )
     record = _StageRecord(run=run)
     try:
+        raise_if_cancelled(cancel)
         yield record
         if run is not None:
             run.flush(write_transcript=transcript)
@@ -261,6 +267,7 @@ def run_pipeline(
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Run all three stages for one ``(task, documents)`` pair under one ``config``.
 
@@ -287,6 +294,10 @@ def run_pipeline(
     after that stage succeeds, so a later failure still leaves earlier artifacts; a
     stage that raises writes its completed calls and ``error.txt``, and the exception
     carries a note naming the run folder.
+
+    ``cancel`` stops the run as :func:`r3con.run` says: once it is set, no new model
+    call is sent and no stage starts, and the stage then under way, or the next one,
+    raises :class:`~r3con.runtime.llm.Cancelled` as any failing stage raises.
 
     The run reports its progress as events, each a dict of JSON values with its
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
@@ -326,7 +337,11 @@ def run_pipeline(
     model = config.model
     rounds = config.relevance_rounds
     llm_kwargs = _llm_kwargs(
-        config.params, api_base=api_base, api_key=api_key, completion=completion
+        config.params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        cancel=cancel,
     )
 
     document_ids = draw_document_ids(len(documents))
@@ -368,7 +383,7 @@ def run_pipeline(
         len(documents),
     )
     with _recorded_stage(
-        task_logger, "relevance", model, transcript=False, emit=emit
+        task_logger, "relevance", model, transcript=False, emit=emit, cancel=cancel
     ) as record:
         relevance = surface_relevance(
             task=task,
@@ -403,7 +418,12 @@ def run_pipeline(
     _log.info("stage 2/3 · structuring · proposing the schema")
     emit("schema_started")
     with _recorded_stage(
-        task_logger, "structuring/schema", model, transcript=True, emit=emit
+        task_logger,
+        "structuring/schema",
+        model,
+        transcript=True,
+        emit=emit,
+        cancel=cancel,
     ) as record:
         proposal = propose_schema(
             task=task,
@@ -432,7 +452,12 @@ def run_pipeline(
     # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     with _recorded_stage(
-        task_logger, "structuring/parsing", model, transcript=False, emit=emit
+        task_logger,
+        "structuring/parsing",
+        model,
+        transcript=False,
+        emit=emit,
+        cancel=cancel,
     ) as record:
         extraction = parse_documents(
             documents=documents,
@@ -463,7 +488,7 @@ def run_pipeline(
     _log.info("stage 3/3 · reasoning")
     emit("reasoning_started", question=task, model=model)
     with _recorded_stage(
-        task_logger, "reasoning", model, transcript=True, emit=emit
+        task_logger, "reasoning", model, transcript=True, emit=emit, cancel=cancel
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -606,6 +631,7 @@ def ask_pipeline(
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Rerun only reasoning over ``built`` for ``task`` under ``config``
     (:func:`ask_config`), as :func:`r3con.ask` says.
@@ -614,10 +640,14 @@ def ask_pipeline(
     folder's own ``events.jsonl``: ``ask_started`` (``question``, ``model``,
     ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, then
     ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
-    ``error``)."""
+    ``error``). ``cancel`` stops it as it stops :func:`run_pipeline`."""
     caps = settings_snapshot()
     llm_kwargs = _llm_kwargs(
-        config.params, api_base=api_base, api_key=api_key, completion=completion
+        config.params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        cancel=cancel,
     )
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
@@ -640,6 +670,7 @@ def ask_pipeline(
         config.model,
         transcript=True,
         emit=emit,
+        cancel=cancel,
         failed="ask_failed",
     ) as record:
         result = reasoning.reason(
@@ -678,20 +709,23 @@ def _llm_kwargs(
     api_base: str | None,
     api_key: str | None,
     completion: Callable[..., Any] | None,
+    cancel: threading.Event | None,
 ) -> dict[str, Any]:
     """What every request is sent with: the output knobs in ``params``, then the
-    transport. Each credential among them, a Router's included, is registered for
-    masking (:func:`r3con.runtime.llm.register_credentials`), so call this before
-    writing ``manifest.json``."""
+    transport and ``cancel``. Each credential among them, a Router's included, is
+    registered for masking (:func:`r3con.runtime.llm.register_credentials`), so call
+    this before writing ``manifest.json``."""
     llm_kwargs: dict[str, Any] = {**params}
     if api_base:
         llm_kwargs["api_base"] = api_base
     if api_key:
         llm_kwargs["api_key"] = api_key
+    # Named parameters of `litellm_chat_completion`, so they bind there rather than
+    # being forwarded into the provider request.
     if completion is not None:
-        # A named parameter of `litellm_chat_completion`, so it binds there rather than
-        # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
+    if cancel is not None:
+        llm_kwargs["cancel"] = cancel
     register_credentials(llm_kwargs, completion)
     return llm_kwargs
 

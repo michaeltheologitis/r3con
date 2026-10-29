@@ -1,16 +1,19 @@
+import contextlib
 import json
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx2
 import litellm
 import pytest
-from r3con_app.server import create_app, serve
+from litellm.exceptions import RateLimitError
+from r3con_app.server import ServerState, _server, create_app, serve
 from starlette.testclient import TestClient
+from starlette.types import ASGIApp
 
 litellm.suppress_debug_info = True
 
@@ -20,6 +23,10 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MEMOS = Path(__file__).resolve().parents[2] / "examples" / "memos"
 GATE_TIMEOUT_SECONDS = 10
+LONG_RETRY_AFTER_SECONDS = 60
+# Far below GATE_TIMEOUT_SECONDS, which ends a held call by itself.
+STILL_WAITING_SECONDS = 0.5
+FORCED_EXIT_SECONDS = 5
 QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 OPENAI_KEY = "sk-stored-openai-key-1234"
@@ -77,13 +84,15 @@ def opened() -> threading.Event:
 
 @dataclass
 class FakeModel:
-    """A ``completion=`` that answers r3con's requests as a model would, through
-    litellm's own mock, and keeps them. Each request waits at ``gate``; a request for
-    the reply named ``fail_on`` raises ``error`` instead of being answered."""
+    """A ``completion=`` that answers r3con's requests as a model would, with
+    ``replies``, through litellm's own mock, and keeps them. Each request waits at
+    ``gate``; a request for the reply named ``fail_on`` raises ``error`` instead of
+    being answered."""
 
     gate: threading.Event = field(default_factory=opened)
     fail_on: str | None = None
     error: Exception = field(default_factory=lambda: RuntimeError("the model is down"))
+    replies: dict[str, str] = field(default_factory=lambda: dict(REPLIES))
     requests: list[dict[str, Any]] = field(default_factory=list)
     called: threading.Event = field(default_factory=threading.Event)
 
@@ -98,7 +107,7 @@ class FakeModel:
         choice = {
             "index": 0,
             "finish_reason": "stop",
-            "message": {"content": REPLIES[name]},
+            "message": {"content": self.replies[name]},
         }
         return litellm.completion(
             **request, mock_response={"choices": [choice], "usage": USAGE}
@@ -119,14 +128,19 @@ def held_llm() -> FakeModel:
 
 
 @pytest.fixture
+def one_call_at_a_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """r3con reads one document at a time, so a held model holds the only call."""
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+
+
+@pytest.fixture
 def logs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
 def client_for(model: FakeModel, logs_dir: Path, **options: Any) -> TestClient:
-    app = create_app(
-        token=TOKEN, port=PORT, logs_dir=logs_dir, completion=model, **options
-    )
+    state = ServerState(logs_dir=logs_dir, completion=model)
+    app = create_app(token=TOKEN, port=PORT, state=state, **options)
     return TestClient(app, base_url=BASE_URL, headers=AUTH)
 
 
@@ -190,6 +204,22 @@ def transport(llm: FakeModel) -> list[dict[str, str]]:
     ]
 
 
+def worker_of(job_id: str) -> threading.Thread:
+    """The thread the server started for the job ``job_id``, while it runs."""
+    return next(t for t in threading.enumerate() if t.name == f"r3con-app-{job_id}")
+
+
+def rate_limited(**request: Any) -> Any:
+    """A ``litellm.completion`` that answers every request with a 429 asking for a
+    wait longer than any test."""
+    error = RateLimitError(message="slow down", llm_provider="openai", model=MODEL)
+    # Where litellm keeps a provider's headers, on the errors it raises.
+    vars(error)["litellm_response_headers"] = {
+        "retry-after": str(LONG_RETRY_AFTER_SECONDS)
+    }
+    raise error
+
+
 def http_client(url: str) -> httpx2.Client:
     """A client for the server that ``url``, with its token, opens."""
     base_url, token = url.split("/#token=")
@@ -199,6 +229,27 @@ def http_client(url: str) -> httpx2.Client:
         timeout=GATE_TIMEOUT_SECONDS,
         trust_env=False,
     )
+
+
+def shut_down_with_a_stream_open(
+    url: str, model: FakeModel, shut_down: Callable[[], None]
+) -> tuple[str, dict[str, Any]]:
+    """Over a real connection: start a run and read its stream's first event; once
+    ``model`` holds its first call, call ``shut_down``, and read on until the server's
+    shutdown closes the stream, after its grace. Returns the run's id and that first
+    event."""
+    with http_client(url) as http:
+        run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        with http.stream("GET", f"/api/runs/{run_id}/events") as response:
+            lines = response.iter_lines()
+            first = next(line for line in lines if line.startswith("data: "))
+            assert model.called.wait(GATE_TIMEOUT_SECONDS)
+            shut_down()
+            # Cut short, so without the end of its body.
+            with contextlib.suppress(httpx2.RemoteProtocolError):
+                for _ in lines:
+                    pass
+    return run_id, json.loads(first.removeprefix("data: "))
 
 
 def first_event_then_the_rest(
@@ -556,7 +607,9 @@ def test_a_key_body_that_is_not_valid_is_refused_without_echoing_the_key(
     [
         ("GET", "/api/runs/nothing/events"),
         ("POST", "/api/runs/nothing/asks"),
+        ("POST", "/api/runs/nothing/cancel"),
         ("GET", "/api/asks/nothing/events"),
+        ("POST", "/api/asks/nothing/cancel"),
     ],
 )
 def test_a_run_or_ask_this_server_did_not_start_is_not_found(
@@ -565,6 +618,53 @@ def test_a_run_or_ask_this_server_did_not_start_is_not_found(
     response = client.request(method, path, json=ASK)
     assert response.status_code == 404
     assert "nothing" in response.json()["error"]
+
+
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_failed(
+    held_llm: FakeModel, logs_dir: Path, caplog: pytest.LogCaptureFixture
+):
+    with (
+        caplog.at_level(logging.INFO, logger="r3con.app"),
+        client_for(held_llm, logs_dir) as client,
+    ):
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        worker = worker_of(run_id)
+        response = client.post(f"/api/runs/{run_id}/cancel")
+        held_llm.gate.set()
+        last = run_events(client, run_id)[-1]
+        worker.join(GATE_TIMEOUT_SECONDS)
+    assert response.status_code == 202
+    assert len(held_llm.requests) == 1
+    assert (last["type"], last["stage"]) == ("run_failed", "relevance")
+    assert last["error"].startswith("Cancelled: ")
+    logged = [
+        (r.levelno, r.getMessage()) for r in caplog.records if r.name == "r3con.app"
+    ]
+    assert logged == [(logging.INFO, f"run_failed: {last['error']}")]
+
+
+def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_failed(
+    held_llm: FakeModel, logs_dir: Path
+):
+    held_llm.gate.set()
+    with client_for(held_llm, logs_dir) as client:
+        run_id = finished_run(client)
+        held_llm.gate.clear()
+        held_llm.called.clear()
+        # A reply that does not fit, which the ask would send again.
+        held_llm.replies["ReasoningAnswer"] = "not an answer"
+        sent = len(held_llm.requests)
+        ask_id = client.post(f"/api/runs/{run_id}/asks", json=ASK).json()["ask_id"]
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.post(f"/api/asks/{ask_id}/cancel")
+        held_llm.gate.set()
+        last = events_of(client, f"/api/asks/{ask_id}/events")[-1]
+    assert response.status_code == 202
+    assert len(held_llm.requests) == sent + 1
+    assert (last["type"], last["stage"]) == ("ask_failed", "reasoning")
+    assert last["error"].startswith("Cancelled: ")
 
 
 @pytest.mark.enable_socket
@@ -586,7 +686,29 @@ def test_serve_streams_a_runs_events_as_they_happen_and_stops(
 
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_run_the_server_stops_under_ends_without_an_unhandled_error(
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_stop_waits_for_a_run_on_a_held_call_and_returns_once_it_has_ended(
+    held_llm: FakeModel, logs_dir: Path
+):
+    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
+    stopping = threading.Thread(target=stop)
+    run_id, started = shut_down_with_a_stream_open(url, held_llm, stopping.start)
+    worker = worker_of(run_id)
+    stopping.join(STILL_WAITING_SECONDS)
+    assert stopping.is_alive()
+    held_llm.gate.set()
+    stopping.join(GATE_TIMEOUT_SECONDS)
+    assert not stopping.is_alive()
+    assert not worker.is_alive()
+    assert len(held_llm.requests) == 1
+    error = Path(started["run_dir"]) / "relevance" / "error.txt"
+    assert "Cancelled" in error.read_text()
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly(
     held_llm: FakeModel,
     logs_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -594,17 +716,72 @@ def test_a_run_the_server_stops_under_ends_without_an_unhandled_error(
 ):
     unhandled: list[threading.ExceptHookArgs] = []
     monkeypatch.setattr(threading, "excepthook", unhandled.append)
-    held_llm.fail_on = "RelevanceSummary"
-    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
-    with http_client(url) as http:
-        assert http.post("/api/runs", json=run_body()).status_code == 202
-    assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
-    stop()
+    server, listener, url = _server(0, logs_dir, held_llm)
+    serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    serving.start()
+
+    def ctrl_c() -> None:
+        server.should_exit = True
+
+    run_id, _ = shut_down_with_a_stream_open(url, held_llm, ctrl_c)
+    worker = worker_of(run_id)
+    server.force_exit = True  # as a second Ctrl-C sets it
+    serving.join(FORCED_EXIT_SECONDS)
+    assert not serving.is_alive()
+    assert worker.is_alive()
     held_llm.gate.set()
-    workers = [t for t in threading.enumerate() if t.name.startswith("r3con-app-")]
-    assert workers
-    for worker in workers:
-        worker.join(GATE_TIMEOUT_SECONDS)
-    assert not any(worker.is_alive() for worker in workers)
+    worker.join(GATE_TIMEOUT_SECONDS)
+    assert not worker.is_alive()
     assert unhandled == []
     assert not [r for r in caplog.records if "on_event raised" in r.getMessage()]
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
+    llm: FakeModel, logs_dir: Path
+):
+    server, listener, url = _server(0, logs_dir, llm)
+    serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    serving.start()
+    server.should_exit = True
+    serving.join(GATE_TIMEOUT_SECONDS)
+    # A request the server was still handling as its shutdown began.
+    base_url, token = url.split("/#token=")
+    client = TestClient(
+        cast(ASGIApp, server.config.app),
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    response = client.post("/api/runs", json=run_body())
+    assert response.status_code == 503
+    assert response.json() == {"error": "The server is stopping."}
+    assert (server.app_state.jobs, server.app_state.workers) == (
+        {"run": {}, "ask": {}},
+        [],
+    )
+    assert not logs_dir.exists()
+    assert llm.requests == []
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_shutdown_with_a_stream_open_cancels_its_run_before_closing_the_stream(
+    logs_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(litellm, "completion", rate_limited)
+    url, stop = serve(logs_dir=logs_dir)
+    with http_client(url) as http:
+        run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        worker = worker_of(run_id)
+        with http.stream("GET", f"/api/runs/{run_id}/events") as response:
+            lines = response.iter_lines()
+            first = next(line for line in lines if line.startswith("data: "))
+            stop()
+            rest = events_in("\n".join(lines))
+    assert not worker.is_alive()
+    last = rest[-1]
+    assert (last["type"], last["stage"]) == ("run_failed", "relevance")
+    assert last["error"].startswith("Cancelled: ")
+    run_dir = Path(json.loads(first.removeprefix("data: "))["run_dir"])
+    assert "Cancelled" in (run_dir / "relevance" / "error.txt").read_text()

@@ -1,6 +1,7 @@
 import importlib.metadata
 import json
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -33,6 +34,17 @@ REFUSED_LINE = (
     "REDACTED"
 )
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
+CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
+BARRIER_TIMEOUT_SECONDS = 10
+SCHEMA_REPLY = """Thought: one row per memo.
+<schema>
+class Row(BaseModel):
+    who: str
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+</schema>"""
 ASK_FILES = {
     "manifest.json",
     "events.jsonl",
@@ -717,6 +729,91 @@ def test_a_failed_ask_reports_ask_failed_into_its_folder(
     assert events_in(Path(events[0]["ask_dir"])) == events
 
 
+def test_a_run_cancelled_during_relevance_sends_no_further_call_and_fails_there(
+    answering_llm, tmp_path
+):
+    cancel = threading.Event()
+    # Cancelled once every document's first read is in flight.
+    in_flight = threading.Barrier(
+        len(DOCS), action=cancel.set, timeout=BARRIER_TIMEOUT_SECONDS
+    )
+
+    def read_while_cancelled(request: dict[str, Any]) -> str:
+        in_flight.wait()
+        return "Notes."
+
+    answering_llm.answers(relevance=read_while_cancelled)
+    events = []
+    with pytest.raises(r3con.Cancelled) as cancelled:
+        finished_run(answering_llm, tmp_path, on_event=events.append, cancel=cancel)
+    assert len(answering_llm.requests) == len(DOCS)
+    types = [event["type"] for event in events]
+    assert types.count("relevance_finished") == len(DOCS)
+    assert {**events[-1], "time": None} == {
+        "type": "run_failed",
+        "time": None,
+        "stage": "relevance",
+        "error": CANCELLED,
+    }
+    run_dir = Path(events[0]["run_dir"])
+    assert cancelled.value.__notes__ == [f"r3con: partial artifacts in {run_dir}"]
+    calls = json.loads((run_dir / "relevance" / "calls.json").read_text())
+    assert [call["error"] for call in calls] == [None] * len(DOCS)
+    assert CANCELLED in (run_dir / "relevance" / "error.txt").read_text()
+
+
+def test_a_run_cancelled_during_a_stages_last_call_stops_as_the_next_one_starts(
+    answering_llm, tmp_path
+):
+    cancel = threading.Event()
+
+    def schema_while_cancelled(request: dict[str, Any]) -> str:
+        cancel.set()
+        return SCHEMA_REPLY
+
+    answering_llm.answers(schema=schema_while_cancelled)
+    events = []
+    with pytest.raises(r3con.Cancelled):
+        finished_run(answering_llm, tmp_path, on_event=events.append, cancel=cancel)
+    types = [event["type"] for event in events]
+    assert types[types.index("schema_finished") :] == ["schema_finished", "run_failed"]
+    assert events[-1]["stage"] == "parsing"
+    parsing = Path(events[0]["run_dir"]) / "structuring" / "parsing"
+    assert CANCELLED in (parsing / "error.txt").read_text()
+
+
+def test_an_ask_cancelled_during_reasoning_sends_no_further_call_and_fails_there(
+    answering_llm, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path)
+    sent = len(answering_llm.requests)
+    cancel = threading.Event()
+
+    def answer_while_cancelled(request: dict[str, Any]) -> str:
+        cancel.set()
+        return "not an answer"  # a reply that does not fit, which is sent again
+
+    answering_llm.answers(reasoning=answer_while_cancelled)
+    events = []
+    with pytest.raises(r3con.Cancelled):
+        ask(
+            built,
+            "Who else?",
+            completion=answering_llm,
+            on_event=events.append,
+            cancel=cancel,
+        )
+    assert len(answering_llm.requests) == sent + 1
+    failed = events[-1]
+    assert (failed["type"], failed["stage"], failed["error"]) == (
+        "ask_failed",
+        "reasoning",
+        CANCELLED,
+    )
+    folder = Path(events[0]["ask_dir"])
+    assert CANCELLED in (folder / "reasoning" / "error.txt").read_text()
+
+
 def test_without_a_run_folder_only_the_callback_gets_events(answering_llm, tmp_path):
     events = []
     run(
@@ -738,6 +835,7 @@ def test_run_is_reachable_from_the_package_and_from_its_module():
     assert r3con.ask is namespace.ask
     assert r3con.read_documents is namespace.read_documents
     assert Answer is namespace.Answer
+    assert r3con.Cancelled is namespace.Cancelled
 
 
 def test_the_version_lookup_leaves_nothing_in_the_package_namespace():

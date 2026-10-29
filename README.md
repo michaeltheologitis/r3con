@@ -95,6 +95,12 @@ other = r3con.ask(result, "Which supplier delivered on time most often?")
 print(other)
 ```
 
+To stop a run from another thread, pass `cancel=threading.Event()` and set it: no new
+model call is sent and the run raises `r3con.Cancelled`, leaving what it did so far in
+its folder. What is already under way runs its course: a call already sent (so a run on
+its last call finishes normally), resends r3con doesn't make itself (a `completion=`, or
+retry settings in `params`), and a sandbox step. `r3con.ask` takes `cancel` too.
+
 ## Notebooks
 
 The examples use five short memos arranged so that no single document contains the full

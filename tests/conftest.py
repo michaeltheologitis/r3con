@@ -537,9 +537,11 @@ def configs(tmp_path):
 
 @pytest.fixture
 def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """The seconds r3con waits before each resend, recorded instead of slept."""
+    """The seconds r3con waits before each resend, recorded instead of waited."""
     recorded: list[float] = []
-    monkeypatch.setattr("r3con.runtime.llm._sleep", recorded.append)
+    monkeypatch.setattr(
+        "r3con.runtime.llm._sleep", lambda seconds, cancel: recorded.append(seconds)
+    )
     return recorded
 
 
