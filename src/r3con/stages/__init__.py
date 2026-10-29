@@ -6,4 +6,7 @@
   parse every document into it.
 - :mod:`r3con.stages.reasoning` — stage 3, reasoning: answer over the structured
   parse and the relevant context.
+
+:mod:`r3con.stages.provenance` holds what they share: replies that cite the notes
+their call was shown.
 """
