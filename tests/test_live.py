@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,8 +23,17 @@ pytestmark = [
 ]
 
 
+def assert_cost_reported(events: list[dict[str, Any]], finished: str) -> None:
+    """The last of ``events`` is ``finished``, with the tokens and dollars spent."""
+    assert events[-1]["type"] == finished
+    assert events[-1]["usd"] > 0
+    assert events[-1]["tokens"]["total"] > 0
+
+
 @pytest.mark.parametrize("reasoning", REASONING_PATHS)
-def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning):
+def test_the_answer_joins_evidence_that_no_single_memo_holds(
+    tmp_path, events_in, reasoning
+):
     documents = read_documents(MEMOS)
     result = run(QUESTION, documents, reasoning=reasoning, logs_dir=tmp_path)
     assert "halloran" in result.answer.lower()
@@ -32,12 +42,16 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(tmp_path, reasoning
     cited = [documents[result.document_ids.index(id_)] for id_ in used]
     assert cited
     assert not any("Cafeteria refurbishment" in document for document in cited)
+    assert result.run_dir is not None
+    assert_cost_reported(events_in(result.run_dir), "run_finished")
 
 
-def test_an_ask_answers_a_new_question_over_a_finished_run(tmp_path):
+def test_an_ask_answers_a_new_question_over_a_finished_run(tmp_path, events_in):
     result = run(QUESTION, read_documents(MEMOS), logs_dir=tmp_path)
     asked = ask(result, "Which site logged the fewest equipment incidents in Q3?")
     assert "northgate" in asked.answer.lower()
     used = {id_.split(".")[0] for ids in asked.provenance.values() for id_ in ids}
     assert used
     assert used <= set(result.document_ids)
+    assert asked.run_dir is not None
+    assert_cost_reported(events_in(asked.run_dir), "ask_finished")
