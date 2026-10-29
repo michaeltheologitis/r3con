@@ -583,6 +583,7 @@ p { margin: 0; }
           <div class="ask-foot">
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
             <span class="ask-actions">
+              <button class="btn" id="stop-btn" type="button" hidden>stop</button>
               <button class="btn" id="new-run-btn" type="button" title="⌘/Ctrl+Enter" aria-keyshortcuts="Control+Enter Meta+Enter" hidden>new run</button>
               <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
             </span>
@@ -1057,6 +1058,11 @@ p { margin: 0; }
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
+  const STOPPING = 'stopping · the call in flight finishes first';
+  // r3con gives a cancelled job's error as its Cancelled exception, by name.
+  const CANCELLED_ERROR = 'Cancelled:';
+  // The r3con stage each kind of node is drawn in, so a stopped replay can say where it stopped.
+  const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
   const LIVE_MODE_NOTE = 'live · r3con-app on this computer';
@@ -1154,6 +1160,7 @@ p { margin: 0; }
       view: { x: 0, y: 0, k: 1 },
       userMoved: false,
       timers: [],
+      narr: null,
       arrangeFrame: 0,
     };
   }
@@ -1164,7 +1171,8 @@ p { margin: 0; }
     tabs: [],
     shown: newTab(),
     nextTab: 1,
-    // The streams open on r3con-app, a run's events or an ask's: each `{ kind, tab }`, dropped once closed.
+    // The streams open on r3con-app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
+    // the run or ask as `job`, dropped once closed.
     streams: new Set(),
     selected: null,
     hovered: null,
@@ -1356,15 +1364,30 @@ p { margin: 0; }
 
   const streaming = (kind, tab) => [...state.streams].some((stream) => stream.kind === kind && stream.tab === tab);
 
-  function openStream(kind, tab) {
-    const stream = { kind, tab };
+  function openStream(kind, tab, job) {
+    const stream = { kind, tab, job, stopping: false };
     state.streams.add(stream);
     return stream;
   }
 
   function closeStream(stream) {
     state.streams.delete(stream);
+    if (stream.stopping) showStatus(stream.tab);
     updateComposer();
+  }
+
+  const stopping = (tab) => [...state.streams].some((stream) => stream.tab === tab && stream.stopping);
+
+  // From the 202 on, r3con sends no new model call, and the stream ends with the job's last event.
+  async function cancelJob(stream) {
+    stream.stopping = true;
+    showStatus(stream.tab);
+    try {
+      await api(`/api/${stream.kind}s/${stream.job.id}/cancel`, { method: 'POST' });
+    } catch (error) {
+      stream.stopping = false;
+      if (stream.tab === state.shown) errorStatus(`couldn't stop · ${explain(error, error.message, "couldn't stop")}`);
+    }
   }
 
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
@@ -1461,7 +1484,8 @@ p { margin: 0; }
     return [run.source, model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
-  // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live.
+  // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live;
+  // a live one also has the server's `id` for it.
   function askSummary({ source, model, totals }) {
     const spend = source === 'simulated' ? ['nothing was sent'] : spent(totals);
     return [`${source} ask over this run`, model, ...spend].join(' · ');
@@ -2248,11 +2272,21 @@ p { margin: 0; }
   const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
 
-  // A tab keeps its run's status, which the status line shows while the tab is shown.
+  // A tab keeps its run's status, which the status line shows while the tab is shown; a stop's line stays
+  // until what it stopped has ended.
+  function showStatus(tab) {
+    if (tab === state.shown) setStatus(...(stopping(tab) ? [STOPPING] : tab.status));
+  }
+
   function tabStatus(tab, ...content) {
     tab.status = content;
-    if (tab === state.shown) setStatus(...content);
+    showStatus(tab);
   }
+
+  const stoppedIn = (stage) => (stage ? `stopped in ${stage}` : 'stopped');
+  const failureLine = ({ stage, error }) => (error.startsWith(CANCELLED_ERROR) ? stoppedIn(stage) : [stage ? `failed in ${stage}` : 'failed', error].join(' · '));
+  // Stages run in turn, so the newest node's kind is the stage a replay is in.
+  const stageReached = (tab) => STAGE_OF[[...tab.nodes.values()].filter((n) => n.kind !== 'doc').at(-1)?.kind] ?? null;
 
   function readyStatus() {
     if (state.tabs.length) return;
@@ -2266,14 +2300,19 @@ p { margin: 0; }
   // failed one, they run. The composer's labels follow this, so they say what a press does.
   const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
 
+  // Hiding the focused button would drop the focus to the page.
+  function showButton(button, shown) {
+    if (!shown && document.activeElement === button) questionEl.focus();
+    button.hidden = !shown;
+  }
+
   function updateComposer() {
     const asks = primaryAction() === 'ask';
     const pending = pendingFiles(state.shown).length;
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
-    // Hiding the focused button would drop the focus to the page.
-    if (!asks && document.activeElement === $('new-run-btn')) questionEl.focus();
-    $('new-run-btn').hidden = !asks;
+    showButton($('stop-btn'), tabBusy(state.shown));
+    showButton($('new-run-btn'), asks);
     const note = $('ask-note');
     const one = pending === 1;
     note.textContent = asks && pending ? `${plural(pending, 'new document')} ${one ? "isn't" : "aren't"} in this run · new run to include ${one ? 'it' : 'them'}` : '';
@@ -2599,7 +2638,7 @@ p { margin: 0; }
         lightRun(tab);
         break;
       case 'run_failed':
-        failRun(tab, narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
+        failRun(tab, narr, failureLine(event));
         break;
     }
   }
@@ -2618,7 +2657,7 @@ p { margin: 0; }
 
   async function streamRun(tab, narr) {
     const { run } = tab;
-    const stream = openStream('run', tab);
+    const stream = openStream('run', tab, run);
     try {
       const { question, model } = run.answers[0];
       const body = { question, model, documents: run.docs.map((f) => f.text) };
@@ -2654,13 +2693,14 @@ p { margin: 0; }
         narr.say('sub', askSummary(ask));
         rerenderIfOpen(tab, id);
       }
-      if (event.type === 'ask_failed') failed(`${askSummary(ask)} · failed · ${event.error}`);
+      if (event.type === 'ask_failed') failed(`${askSummary(ask)} · ${failureLine(event)}`);
     };
-    const stream = openStream('ask', tab);
+    const stream = openStream('ask', tab, ask);
     narr.phase(`asking · ${model}`);
     try {
       const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
-      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent);
+      ask.id = (await asked.json()).ask_id;
+      await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
       failed(explain(error, error.message, 'the ask stopped'));
     } finally {
@@ -2678,7 +2718,7 @@ p { margin: 0; }
     tab.drawing.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length));
     tab.turn.replaceChildren();
     tab.userMoved = false;
-    const narr = narrator(tab, tab.turn);
+    const narr = (tab.narr = narrator(tab, tab.turn));
     narr.phase('starting');
     syncDocNodes(tab, { at, animate: true, replan: true });
     mode.play(tab, narr);
@@ -2802,7 +2842,7 @@ p { margin: 0; }
     showDrawing(tab);
     // Nodes drawn while their tab was hidden had no size to fit by, and files may have changed since.
     syncDocNodes(tab);
-    setStatus(...tab.status);
+    showStatus(tab);
     updateComposer();
     revealTab(tab);
   }
@@ -3365,6 +3405,10 @@ p { margin: 0; }
       submitQuestion(primaryAction());
     });
     $('new-run-btn').addEventListener('click', () => submitQuestion('run'));
+    $('stop-btn').addEventListener('click', () => {
+      mode.stop(state.shown);
+      updateComposer();
+    });
     questionEl.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
@@ -3424,8 +3468,13 @@ p { margin: 0; }
     readable: (file) => file.slice(0, READ_BYTES),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
-    // A replay is going until its answer lands.
-    runGoing: (tab) => Boolean(tab.run) && !landed(tab, RUN_ANSWER),
+    // A replay is going while it has steps to come, until its answer lands.
+    runGoing: (tab) => tab.timers.length > 0 && !landed(tab, RUN_ANSWER),
+    // It stops where it is, as a live run does once its call in flight is back.
+    stop(tab) {
+      cancelTimers(tab);
+      failRun(tab, tab.narr, stoppedIn(stageReached(tab)));
+    },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
     providersWithKeys: async () => [...keyed],
@@ -3443,6 +3492,7 @@ p { margin: 0; }
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
+    stop: (tab) => [...state.streams].filter((stream) => stream.tab === tab).forEach(cancelJob),
     ask: (question) => askOver(state.shown, question, pickedModel()),
     async saveKey(provider, key, endpoint) {
       const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
@@ -3467,6 +3517,7 @@ p { margin: 0; }
     renderFiles();
     showDrawing(state.shown);
     syncDocNodes(state.shown);
+    updateComposer();
     renderPicker([]);
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));

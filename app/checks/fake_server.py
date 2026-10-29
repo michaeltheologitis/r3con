@@ -7,7 +7,9 @@ are), and each parse its first line; round 2 cites the first summary it is shown
 parse its own document's note, and the answer the first two documents' summaries and
 parses. It refuses a document over ``PART_CHARS`` as too long, so that r3con reads it
 in parts. A question holding ``FAILS`` makes every call raise, and one holding
-``HANGS`` makes every call wait until the server is killed.
+``HANGS`` makes every call wait until the server is killed. One holding ``STALLS``
+makes every call wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one
+holding ``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
 """
 
 import os
@@ -20,6 +22,7 @@ import json
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +34,11 @@ litellm.suppress_debug_info = True
 
 FAILS = "(the model is down)"
 HANGS = "(the model hangs)"
+STALLS = "(the model stalls)"
+RELEASE = "release"
+RELEASE_POLL_SECONDS = 0.05
+OFF_SCHEMA = "(the model answers off schema)"
+EMPTY_REPLY = "{}"
 QUIET = "(nothing relevant here)"
 PART_CHARS = 2000
 # The schema stage asks for no response format, as round 1 of relevance does; its user
@@ -117,6 +125,8 @@ def scripted_model(**request: Any) -> Any:
         raise RuntimeError("the check's model is down")
     if HANGS in sent:
         never.wait()
+    while STALLS in sent and not Path(sys.argv[1], RELEASE).exists():
+        time.sleep(RELEASE_POLL_SECONDS)
     part = request["messages"][-1]["content"]
     if reply_name(request) in READS_A_DOCUMENT and len(part) > PART_CHARS:
         raise ContextWindowExceededError(
@@ -127,7 +137,11 @@ def scripted_model(**request: Any) -> Any:
     choice = {
         "index": 0,
         "finish_reason": "stop",
-        "message": {"content": content(request)},
+        "message": {
+            "content": EMPTY_REPLY
+            if OFF_SCHEMA in sent and request.get("response_format")
+            else content(request)
+        },
     }
     return litellm.completion(
         **request, mock_response={"choices": [choice], "usage": USAGE}
