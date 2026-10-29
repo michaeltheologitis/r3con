@@ -522,7 +522,13 @@ function noHorizontalScroll() {
 // Only the animations a node or line plays as it appears count, not transitions such as the view's glide.
 function panelStill() {
   const world = document.getElementById('world');
-  return !document.getAnimations().some((a) => world.contains(a.effect?.target) && ['node-in', 'draw', 'fade'].includes(a.animationName));
+  return !document.getAnimations().some((a) => a.playState === 'running' && world.contains(a.effect?.target) && ['node-in', 'draw', 'fade'].includes(a.animationName));
+}
+
+// Lines playing an animation that do not end at answer `id`, whose own lines draw and fade in as it lands.
+function linesReplayed(id) {
+  const replays = (a) => a.playState === 'running' && a.effect?.target?.matches?.('#world .edge') && !a.effect.target.dataset.key.endsWith(`>${id}`);
+  return document.getAnimations().filter(replays).length;
 }
 
 function answerWorking() {
@@ -1208,6 +1214,13 @@ async function answersWhileReplaying() {
     const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
     const goingName = 'while a run is still going, the file-added line says ask stays on that run, as Enter will';
     check('answers', goingName, added === FILE_ADDED_AFTER_RUN, added);
+    const offered = await page.evaluate(composer);
+    await page.click('#run-btn');
+    const clickWaits = (await count(page, '.turn')) === 1 && (await page.inputValue('#question')) === NEW_QUESTION;
+    await page.$eval('#new-run-btn', (button) => button.click());
+    const opened = (await page.evaluate(tabRow)).map((tab) => tab.selected);
+    const offerName = "while the prototype's run replays, the composer offers ask ⏎, which waits as Enter does, and new run, which opens a tab of its own";
+    check('answers', offerName, offered.primary === 'ask ⏎' && offered.newRun && clickWaits && isDeepStrictEqual(opened, [false, true]), JSON.stringify(offered));
   });
 }
 
@@ -1229,8 +1242,8 @@ async function tabs() {
   const asks = recordedAsks();
   await withPage('tabs', {}, async (page) => {
     const one = await page.evaluate(tabRow);
-    const firstName = 'the first run opens the first tab, named by its number, question and model, and the last tab has no ×';
-    check('tabs', firstName, one.length === 1 && one[0].label === TAB_LABEL && !one[0].hasClose, JSON.stringify(one));
+    const firstName = 'the first run opens the first tab, named by its number, question and model; the last tab offers no × and no Delete';
+    check('tabs', firstName, one.length === 1 && one[0].label === TAB_LABEL && !one[0].hasClose && one[0].keys === null, JSON.stringify(one));
     await send(page, asks[0].question);
     await dragNode(page, 'r2-1', 60, 40);
     const frame = await page.evaluate(panelBox);
@@ -1317,6 +1330,13 @@ async function tabs() {
     const stays = (await page.evaluate(tabRow)).length === 2;
     const busyName = "a tab whose run is going can't be closed: its × is disabled while the other tab's isn't";
     check('tabs', busyName, isDeepStrictEqual(going.map((tab) => tab.closable), [true, false]) && stays, JSON.stringify(going.map((tab) => tab.closable)));
+    await page.evaluate(recordStatuses);
+    await page.locator('.run-tab').nth(1).focus();
+    await page.keyboard.press('Delete');
+    const said = await page.evaluate(() => window.statuses);
+    const keeps = (await page.evaluate(tabRow)).length === 2 && said.includes('tab 2 is still going; close it once it has finished');
+    const whyName = 'Delete is offered only on a tab it closes; on a tab whose run is going it keeps the tab, and the status says why';
+    check('tabs', whyName, isDeepStrictEqual(going.map((tab) => tab.keys), ['Delete', null]) && keeps, `${JSON.stringify(going.map((tab) => tab.keys))}; ${said.join(' | ')}`);
     await page.locator('.run-tab').first().click();
     const ended = await becomes(page, secondTabEnded, null, REPLAY_MS);
     await page.waitForTimeout(LIT_DELAY_MS);
@@ -1335,16 +1355,24 @@ async function tabs() {
     check('tabs', 'replay replays the shown tab alone: its status starts over and its × disables, while the other tab stays idle', replaysShown, `${JSON.stringify(replaying)}; ${status}`);
   });
 
-  // With motion on, nodes animate in and arrange slides, so a switch can come while either is going.
+  // With motion on, nodes and lines animate in and arrange slides, so a switch can come while either is going.
   await withPage('tabs', { sample: false }, async (page) => {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.click('#run-btn');
     await waitLit(page, REPLAY_MS);
     await becomes(page, panelStill);
+    await send(page, asks[0].question);
+    const replayed = await page.evaluate(linesReplayed, 'answer-1');
+    check('tabs', 'lighting a new answer moves lines between layers without playing how they were drawn again', replayed === 0, `${replayed} replayed`);
+
     await send(page, NEW_QUESTION, 'Control+Enter');
-    await becomes(page, secondTabEnded, null, REPLAY_MS);
+    await page.waitForSelector('#world .edge.draw', { state: 'attached' });
     await page.locator('.run-tab').first().click();
-    check('tabs', 'switching back to a tab whose nodes animated in plays none of it again', await page.evaluate(panelStill));
+    await becomes(page, secondTabEnded, null, REPLAY_MS);
+    await page.waitForTimeout(LIT_DELAY_MS);
+    await page.locator('.run-tab').nth(1).click();
+    check('tabs', 'a tab left mid-replay and shown again plays none of the animations it cut off', await page.evaluate(panelStill));
+    await page.locator('.run-tab').first().click();
 
     const frame = await page.evaluate(panelBox);
     await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, -200);
@@ -1577,7 +1605,15 @@ async function liveAnswers(url) {
     const newRunName = "after an ask, new run is offered and opens its run's own tab";
     check('live', newRunName, offered && opened && inTab && runs === 2 && nodes === SAMPLE_COUNTS.nodes, `${runs} runs, ${nodes} nodes`);
     const focused = await focusedId(page);
-    check('live', 'new run from the keyboard keeps the focus, in the question box', focused === 'question', `focus on #${focused}`);
+    check('live', 'new run from the keyboard keeps the focus on new run, still offered while that run goes', focused === 'new-run-btn', `focus on #${focused}`);
+    await page.fill('#question', `Which memo is the registry? ${FAILS}`);
+    await page.focus('#new-run-btn');
+    await page.keyboard.press('Enter');
+    const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
+    const refocused = await focusedId(page);
+    const hidden = !(await page.evaluate(composer)).newRun;
+    const failName = 'a new run from the keyboard that fails hides new run, and the focus moves to the question box';
+    check('live', failName, failed && hidden && refocused === 'question', `${await page.textContent('#run-status')}; focus on #${refocused}`);
   });
 }
 
@@ -1640,17 +1676,21 @@ async function liveAskAfterFailed(url) {
   });
 }
 
-async function liveRunEnd(url) {
+// Holds the run's end back, so its answer has landed while it is still going.
+async function liveWhileGoing(url) {
   const before = (page) => page.addInitScript(holdFrom, 'run_finished');
   await withPage('live', { url, sample: false, before }, async (page) => {
     await page.click('#run-btn');
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
-    const whileOpen = await page.textContent('#run-btn');
-    await page.evaluate(() => (window.release = true));
-    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-    const once = await page.textContent('#run-btn');
-    const endName = 'the button offers to ask only once the run has ended, not when its answer lands';
-    check('live', endName, answered && done && whileOpen === 'run ⏎' && once === 'ask ⏎', `${whileOpen} → ${once}`);
+    const offered = await page.evaluate(composer);
+    await page.fill('#question', 'Which memo is the registry?');
+    await page.click('#run-btn');
+    const refused = await page.textContent('#run-status');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/runs'), { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.$eval('#new-run-btn', (button) => button.click());
+    const second = (await started) !== null && (await shownTab(page)) === 1;
+    const goingName = "while a run is going, even with its answer landed, the composer offers ask ⏎, which waits for its end as Enter does, and new run, which starts a second run";
+    check('live', goingName, answered && offered.primary === 'ask ⏎' && offered.newRun && refused === ASK_WHEN_DONE && second, `${JSON.stringify(offered)}; ${refused}`);
   });
 }
 
@@ -1827,7 +1867,7 @@ async function live() {
     await liveAnswers(url);
     await liveAskAfterFailed(url);
     await liveTabs(url);
-    await liveRunEnd(url);
+    await liveWhileGoing(url);
     await liveParts(url);
     await liveFailure(url);
     await liveUnreadable(url);

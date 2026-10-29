@@ -1054,8 +1054,8 @@ p { margin: 0; }
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con-app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+  const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
   const TYPE_A_MODEL = 'type a model first';
-  const STARTING = 'running · starting';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
@@ -1259,7 +1259,7 @@ p { margin: 0; }
     const [kind, d] = splitId(id);
     if (kind === 'doc') return tab.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return answerLabel(answerOf(tab.run, id));
+    if (kind === 'answer') return answerLabel(answerAt(tab.run, id));
     return `${docLabel(tab.run, d)} · ${KIND_SUFFIX[kind]}`;
   }
 
@@ -1471,10 +1471,12 @@ p { margin: 0; }
   const answerId = (k) => `answer-${k}`;
   const RUN_ANSWER = answerId(0);
 
+  const answerAt = (run, id) => run.answers[splitId(id)[1]];
+
+  // An answer with where it came from, as the chat and its popup give it.
   function answerOf(run, id) {
-    const [, k] = splitId(id);
-    const answer = run.answers[k];
-    if (k === 0) return { ...answer, simulated: run.simulated, summary: runSummary(run) };
+    const answer = answerAt(run, id);
+    if (id === RUN_ANSWER) return { ...answer, simulated: run.simulated, summary: runSummary(run) };
     return { ...answer, simulated: answer.source === 'simulated', summary: askSummary(answer) };
   }
 
@@ -1483,7 +1485,7 @@ p { margin: 0; }
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
-      const { summary_ids, parse_ids } = answerOf(run, id).provenance;
+      const { summary_ids, parse_ids } = answerAt(run, id).provenance;
       return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
@@ -1631,8 +1633,8 @@ p { margin: 0; }
     applyView();
   }
 
-  function fitShown(tab, animate = false) {
-    if (!tab.userMoved) fit(animate);
+  function fitShown(animate = false) {
+    if (!state.shown.userMoved) fit(animate);
   }
 
   function refit() {
@@ -1658,7 +1660,7 @@ p { margin: 0; }
   function ariaName(tab, node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = answerOf(tab.run, node.id);
+      const { question, model } = answerAt(tab.run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
@@ -1743,7 +1745,7 @@ p { margin: 0; }
     }
     if (replan) tab.layout = plan(tab, nodeOrigin(tab));
     updateHint();
-    fitShown(tab, animate);
+    fitShown(animate);
   }
 
   function placeNode(node) {
@@ -1774,7 +1776,7 @@ p { margin: 0; }
       for (const { node } of moves) placeNode(node);
       redrawEdges(tab);
       positionInspector();
-      fitShown(tab, true);
+      fitShown(true);
     };
     if (!moves.length || reduceMotion()) return finish();
     const start = performance.now();
@@ -1866,10 +1868,16 @@ p { margin: 0; }
   // A tab drawn while hidden would play every animation at once when shown.
   const animates = (tab) => tab === state.shown && !reduceMotion();
 
+  // An element put back in the page plays its animation again while the class is on: a line moved to the
+  // lit layer, or a drawing shown again.
+  function endAnimation(el) {
+    el.classList.remove('enter', 'draw', 'fade');
+    el.removeAttribute('pathLength');
+  }
+
   function animateEdge(tab, el, how) {
     if (!animates(tab)) return;
-    el.classList.remove('draw', 'fade');
-    el.removeAttribute('pathLength');
+    endAnimation(el);
     if (how === 'draw') el.setAttribute('pathLength', '1');
     el.classList.add(how);
   }
@@ -1889,7 +1897,7 @@ p { margin: 0; }
     layerFor(tab, kind).append(edge.el);
     edge.el.setAttribute('d', edgePath(tab, tab.nodes.get(from), tab.nodes.get(to)));
     if (how) animateEdge(tab, edge.el, how);
-    const id = state.hovered ?? state.selected;
+    const id = hoveredIn(tab) ?? openIn(tab);
     edge.el.classList.toggle('hl', id !== null && (id === from || id === to));
     return edge;
   }
@@ -2254,11 +2262,12 @@ p { margin: 0; }
 
   // A question can ask over the shown tab's run once its answer has landed and the run has ended.
   const canAsk = () => landed(state.shown, RUN_ANSWER) && !mode.runGoing(state.shown);
-  // Enter asks once there is a run to ask over, or one going; before any run, or after a failed one, it runs.
+  // Enter and the run button ask once there is a run to ask over, or one going; before any run, or after a
+  // failed one, they run. The composer's labels follow this, so they say what a press does.
   const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
 
   function updateComposer() {
-    const asks = canAsk();
+    const asks = primaryAction() === 'ask';
     const pending = pendingFiles(state.shown).length;
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
@@ -2610,7 +2619,6 @@ p { margin: 0; }
   async function streamRun(tab, narr) {
     const { run } = tab;
     const stream = openStream('run', tab);
-    narr.phase('starting');
     try {
       const { question, model } = run.answers[0];
       const body = { question, model, documents: run.docs.map((f) => f.text) };
@@ -2670,9 +2678,10 @@ p { margin: 0; }
     tab.drawing.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length));
     tab.turn.replaceChildren();
     tab.userMoved = false;
-    tabStatus(tab, STARTING);
+    const narr = narrator(tab, tab.turn);
+    narr.phase('starting');
     syncDocNodes(tab, { at, animate: true, replan: true });
-    mode.play(tab, narrator(tab, tab.turn));
+    mode.play(tab, narr);
     updateComposer();
   }
 
@@ -2697,7 +2706,7 @@ p { margin: 0; }
     const id = answerId(tab.run.answers.push(ask) - 1);
     tab.layout.set(id, freeAnswerSpot(tab));
     addNode(tab, id);
-    fitShown(tab, true);
+    fitShown(true);
     return id;
   }
 
@@ -2749,7 +2758,7 @@ p { margin: 0; }
 
   // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
   function openTab(tab) {
-    const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', 'aria-keyshortcuts': 'Delete', onclick: () => switchTab(tab) };
+    const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
     tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
     tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
     $('run-tabs').append(tab.button, tab.close);
@@ -2764,6 +2773,7 @@ p { margin: 0; }
       tab.button.tabIndex = shown ? 0 : -1;
       tab.close.hidden = state.tabs.length === 1;
       tab.close.disabled = tabBusy(tab);
+      tab.button.ariaKeyShortcuts = tab.close.hidden || tab.close.disabled ? null : 'Delete';
     }
     if (!state.tabs.length) return;
     panel.setAttribute('role', 'tabpanel');
@@ -2772,13 +2782,14 @@ p { margin: 0; }
 
   function showDrawing(tab) {
     finishSlide(state.shown);
+    // A drawing taken out of the page mid-animation never hears the animation end.
+    for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
     state.hovered = null;
     state.shown = tab;
     world.replaceChildren(tab.drawing);
     applyView();
     refreshHighlight();
-    updateComposer();
   }
 
   // On a phone the tab row scrolls, and the shown tab could be out of sight.
@@ -2792,11 +2803,14 @@ p { margin: 0; }
     // Nodes drawn while their tab was hidden had no size to fit by, and files may have changed since.
     syncDocNodes(tab);
     setStatus(...tab.status);
+    updateComposer();
     revealTab(tab);
   }
 
   function closeTab(tab) {
-    if (tabBusy(tab) || state.tabs.length === 1) return;
+    if (state.tabs.length === 1) return;
+    // Only Delete gets here for a busy tab: its × is disabled, and hidden from assistive tech.
+    if (tabBusy(tab)) return setStatus(tabStillGoing(tab));
     cancelTimers(tab);
     const i = state.tabs.indexOf(tab);
     state.tabs.splice(i, 1);
@@ -3294,10 +3308,7 @@ p { margin: 0; }
       refreshHighlight();
     });
     // An animation's class comes off once it has played, so the node or line can play it again.
-    world.addEventListener('animationend', (e) => {
-      e.target.classList.remove('enter', 'draw', 'fade');
-      e.target.removeAttribute('pathLength');
-    });
+    world.addEventListener('animationend', (e) => endAnimation(e.target));
     // On click, not pointerup: a tap's click would otherwise land on the inspector that just opened under it.
     panel.addEventListener('click', (e) => {
       const id = hoverFrom(e);
@@ -3394,7 +3405,7 @@ p { margin: 0; }
     window.addEventListener('drop', (e) => hasFiles(e) && e.preventDefault());
 
     new ResizeObserver(() => {
-      fitShown(state.shown);
+      fitShown();
       positionInspector();
     }).observe(panel);
   }
