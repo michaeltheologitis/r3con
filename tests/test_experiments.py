@@ -79,7 +79,9 @@ def mapping_records(structured_context: dict, registry_id: str) -> list[dict]:
 @pytest.mark.parametrize(
     ("parts", "seed"), list(itertools.product((1, 2, 4), (1, 2, 3)))
 )
-def test_a_document_read_in_parts_still_answers(tmp_path, grown_registry, parts, seed):
+def test_a_document_read_in_parts_still_answers(
+    tmp_path, grown_registry, events_in, parts, seed
+):
     documents = read_documents(MEMOS)
     documents[3] = grown_registry(40_000, at=0.6)
     started = time.perf_counter()
@@ -114,6 +116,7 @@ def test_a_document_read_in_parts_still_answers(tmp_path, grown_registry, parts,
                 "calls": sum(total["n_steps"] for total in totals),
                 "prompt_tokens": sum(t["prompt"] for t in tokens),
                 "completion_tokens": sum(t["completion"] for t in tokens),
+                "usd": events_in(result.run_dir)[-1]["usd"],
                 "seconds": round(time.perf_counter() - started),
                 "answer": result.answer,
             }
