@@ -194,6 +194,16 @@ def test_each_call_records_what_it_cost(logger):
     assert [call["usd"] for call in calls] == [0.25, None]
 
 
+def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    run.add_step(messages=[], response=reply(), sends=3, resend_wait_seconds=2.5)
+    run.add_step(messages=[], response=reply())
+    run.flush(write_transcript=False)
+    calls = json.loads((run.dir / "calls.json").read_text())
+    recorded = [(call["sends"], call["resend_wait_seconds"]) for call in calls]
+    assert recorded == [(3, 2.5), (None, None)]
+
+
 def test_a_multi_turn_transcript_is_the_last_turns_whole_thread(logger):
     run = StageRun(stage="reasoning", task_logger=logger)
     first = [{"role": "system", "content": "S"}, {"role": "user", "content": "U1"}]
