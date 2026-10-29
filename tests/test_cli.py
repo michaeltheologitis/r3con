@@ -120,14 +120,11 @@ def test_a_config_pinning_a_stage_r3con_does_not_have_exits_2_in_one_line(
     prompts = {**dict.fromkeys(PROMPT_STAGES, "v1"), "relevance": "v1"}
     configs(old={"model": "openai/m", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "old") == 2
-    err = capsys.readouterr().err
-    assert err.startswith(
-        "r3con: config 'old' pins a prompt for stage(s) r3con does not have: "
-        "['relevance']. The stages are ['relevance/first-round', "
-        "'relevance/later-rounds',"
+    assert capsys.readouterr().err == (
+        "r3con: config 'old': `prompts.relevance`: Input should be "
+        "'relevance/first-round', 'relevance/later-rounds', 'structuring/schema', "
+        "'structuring/parsing', 'reasoning/direct' or 'reasoning/coding'.\n"
     )
-    assert err.endswith("'reasoning/direct', 'reasoning/coding'].\n")
-    assert err.count("\n") == 1
     assert scripted.requests == []
 
 
@@ -138,8 +135,8 @@ def test_a_config_naming_a_reasoning_path_r3con_does_not_have_exits_2_in_one_lin
     configs(bad={"model": "openai/m", "reasoning": "agent", "prompts": prompts})
     assert r3con("run", "Who?", str(MEMOS), "--config", "bad") == 2
     assert capsys.readouterr().err == (
-        "r3con: config 'bad': `reasoning` must be one of ['direct', 'coding'], got "
-        "'agent'.\n"
+        "r3con: config 'bad': `reasoning='agent'`: Input should be 'direct' or "
+        "'coding'.\n"
     )
     assert scripted.requests == []
 

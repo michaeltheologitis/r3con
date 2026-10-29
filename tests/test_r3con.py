@@ -191,7 +191,7 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
     llm, tmp_path
 ):
-    with pytest.raises(ValueError, match="`reasoning` must be one of"):
+    with pytest.raises(ValueError, match="`reasoning='agent'`: Input should be"):
         run("Who?", ["memo"], reasoning="agent", completion=llm, logs_dir=tmp_path)
     assert llm.requests == []
     assert list(tmp_path.iterdir()) == []

@@ -43,7 +43,7 @@ from litellm.exceptions import ContextWindowExceededError
 from pydantic import BaseModel, Field, ValidationError, create_model, field_validator
 
 from r3con import settings
-from r3con.config import ReasoningPath
+from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import get_logger
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
@@ -453,7 +453,7 @@ def reason(
     schema_code: str,
     parsed: BaseModel | dict[str, Any],
     model: str,
-    prompts: Mapping[str, str],
+    prompts: Mapping[PromptStage, str],
     path: ReasoningPath,
     document_ids: Sequence[str],
     relevance_snippets: Sequence[Snippet] | None = None,

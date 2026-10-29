@@ -43,6 +43,7 @@ from typing import Annotated, Any, NamedTuple, TypeVar, cast
 from pydantic import BaseModel, Field, create_model
 
 from r3con import settings
+from r3con.config import PromptStage
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
@@ -242,7 +243,9 @@ def provenance_schema(
     )
 
 
-def _request(task: str, shown: dict[str, str], prompts: Mapping[str, str]) -> _Request:
+def _request(
+    task: str, shown: dict[str, str], prompts: Mapping[PromptStage, str]
+) -> _Request:
     """A document's request in one round, given the OTHER documents' non-empty snippets
     it shows, by id: the first-round prompt and plain text when there are none, else
     the later-rounds prompt and its ``{summary, provenance_ids}`` reply."""
@@ -321,7 +324,7 @@ def relevance_snippet(
     document: str,
     other_snippets: Mapping[str, str],
     model: str,
-    prompts: Mapping[str, str],
+    prompts: Mapping[PromptStage, str],
     run: StageRun | None = None,
     kind: str = "relevance",
     max_attempts: int | None = None,
@@ -363,7 +366,7 @@ def surface_relevance(
     documents: list[str],
     document_ids: list[str],
     model: str,
-    prompts: Mapping[str, str],
+    prompts: Mapping[PromptStage, str],
     rounds: int = 2,
     run: StageRun | None = None,
     workers: int | None = None,

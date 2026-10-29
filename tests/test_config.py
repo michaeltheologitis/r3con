@@ -69,6 +69,11 @@ def test_the_default_config_loads_with_its_shipped_values():
             "default[model=gpt-6-luna,rounds=2,reasoning=coding,",
         ),
         (
+            {"relevance_rounds": 0},
+            {"relevance_rounds": 0},
+            "default[model=gpt-6-luna,rounds=0,",
+        ),
+        (
             {
                 "model": None,
                 "relevance_rounds": None,
@@ -125,64 +130,133 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
     assert "params={top_p=0.8}" in overridden.label()
 
 
+NO_MODEL = "config 'bad': `model` is empty or missing."
+MISSING_PROMPTS = "config 'bad' is missing prompt versions for stage(s): "
+NO_PROMPTS = f"{MISSING_PROMPTS}{list(PROMPT_STAGES)}"
+
+
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"prompts": PROMPTS}, "must define a `model`"),
-        ({**FULL, "prompts": {CODING: "v1"}}, "missing prompt versions"),
+        ({"prompts": PROMPTS}, NO_MODEL),
+        ({"model": None, "prompts": PROMPTS}, NO_MODEL),
+        ({"model": "openai/m"}, NO_PROMPTS),
+        ({"model": "openai/m", "prompts": None}, NO_PROMPTS),
+        ({"model": "openai/m", "prompts": {}}, NO_PROMPTS),
+        (
+            {**FULL, "prompts": {CODING: "v1"}},
+            f"{MISSING_PROMPTS}{list(PROMPT_STAGES[:-1])}",
+        ),
+    ],
+    ids=[
+        "no-model",
+        "empty-model",
+        "no-prompts",
+        "empty-prompts",
+        "no-stage-pinned",
+        "one-stage-pinned",
     ],
 )
 def test_a_config_missing_what_a_run_needs_is_refused(configs, fields, message):
     configs(bad=fields)
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError) as refused:
         load_config("bad")
+    assert str(refused.value) == message
+
+
+def test_a_config_without_a_model_loads_when_the_model_is_overridden(configs):
+    configs(any_model={"prompts": PROMPTS})
+    config = load_config("any_model", model="openai/m")
+    assert (config.model, config.overrides) == ("openai/m", {"model": "openai/m"})
 
 
 THE_STAGES = (
-    "The stages are ['relevance/first-round', 'relevance/later-rounds', "
-    "'structuring/schema', 'structuring/parsing', 'reasoning/direct', "
-    "'reasoning/coding']."
+    "Input should be 'relevance/first-round', 'relevance/later-rounds', "
+    "'structuring/schema', 'structuring/parsing', 'reasoning/direct' or "
+    "'reasoning/coding'"
 )
 
 
 @pytest.mark.parametrize(
-    ("prompts", "old"),
+    ("prompts", "refusal"),
     [
-        ({**PROMPTS, "relevance": "v1"}, "relevance"),
-        ({"relevance": "v1"}, "relevance"),
-        (OLD_DEFAULT_PROMPTS, "reasoning"),
+        ({**PROMPTS, "relevance": "v1"}, f"`prompts.relevance`: {THE_STAGES}"),
+        ({"relevance": "v1"}, f"`prompts.relevance`: {THE_STAGES}"),
+        (OLD_DEFAULT_PROMPTS, f"`prompts.reasoning`: {THE_STAGES}"),
+        ("v1", "`prompts='v1'`: Input should be a valid dictionary"),
+        (5, "`prompts=5`: Input should be a valid dictionary"),
     ],
-    ids=["beside-the-stages", "alone", "the-old-reasoning-stage"],
+    ids=[
+        "unknown-beside-the-stages",
+        "unknown-alone",
+        "the-old-reasoning-stage",
+        "a-string",
+        "a-number",
+    ],
 )
-def test_a_config_pinning_a_stage_r3con_does_not_have_is_refused_with_the_stages(
-    configs, prompts, old
-):
-    unknown = f"pins a prompt for stage(s) r3con does not have: [{old!r}]. {THE_STAGES}"
+def test_bad_prompts_in_a_config_are_refused_in_one_line(configs, prompts, refusal):
     configs(old={**FULL, "prompts": prompts})
     with pytest.raises(ValueError) as refused:
         load_config("old")
-    assert type(refused.value) is ValueError
-    assert str(refused.value) == f"config 'old' {unknown}"
-    with pytest.raises(ValidationError, match=re.escape(f"RunConfig {unknown}")):
-        RunConfig(model="openai/m", prompts=prompts)
+    assert str(refused.value) == f"config 'old': {refusal}."
 
 
+def test_a_run_config_refuses_a_stage_r3con_does_not_have():
+    with pytest.raises(ValidationError, match=re.escape(THE_STAGES)):
+        RunConfig(model="openai/m", prompts={**PROMPTS, "relevance": "v1"})
+
+
+NOT_AN_INTEGER = "Input should be a valid integer"
+BAD_SETTINGS = [
+    ("relevance_rounds", "3", NOT_AN_INTEGER),
+    ("relevance_rounds", True, NOT_AN_INTEGER),
+    ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
+    ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
+    ("params", "temperature=0.7", "Input should be a valid dictionary"),
+    ("params", ["temperature", 0.7], "Input should be a valid dictionary"),
+    ("model", 5, "Input should be a valid string"),
+]
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), BAD_SETTINGS)
 @pytest.mark.parametrize(
-    ("name", "overrides", "message"),
-    [
-        ("agent", {}, "config 'agent': `reasoning` must be one of"),
-        ("default", {"reasoning": "Direct"}, "override: `reasoning` must be one of"),
-    ],
-    ids=["file", "override"],
+    ("name", "where"),
+    [("default", "override"), ("bad", "config 'bad'")],
+    ids=["override", "file"],
 )
-def test_a_reasoning_path_r3con_does_not_have_is_refused(
-    configs, name, overrides, message
+def test_a_bad_setting_is_refused_in_one_line_naming_it(
+    configs, name, where, field, value, reason
 ):
-    configs(agent={**FULL, "reasoning": "agent"})
+    configs(bad={**FULL, field: value})
+    overrides = {field: value} if where == "override" else {}
     with pytest.raises(ValueError) as refused:
         load_config(name, **overrides)
-    assert type(refused.value) is ValueError
-    assert str(refused.value).startswith(f"{message} ['direct', 'coding'], got '")
+    assert str(refused.value) == f"{where}: `{field}={value!r}`: {reason}."
+
+
+def test_every_refused_setting_is_named_in_one_line_with_where_it_was_set(configs):
+    configs(bad={**FULL, "reasoning": "agent"})
+    with pytest.raises(ValueError) as refused:
+        load_config("bad", relevance_rounds=-1)
+    assert str(refused.value) == (
+        "override: `relevance_rounds=-1`: Input should be greater than or equal to 0; "
+        "config 'bad': `reasoning='agent'`: Input should be 'direct' or 'coding'."
+    )
+
+
+def test_a_long_refused_value_is_shortened():
+    with pytest.raises(ValueError) as refused:
+        load_config("default", params=["temperature"] * 100)
+    assert str(refused.value) == (
+        "override: `params=['temperature', 'temperature', 'temperature', 'temperature', "
+        "'temperature', 'temperature', ...]`: Input should be a valid dictionary."
+    )
+
+
+def test_a_setting_left_empty_in_a_config_file_takes_its_default(configs):
+    configs(empty={**FULL, "reasoning": None, "params": None})
+    config = load_config("empty")
+    assert (config.reasoning, config.params) == ("direct", {})
 
 
 def test_a_run_config_refuses_a_reasoning_path_r3con_does_not_have():
@@ -194,17 +268,6 @@ def test_a_run_config_refuses_a_reasoning_path_r3con_does_not_have():
 def test_a_misspelt_override_is_refused(name, value):
     with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
         load_config("default", **{name: value})
-
-
-@pytest.mark.parametrize(
-    ("name", "overrides"),
-    [("default", {"params": "temperature=0.7"}), ("bad", {})],
-    ids=["override", "file"],
-)
-def test_params_that_are_not_a_mapping_are_a_type_error(configs, name, overrides):
-    configs(bad={**FULL, "params": "temperature=0.7"})
-    with pytest.raises(TypeError, match="`params` must be a mapping.*got str"):
-        load_config(name, **overrides)
 
 
 @pytest.mark.parametrize(
