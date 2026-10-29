@@ -53,9 +53,9 @@ caller's own ``num_retries``, ``max_retries`` or ``retry_policy`` goes to
 called as it is, once per request, and owns its retrying: a ``litellm.Router`` resends by
 the same status rule, with its own cooldowns and fallbacks. A recorded call's ``sends``
 and ``resend_wait_seconds`` come from tenacity, and are ``None`` for a call r3con did not
-resend itself. A call that raises, once r3con stops resending it, is recorded too, with
-its error's class and first line, its ``api_key`` masked, and then the error is raised
-as it was.
+resend itself. A call that raises an error, once r3con stops resending it, is recorded
+too, with the error's class and first non-empty line, its ``api_key`` masked, and then
+the error is raised as it was.
 """
 
 from __future__ import annotations
@@ -92,6 +92,8 @@ _RETRY_AFTER_JITTER_SECONDS = 1.0
 _WAIT_DIGITS = 2
 _ERROR_CHARS = 300
 _MASKED_KEY = "<api_key>"
+# A shorter api_key is a placeholder, such as vLLM's "EMPTY", not a secret.
+_MIN_MASKED_KEY_CHARS = 8
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
@@ -193,8 +195,9 @@ def litellm_chat_completion_full(
     If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
     to it with the request messages, response content, tokens, cost in USD, and
     ``kind`` label. Pass ``kind="retry"`` (or another custom label) on retry attempts
-    so the transcript renders them as a labeled block. A call that raises is recorded
-    with its error, no reply and a cost of 0, and the error is raised unchanged.
+    so the transcript renders them as a labeled block. A call that raises an error is
+    recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
+    error is raised unchanged.
     """
 
     if messages is not None:
@@ -246,7 +249,7 @@ def litellm_chat_completion_full(
                 response={},
                 schema=request.get("response_format"),
                 usd=0.0,
-                error=_in_brief(error, api_key),
+                error=_error_line(error, api_key),
                 **_resends(attempts),
             )
         raise
@@ -451,11 +454,12 @@ def _resends(attempts: list[tenacity.RetryCallState]) -> dict[str, Any]:
     }
 
 
-def _in_brief(error: Exception, api_key: str | None) -> str:
-    """``error``'s class and the first line of its message, ``api_key`` masked, cut to
-    :data:`_ERROR_CHARS`. A provider may echo the key back, and litellm passes it on."""
-    first_line = next(iter(str(error).splitlines()), "")
-    if api_key:
+def _error_line(error: Exception, api_key: str | None) -> str:
+    """``error``'s class and the first non-empty line of its message, ``api_key``
+    masked unless it is a placeholder, cut to :data:`_ERROR_CHARS`. A provider may echo
+    the key back, and litellm passes it on."""
+    first_line = next(iter(str(error).strip().splitlines()), "")
+    if api_key and len(api_key) >= _MIN_MASKED_KEY_CHARS:
         first_line = first_line.replace(api_key, _MASKED_KEY)
     return f"{type(error).__name__}: {first_line}"[:_ERROR_CHARS]
 

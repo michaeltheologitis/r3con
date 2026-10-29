@@ -201,11 +201,11 @@ def _recorded_stage(
     fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the
-    calls made, one that failed included, and ``error.txt`` with the traceback, adds a
-    note naming the run folder to the exception, emits ``failed`` with the stage's name
-    as its events give it (``schema`` for ``structuring/schema``) and the error in one
-    line, and re-raises. Without a logger it records nothing, but still emits
-    ``failed``.
+    calls that answered or raised an error (a call an interrupt cut short is not
+    recorded) and ``error.txt`` with the traceback, adds a note naming the run folder to
+    the exception, emits ``failed`` with the stage's name as its events give it
+    (``schema`` for ``structuring/schema``) and the error in one line, and re-raises.
+    Without a logger it records nothing, but still emits ``failed``.
     """
     run = (
         None

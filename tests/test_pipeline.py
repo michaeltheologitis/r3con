@@ -711,12 +711,12 @@ def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(
     with pytest.raises(litellm.APIConnectionError):
         answer(answering_llm.answers(relevance=["one", "two", down, down]), logger)
     calls = read_json(logger, "relevance/calls")
-    down_in_brief = "APIConnectionError: litellm.APIConnectionError: provider down"
+    down_line = "APIConnectionError: litellm.APIConnectionError: provider down"
     assert sorted((call["kind"], call["error"]) for call in calls) == [
         ("relevance-r1-d0", None),
         ("relevance-r1-d1", None),
-        ("relevance-r2-d0", down_in_brief),
-        ("relevance-r2-d1", down_in_brief),
+        ("relevance-r2-d0", down_line),
+        ("relevance-r2-d1", down_line),
     ]
 
 

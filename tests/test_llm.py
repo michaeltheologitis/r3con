@@ -131,6 +131,10 @@ def top_draws(monkeypatch):
     monkeypatch.setattr(random, "uniform", lambda low, high: high)
 
 
+def refused(message: str) -> litellm.BadRequestError:
+    return litellm.BadRequestError(message=message, llm_provider="openai", model=MODEL)
+
+
 def litellm_settings():
     return litellm.suppress_debug_info, logging.getLogger("LiteLLM").level
 
@@ -638,32 +642,57 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
     answered, failed = run.steps
     totals = run.compute_totals()
     assert (failed.usd, failed.tokens) == (0.0, None)
-    assert (totals["n_steps"], totals["tokens"]) == (2, answered.tokens)
+    assert (totals["n_steps"], totals["tokens"]) == (1, answered.tokens)
     assert totals["usd"] == answered.usd > 0
 
 
 @pytest.mark.parametrize(
-    ("message", "recorded"),
+    ("error", "api_key", "recorded"),
     [
-        ("refused\nTraceback (most recent call last):", "refused"),
-        ("x" * _ERROR_CHARS, "x" * (_ERROR_CHARS - len(BAD_REQUEST))),
-        (f"bad key Bearer {KEY}", "bad key Bearer <api_key>"),
+        (
+            refused("refused\nTraceback (most recent call last):"),
+            KEY,
+            f"{BAD_REQUEST}refused",
+        ),
+        (
+            ConnectionError("\n\nprovider down\nTraceback (most recent call last):"),
+            KEY,
+            "ConnectionError: provider down",
+        ),
+        (
+            refused("x" * _ERROR_CHARS),
+            KEY,
+            BAD_REQUEST + "x" * (_ERROR_CHARS - len(BAD_REQUEST)),
+        ),
+        (
+            refused(f"bad key Bearer {KEY}"),
+            KEY,
+            f"{BAD_REQUEST}bad key Bearer <api_key>",
+        ),
+        (
+            refused("maximum context length is 4000 tokens"),
+            "x",
+            f"{BAD_REQUEST}maximum context length is 4000 tokens",
+        ),
     ],
-    ids=["first-line", "cut-short", "key-masked"],
+    ids=[
+        "first-line",
+        "first-non-empty-line",
+        "cut-short",
+        "key-masked",
+        "placeholder-key-left-alone",
+    ],
 )
 def test_a_recorded_error_is_its_first_line_cut_short_without_the_key(
-    llm, tmp_path, message, recorded
+    llm, tmp_path, error, api_key, recorded
 ):
-    refused = litellm.BadRequestError(
-        message=message, llm_provider="openai", model=MODEL
-    )
     run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
 
-    with pytest.raises(litellm.BadRequestError):
-        ask(llm.replies(refused), run=run, api_key=KEY)
+    with pytest.raises(type(error)):
+        ask(llm.replies(error), run=run, api_key=api_key)
 
     [step] = run.steps
-    assert step.error == BAD_REQUEST + recorded
+    assert step.error == recorded
 
 
 def test_litellm_reads_its_bundled_price_map():

@@ -22,6 +22,7 @@ from r3con.settings import settings_snapshot
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 DOWN = "APIConnectionError: litellm.APIConnectionError: provider down"
+TOKENS = {"prompt": 10, "completion": 2, "total": 12}
 
 
 class Sample(BaseModel):
@@ -185,6 +186,13 @@ def test_a_stage_totals_its_steps_tokens_and_cost(logger, calls, totals):
         run.add_step(messages=[], response=reply(), tokens=tokens, usd=usd)
     assert run.compute_totals() == totals
     assert type(run.compute_totals()["usd"]) is type(totals["usd"])
+
+
+def test_a_stage_counts_only_the_calls_that_answered(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    run.add_step(messages=[], response=reply(), tokens=TOKENS, usd=0.25)
+    run.add_step(messages=[], response={}, usd=0.0, error=DOWN)
+    assert run.compute_totals() == {"n_steps": 1, "tokens": TOKENS, "usd": 0.25}
 
 
 def test_each_call_records_what_it_cost(logger):

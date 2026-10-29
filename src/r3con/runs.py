@@ -56,7 +56,7 @@ Layout per ``logs/<run-folder>/``:
   above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
-call it made, one that failed included, plus ``transcript.yaml`` where the stage writes
+call that answered or raised an error, plus ``transcript.yaml`` where the stage writes
 one) and ``error.txt``, the traceback.
 
 Two layers in code:
@@ -73,11 +73,12 @@ Two layers in code:
   request was sent, more than 1 when a temporary error made r3con resend it, and
   ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
   ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
-  call that raised, the error's class and the first line of its message: such a call
-  has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0, as it got no
-  reply to bill) and, unless skipped, ``transcript.yaml`` (the readable message thread).
-  Aggregate token and cost totals are available via ``compute_totals()`` so callers
-  fold them into the stage's ``result.json``.
+  call that raised one, the error's class and the first non-empty line of its message:
+  such a call has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0,
+  as r3con got no reply to price) and, unless skipped, ``transcript.yaml`` (the
+  readable message thread). Aggregate token and cost totals are available via
+  ``compute_totals()`` so callers fold them into the stage's ``result.json``; their
+  ``n_steps`` counts only the calls that answered.
 """
 
 from __future__ import annotations
@@ -352,9 +353,10 @@ class StepRecord:
 
 
 def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
-    """The step count and summed tokens of ``steps`` (``None`` when none counted any),
-    and their ``usd``: the sum of theirs, or ``None`` when litellm could not price one
-    of them."""
+    """The count of ``steps`` that answered, leaving out those that raised an error
+    (``calls.json`` lists them), the summed tokens of ``steps`` (``None`` when none
+    counted any), and their ``usd``: the sum of theirs, or ``None`` when litellm could
+    not price one of them."""
     prompt = completion = total = 0
     any_tokens = False
     costs = [s.usd for s in steps]
@@ -365,7 +367,7 @@ def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
             completion += s.tokens.get("completion", 0)
             total += s.tokens.get("total", 0)
     return {
-        "n_steps": len(steps),
+        "n_steps": sum(s.error is None for s in steps),
         "tokens": {"prompt": prompt, "completion": completion, "total": total}
         if any_tokens
         else None,
