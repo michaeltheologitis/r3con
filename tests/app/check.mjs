@@ -148,13 +148,24 @@ const CANCEL_REFUSED = 'no run with that id';
 const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a status of 404';
 const LIVE_ASK = 'live ask over this run';
 const PDF_TEXT = 'Incidents this quarter: 7.';
-// tests/pdfs.py's write_pdf, so that the checks and the tests make their PDFs one way.
-const WRITE_PDF = 'import sys; from pathlib import Path; from tests.pdfs import write_pdf; write_pdf(Path(sys.argv[1]), *sys.argv[2:])';
+const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
+// The page's READ_BYTES: a file's preview shows this much of its text.
+const READ_BYTES = 20000;
+// Every PDF the checks add, by name: write_pdf's arguments for it, in tests/pdfs.py, so that the checks
+// and the tests make their PDFs one way. No text makes a scan.
+const PDF_SPECS = {
+  '01_memo.pdf': { text: PDF_TEXT },
+  '02_scan.pdf': {},
+  '03_padded.pdf': { text: PADDED_TEXT, padding: READ_BYTES + 5000 },
+};
+const WRITE_PDFS =
+  'import json, sys; from pathlib import Path; from tests.pdfs import write_pdf\n' +
+  'for name, spec in json.loads(sys.argv[2]).items(): write_pdf(Path(sys.argv[1], name), **spec)';
 // A .docx is a ZIP, whose first header's version field holds a NUL byte.
 const DOCX_START = [0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00];
 const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
 const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
-const SCAN_REFUSED = 'no readable text in 02_scan.pdf; nothing was sent';
+const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -162,6 +173,7 @@ const scriptedSummary = (text) => text.split('\n').find((line) => line.trim() &&
 
 let browser;
 let failures = 0;
+let pdfs;
 
 function check(area, name, pass, detail = '') {
   if (!pass) failures += 1;
@@ -732,13 +744,12 @@ async function files() {
   });
 }
 
-// A PDF made by tests/pdfs.py, with `text` as its text layer, or with none, as a scan has.
-function pdf(name, text) {
-  const dir = mkdtempSync(join(tmpdir(), 'r3con-pdf-'));
+// Writes every PDF in `specs` with one uv run, and returns each by name, as setInputFiles takes it.
+function writePdfs(specs) {
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-pdfs-'));
   try {
-    const path = join(dir, name);
-    execFileSync('uv', ['run', 'python', '-c', WRITE_PDF, path, ...(text ? [text] : [])], { cwd: REPO_DIR, stdio: 'ignore' });
-    return { name, mimeType: 'application/pdf', buffer: readFileSync(path) };
+    execFileSync('uv', ['run', 'python', '-c', WRITE_PDFS, dir, JSON.stringify(specs)], { cwd: REPO_DIR });
+    return Object.fromEntries(Object.keys(specs).map((name) => [name, { name, mimeType: 'application/pdf', buffer: readFileSync(join(dir, name)) }]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -755,7 +766,7 @@ const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? nul
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
-    await page.setInputFiles('#file-input', [pdf('01_memo.pdf', PDF_TEXT), docx(), memo('notes.log', 'A log line.\n')]);
+    await page.setInputFiles('#file-input', [pdfs['01_memo.pdf'], docx(), memo('notes.log', 'A log line.\n')]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
@@ -2034,54 +2045,98 @@ const openFileView = async (page, name) => {
   return page.$eval('#file-view', (view) => ({ meta: view.querySelector(':scope > .k').textContent, text: view.querySelector('pre, p.k').textContent }));
 };
 
+const fmtKb = (n) => `${(n / 1024).toFixed(1)} KB`;
+const runPosted = (page) =>
+  page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+
 async function livePdf(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = postsOf(page);
-    const memoPdf = pdf('01_memo.pdf', PDF_TEXT);
-    await page.setInputFiles('#file-input', [memoPdf, pdf('02_scan.pdf')]);
-    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
+    const memoPdf = pdfs['01_memo.pdf'];
+    const padded = pdfs['03_padded.pdf'];
+    await page.setInputFiles('#file-input', [memoPdf, pdfs['02_scan.pdf'], padded]);
+    const two = await becomes(page, () => document.querySelectorAll('.node.doc').length === 2);
     await page.click('#tab-files');
+    const listed = await removeNames(page);
+    const error = await filesError(page);
+    const sentToApp = isDeepStrictEqual(posts, Array(3).fill('/api/documents/text'));
+    const scanRefused = error === `Not added: 02_scan.pdf. ${NO_TEXT_LAYER}` && isDeepStrictEqual(listed, ['remove 01_memo.pdf', 'remove 03_padded.pdf']);
+    const scanName = 'each PDF added goes to r3con app for its text, and a scan, with none, is refused as it is added, named, saying why';
+    check('live', scanName, two && sentToApp && scanRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
+
     const shown = await openFileView(page, '01_memo.pdf');
     const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B · your file`, text: PDF_TEXT });
-    const sentToApp = isDeepStrictEqual(posts, ['/api/documents/text', '/api/documents/text']);
-    const name = "each PDF added goes to r3con app for its text, and the files tab shows a PDF's extracted text and its file's size";
-    check('live', name, extracted && sentToApp, `${JSON.stringify(shown)}; ${posts.join(', ')}`);
-
+    check('live', "the files tab shows a PDF's extracted text and its file's size", extracted, JSON.stringify(shown));
     await page.click('#file-back');
-    const scan = (await openFileView(page, '02_scan.pdf')).text;
-    await page.click('#tab-chat');
-    await page.click('#run-btn');
-    const status = await page.textContent('#run-status');
-    const scanName = 'a scanned PDF has no text: its preview says so, and a run is refused, naming it, with nothing sent';
-    check('live', scanName, scan === 'This file has no readable text.' && status === SCAN_REFUSED && posts.length === 2, `${scan}; ${status}; ${posts.length} posts`);
+    const big = await openFileView(page, '03_padded.pdf');
+    const whole = isDeepStrictEqual(big, { meta: `${fmtKb(padded.buffer.length)} · your file`, text: PADDED_TEXT });
+    const bigName = `a PDF over ${fmtKb(READ_BYTES)} whose text is shorter shows its whole text, with no note that only the first part is shown`;
+    check('live', bigName, padded.buffer.length > READ_BYTES && whole, JSON.stringify(big));
 
-    await page.click('#tab-files');
-    await removeButton(page, '02_scan.pdf').click();
     await page.click('#tab-chat');
-    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
-    check('live', "a run is sent a PDF's extracted text", isDeepStrictEqual(sent, [PDF_TEXT]), JSON.stringify(sent));
+    const bytes = Buffer.byteLength(PDF_TEXT + PADDED_TEXT);
+    const counted = await becomes(page, lastTurnSays, [`sent 2 documents to r3con · ${bytes} B`]);
+    const runName = "a run is sent the PDFs' extracted texts, and says it sent their size, not the PDFs'";
+    const said = (await page.evaluate(lastTurnLines)).find((text) => text.startsWith('sent '));
+    check('live', runName, isDeepStrictEqual(sent, [PDF_TEXT, PADDED_TEXT]) && counted, `${JSON.stringify(sent)}; ${said}`);
   });
 }
+
+// The first PDF's text is held at the server until the second batch is in, which is refused at once.
+async function liveBatches(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route('**/api/documents/text?*', async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page.setInputFiles('#file-input', pdfs['01_memo.pdf']);
+    await page.setInputFiles('#file-input', docx());
+    release();
+    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 1);
+    const refusal = `Not added: report.docx. ${NOT_TEXT}`;
+    const stands = await becomes(page, (text) => document.getElementById('files-error').textContent === text, refusal);
+    const added = await page.evaluate(() => [...document.querySelectorAll('#transcript .line .t')].some((el) => el.textContent.startsWith('1 file added')));
+    const name = "a batch added while a PDF is still being read waits its turn, so the first batch's line and the second's refusal both stand";
+    check('live', name, stands && added, `${await filesError(page)}; added said ${added}`);
+  });
+}
+
+const utf16 = (name, text, bom) => ({ name, mimeType: 'text/plain', buffer: Buffer.concat([Buffer.from(bom ? [0xff, 0xfe] : []), Buffer.from(text, 'utf16le')]) });
 
 async function liveNotText(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = postsOf(page);
     const binary = { name: 'data.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('a header\0with a NUL byte') };
-    await page.setInputFiles('#file-input', [docx(), binary, memo('notes.log', 'A log line.\n'), memo('README', 'An extensionless note.\n')]);
-    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
+    const files = [
+      docx(),
+      binary,
+      memo('notes.log', 'A log line.\n'),
+      memo('README', 'An extensionless note.\n'),
+      utf16('utf16_bom.txt', 'A Notepad note.\n', true),
+      utf16('utf16_no_bom.txt', 'No byte-order mark.\n', false),
+    ];
+    await page.setInputFiles('#file-input', files);
+    const three = await becomes(page, () => document.querySelectorAll('.node.doc').length === 3);
     await page.click('#tab-files');
     const listed = await removeNames(page);
     const error = await filesError(page);
-    const refused = error === `Not added: data.bin, report.docx. ${NOT_TEXT}` && isDeepStrictEqual(listed, ['remove notes.log', 'remove README']);
-    const name = 'a .docx and a file with a NUL byte are refused, named, with what to do, and nothing is sent; a .log and an extensionless file are added';
-    check('live', name, refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
+    const refused =
+      error === `Not added: data.bin, report.docx, utf16_no_bom.txt. ${NOT_TEXT}` &&
+      isDeepStrictEqual(listed, ['remove notes.log', 'remove README', 'remove utf16_bom.txt']);
+    const name =
+      'a .docx, a file with a NUL byte and UTF-16 without a byte-order mark are refused, named, with what to do, and nothing is sent; a .log, an extensionless file and UTF-16 with one are added';
+    check('live', name, three && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
     await page.click('#tab-chat');
-    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
-    check('live', 'a run is sent only the text files', isDeepStrictEqual(sent, ['A log line.\n', 'An extensionless note.\n']), JSON.stringify(sent));
+    const texts = ['A log line.\n', 'An extensionless note.\n', 'A Notepad note.\n'];
+    check('live', 'a run is sent only the text files, the UTF-16 one decoded', isDeepStrictEqual(sent, texts), JSON.stringify(sent));
   });
 }
 
@@ -2409,6 +2464,7 @@ async function live() {
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);
+    await liveBatches(url);
     await liveNotText(url);
     await liveStaleToken(url);
     await liveStopRefused(url);
@@ -2421,6 +2477,7 @@ async function live() {
 }
 
 try {
+  pdfs = writePdfs(PDF_SPECS);
   browser = await require('playwright').chromium.launch();
   const areas = [load, beforeRun, sampleReplay, arrange, files, filesNotText, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();

@@ -10,7 +10,7 @@
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
   /** @typedef {{ name: string, text: string, size: number, sample: boolean, uid: number }} LoadedFile */
-  /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
+  /** @typedef {{ text?: string, why?: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
   /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
   /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
@@ -527,6 +527,11 @@
   const PDF_SUFFIX = '.pdf';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
   const SNIFF_BYTES = 8000;
+  // UTF-16 text holds NUL bytes, but with a byte-order mark, as Windows writes it, readText decodes it.
+  const UTF16_BOMS = [
+    [0xff, 0xfe],
+    [0xfe, 0xff],
+  ];
   const MAX_SIMULATED_CITES = 4;
   const SIMULATED_SUMMARY_STRIDE = 2;
   const SIMULATED_PARSE_STRIDE = 3;
@@ -591,6 +596,7 @@
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
   const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
+  const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -797,6 +803,9 @@
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
   const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
+  // What r3con is sent: the files' texts, in UTF-8, which for a PDF is far less than its file.
+  /** @param {LoadedFile[]} files */
+  const textBytes = (files) => files.reduce((sum, f) => sum + new Blob([f.text]).size, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Every event handled here starts at an element.
   /** @param {Event} event */
@@ -892,16 +901,16 @@
 
   const lostConnection = () => new ServerError(LOST_CONNECTION);
 
-  // A file is sent as its own bytes, any other body as JSON.
   /** @param {string} path @param {{ method?: string, body?: unknown }} [request] */
   async function api(path, { method = 'GET', body } = {}) {
     const headers = { Authorization: `Bearer ${token}` };
+    const json = body !== undefined && !(body instanceof Blob);
     let response;
     try {
       response = await fetch(path, {
         method,
-        headers: body instanceof Blob ? headers : { ...headers, 'Content-Type': 'application/json' },
-        body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
+        headers: json ? { ...headers, 'Content-Type': 'application/json' } : headers,
+        body: json ? JSON.stringify(body) : /** @type {Blob | undefined} */ (body),
       });
     } catch {
       connectionProblem = LOST_CONNECTION;
@@ -2336,7 +2345,7 @@
       narr.phase(`reading · ${rank + 1} of ${n}`);
     }, PACE.read);
     at(t, () => {
-      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`);
+      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(textBytes(run.docs))}`);
       narr.stage = null;
     });
 
@@ -2398,7 +2407,7 @@
       case 'run_started':
         if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
         run.ids = event.document_ids;
-        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(totalBytes(run.docs))}`);
+        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         if (!hasNodes(tab, `r${event.round}`)) beginStage(tab, narr, `r${event.round}`);
@@ -2777,40 +2786,43 @@
     });
   }
 
-  // A PDF's text comes from r3con app, which extracts it as r3con does. Any other file is read here as text,
-  // unless its start holds a NUL byte, as no text does: so Word files, images and archives are refused.
   /** @param {File} file @returns {Promise<FileRead>} */
   async function readFile(file) {
     if (isPdf(file)) return mode.readPdf(file);
     // A file that can't be read goes on to readText, which reads it as no text.
     const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
-    return start.includes(0) ? { why: NOT_TEXT } : { text: await readText(file) };
+    const utf16 = UTF16_BOMS.some(([first, second]) => start[0] === first && start[1] === second);
+    return utf16 || !start.includes(0) ? { text: await readText(file) } : { why: NOT_TEXT };
   }
 
+  // Batches are added one after another, so that each one's lines in the files pane stand.
+  let adding = Promise.resolve();
+
+  // The list is copied now: a file input's empties once its value is reset.
   /** @param {Iterable<File | null>} list */
-  async function addFiles(list) {
-    const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+  function addFiles(list) {
+    const files = [...list];
+    adding = adding.then(() => addBatch(files)).catch((error) => console.error("couldn't add files", error));
+  }
+
+  /** @param {(File | null)[]} files */
+  async function addBatch(files) {
+    const picked = files.filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
     picked.sort((a, b) => a.name.localeCompare(b.name));
     const error = $('files-error');
     if (!picked.length) {
-      error.textContent = 'No files found there. Try picking the files themselves.';
       error.hidden = false;
+      error.textContent = 'No files found there. Try picking the files themselves.';
       return;
     }
     error.hidden = true;
     $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
-    const results = await Promise.all(picked.map(readFile));
-    /** @type {LoadedFile[]} */
-    const read = [];
-    /** @type {Map<string, string[]>} */
-    const refused = new Map();
-    picked.forEach((f, i) => {
-      const result = results[i];
-      if ('why' in result) refused.set(result.why, [...(refused.get(result.why) ?? []), f.name]);
-      else read.push(withUid({ name: f.name, size: f.size, text: result.text, sample: false }));
-    });
-    error.textContent = [...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' ');
+    const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
+    const refused = Map.groupBy(reads.filter((r) => r.why), (r) => r.why);
+    // Shown before it is filled, so that the alert is announced.
     error.hidden = !refused.size;
+    error.textContent = [...refused].map(([why, rs]) => `Not added: ${rs.map((r) => r.file.name).join(', ')}. ${why}`).join(' ');
+    const read = reads.filter((r) => !r.why).map(({ file, text }) => withUid({ name: file.name, size: file.size, text, sample: false }));
     if (!read.length) {
       $('files-said').textContent = '';
       return;
@@ -3415,7 +3427,8 @@
     async readPdf(file) {
       try {
         const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
-        return { text: (await extracted.json()).text };
+        const { text } = await extracted.json();
+        return text.trim() ? { text } : { why: NO_TEXT_LAYER };
       } catch (error) {
         return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a PDF's text")}.` };
       }

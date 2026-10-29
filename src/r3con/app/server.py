@@ -159,10 +159,9 @@ class RunRequest(BaseModel):
     documents: list[Text] = Field(min_length=1)
 
 
-class DocumentFile(BaseModel):
+class DocumentQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Text
-    content: bytes
 
 
 class AskRequest(BaseModel):
@@ -223,11 +222,15 @@ def _state(request: Request) -> ServerState:
     return request.app.state.server
 
 
-async def _read(request: Request, parse: Callable[[bytes], Parsed]) -> Parsed:
+def _valid(parse: Callable[[Any], Parsed], given: Any) -> Parsed:
     try:
-        return parse(await request.body())
+        return parse(given)
     except ValidationError as error:
         raise HTTPException(422, _explain(error)) from None
+
+
+async def _read(request: Request, parse: Callable[[bytes], Parsed]) -> Parsed:
+    return _valid(parse, await request.body())
 
 
 def _explain(error: ValidationError) -> str:
@@ -388,16 +391,13 @@ async def forget_key(request: Request) -> Response:
 
 
 async def document_text(request: Request) -> Response:
-    query = request.query_params
-    document = await _read(
-        request,
-        lambda content: DocumentFile.model_validate({**query, "content": content}),
-    )
+    query = _valid(DocumentQuery.model_validate, dict(request.query_params))
+    pdf = io.BytesIO(await request.body())
     # pypdf is CPU-bound: on the event loop, it would hold up every other request.
-    text = await run_in_threadpool(
-        r3con._pdf_text, document.name, io.BytesIO(document.content)
-    )
-    return JSONResponse({"text": text})
+    text = await run_in_threadpool(r3con._pdf_text, query.name, pdf)
+    # pypdf can extract a lone surrogate, which JSONResponse can't encode as UTF-8 and
+    # json.dumps escapes.
+    return Response(json.dumps({"text": text}), media_type="application/json")
 
 
 async def start_run(request: Request) -> Response:
