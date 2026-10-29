@@ -58,9 +58,12 @@ Two layers in code:
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
   writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, usd, finish_reason, prompt, output}``, where ``chunk`` is the part index of
-  a document read in parts and ``usd`` is litellm's price for the call, or ``null``
-  when it cannot price it) and, unless skipped, ``transcript.yaml``
+  tokens, usd, sends, resend_wait_seconds, finish_reason, prompt, output}``, where
+  ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's price
+  for the call, or ``null`` when it cannot price it, ``sends`` is the times the request
+  was sent, more than 1 when a temporary error made r3con resend it, and
+  ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
+  ``null`` when r3con did not resend it itself) and, unless skipped, ``transcript.yaml``
   (the readable message thread). Aggregate token and cost totals are available via
   ``compute_totals()`` so callers fold them into the stage's ``result.json``.
 """
@@ -252,6 +255,8 @@ class StepRecord:
     # {"prompt": int, "completion": int, "total": int}
     tokens: dict[str, int] | None = None
     usd: float | None = None
+    sends: int | None = None
+    resend_wait_seconds: float | None = None
 
 
 class StageRun:
@@ -286,6 +291,8 @@ class StageRun:
         schema: dict[str, Any] | None = None,
         tokens: dict[str, int] | None = None,
         usd: float | None = None,
+        sends: int | None = None,
+        resend_wait_seconds: float | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
         completion order; each call's ``kind`` carries its own identity."""
@@ -298,6 +305,8 @@ class StageRun:
                 schema=schema,
                 tokens=tokens,
                 usd=usd,
+                sends=sends,
+                resend_wait_seconds=resend_wait_seconds,
             )
             self.steps.append(step)
         return step
@@ -324,9 +333,9 @@ class StageRun:
         return transcript_path
 
     def _write_calls(self) -> Path:
-        """Write ``calls.json`` — one entry per LLM call: ``{step, kind, doc, chunk,
-        tokens, usd, finish_reason, prompt, output}``. ``doc``/``chunk`` are read out of the
-        call ``kind`` (e.g. ``parse-d0``, ``relevance-r1-d2``) when present."""
+        """Write ``calls.json`` — one entry per LLM call, with the fields the module
+        docstring defines. ``doc``/``chunk`` are read out of the call ``kind`` (e.g.
+        ``parse-d0``, ``relevance-r1-d2``) when present."""
         calls: list[dict[str, Any]] = []
         for s in self.steps:
             m = _DOC_CHUNK_RE.search(s.kind)
@@ -339,6 +348,8 @@ class StageRun:
                     "chunk": int(m.group(2)) if (m and m.group(2)) else None,
                     "tokens": s.tokens,
                     "usd": s.usd,
+                    "sends": s.sends,
+                    "resend_wait_seconds": s.resend_wait_seconds,
                     "finish_reason": resp.get("finish_reason"),
                     "prompt": s.messages,
                     "output": resp.get("content"),

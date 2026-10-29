@@ -511,6 +511,42 @@ def test_a_call_litellm_cannot_price_is_recorded_without_a_cost(llm, tmp_path):
     assert [step.usd for step in run.steps] == [None]
 
 
+def slowed_down(retry_after: str) -> litellm.RateLimitError:
+    error = litellm.RateLimitError(
+        message="slow down", llm_provider="openai", model=MODEL
+    )
+    error.litellm_response_headers = {"retry-after": retry_after}
+    return error
+
+
+@pytest.mark.parametrize(
+    ("rate_limits", "sends", "resend_wait_seconds"),
+    [(0, 1, 0), (2, 3, 4.01)],
+    ids=["first-time", "after-two-rate-limits-to-hundredths"],
+)
+def test_a_recorded_call_says_how_often_it_was_sent_and_how_long_it_waited(
+    llm, monkeypatch, tmp_path, top_draws, rate_limits, sends, resend_wait_seconds
+):
+    errors = [slowed_down(retry_after="1.004") for _ in range(rate_limits)]
+    monkeypatch.setattr(litellm, "completion", llm.replies(*errors, "ok"))
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL, run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (sends, resend_wait_seconds)
+    assert len(llm.requests) == sends
+
+
+def test_a_call_r3con_did_not_resend_itself_records_no_sends_or_wait(llm, tmp_path):
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    ask(llm.replies("ok"), run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
 def test_litellm_reads_its_bundled_price_map():
     assert len(litellm.model_cost) > 0
     source = get_model_cost_map_source_info()
