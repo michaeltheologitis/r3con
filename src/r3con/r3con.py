@@ -43,9 +43,11 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import IO, Any
+from typing import Any, BinaryIO
 
+import mammoth
 from dotenv import find_dotenv, load_dotenv
+from markdownify import ATX, MarkdownConverter
 from pypdf import PdfReader
 
 from r3con.config import (
@@ -68,45 +70,33 @@ from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
 
 _log = get_logger("documents")
-
-# Which files a folder walk picks up. A walk that swallowed binaries would produce
-# garbage documents and confusing model errors, so keep it to files we can turn into
-# text — the text-ish ones, read directly, plus PDF, which is extracted. Pass explicit
-# paths for anything else.
-TEXT_SUFFIXES: frozenset[str] = frozenset(
-    {
-        ".txt",
-        ".md",
-        ".markdown",
-        ".rst",
-        ".json",
-        ".jsonl",
-        ".csv",
-        ".tsv",
-        ".yaml",
-        ".yml",
-        ".html",
-        ".xml",
-        ".pdf",
-    }
-)
+# Office's lock file for a document someone has open: ~$report.docx.
+_LOCK_FILE_PREFIX = "~$"
 
 
 def _read_one(path: Path) -> str:
     """One file's text.
 
-    A PDF is extracted page by page (:func:`_pdf_text`); everything else is read as
-    UTF-8, replacing undecodable bytes rather than failing — one bad byte in one document
-    should not sink a run.
+    A file whose suffix is in :data:`_EXTRACTORS` is extracted; everything else is read
+    as UTF-8, replacing undecodable bytes rather than failing — one bad byte in one
+    document should not sink a run. A file that can't be opened or read is logged, and
+    gives ``""``, which the caller then drops.
     """
-    if path.suffix.lower() != ".pdf":
-        return path.read_text(encoding="utf-8", errors="replace")
-    return _pdf_text(str(path), path)
+    extract = _extractor(path.name)
+    try:
+        if extract is None:
+            return path.read_text(encoding="utf-8", errors="replace")
+        file = path.open("rb")
+    except OSError as e:
+        _log.warning("%s: not readable (%s); skipping it", path, type(e).__name__)
+        return ""
+    with file:
+        return extract(str(path), file)
 
 
-def _pdf_text(name: str, pdf: Path | IO[bytes]) -> str:
-    """A PDF's text, page by page, read from its path or from a stream of its bytes;
-    ``name`` is what the warnings call it.
+def _pdf_text(name: str, pdf: BinaryIO) -> str:
+    """A PDF's text, page by page, from a stream of its bytes; ``name`` is what the
+    warnings call it.
 
     A PDF pypdf can't read gives ``""``, and so does one with no text layer (a scan),
     which the caller then drops: say so rather than letting it vanish. The fix is OCR,
@@ -130,6 +120,89 @@ def _pdf_text(name: str, pdf: Path | IO[bytes]) -> str:
     return text
 
 
+def _docx_text(name: str, docx: BinaryIO) -> str:
+    """A Word file's text as Markdown, from a stream of its bytes; ``name`` is what the
+    warnings call it.
+
+    mammoth turns its body into HTML, and markdownify that into Markdown: headings,
+    lists and tables keep their shape, a table's first row is its header, and a tracked
+    insertion stays while a deletion goes. The text is kept as written, its ``_`` and
+    ``*`` unescaped, but for a ``|`` in a table's cell. Images are left out. A file that
+    can't be read gives ``""``, and so does one with no text, which the caller then
+    drops: say so.
+    """
+    try:
+        # An image converter that makes no element, so no image's bytes are read.
+        converted = mammoth.convert_to_html(docx, convert_image=lambda image: [])
+        text = _CellPipesEscaped(
+            heading_style=ATX,
+            table_infer_header=True,
+            escape_asterisks=False,
+            escape_underscores=False,
+            escape_misc=False,
+        ).convert(converted.value)
+    except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
+        _log.warning(
+            "%s: not readable as a Word file (%s); skipping it", name, type(e).__name__
+        )
+        return ""
+    for message in converted.messages:
+        _log.debug("%s: %s", name, message.message)
+    if not text.strip():
+        _log.warning("%s: no extractable text; skipping it", name)
+    return text
+
+
+class _CellPipesEscaped(MarkdownConverter):
+    """markdownify, with a ``|`` in a table's cell escaped, so it can't split the cell."""
+
+    # markdownify's stub leaves out the convert_* hooks its README says to override.
+    def convert_td(self, el: Any, text: str, parent_tags: set[str]) -> str:
+        cell = text.replace("|", r"\|")
+        return super().convert_td(el, cell, parent_tags)  # pyright: ignore[reportAttributeAccessIssue]
+
+    def convert_th(self, el: Any, text: str, parent_tags: set[str]) -> str:
+        cell = text.replace("|", r"\|")
+        return super().convert_th(el, cell, parent_tags)  # pyright: ignore[reportAttributeAccessIssue]
+
+
+_EXTRACTORS: dict[str, Callable[[str, BinaryIO], str]] = {
+    ".pdf": _pdf_text,
+    ".docx": _docx_text,
+}
+
+# Which files a folder walk picks up. A walk that swallowed binaries would produce
+# garbage documents and confusing model errors, so keep it to files we can turn into
+# text — the text-ish ones, read directly, plus those in _EXTRACTORS. Pass explicit paths
+# for anything else.
+TEXT_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".txt",
+        ".md",
+        ".markdown",
+        ".rst",
+        ".json",
+        ".jsonl",
+        ".csv",
+        ".tsv",
+        ".yaml",
+        ".yml",
+        ".html",
+        ".xml",
+        *_EXTRACTORS,
+    }
+)
+
+
+def _extractor(name: str) -> Callable[[str, BinaryIO], str] | None:
+    """How to extract the file called ``name``, by the suffix it ends with, so that a
+    file called just ``.docx`` is a Word file; or ``None`` if it is read as text."""
+    lower = name.lower()
+    return next(
+        (f for suffix, f in _EXTRACTORS.items() if lower.endswith(suffix)), None
+    )
+
+
 def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     """Read documents off the filesystem into the list of strings :func:`run` wants.
 
@@ -138,16 +211,18 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     path), a single file, or a glob such as ``"reports/*.md"``; pass several and they are
     concatenated in the order given.
 
-    A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files
-    and PDFs. An explicit path or a glob reads **whatever you name**, so that a ``.log``, a
-    ``.py`` or an extensionless file is yours to pass; the flip side is that a glob aimed
-    at binaries will happily turn them into garbage documents.
+    A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files,
+    PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
+    name**, so that a ``.log``, a ``.py`` or an extensionless file is yours to pass; the
+    flip side is that a glob aimed at binaries will happily turn them into garbage
+    documents. A walk and a glob both skip Office's lock files (``~$report.docx``).
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
-    is logged and then dropped; OCR is outside this package. Everything else is read as
-    UTF-8, replacing undecodable bytes rather than failing: one bad byte in one document
-    should not sink a run. Empty documents are dropped — an empty document contributes
-    nothing and costs a relevance call.
+    is logged and then dropped; OCR is outside this package. A Word file is converted to
+    Markdown, its tables included; one that can't be read, or has no text, is logged and
+    dropped. Everything else is read as UTF-8, replacing undecodable bytes rather than
+    failing: one bad byte in one document should not sink a run. Empty documents are
+    dropped — an empty document contributes nothing and costs a relevance call.
 
     Document order is preserved end to end (it is what ``Document N`` refers to in the
     structuring prompts, and ``document_ids`` aligns with it), so a stable, sorted walk
@@ -164,7 +239,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
             files = sorted(
                 p
                 for p in path.rglob("*")
-                if p.is_file() and p.suffix.lower() in TEXT_SUFFIXES
+                if p.is_file()
+                and p.name.lower().endswith(tuple(TEXT_SUFFIXES))
+                and not p.name.startswith(_LOCK_FILE_PREFIX)
             )
         elif path.is_file():
             files = [path]
@@ -177,7 +254,7 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
                     if anchor
                     else Path().glob(pattern)
                 )
-                if p.is_file()
+                if p.is_file() and not p.name.startswith(_LOCK_FILE_PREFIX)
             )
         if not files:
             raise FileNotFoundError(f"No documents found at {src!r}.")

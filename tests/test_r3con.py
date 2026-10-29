@@ -1,6 +1,9 @@
+import base64
 import importlib.metadata
 import json
 import logging
+import os
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -15,8 +18,41 @@ from r3con import Answer, RunConfig
 from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES, REASONING_PATHS
 from r3con.r3con import ask, read_documents, run
-from tests.pdfs import write_pdf
+from tests.documents import (
+    CORRUPT_DOCX,
+    PNG,
+    paragraph,
+    table,
+    write_docx,
+    write_pdf,
+)
 
+# A paragraph whose second run Word tracks as inserted, and third as deleted.
+TRACKED_CHANGES = (
+    '<w:p><w:r><w:t xml:space="preserve">Revenue was </w:t></w:r>'
+    '<w:ins w:id="1" w:author="a"><w:r><w:t>12 million</w:t></w:r></w:ins>'
+    '<w:del w:id="2" w:author="a"><w:r><w:delText>9 million</w:delText></w:r></w:del>'
+    '<w:r><w:t xml:space="preserve"> in Q3.</w:t></w:r></w:p>'
+)
+# A content control around a paragraph, and one around a run.
+CONTENT_CONTROLS = (
+    f"<w:sdt><w:sdtContent>{paragraph('Inside a block control.')}</w:sdtContent></w:sdt>"
+    '<w:p><w:r><w:t xml:space="preserve">Name: </w:t></w:r>'
+    "<w:sdt><w:sdtContent><w:r><w:t>Jane Doe</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+)
+MERGED_HEADER = (
+    '<w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr>'
+    f"{paragraph('Total')}</w:tc></w:tr><w:tr>"
+    + "".join(f"<w:tc>{paragraph(text)}</w:tc>" for text in ["Site A", "Q2", "5"])
+    + "</w:tr></w:tbl>"
+)
+NESTED_TABLE = (
+    f"<w:tbl><w:tr><w:tc>{paragraph('outer')}</w:tc>"
+    f"<w:tc>{table([['inner1', 'inner2']])}{paragraph('')}</w:tc></w:tr></w:tbl>"
+)
+PLAIN_TEXT = b"Plain words, saved under the wrong name."
+# What Word writes beside a document someone has open: their name, padded.
+WORD_OWNER_FILE = b"\x07Michael" + bytes(154)
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
 DOCS = ["Halloran memo", "Merrow memo", "Calder memo"]
 JOINED = "Halloran memo; Merrow memo; Calder memo"
@@ -326,6 +362,140 @@ def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
     assert len(documents) == 2
     assert "Incidents this quarter: 7." in documents[0]
     assert documents[1] == "a plain memo"
+
+
+def test_a_word_files_paragraphs_and_tables_come_out_in_order_as_markdown(tmp_path):
+    docx = tmp_path / "report.docx"
+    table = [["Site", "Incidents"], ["Halloran", "7"]]
+    write_docx(docx, ["Incidents by site:", table, "Merrow's count is provisional."])
+    lines = [
+        "Incidents by site:",
+        "",
+        "| Site | Incidents |",
+        "| --- | --- |",
+        "| Halloran | 7 |",
+        "",
+        "Merrow's count is provisional.",
+    ]
+    assert read_documents(docx) == ["\n".join(lines)]
+
+
+@pytest.mark.parametrize(
+    ("xml", "text"),
+    [
+        (TRACKED_CHANGES, "Revenue was 12 million in Q3."),
+        (CONTENT_CONTROLS, "Inside a block control.\n\nName: Jane Doe"),
+        (
+            MERGED_HEADER,
+            "| Total | | |\n| --- | --- | --- |\n| Site A | Q2 | 5 |",
+        ),
+    ],
+    ids=[
+        "tracked-insertion-kept-deletion-dropped",
+        "content-controls",
+        "merged-header",
+    ],
+)
+def test_a_word_files_text_is_what_word_shows(tmp_path, xml, text):
+    docx = tmp_path / "report.docx"
+    write_docx(docx, xml=xml)
+    assert read_documents(docx) == [text]
+
+
+def test_a_word_files_underscores_and_asterisks_are_kept_as_written(tmp_path):
+    docx = tmp_path / "report.docx"
+    write_docx(docx, ["account_id_2024 is *important* 5*3"])
+    assert read_documents(docx) == ["account_id_2024 is *important* 5*3"]
+
+
+@pytest.mark.parametrize("header", [False, True], ids=["plain-rows", "header-row"])
+def test_a_pipe_in_a_word_tables_cell_is_escaped_so_each_row_keeps_its_cells(
+    tmp_path, header: bool
+):
+    docx = tmp_path / "report.docx"
+    write_docx(docx, xml=table([["Name|Alias", "Value"], ["a|b", "7"]], header=header))
+    [text] = read_documents(docx)
+    assert text == "| Name\\|Alias | Value |\n| --- | --- |\n| a\\|b | 7 |"
+    cells = {len(re.split(r"(?<!\\)\|", line)) for line in text.splitlines()}
+    assert cells == {len(["", "Name|Alias", "Value", ""])}
+
+
+def test_a_file_called_just_docx_is_a_word_file_to_a_walk_as_to_its_path(tmp_path):
+    write_docx(tmp_path / ".docx", ["Incidents this quarter: 7."])
+    assert read_documents(tmp_path) == read_documents(tmp_path / ".docx")
+    assert read_documents(tmp_path) == ["Incidents this quarter: 7."]
+
+
+def test_a_table_nested_in_a_word_table_keeps_its_text(tmp_path):
+    docx = tmp_path / "report.docx"
+    write_docx(docx, xml=NESTED_TABLE)
+    [text] = read_documents(docx)
+    assert all(word in text for word in ["outer", "inner1", "inner2"])
+
+
+def test_a_word_files_image_leaves_none_of_its_data_in_the_text(tmp_path):
+    docx = tmp_path / "report.docx"
+    write_docx(docx, ["Before the chart."], image=True)
+    [text] = read_documents(docx)
+    assert text.startswith("Before the chart.")
+    assert "base64," not in text
+    assert base64.b64encode(PNG).decode() not in text
+
+
+@pytest.mark.parametrize(
+    "content", [CORRUPT_DOCX, PLAIN_TEXT], ids=["corrupt", "plain-text"]
+)
+def test_a_word_file_that_cannot_be_read_is_logged_and_dropped_not_read_as_text(
+    tmp_path, caplog, content: bytes
+):
+    unreadable = tmp_path / "a_memo.docx"
+    unreadable.write_bytes(content)
+    (tmp_path / "b_plain.txt").write_text("a plain memo", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents(tmp_path)
+    assert documents == ["a plain memo"]
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{unreadable}: not readable as a Word file (BadZipFile); skipping it"
+    ]
+
+
+def test_a_file_that_cannot_be_opened_is_logged_and_skipped(tmp_path, caplog):
+    write_pdf(tmp_path / "a_memo.pdf", "Incidents this quarter: 7.")
+    write_docx(tmp_path / "b_report.docx", ["Incidents by site."])
+    (tmp_path / "c_notes.txt").write_text("a locked note", encoding="utf-8")
+    (tmp_path / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
+    locked = [
+        tmp_path / name for name in ["a_memo.pdf", "b_report.docx", "c_notes.txt"]
+    ]
+    for path in locked:
+        path.chmod(0)
+    if os.access(locked[0], os.R_OK):
+        pytest.skip("this user, root say, reads a file whatever its mode")
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents(tmp_path)
+    assert documents == ["a plain memo"]
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{path}: not readable (PermissionError); skipping it" for path in locked
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [lambda root: root, lambda root: str(root / "*.docx")],
+    ids=["walk", "glob"],
+)
+def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
+    tmp_path, caplog, source: Callable[[Path], str | Path]
+):
+    write_docx(tmp_path / "a_report.docx", ["Incidents this quarter: 7."])
+    write_docx(tmp_path / "b_empty.docx")
+    (tmp_path / "~$a_report.docx").write_bytes(WORD_OWNER_FILE)
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents(source(tmp_path))
+    assert documents == ["Incidents this quarter: 7."]
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{tmp_path / 'b_empty.docx'}: no extractable text; skipping it"
+    ]
 
 
 def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_on(

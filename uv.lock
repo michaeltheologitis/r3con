@@ -4,7 +4,8 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
+    "(python_full_version >= '3.11.5' and python_full_version < '3.12') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
+    "python_full_version < '3.11.5'",
 ]
 
 [[package]]
@@ -194,6 +195,20 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/9a/8e/82a0fe20a541c03148528be8cac2408564a6c9a0cc7e9171802bc1d26985/attrs-26.1.0.tar.gz", hash = "sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32", size = 952055, upload-time = "2026-03-19T14:22:25.026Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl", hash = "sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309", size = 67548, upload-time = "2026-03-19T14:22:23.645Z" },
+]
+
+[[package]]
+name = "beautifulsoup4"
+version = "4.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "soupsieve", version = "2.10", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11.5'" },
+    { name = "soupsieve", version = "3.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11.5'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
 ]
 
 [[package]]
@@ -485,6 +500,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
+]
+
+[[package]]
+name = "cobble"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/7a/a507c709be2c96e1bb6102eb7b7f4026c5e5e223ef7d745a17d239e9d844/cobble-0.1.4.tar.gz", hash = "sha256:de38be1539992c8a06e569630717c485a5f91be2192c461ea2b220607dfa78aa", size = 3805, upload-time = "2024-06-01T18:11:09.528Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/e1/3714a2f371985215c219c2a70953d38e3eed81ef165aed061d21de0e998b/cobble-0.1.4-py3-none-any.whl", hash = "sha256:36c91b1655e599fd428e2b95fdd5f0da1ca2e9f1abb0bc871dec21a0e78a2b44", size = 3984, upload-time = "2024-06-01T18:11:07.911Z" },
 ]
 
 [[package]]
@@ -1295,6 +1319,31 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/a3/9ceea12f47cc2728cef090e8bdd0f2e1ebf65035636498e0391faab4019d/litellm-1.104.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:3c4a15692a9dd259033195c5d4ca1697a14e6bd50d679435a799a9028e99b453", size = 36002177, upload-time = "2026-10-03T22:43:17.731Z" },
     { url = "https://files.pythonhosted.org/packages/e1/79/a5e907a87f14c67cc032b4163f86835db4f13ab230fe98c0d36864143876/litellm-1.104.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:6ffed0207c6fba822fa484754f8fea40d8e9705673189d4bb6f18fa866e59a8e", size = 36967363, upload-time = "2026-10-03T22:43:22.482Z" },
     { url = "https://files.pythonhosted.org/packages/59/80/03920dc49bf92adfc80ad568df229007a76428abd340eef2b53e22edb3fb/litellm-1.104.0-cp310-abi3-win_amd64.whl", hash = "sha256:414d31b0bda41aa8fb8696c78d5f728a446e37a34476c6f5f2b6fa17ddd66ee4", size = 37605934, upload-time = "2026-10-03T22:43:27.164Z" },
+]
+
+[[package]]
+name = "mammoth"
+version = "1.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cobble" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c3/a8/d6691d0b76cf55cf19851e9e189d0356526024d650c131a0969fcd76225d/mammoth-1.13.0.tar.gz", hash = "sha256:b359bee7bc00caba47dacc64286928133dd947917bab852eea01d0c8d8997296", size = 53987, upload-time = "2026-09-26T22:12:09.733Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/2a/47d72b27689f3c7cd1d270dd1d4699df2fe3b78b2f293b6b08f565548a45/mammoth-1.13.0-py2.py3-none-any.whl", hash = "sha256:dd7629fa9d0a5e82207b3f481a9dcb8308fb43f6206258e062f11121efba9991", size = 55228, upload-time = "2026-09-26T22:12:08.265Z" },
+]
+
+[[package]]
+name = "markdownify"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/ab/d1297139c0e2ceb151ae564c8c4f57ac0155d8f1f8b4cbd5d6523c82ea36/markdownify-1.2.3.tar.gz", hash = "sha256:1a176f05522c8a2cb1dd3ab9d307dcdadbed5c26ae717855bfc42b3b6d38d937", size = 18852, upload-time = "2026-06-30T20:27:39.06Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/10/fa543d484e8b1199243fe20eedd02cc5af050edebce98a7293a5773df592/markdownify-1.2.3-py3-none-any.whl", hash = "sha256:a189a0bedfd14009030fde5f85bb6f77c56897cb839b5c25315dd7d4e3e290ba", size = 15732, upload-time = "2026-06-30T20:27:38.094Z" },
 ]
 
 [[package]]
@@ -2135,6 +2184,8 @@ source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
     { name = "litellm" },
+    { name = "mammoth" },
+    { name = "markdownify" },
     { name = "pydantic" },
     { name = "pypdf" },
     { name = "python-dotenv" },
@@ -2167,6 +2218,8 @@ dev = [
 requires-dist = [
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "litellm", specifier = ">=1.103,<2" },
+    { name = "mammoth", specifier = ">=1.12.2" },
+    { name = "markdownify", specifier = ">=1.0.0" },
     { name = "platformdirs", marker = "extra == 'app'", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pypdf", specifier = ">=6.19.0" },
@@ -2501,6 +2554,32 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "soupsieve"
+version = "2.10"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version < '3.11.5'",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/71/c3/1b817965ac12dc002d7c9cd7dfffdd7d4fbf9b45763ef2ffe7b86ee94670/soupsieve-2.10.tar.gz", hash = "sha256:49e9380d7d2905463583bafe285e818c7366a9ed7b3aee221c1ac79c905d8bc0", size = 124337, upload-time = "2026-09-24T02:36:35.048Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/87/5ed59e1d0290564e2027ed066c52b059892c4637741337fc0967183c8d4d/soupsieve-2.10-py3-none-any.whl", hash = "sha256:8596eb8967d744174820280fa62b4542a2e955bfaccca73ed8a13c6eb8e9b502", size = 38019, upload-time = "2026-09-24T02:36:33.709Z" },
+]
+
+[[package]]
+name = "soupsieve"
+version = "3.0.4"
+source = { registry = "https://pypi.org/simple" }
+resolution-markers = [
+    "python_full_version >= '3.14'",
+    "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
+    "(python_full_version >= '3.11.5' and python_full_version < '3.12') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
+]
+sdist = { url = "https://files.pythonhosted.org/packages/19/63/0b6bae54546aed98d72f12d09df57b19a287f01c84d22047fa2e23772ab9/soupsieve-3.0.4.tar.gz", hash = "sha256:924fab84ae21604c19e175e1f39815eb6fa83ba23836e09e9de180925e5bc4c0", size = 119017, upload-time = "2026-10-22T00:45:26.362Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/66/473f7ca0be0b06e38ee8c85ee2db184e3981bd769fac2e7c19c8a8865211/soupsieve-3.0.4-py3-none-any.whl", hash = "sha256:8412826614f9c632227067d0985aeb9f584bd15efc852955430e097a9fe7afbf", size = 42458, upload-time = "2026-10-22T00:45:24.843Z" },
 ]
 
 [[package]]

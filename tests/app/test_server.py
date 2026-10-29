@@ -1,6 +1,7 @@
 import contextlib
 import json
 import logging
+import re
 import socket
 import threading
 from collections.abc import Callable, Iterator
@@ -15,9 +16,10 @@ from litellm.exceptions import RateLimitError
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp
 
+from r3con import r3con
 from r3con.app.server import ServerState, _server, create_app, listen, serve
 from r3con.r3con import read_documents
-from tests.pdfs import write_pdf
+from tests.documents import CORRUPT_DOCX, write_docx, write_pdf
 
 litellm.suppress_debug_info = True
 
@@ -46,7 +48,13 @@ KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
 ASK = {"question": "Which site logged the fewest?", "model": MODEL}
 PDF_TEXT = "Incidents this quarter: 7."
 CORRUPT_PDF = b"%PDF-1.4 truncated garbage"
+REPORT = [
+    "Incidents by site:",
+    [["Site", "Incidents"], ["Halloran", "7"], ["Merrow", "3"]],
+    "Merrow's count is provisional.",
+]
 DOCUMENT_TEXT = "/api/documents/text"
+UNEXTRACTED = "name: must end in one of .pdf, .docx"
 RUN_EVENTS = [
     "run_started",
     "relevance_started",
@@ -352,14 +360,21 @@ def test_a_request_that_names_another_host_is_refused(
     assert client.get(path, headers={"Host": host}).status_code == 403
 
 
-@pytest.mark.parametrize("path", ["/", "/app.css", "/app.js", "/api/keys"])
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        *(("GET", path) for path in ["/", "/app.css", "/app.js", "/api/keys"]),
+        ("POST", f"{DOCUMENT_TEXT}?name=memo.docx"),
+    ],
+)
 @pytest.mark.parametrize(
     "origin", ["http://evil.example", "null", f"http://127.0.0.1:{PORT + 1}"]
 )
 def test_a_request_from_another_origin_is_refused(
-    client: TestClient, path: str, origin: str
+    client: TestClient, method: str, path: str, origin: str
 ):
-    assert client.get(path, headers={"Origin": origin}).status_code == 403
+    response = client.request(method, path, headers={"Origin": origin})
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize("host", [f"127.0.0.1:{PORT}", f"localhost:{PORT}"])
@@ -663,10 +678,31 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     assert read_documents(pdf) == [extracted]
 
 
+# A Word file is read by its name's suffix, in any case, even with nothing before it.
+@pytest.mark.parametrize("name", ["report.docx", "REPORT.DOCX", ".docx"])
+def test_a_word_files_text_is_extracted_as_read_documents_extracts_it(
+    client: TestClient, tmp_path: Path, name: str
+):
+    path = tmp_path / name
+    write_docx(path, REPORT)
+    response = text_of(client, path)
+    [text] = read_documents(path)
+    assert response.status_code == 200
+    assert response.json() == {"text": text}
+
+
+def test_the_page_sends_the_server_each_suffix_r3con_extracts():
+    script = (APP_DIR / "app.js").read_text(encoding="utf-8")
+    listed = re.search(r"const EXTRACTED_SUFFIXES = \[(.*?)\];", script)
+    assert listed is not None
+    assert re.findall(r"'([^']+)'", listed[1]) == list(r3con._EXTRACTORS)
+
+
 @pytest.mark.parametrize(
-    ("write", "logged"),
+    ("name", "write", "logged"),
     [
         (
+            "memo.pdf",
             write_pdf,
             (
                 "memo.pdf: no extractable text — a scanned PDF needs OCR first; "
@@ -674,23 +710,35 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
             ),
         ),
         (
+            "memo.pdf",
             lambda path: path.write_bytes(CORRUPT_PDF),
             "memo.pdf: not readable as a PDF (PdfStreamError); skipping it",
         ),
+        (
+            "memo.docx",
+            lambda path: path.write_bytes(CORRUPT_DOCX),
+            "memo.docx: not readable as a Word file (BadZipFile); skipping it",
+        ),
+        (
+            "memo.docx",
+            write_docx,
+            "memo.docx: no extractable text; skipping it",
+        ),
     ],
-    ids=["scanned", "corrupt"],
+    ids=["scanned-pdf", "corrupt-pdf", "corrupt-docx", "empty-docx"],
 )
-def test_a_pdf_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
+def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
     client: TestClient,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    name: str,
     write: Callable[[Path], None],
     logged: str,
 ):
-    pdf = tmp_path / "memo.pdf"
-    write(pdf)
+    file = tmp_path / name
+    write(file)
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
-        response = text_of(client, pdf)
+        response = text_of(client, file)
     assert response.status_code == 200
     assert response.json() == {"text": ""}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
@@ -705,9 +753,13 @@ def test_a_pdf_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_l
         ({"name": " "}, "name: must not be blank"),
         ({"name": "memo.pdf", "pages": "1"}, "pages: Extra inputs are not permitted"),
         ({"name": "memo.pdf", "content": "x"}, "content: Extra inputs"),
+        ({"name": "memo.txt"}, UNEXTRACTED),
+        ({"name": "memo.doc"}, UNEXTRACTED),
+        ({"name": "memo"}, UNEXTRACTED),
+        ({"name": "memo.html"}, UNEXTRACTED),
     ],
 )
-def test_a_pdf_without_a_valid_name_is_refused_with_what_is_wrong(
+def test_a_document_without_a_valid_name_is_refused_with_what_is_wrong(
     client: TestClient, params: dict[str, str], wrong: str
 ):
     response = client.post(DOCUMENT_TEXT, params=params, content=CORRUPT_PDF)

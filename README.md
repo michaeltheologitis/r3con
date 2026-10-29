@@ -84,8 +84,8 @@ result = r3con.run(
 print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total."
 ```
 
-`read_documents` supports `.txt`, `.md`, `.csv`, `.json`, `.html`, `.xml`, `.pdf`, and
-other common text formats.
+`read_documents` reads PDF and Word (`.docx`) files, and text files such as `.txt`,
+`.md`, `.csv`, `.json`, `.html` and `.xml`.
 
 If you already have the documents in memory, pass them directly:
 
