@@ -79,7 +79,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import one_line, register_key
+from r3con.masking import is_credential_name, one_line, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -98,7 +98,6 @@ _WAIT_DIGITS = 2
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
-_CREDENTIAL_NAME = re.compile("key|token|secret|password|auth", re.IGNORECASE)
 _sleep = time.sleep
 
 
@@ -397,16 +396,19 @@ def register_credentials(
     params: Mapping[str, Any], completion: Callable[..., Any] | None = None
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
-    request with ``params`` sends: each value of its ``extra_headers``, and the value of
-    each parameter whose name says key, token, secret, password or auth, ``api_key``
-    among them; and when ``completion`` is a ``litellm.Router``'s, the same of each of
-    its deployments' ``litellm_params``, where the Router has already read an
-    ``os.environ/NAME`` from the environment."""
+    request with ``params`` sends: each value of its ``extra_headers`` and of each
+    parameter with a credential's name (:func:`r3con.masking.is_credential_name`),
+    ``api_key`` among them, and the token alone of a ``<scheme> <token>`` one
+    (``Bearer``, ``Basic``); and when ``completion`` is a ``litellm.Router``'s, the same
+    of each of its deployments' ``litellm_params``, where the Router has already read
+    an ``os.environ/NAME`` from the environment."""
     headers = params.get("extra_headers") or {}
-    named = [value for name, value in params.items() if _CREDENTIAL_NAME.search(name)]
-    for value in [*headers.values(), *named]:
-        if isinstance(value, str):
-            register_key(value)
+    named = [value for name, value in params.items() if is_credential_name(name)]
+    sent = [value for value in [*headers.values(), *named] if isinstance(value, str)]
+    # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
+    schemed = [words for words in map(str.split, sent) if len(words) == 2]
+    for value in [*sent, *(token for scheme, token in schemed if scheme.isalpha())]:
+        register_key(value)
     router = getattr(completion, "__self__", None)
     if isinstance(router, Router):
         for deployment in router.model_list:

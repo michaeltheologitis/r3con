@@ -36,22 +36,31 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
 
 def _masked_record(record: logging.LogRecord) -> bool:
-    """Mask ``record``'s message, its traceback and its stack. The traceback is left only
-    as the text a formatter appends, so a handler that renders ``exc_info`` itself never
-    sees the error unmasked. A call whose message does not format, such as
-    ``("doc %d", "seven")``, logs its format and arguments instead: logging does not
-    catch what a filter raises, so the log call itself would raise."""
-    try:
-        message = record.getMessage()
-    except (TypeError, ValueError, KeyError):
-        message = f"{record.msg} {record.args!r}"
-    record.msg, record.args = masked(message), ()
+    """Mask ``record``'s message (:func:`_message`), its traceback and its stack. The
+    traceback is left only as the text a formatter appends, so a handler that renders
+    ``exc_info`` itself never sees the error unmasked."""
+    record.msg, record.args = masked(_message(record)), ()
     if record.exc_info:
         record.exc_text = masked(logging.Formatter().formatException(record.exc_info))
         record.exc_info = None
     if record.stack_info:
         record.stack_info = masked(record.stack_info)
     return True
+
+
+def _message(record: logging.LogRecord) -> str:
+    """``record``'s message; when it does not format, as ``("doc %d", "seven")`` or an
+    argument whose ``str`` raises, its format and its arguments' ``repr``, or
+    ``<unprintable args>`` when that raises too."""
+    # Logging does not guard a filter, so what this raised would fail the log call,
+    # and the run with it.
+    try:
+        return record.getMessage()
+    except Exception:  # noqa: BLE001 — see above
+        try:
+            return f"{record.msg} {record.args!r}"
+        except Exception:  # noqa: BLE001 — see above
+            return f"{record.msg} <unprintable args>"
 
 
 def configure_logging(level: str | int | None = None) -> None:

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from r3con import settings
 from r3con.config import PROMPT_STAGES, RunConfig
+from r3con.masking import register_key
 from r3con.pipeline import run_pipeline
 from r3con.runs import (
     StageRun,
@@ -330,6 +331,22 @@ def test_the_manifest_keeps_the_model_string_litellm_is_called_with(logger):
     manifest = json.loads((logger.dir / "manifest.json").read_text())
     assert manifest["litellm_model"] == QWEN
     assert manifest["config"]["model"] == "Qwen3.5-35B-A3B"
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["not-a-real-key-q7RkT2mXv9LpA4sW", 'not-a-"real"-key\\q7RkT2mXv9'],
+    ids=["plain", "json-escapes-it"],
+)
+def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
+    register_key(key)
+    params = {"extra_headers": {"x-gateway-auth": key}, "temperature": 0.3}
+    write_manifest(logger, task="q", config=config(params=params), n_docs=1)
+    recorded = json.loads((logger.dir / "manifest.json").read_text())["config"]
+    assert recorded["params"] == {
+        "extra_headers": {"x-gateway-auth": "REDACTED"},
+        "temperature": 0.3,
+    }
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):

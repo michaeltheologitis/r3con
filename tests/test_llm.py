@@ -716,16 +716,21 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     )
     params = {
         "api_key": "call-key-0123456789",
-        "extra_headers": {"x-gateway-auth": "header-0123456789"},
+        "extra_headers": {
+            "x-gateway-auth": "header-0123456789",
+            "Authorization": "Bearer bearer-token-0123456789",
+        },
         "azure_ad_token": "ad-token-0123456789",
         "user": "end-user-0123456789",
+        "prompt_cache_key": "summaries-cache-2026",
         "max_tokens": 4096,
     }
     sent = (
         "router-key-0123456789 gateway-from-the-environment tenant-0123456789 "
-        "call-key-0123456789 header-0123456789 ad-token-0123456789"
+        "call-key-0123456789 header-0123456789 bearer-token-0123456789 "
+        "ad-token-0123456789"
     )
     register_credentials(params, routing.completion)
-    assert masked(f"{sent} end-user-0123456789 4096") == (
-        "REDACTED " * 6 + "end-user-0123456789 4096"
+    assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
+        "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
     )

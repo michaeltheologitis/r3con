@@ -299,8 +299,7 @@ def write_manifest(
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
     # Its params may hold a credential, an extra header say, registered at run start.
-    as_json = json.dumps(config_block, default=repr, ensure_ascii=False)
-    config_block = json.loads(masked(as_json))
+    config_block = _masked_values(config_block)
     manifest = {
         "r3con_version": __version__,
         "task": task,
@@ -327,6 +326,18 @@ def write_manifest(
     if ask_of is not None:
         manifest["ask_of"] = ask_of
     return task_logger.write_json("manifest", manifest)
+
+
+def _masked_values(data: Any) -> Any:
+    """``data`` with each string among its dicts' values and its lists' items masked
+    (:func:`r3con.masking.masked`), so a key JSON would escape is still found."""
+    if isinstance(data, str):
+        return masked(data)
+    if isinstance(data, dict):
+        return {name: _masked_values(value) for name, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_masked_values(item) for item in data]
+    return data
 
 
 def _sources(

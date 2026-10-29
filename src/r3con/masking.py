@@ -16,21 +16,24 @@ are:
 
 - every key registered with :func:`register_key`, which r3con does for each credential
   it sends (:func:`r3con.runtime.llm.register_credentials`): a call's ``api_key``, the
-  values of ``extra_headers`` and of any parameter named like a credential, and the
-  keys of a ``litellm.Router`` whose ``.completion`` is the run's ``completion``. A
-  ``completion`` wrapper that adds a key of its own must register it;
-- the value of every environment variable whose name says ``KEY``, ``TOKEN``,
-  ``SECRET``, ``PASSWORD`` or ``CREDENTIAL``, where litellm finds a provider's key,
-  when it is at least :data:`_MIN_ENVIRONMENT_SECRET_CHARS` characters with no
-  whitespace, so that ``SORT_KEY=timestamp`` is not one.
+  values of ``extra_headers`` and of any parameter with a credential's name
+  (:func:`is_credential_name`), and the keys of a ``litellm.Router`` whose
+  ``.completion`` is the run's ``completion``. A ``completion`` wrapper that adds a key
+  of its own must register it;
+- the value of every environment variable with a credential's name, where litellm finds
+  a provider's key, unless it holds whitespace or starts with ``/`` or ``~``, as a path
+  does (``GOOGLE_APPLICATION_CREDENTIALS``), or is shorter than
+  :data:`_MIN_ENVIRONMENT_SECRET_CHARS`, or :data:`_MIN_MASKED_KEY_CHARS` for a name
+  that ends in ``api_key`` or ``apikey``, a provider's key.
 
-A registered key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as
-vLLM's ``EMPTY``, and is left alone.
+A key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as vLLM's
+``EMPTY``, and is left alone.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections.abc import Mapping
 from typing import Any
@@ -42,7 +45,11 @@ _MASK = "REDACTED"
 _MIN_MASKED_KEY_CHARS = 8
 _MIN_ENVIRONMENT_SECRET_CHARS = 16
 _ERROR_CHARS = 300
-_SECRET_NAME_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+_PROVIDER_KEY_NAME = re.compile("api_?key$", re.IGNORECASE)
+_CREDENTIAL_NAME = re.compile(
+    "api_?key$|token|secret|password|credential|auth", re.IGNORECASE
+)
+_PATH_STARTS = ("/", "~")
 _registered: set[str] = set()
 _lock = threading.Lock()
 
@@ -53,6 +60,14 @@ def register_key(key: str | None) -> None:
     if key and len(key) >= _MIN_MASKED_KEY_CHARS:
         with _lock:
             _registered.add(key)
+
+
+def is_credential_name(name: str) -> bool:
+    """Whether a parameter or environment variable called ``name`` holds a credential:
+    its name, in any case, ends in ``api_key`` or ``apikey``, or says token, secret,
+    password, credential or auth. A bare ``key``, as in ``prompt_cache_key``, does
+    not."""
+    return bool(_CREDENTIAL_NAME.search(name))
 
 
 def masked(text: str) -> str:
@@ -86,10 +101,14 @@ def _located(detail: Mapping[str, Any]) -> str:
 
 
 def _environment_secrets() -> list[str]:
-    return [
-        value
-        for name, value in os.environ.items()
-        if any(part in name.upper() for part in _SECRET_NAME_PARTS)
-        and len(value) >= _MIN_ENVIRONMENT_SECRET_CHARS
-        and not any(map(str.isspace, value))
-    ]
+    return [value for name, value in os.environ.items() if _is_secret(name, value)]
+
+
+def _is_secret(name: str, value: str) -> bool:
+    if not is_credential_name(name) or value.startswith(_PATH_STARTS):
+        return False
+    if any(map(str.isspace, value)):
+        return False
+    provider_key = _PROVIDER_KEY_NAME.search(name)
+    floor = _MIN_MASKED_KEY_CHARS if provider_key else _MIN_ENVIRONMENT_SECRET_CHARS
+    return len(value) >= floor

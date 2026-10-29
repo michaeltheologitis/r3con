@@ -9,6 +9,22 @@ from r3con.masking import register_key
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 
 
+class Unprintable:
+    """A log argument whose ``str`` raises, and whose ``repr`` raises too unless it is
+    given one."""
+
+    def __init__(self, shown: str | None = None) -> None:
+        self.shown = shown
+
+    def __str__(self) -> str:
+        raise RuntimeError("no str")
+
+    def __repr__(self) -> str:
+        if self.shown is None:
+            raise RuntimeError("no repr")
+        return self.shown
+
+
 class OwnTracebacks(logging.Handler):
     """Renders a record's ``exc_info`` itself, as rich, structlog or Sentry do, and
     the text a formatter would append only when there is none."""
@@ -110,7 +126,18 @@ def test_a_logged_stack_is_masked(caplog):
     assert KEY not in caplog.text
 
 
-def test_a_log_call_whose_message_does_not_format_returns_and_logs_its_parts(caplog):
+@pytest.mark.parametrize(
+    ("message", "argument", "logged"),
+    [
+        ("doc %d", "seven", "doc %d ('seven',)"),
+        ("doc %s", Unprintable("Unprintable()"), "doc %s (Unprintable(),)"),
+        ("doc %s", Unprintable(), "doc %s <unprintable args>"),
+    ],
+    ids=["wrong-type", "str-raises", "str-and-repr-raise"],
+)
+def test_a_log_call_whose_message_does_not_format_returns_and_logs_its_parts(
+    caplog, message, argument, logged
+):
     caplog.set_level(logging.WARNING, logger="r3con")
-    get_logger("llm").warning("doc %d", "seven")
-    assert caplog.messages == ["doc %d ('seven',)"]
+    get_logger("llm").warning(message, argument)
+    assert caplog.messages == [logged]
