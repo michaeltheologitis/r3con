@@ -15,13 +15,14 @@ from litellm.types.router import RetryPolicy
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from r3con import settings
+from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
-    _ERROR_CHARS,
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
     quiet_litellm,
+    register_credentials,
 )
 
 MODEL = "openai/gpt-6-luna"
@@ -71,6 +72,8 @@ CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
 LONGEST_FIRST_BACKOFF = 1
 NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
 KEY = "sk-not-a-real-key-0123456789"
+# No shape litellm's own redactor knows: only r3con's masking can hide it.
+PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 
 
@@ -484,6 +487,25 @@ def test_each_resend_is_logged_as_a_warning_naming_the_error_and_the_wait(
 
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_resend_warning_masks_the_key_the_error_echoes(httpserver, caplog, model):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    echoed = {"error": {"message": f"slow down, {PLAIN_KEY}", "type": "server_error"}}
+    answers_in_turn(httpserver, (429, echoed), OK)
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=model,
+        api_base=httpserver.url_for("/v1"),
+        api_key=PLAIN_KEY,
+    )
+    [resend] = caplog.records
+    assert "as it raised RateLimitError" in resend.getMessage()
+    assert "slow down, REDACTED" in caplog.text
+    assert PLAIN_KEY not in caplog.text
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
 @pytest.mark.parametrize(
     ("own_setting", "requests"),
     [
@@ -621,22 +643,12 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
         (
             refused("refused\nTraceback (most recent call last):"),
             KEY,
-            f"{BAD_REQUEST}refused",
-        ),
-        (
-            ConnectionError("\n\nprovider down\nTraceback (most recent call last):"),
-            KEY,
-            "ConnectionError: provider down",
-        ),
-        (
-            refused("x" * _ERROR_CHARS),
-            KEY,
-            BAD_REQUEST + "x" * (_ERROR_CHARS - len(BAD_REQUEST)),
+            f"{BAD_REQUEST}refused Traceback (most recent call last):",
         ),
         (
             refused(f"bad key Bearer {KEY}"),
             KEY,
-            f"{BAD_REQUEST}bad key Bearer <api_key>",
+            f"{BAD_REQUEST}bad key Bearer REDACTED",
         ),
         (
             refused("maximum context length is 4000 tokens"),
@@ -644,15 +656,9 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
             f"{BAD_REQUEST}maximum context length is 4000 tokens",
         ),
     ],
-    ids=[
-        "first-line",
-        "first-non-empty-line",
-        "cut-short",
-        "key-masked",
-        "placeholder-key-left-alone",
-    ],
+    ids=["one-line", "key-masked", "placeholder-key-left-alone"],
 )
-def test_a_recorded_error_is_its_first_line_cut_short_without_the_key(
+def test_a_recorded_error_is_one_line_without_the_key(
     llm, run, error, api_key, recorded
 ):
     with pytest.raises(type(error)):
@@ -697,3 +703,34 @@ def test_a_quiet_block_in_another_thread_leaves_litellm_as_it_found_it(loud_lite
     assert not other.is_alive()
     assert seen_inside == [QUIET]
     assert litellm_settings() == LOUD
+
+
+def test_every_credential_a_request_sends_is_registered_for_masking(
+    monkeypatch, router
+):
+    monkeypatch.setenv("MY_GATEWAY", "gateway-from-the-environment")
+    routing = router(
+        {"model": MODEL, "api_key": "router-key-0123456789"},
+        {"model": OPENAI, "api_key": "os.environ/MY_GATEWAY"},
+        {"model": VLLM, "extra_headers": {"x-tenant-auth": "tenant-0123456789"}},
+    )
+    params = {
+        "api_key": "call-key-0123456789",
+        "extra_headers": {
+            "x-gateway-auth": "header-0123456789",
+            "Authorization": "Bearer bearer-token-0123456789",
+        },
+        "azure_ad_token": "ad-token-0123456789",
+        "user": "end-user-0123456789",
+        "prompt_cache_key": "summaries-cache-2026",
+        "max_tokens": 4096,
+    }
+    sent = (
+        "router-key-0123456789 gateway-from-the-environment tenant-0123456789 "
+        "call-key-0123456789 header-0123456789 bearer-token-0123456789 "
+        "ad-token-0123456789"
+    )
+    register_credentials(params, routing.completion)
+    assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
+        "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
+    )

@@ -54,8 +54,10 @@ called as it is, once per request, and owns its retrying: a ``litellm.Router`` r
 the same status rule, with its own cooldowns and fallbacks. A recorded call's ``sends``
 and ``resend_wait_seconds`` come from tenacity, and are ``None`` for a call r3con did not
 resend itself. A call that raises an error, once r3con stops resending it, is recorded
-too, with the error's class and first non-empty line, its ``api_key`` masked, and then
-the error is raised as it was.
+too, with its error on one line, keys masked (:func:`r3con.masking.one_line`), and then
+the error is raised as it was. Every credential a request carries is registered for
+masking before it is sent (:func:`register_credentials`), so the warning logged before a
+resend, and any error r3con writes later, mask it.
 """
 
 from __future__ import annotations
@@ -66,16 +68,18 @@ import random
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
 
 import litellm
 import tenacity
+from litellm.router import Router
 from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
+from r3con.masking import is_credential_name, one_line, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -90,10 +94,6 @@ _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
 _WAIT_DIGITS = 2
-_ERROR_CHARS = 300
-_MASKED_KEY = "<api_key>"
-# A shorter api_key is a placeholder, such as vLLM's "EMPTY", not a secret.
-_MIN_MASKED_KEY_CHARS = 8
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
@@ -236,6 +236,7 @@ def litellm_chat_completion_full(
         }
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
+    register_credentials(request, completion)
 
     def record(**outcome: Any) -> None:
         if run is not None:
@@ -253,7 +254,7 @@ def litellm_chat_completion_full(
         else:
             response = (completion or litellm.completion)(**request)
     except Exception as error:
-        record(response={}, usd=0.0, error=_error_line(error, api_key))
+        record(response={}, usd=0.0, error=one_line(error))
         raise
 
     record(
@@ -391,6 +392,29 @@ def send_until_valid(
     return send(text, max_attempts)
 
 
+def register_credentials(
+    params: Mapping[str, Any], completion: Callable[..., Any] | None = None
+) -> None:
+    """Register for masking (:func:`r3con.masking.register_key`) every credential a
+    request with ``params`` sends: each value of its ``extra_headers`` and of each
+    parameter with a credential's name (:func:`r3con.masking.is_credential_name`),
+    ``api_key`` among them, and the token alone of a ``<scheme> <token>`` one
+    (``Bearer``, ``Basic``); and when ``completion`` is a ``litellm.Router``'s, the same
+    of each of its deployments' ``litellm_params``, where the Router has already read
+    an ``os.environ/NAME`` from the environment."""
+    headers = params.get("extra_headers") or {}
+    named = [value for name, value in params.items() if is_credential_name(name)]
+    sent = [value for value in [*headers.values(), *named] if isinstance(value, str)]
+    # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
+    schemed = [words for words in map(str.split, sent) if len(words) == 2]
+    for value in [*sent, *(token for scheme, token in schemed if scheme.isalpha())]:
+        register_key(value)
+    router = getattr(completion, "__self__", None)
+    if isinstance(router, Router):
+        for deployment in router.model_list:
+            register_credentials(deployment.get("litellm_params") or {})
+
+
 def count_tokens(text: str) -> int:
     """The cl100k_base tokens in ``text``, from the vocabulary litellm ships: the same
     count whatever the model, and offline."""
@@ -438,16 +462,6 @@ def _resend_temporary_errors(request: dict[str, Any], resends: dict[str, Any]) -
         reraise=True,
     )
     return resending(litellm.completion, **request, num_retries=0)
-
-
-def _error_line(error: Exception, api_key: str | None) -> str:
-    """``error``'s class and the first non-empty line of its message, ``api_key``
-    masked unless it is a placeholder, cut to :data:`_ERROR_CHARS`. A provider may echo
-    the key back, and litellm passes it on."""
-    first_line = str(error).strip().partition("\n")[0]
-    if api_key and len(api_key) >= _MIN_MASKED_KEY_CHARS:
-        first_line = first_line.replace(api_key, _MASKED_KEY)
-    return f"{type(error).__name__}: {first_line}"[:_ERROR_CHARS]
 
 
 def is_temporary(error: BaseException) -> bool:

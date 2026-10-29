@@ -52,6 +52,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
+from r3con.masking import masked, one_line
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -62,6 +63,7 @@ from r3con.runs import (
     write_manifest,
 )
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
+from r3con.runtime.llm import register_credentials
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
@@ -202,10 +204,11 @@ def _recorded_stage(
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the
     calls that answered or raised an error (a call an interrupt cut short is not
-    recorded) and ``error.txt`` with the traceback, adds a note naming the run folder to
-    the exception, emits ``failed`` with the stage's name as its events give it
-    (``schema`` for ``structuring/schema``) and the error in one line, and re-raises.
-    Without a logger it records nothing, but still emits ``failed``.
+    recorded) and ``error.txt`` with the traceback, keys masked, adds a note naming the
+    run folder to the exception, emits ``failed`` with the stage's name as its events
+    give it (``schema`` for ``structuring/schema``) and the error in one line
+    (:func:`r3con.masking.one_line`), and re-raises. Without a logger it records
+    nothing, but still emits ``failed``.
     """
     run = (
         None
@@ -223,16 +226,10 @@ def _recorded_stage(
     except BaseException as error:
         if run is not None:
             run.flush(write_transcript=transcript)
-            run.task_logger.write_text(f"{stage}/error", traceback.format_exc())
+            run.task_logger.write_text(f"{stage}/error", masked(traceback.format_exc()))
             error.add_note(f"r3con: partial artifacts in {run.task_logger.dir}")
-        emit(failed, stage=stage.rpartition("/")[2], error=_one_line(error))
+        emit(failed, stage=stage.rpartition("/")[2], error=one_line(error))
         raise
-
-
-def _one_line(error: BaseException) -> str:
-    """``error``'s type and message, on one line."""
-    text = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
-    return " ".join(text.split())
 
 
 def _spent(runs: Sequence[StageRun | None]) -> dict[str, Any]:
@@ -312,7 +309,9 @@ def run_pipeline(
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
-      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, one line.
+      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, the
+      error on one line, keys masked (:func:`r3con.masking.one_line`): its class and
+      its message, or each of a ``ValidationError``'s errors as ``loc: msg``.
 
     Each event is appended to ``events.jsonl`` in the run folder, when there is one,
     and handed to ``on_event``, when given, as a copy. ``on_event`` is called from the
@@ -567,7 +566,7 @@ def _in_one_line(error: Exception) -> str:
     """``error`` on one line: each setting pydantic refused and why, else its type and
     message."""
     if not isinstance(error, ValidationError):
-        return _one_line(error)
+        return one_line(error)
     settings = (
         (".".join(str(part) for part in e["loc"] if part != "[key]"), e["msg"])
         for e in error.errors()
@@ -617,6 +616,9 @@ def ask_pipeline(
     ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
     ``error``)."""
     caps = settings_snapshot()
+    llm_kwargs = _llm_kwargs(
+        config.params, api_base=api_base, api_key=api_key, completion=completion
+    )
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     write_manifest(
@@ -653,12 +655,7 @@ def ask_pipeline(
             max_attempts=caps["reasoning_max_attempts"],
             max_turns=caps["reasoning_max_turns"],
             run=record.run,
-            **_llm_kwargs(
-                config.params,
-                api_base=api_base,
-                api_key=api_key,
-                completion=completion,
-            ),
+            **llm_kwargs,
         )
         record.result = _reasoning_record(result)
     emit("reasoning_finished", **_reasoning_outcome(result))
@@ -683,7 +680,9 @@ def _llm_kwargs(
     completion: Callable[..., Any] | None,
 ) -> dict[str, Any]:
     """What every request is sent with: the output knobs in ``params``, then the
-    transport."""
+    transport. Each credential among them, a Router's included, is registered for
+    masking (:func:`r3con.runtime.llm.register_credentials`), so call this before
+    writing ``manifest.json``."""
     llm_kwargs: dict[str, Any] = {**params}
     if api_base:
         llm_kwargs["api_base"] = api_base
@@ -693,6 +692,7 @@ def _llm_kwargs(
         # A named parameter of `litellm_chat_completion`, so it binds there rather than
         # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
+    register_credentials(llm_kwargs, completion)
     return llm_kwargs
 
 

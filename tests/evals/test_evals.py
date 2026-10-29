@@ -28,6 +28,7 @@ LUNA_PRICE = {
     "mode": "chat",
 }
 USD_PER_CALL = 10
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 LITELLM_ERROR = {"message": "down", "llm_provider": "openai", "model": "gpt-6-luna"}
 FORBIDDEN = httpx.Response(403, request=httpx.Request("POST", "https://api.openai.com"))
 INFRASTRUCTURE_FAILURES = [
@@ -384,3 +385,18 @@ def test_a_download_is_kept_only_when_its_checksum_matches(tmp_path):
 
     digest = hashlib.sha256(b"{}\n").hexdigest()
     assert download(source.as_uri(), target, digest).read_text() == "{}\n"
+
+
+def test_a_recorded_error_never_holds_the_key(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENAI_API_KEY", KEY)
+    echoing = {**LITELLM_ERROR, "message": f"refused for {KEY}"}
+    judging_llm.answers(schema=exceptions.BadRequestError(**echoing))
+
+    evaluate(PINNED, tmp_path / "run", tmp_path / "results.jsonl")
+
+    record = read_json(tmp_path / "run" / "corpusqa" / "sales_en_1" / "record.json")
+    assert record["error"].endswith("refused for REDACTED")
+    files = [path for path in (tmp_path / "run").rglob("*") if path.is_file()]
+    assert [path for path in files if KEY in path.read_text()] == []

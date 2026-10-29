@@ -21,6 +21,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
+from r3con.masking import masked
 from r3con.pipeline import (
     ASKS_FOLDER,
     ask_config,
@@ -172,10 +173,10 @@ def _run(args: argparse.Namespace) -> int:
         settings_snapshot()
         documents = read_documents(args.documents)
     except (FileNotFoundError, ValueError) as e:
-        print(f"r3con: {e}", file=sys.stderr)
+        _error(str(e))
         return 2
     if not documents:
-        print("r3con: no documents to read (every source was empty).", file=sys.stderr)
+        _error("no documents to read (every source was empty).")
         return 2
 
     task_logger = None
@@ -211,7 +212,7 @@ def _ask(args: argparse.Namespace) -> int:
         built = read_representation(Path(args.run_dir))
         config = ask_config(built, model=args.model, reasoning=args.reasoning)
     except (FileNotFoundError, ValueError) as e:
-        print(f"r3con: {e}", file=sys.stderr)
+        _error(str(e))
         return 2
     task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     print(f"artifacts: {task_logger.dir}", file=sys.stderr)
@@ -231,11 +232,15 @@ def _ask(args: argparse.Namespace) -> int:
 
 
 def _failed(error: Exception) -> int:
-    """Report ``error`` and its notes, such as where its artifacts are, on stderr."""
-    print(f"r3con: {type(error).__name__}: {error}", file=sys.stderr)
-    for note in getattr(error, "__notes__", ()):
-        print(note, file=sys.stderr)
+    """Report ``error`` and its notes, such as where its artifacts are."""
+    notes = getattr(error, "__notes__", ())
+    _error("\n".join([f"{type(error).__name__}: {error}", *notes]))
     return 1
+
+
+def _error(text: str) -> None:
+    """Print ``text`` on stderr after ``r3con: ``, keys masked: an error may echo one."""
+    print(masked(f"r3con: {text}"), file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:

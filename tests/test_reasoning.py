@@ -18,6 +18,7 @@ READ_IN_PARTS = "Some documents were too long to read whole and were read in par
 PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
 SAMPLE = "only a SAMPLE"
 NUMBERED = re.compile(r"Document \d|\"document\": \d")
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 # 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,410
 # tokens with the whole parse and about 2,920 with one sample record per field; the
 # direct request about 4,130 with its reply's schema.
@@ -332,7 +333,7 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback == {
         "cause": "invalid",
-        "error": "answer: Value error, the answer is empty",
+        "error": "ValidationError: answer: Value error, the answer is empty",
     }
     *direct, coding = llm.requests
     assert len(direct) == settings.REASONING_MAX_ATTEMPTS
@@ -349,7 +350,7 @@ def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(
     monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
     result = ask(llm, "not JSON", "{", citing("coding"))
     assert result.fallback is not None and result.fallback["cause"] == "invalid"
-    assert result.fallback["error"].startswith("reply: Invalid JSON")
+    assert result.fallback["error"].startswith("ValidationError: Invalid JSON")
     assert len(llm.requests) == 3
 
 
@@ -726,3 +727,12 @@ def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_sample
     assert caplog.messages == [
         "reasoning's direct prompt was refused as too long; reasoning with code instead"
     ]
+
+
+def test_a_refusal_that_echoes_the_key_is_masked_in_the_fallback(llm):
+    refused = litellm.ContextWindowExceededError(
+        message=f"too long for {KEY}", model=MODEL, llm_provider="openai"
+    )
+    result = ask(llm, refused, citing("coding"), api_key=KEY)
+    assert result.fallback is not None and result.fallback["cause"] == "refusal"
+    assert result.fallback["error"] == str(refused).replace(KEY, "REDACTED")

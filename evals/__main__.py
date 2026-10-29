@@ -30,6 +30,7 @@ import r3con
 from evals import JUDGE_MODEL, corpusqa, log, loong
 from r3con.config import RunConfig, load_config
 from r3con.logging_setup import configure_logging
+from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger, new_run_folder
 from r3con.runtime.llm import is_temporary
 
@@ -171,7 +172,7 @@ def _answer(
     except Exception as e:
         if is_temporary(e) or isinstance(e, SETUP_ERRORS):
             raise
-        error = f"{type(e).__name__}: {e}"
+        error = masked(f"{type(e).__name__}: {e}")
         log.warning("%s raised %s", row["id"], error)
     run_dir = next((path.parent for path in task_dir.glob("*/manifest.json")), None)
     return {

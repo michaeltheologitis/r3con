@@ -506,7 +506,7 @@ def test_direct_replies_that_never_fit_reason_with_code_and_the_folder_says_why(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "invalid",
-        "error": "answer: Field required",
+        "error": "ValidationError: answer: Field required",
     }
     kinds = [call["kind"] for call in read_json(logger, "reasoning/calls")]
     assert kinds == ["direct", "direct-retry-1", "turn-1"]
@@ -1256,7 +1256,7 @@ def test_a_raising_callback_is_logged_once_per_kind_of_error_and_the_run_goes_on
         "on_event raised RuntimeError on a run_started event; the run goes on",
         "on_event raised ValueError on a relevance_started event; the run goes on",
     ]
-    assert all(w.exc_info for w in warnings)
+    assert all(w.exc_text.startswith("Traceback") for w in warnings)
     assert len(caplog.records) == len(events_in(logger.dir))
     assert events_in(logger.dir)[-1]["type"] == "run_finished"
 

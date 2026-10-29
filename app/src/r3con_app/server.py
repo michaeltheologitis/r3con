@@ -13,10 +13,10 @@ opened URL's fragment, ``#token=...``.
   self-hosted providers in ``SELF_HOSTED`` and to names litellm can't place, and any
   other provider gets litellm's own setup from the environment.
 - Keys stay in this process's memory, and the server never sends, logs or writes one.
-  It masks them (the stored keys, Other's, and the three providers' variables) in the
-  ``error`` of each event it relays and in its own log line. r3con, in the same
-  process, still writes the raw error to ``events.jsonl`` and ``error.txt`` in the logs
-  dir, and its resend warnings to stderr, until a follow-up masks those.
+  Each goes to r3con as a run's ``api_key``, which r3con registers before sending it
+  and masks in every event's ``error``, in what it writes to the logs dir and in what
+  it logs (:mod:`r3con.masking`), the environment's keys too; the server's own log
+  line of a failure goes through the same masking.
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -42,7 +42,7 @@ import secrets
 import socket
 import threading
 import webbrowser
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -73,7 +73,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
 from r3con.logging_setup import configure_logging, get_logger
-from r3con.pipeline import _one_line
+from r3con.masking import one_line
 from r3con.runs import EventRecorder
 from r3con.runtime.llm import quiet_litellm
 
@@ -92,9 +92,6 @@ KEY_VARIABLES: dict[Provider, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
 }
-KEY_MASK = "[key]"
-# A shorter key, such as vLLM's "EMPTY", is a placeholder, not a secret.
-MIN_MASKED_KEY_CHARS = 8
 SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
@@ -210,24 +207,6 @@ def _key_status(state: ServerState) -> dict[str, Any]:
     return status
 
 
-def _held_keys(state: ServerState) -> tuple[str, ...]:
-    """Every key this server could send, stored here or in its environment, that is long
-    enough to be a secret, longest first, so that a key inside another is masked whole."""
-    stored = list(state.keys.values())
-    if state.other is not None and state.other.key is not None:
-        stored.append(state.other.key)
-    keys = {key.get_secret_value() for key in stored}
-    keys.update(os.environ.get(variable, "") for variable in KEY_VARIABLES.values())
-    long_enough = (key for key in keys if len(key.strip()) >= MIN_MASKED_KEY_CHARS)
-    return tuple(sorted(long_enough, key=len, reverse=True))
-
-
-def _masked(text: str, keys: Iterable[str]) -> str:
-    for key in keys:
-        text = text.replace(key, KEY_MASK)
-    return text
-
-
 def _provider(model: str) -> str | None:
     """``model``'s provider as litellm places it, or ``None`` if it can't."""
     try:
@@ -269,16 +248,9 @@ def _add(job: Job, event: dict[str, Any]) -> None:
     job.wake = asyncio.Event()
 
 
-def _relay(
-    loop: asyncio.AbstractEventLoop,
-    job: Job,
-    keys: tuple[str, ...],
-    event: dict[str, Any],
-) -> None:
-    """Hand ``event`` to ``job`` on the server's loop, with no key in its error; once
-    the loop has closed, as it has when the server stops mid-run, drop it."""
-    if "error" in event:
-        event["error"] = _masked(event["error"], keys)
+def _relay(loop: asyncio.AbstractEventLoop, job: Job, event: dict[str, Any]) -> None:
+    """Hand ``event`` to ``job`` on the server's loop; once the loop has closed, as it
+    has when the server stops mid-run, drop it."""
     try:
         loop.call_soon_threadsafe(_add, job, event)
     except RuntimeError:
@@ -291,14 +263,13 @@ def _work(
     loop: asyncio.AbstractEventLoop,
     call: Callable[..., Any],
     failed: str,
-    keys: tuple[str, ...],
 ) -> None:
-    on_event = partial(_relay, loop, job, keys)
+    on_event = partial(_relay, loop, job)
     try:
         call(on_event=on_event)
     except Exception as error:  # noqa: BLE001 — logged below, as one masked line
         # No traceback: r3con writes it to the failed stage's error.txt.
-        line = _masked(_one_line(error), keys)
+        line = one_line(error)
         logger.error("%s: %s", failed, line)
         EventRecorder(on_event, None)(failed, stage=None, error=line)
 
@@ -308,7 +279,7 @@ def _start(state: ServerState, kind: Kind, call: Callable[..., Any]) -> str:
     ``kind``; returns the job's id."""
     job_id = secrets.token_hex(ID_BYTES)
     state.jobs[kind][job_id] = job = Job()
-    args = (job, asyncio.get_running_loop(), call, f"{kind}_failed", _held_keys(state))
+    args = (job, asyncio.get_running_loop(), call, f"{kind}_failed")
     worker = threading.Thread(
         target=_work, args=args, name=f"r3con-app-{job_id}", daemon=True
     )

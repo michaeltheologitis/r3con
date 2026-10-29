@@ -59,6 +59,13 @@ A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (
 call that answered or raised an error, plus ``transcript.yaml`` where the stage writes
 one) and ``error.txt``, the traceback.
 
+Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
+``error``, ``error.txt``, the ``error`` of ``run_failed`` and ``ask_failed`` in
+``events.jsonl``, each split's ``error`` in ``splits.json`` and the ``error`` of
+reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key, as does
+``manifest.json``'s ``config`` in place of a credential in the run's ``params``, an
+extra header say. Prompts, replies and documents are written as they are.
+
 Two layers in code:
 
 - ``TaskLogger`` writes structured artifacts under one run-folder. ``write_json("a/b",
@@ -73,12 +80,12 @@ Two layers in code:
   request was sent, more than 1 when a temporary error made r3con resend it, and
   ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
   ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
-  call that raised one, the error's class and the first non-empty line of its message:
-  such a call has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0,
-  as r3con got no reply to price) and, unless skipped, ``transcript.yaml`` (the
-  readable message thread). Aggregate token and cost totals are available via
-  ``compute_totals()`` so callers fold them into the stage's ``result.json``; their
-  ``n_steps`` counts only the calls that answered.
+  call that raised one, the error's class and the first non-empty line of its message,
+  keys masked: such a call has ``tokens``, ``finish_reason`` and ``output`` ``null``
+  and ``usd`` 0, as r3con got no reply to price) and, unless skipped,
+  ``transcript.yaml`` (the readable message thread). Aggregate token and cost totals
+  are available via ``compute_totals()`` so callers fold them into the stage's
+  ``result.json``; their ``n_steps`` counts only the calls that answered.
 """
 
 from __future__ import annotations
@@ -102,6 +109,7 @@ from pydantic import BaseModel
 # same normalized name the run label does.
 from r3con.config import normalize_model_name
 from r3con.logging_setup import get_logger
+from r3con.masking import masked
 from r3con.settings import active_logs_dir
 
 _log = get_logger("runs")
@@ -290,6 +298,8 @@ def write_manifest(
     overrides = config_block.get("overrides") or {}
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
+    # Its params may hold a credential, an extra header say, registered at run start.
+    config_block = _masked_values(config_block)
     manifest = {
         "r3con_version": __version__,
         "task": task,
@@ -316,6 +326,18 @@ def write_manifest(
     if ask_of is not None:
         manifest["ask_of"] = ask_of
     return task_logger.write_json("manifest", manifest)
+
+
+def _masked_values(data: Any) -> Any:
+    """``data`` with each string among its dicts' values and its lists' items masked
+    (:func:`r3con.masking.masked`), so a key JSON would escape is still found."""
+    if isinstance(data, str):
+        return masked(data)
+    if isinstance(data, dict):
+        return {name: _masked_values(value) for name, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_masked_values(item) for item in data]
+    return data
 
 
 def _sources(

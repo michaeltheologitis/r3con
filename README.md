@@ -126,6 +126,10 @@ r3con also records provenance, how the answer, each summary and each parse came 
 
 Every run writes each stage's output and model calls, failed ones included, with their
 tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
+An API key that a provider's error echoes is masked before r3con writes or logs it:
+the keys r3con sends, a `litellm.Router`'s included, and the environment's. A
+`completion=` wrapper that adds a key of its own must register it with
+`r3con.masking.register_key(key)`.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir

@@ -41,6 +41,12 @@ R3CON_VARIABLES = (
     "R3CON_LOG_LEVEL",
 )
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+ROUTER_CALLBACKS = (
+    "success_callback",
+    "failure_callback",
+    "_async_success_callback",
+    "_async_failure_callback",
+)
 # The line, and the blank one after it, that heads a parse request's user message.
 PARSE_HEADING = re.compile(r"\ADocument ID: \w+\n\n")
 ANSWERING_SCHEMA = """Thought: one row per person.
@@ -457,6 +463,25 @@ def priced_model() -> Iterator[dict[str, float]]:
 
 
 @pytest.fixture
+def router(monkeypatch: pytest.MonkeyPatch) -> Callable[..., litellm.Router]:
+    """Builds a ``litellm.Router`` over deployments given as their ``litellm_params``,
+    each named by its model, and undoes what building one leaves in litellm's globals:
+    its callbacks, and its deployments in the price map, which litellm 1.103 prices at
+    0 for every later call to the same model."""
+    monkeypatch.setattr(litellm, "model_cost", dict(litellm.model_cost))
+    for name in ROUTER_CALLBACKS:
+        monkeypatch.setattr(litellm, name, list(getattr(litellm, name)))
+
+    def build(*deployments: dict[str, Any]) -> litellm.Router:
+        model_list = [
+            {"model_name": d["model"], "litellm_params": d} for d in deployments
+        ]
+        return litellm.Router(model_list=model_list, num_retries=0)
+
+    return build
+
+
+@pytest.fixture
 def grown_registry() -> Callable[..., str]:
     return grow_registry
 
@@ -529,6 +554,8 @@ def _isolated(
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
     monkeypatch.chdir(tmp_path)
+    # Each test starts with no key registered for masking by an earlier one's calls.
+    monkeypatch.setattr("r3con.masking._registered", set())
     if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
         monkeypatch.setattr(litellm, "completion", FakeLLM())
     if not request.node.get_closest_marker("live"):

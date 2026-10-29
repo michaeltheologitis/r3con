@@ -14,6 +14,7 @@ from r3con.stages.provenance import ids_field
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 REST = "Summarise the document for the task."
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 # 16 equal paragraphs, 3,444 characters, 720 tokens: halves and quarters fall on breaks.
 PARAGRAPHS = "\n\n".join(f"Paragraph {i}. " + "word " * 40 for i in range(16))
 # Two short paragraphs, then a long one: the first cut leaves 604 and 900 characters.
@@ -437,3 +438,19 @@ def test_over_line_counts_only_what_its_bytes_cannot_settle(window, encodes):
     assert splits.over_line(" the" * 300, " the" * 600) == 900
     assert encodes == [" the" * 300, " the" * 300, " the" * 600]
     assert Splits([], model=QWEN).over_line(" the" * 3_000) is None
+
+
+def test_a_refusal_that_echoes_a_key_is_recorded_masked(logger, monkeypatch):
+    monkeypatch.setenv("HOSTED_VLLM_API_KEY", KEY)
+    refused = litellm.ContextWindowExceededError(
+        message=f"too long for {KEY}", model=QWEN, llm_provider="hosted_vllm"
+    )
+
+    def send(part, kind):
+        if part == PARAGRAPHS:
+            raise refused
+        return kind
+
+    read(PARAGRAPHS, send, task_logger=logger)
+    [split] = record(logger)["documents"]["0"]["events"]
+    assert split["error"] == str(refused).replace(KEY, "REDACTED")
