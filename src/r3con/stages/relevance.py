@@ -47,7 +47,7 @@ from r3con.config import PromptStage
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
-from r3con.runs import StageRun
+from r3con.runs import Emit, StageRun, no_events
 from r3con.runtime.llm import send_until_valid
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
@@ -301,6 +301,24 @@ def _read(
     return summary, cited(reply.provenance_ids, request.shown, kind)
 
 
+def _report_snippets(
+    emit: Emit, round_: int, document_id: str, records: list[SnippetRecord]
+) -> None:
+    """Emit ``relevance_finished`` for each of a document's final ``records`` in round
+    ``round_``, its ``part`` the ``k`` of the record's id ``<id>.<k>``, or ``None`` for
+    a document read whole."""
+    for record in records:
+        k = record.id.partition(".")[2]
+        emit(
+            "relevance_finished",
+            round=round_,
+            doc_id=document_id,
+            part=int(k) if k else None,
+            summary=record.summary,
+            provenance=record.provenance,
+        )
+
+
 def _attempts(max_attempts: int | None) -> int:
     """``max_attempts``, or ``settings.RELEVANCE_MAX_ATTEMPTS`` for ``None``.
 
@@ -372,6 +390,7 @@ def surface_relevance(
     workers: int | None = None,
     splits: Splits | None = None,
     max_attempts: int | None = None,
+    emit: Emit = no_events,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -392,6 +411,11 @@ def surface_relevance(
     per part, and stays split in later rounds. A part never sees its own document's
     other parts: the others' block holds the other documents only, a split one's
     snippets listed separately under their part ids.
+
+    ``emit`` reports ``relevance_started`` before each document is read in a round, and
+    ``relevance_finished`` for each of its final parts once it is read
+    (:func:`r3con.pipeline.run_pipeline` lists their fields). It is called from worker
+    threads.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -433,6 +457,7 @@ def surface_relevance(
             own = {record.id for record in prev[i]}
             others = {id_: s for id_, s in shown.items() if id_ not in own}
             request = _request(task, others, prompts)
+            emit("relevance_started", round=round_idx, doc_id=document_ids[i])
             replies = reader.read_in_parts(
                 i,
                 call=f"relevance-r{round_idx}",
@@ -448,12 +473,14 @@ def surface_relevance(
                     **llm_kwargs,
                 ),
             )
-            return [
+            records = [
                 SnippetRecord(id=id_, summary=summary, provenance=provenance)
                 for id_, (summary, provenance) in zip(
                     _part_ids(document_ids[i], len(replies)), replies, strict=True
                 )
             ]
+            _report_snippets(emit, round_idx, document_ids[i], records)
+            return records
 
         result = parallel_map(one, documents, max_workers=max_workers)
         n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))

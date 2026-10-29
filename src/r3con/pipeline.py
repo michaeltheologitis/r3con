@@ -27,13 +27,16 @@ stage that fails leaves the calls it completed and its traceback (see
 :mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
 
 :func:`ask_pipeline` reruns only reasoning over a finished run (:func:`r3con.ask`).
+
+Both report their progress as it happens, as events (:class:`r3con.runs.EventRecorder`)
+written to the folder's ``events.jsonl`` and handed to the caller's ``on_event``.
 """
 
 from __future__ import annotations
 
 import json
 import traceback
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -49,7 +52,15 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
-from r3con.runs import StageRun, TaskLogger, new_run_folder, write_manifest
+from r3con.runs import (
+    Emit,
+    EventRecorder,
+    StageRun,
+    TaskLogger,
+    new_run_folder,
+    step_totals,
+    write_manifest,
+)
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
@@ -176,7 +187,13 @@ class _StageRecord:
 
 @contextmanager
 def _recorded_stage(
-    task_logger: TaskLogger | None, stage: str, model: str, *, transcript: bool
+    task_logger: TaskLogger | None,
+    stage: str,
+    model: str,
+    *,
+    transcript: bool,
+    emit: Emit,
+    failed: str = "run_failed",
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
@@ -185,24 +202,47 @@ def _recorded_stage(
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
     token and cost ``totals``. On any exception, an interrupt included, it writes the calls
     that completed and ``error.txt`` with the traceback, adds a note naming the run
-    folder to the exception, and re-raises. Without a logger it records nothing.
+    folder to the exception, emits ``failed`` with the stage's name as its events give
+    it (``schema`` for ``structuring/schema``) and the error in one line, and
+    re-raises. Without a logger it records nothing, but still emits ``failed``.
     """
-    if task_logger is None:
-        yield _StageRecord(run=None)
-        return
-    run = StageRun(stage=stage, task_logger=task_logger, model=model)
+    run = (
+        None
+        if task_logger is None
+        else StageRun(stage=stage, task_logger=task_logger, model=model)
+    )
     record = _StageRecord(run=run)
     try:
         yield record
-        run.flush(write_transcript=transcript)
-        task_logger.write_json(
-            f"{stage}/result", {**record.result, "totals": run.compute_totals()}
-        )
+        if run is not None:
+            run.flush(write_transcript=transcript)
+            run.task_logger.write_json(
+                f"{stage}/result", {**record.result, "totals": run.compute_totals()}
+            )
     except BaseException as error:
-        run.flush(write_transcript=transcript)
-        task_logger.write_text(f"{stage}/error", traceback.format_exc())
-        error.add_note(f"r3con: partial artifacts in {task_logger.dir}")
+        if run is not None:
+            run.flush(write_transcript=transcript)
+            run.task_logger.write_text(f"{stage}/error", traceback.format_exc())
+            error.add_note(f"r3con: partial artifacts in {run.task_logger.dir}")
+        emit(failed, stage=stage.rpartition("/")[2], error=_one_line(error))
         raise
+
+
+def _one_line(error: BaseException) -> str:
+    """``error``'s type and message, on one line."""
+    text = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+    return " ".join(text.split())
+
+
+def _spent(runs: Sequence[StageRun | None]) -> dict[str, Any]:
+    """The ``tokens`` and ``usd`` of every call ``runs`` recorded, totalled as a stage's
+    ``result.json`` totals its own; both ``None`` when nothing recorded them, in a run
+    without a folder."""
+    recorded = [run for run in runs if run is not None]
+    if not recorded:
+        return {"tokens": None, "usd": None}
+    totals = step_totals([step for run in recorded for step in run.steps])
+    return {"tokens": totals["tokens"], "usd": totals["usd"]}
 
 
 def _preview(text: str, n: int = 100) -> str:
@@ -222,6 +262,7 @@ def run_pipeline(
     api_base: str | None = None,
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> Answer:
     """Run all three stages for one ``(task, documents)`` pair under one ``config``.
 
@@ -248,6 +289,36 @@ def run_pipeline(
     after that stage succeeds, so a later failure still leaves earlier artifacts; a
     stage that raises writes its completed calls and ``error.txt``, and the exception
     carries a note naming the run folder.
+
+    The run reports its progress as events, each a dict of JSON values with its
+    ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
+
+    - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds``.
+    - ``relevance_started``, before a document is read in a round: ``round``,
+      ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
+      read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
+      ``<id>.<k>``, ``None`` for a document read whole), the snippet's ``summary`` and
+      the ids of the previous round's snippets it used, ``provenance``. A part refused
+      as too long and cut further is no event.
+    - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
+      ``thought``.
+    - ``parsing_started`` / ``parsing_finished``, around each document's parse:
+      ``doc_id``; finished adds ``n_records`` and the ids of the relevance snippets
+      the parse used, ``provenance``.
+    - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
+      ``answer``, ``provenance`` (``{summary_ids, parse_ids}``), ``path``, ``fallback``.
+    - ``run_finished``: ``run_dir``, and the run's ``tokens`` and ``usd``, as a stage's
+      ``totals`` gives them (``None`` without a run folder).
+    - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
+      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, one line.
+
+    Each event is appended to ``events.jsonl`` in the run folder, when there is one,
+    and handed to ``on_event``, when given, as a copy. ``on_event`` is called from the
+    stages' worker threads, but under one lock, so it is never entered twice at once;
+    the workers wait for it, so it should return quickly (put the event on a queue,
+    say). If it raises, or writing the file fails, the error is logged and the run goes
+    on. A model call that is resent (a rate limit, a reply that did not fit) is no
+    event: ``calls.json`` records it.
     """
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
@@ -277,6 +348,15 @@ def run_pipeline(
         margin_percent=caps["window_margin_percent"],
         task_logger=task_logger,
     )
+    emit = EventRecorder(on_event, task_logger)
+    emit(
+        "run_started",
+        question=task,
+        model=model,
+        document_ids=document_ids,
+        rounds=rounds,
+    )
+    stage_runs: list[StageRun | None] = []
 
     # --- Stage 1: surface relevance — the relevant context. ---
     _log.info(
@@ -284,7 +364,9 @@ def run_pipeline(
         rounds,
         len(documents),
     )
-    with _recorded_stage(task_logger, "relevance", model, transcript=False) as record:
+    with _recorded_stage(
+        task_logger, "relevance", model, transcript=False, emit=emit
+    ) as record:
         relevance = surface_relevance(
             task=task,
             documents=documents,
@@ -296,6 +378,7 @@ def run_pipeline(
             workers=caps["doc_workers"],
             run=record.run,
             splits=splits,
+            emit=emit,
             **llm_kwargs,
         )
         record.result = {
@@ -309,13 +392,15 @@ def run_pipeline(
                 for k, per_doc in enumerate(relevance.records)
             ],
         }
+    stage_runs.append(record.run)
     # the relevant context feeds every later stage
     relevance_snippets = relevance.snippets
 
     # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
+    emit("schema_started")
     with _recorded_stage(
-        task_logger, "structuring/schema", model, transcript=True
+        task_logger, "structuring/schema", model, transcript=True, emit=emit
     ) as record:
         proposal = propose_schema(
             task=task,
@@ -334,11 +419,17 @@ def run_pipeline(
                 for a in proposal.attempts
             ],
         }
+    stage_runs.append(record.run)
+    emit(
+        "schema_finished",
+        schema_code=proposal.schema_code,
+        thought=record.result["thought"],
+    )
 
     # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
     with _recorded_stage(
-        task_logger, "structuring/parsing", model, transcript=False
+        task_logger, "structuring/parsing", model, transcript=False, emit=emit
     ) as record:
         extraction = parse_documents(
             documents=documents,
@@ -353,6 +444,7 @@ def run_pipeline(
             run=record.run,
             workers=caps["doc_workers"],
             splits=splits,
+            emit=emit,
             **llm_kwargs,
         )
         record.result = {
@@ -361,11 +453,15 @@ def run_pipeline(
             "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
             "provenance": extraction.provenance,
         }
+    stage_runs.append(record.run)
     parsed = extraction.parse
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
-    with _recorded_stage(task_logger, "reasoning", model, transcript=True) as record:
+    emit("reasoning_started", question=task, model=model)
+    with _recorded_stage(
+        task_logger, "reasoning", model, transcript=True, emit=emit
+    ) as record:
         result = reasoning.reason(
             task=task,
             schema_code=proposal.schema_code,
@@ -391,6 +487,13 @@ def run_pipeline(
             _preview(result.answer),
         )
         record.result = _reasoning_record(result)
+    stage_runs.append(record.run)
+    emit("reasoning_finished", **_reasoning_outcome(result))
+    emit(
+        "run_finished",
+        run_dir=str(task_logger.dir) if task_logger is not None else None,
+        **_spent(stage_runs),
+    )
     return _answer(
         result,
         relevance=relevance,
@@ -464,7 +567,7 @@ def _in_one_line(error: Exception) -> str:
     """``error`` on one line: each setting pydantic refused and why, else its type and
     message."""
     if not isinstance(error, ValidationError):
-        return f"{type(error).__name__}: {error}"
+        return _one_line(error)
     settings = (
         (".".join(str(part) for part in e["loc"] if part != "[key]"), e["msg"])
         for e in error.errors()
@@ -503,9 +606,16 @@ def ask_pipeline(
     api_base: str | None = None,
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> Answer:
     """Rerun only reasoning over ``built`` for ``task`` under ``config``
-    (:func:`ask_config`), as :func:`r3con.ask` says."""
+    (:func:`ask_config`), as :func:`r3con.ask` says.
+
+    It reports its progress as :func:`run_pipeline` does, to ``on_event`` and the ask
+    folder's own ``events.jsonl``: ``ask_started`` (``question``, ``model``,
+    ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, then
+    ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
+    ``error``)."""
     caps = settings_snapshot()
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
@@ -518,8 +628,17 @@ def ask_pipeline(
         ask_of=built.run_dir.name,
     )
     _log.info("asking over %s · artifacts: %s", built.run_dir, task_logger.dir)
+    emit = EventRecorder(on_event, task_logger)
+    ask_dir = str(task_logger.dir)
+    emit("ask_started", question=task, model=config.model, ask_dir=ask_dir)
+    emit("reasoning_started", question=task, model=config.model)
     with _recorded_stage(
-        task_logger, "reasoning", config.model, transcript=True
+        task_logger,
+        "reasoning",
+        config.model,
+        transcript=True,
+        emit=emit,
+        failed="ask_failed",
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -542,6 +661,8 @@ def ask_pipeline(
             ),
         )
         record.result = _reasoning_record(result)
+    emit("reasoning_finished", **_reasoning_outcome(result))
+    emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
     return _answer(
         result,
         relevance=built.relevance,
@@ -575,13 +696,21 @@ def _llm_kwargs(
     return llm_kwargs
 
 
-def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
-    """The fields of the reasoning stage's ``result.json``."""
+def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:
+    """What reasoning concluded: its answer, provenance, path and fallback, as its
+    ``result.json`` and its ``reasoning_finished`` event both give them."""
     return {
         "answer": result.answer,
         "provenance": result.provenance,
         "path": result.path,
         "fallback": result.fallback,
+    }
+
+
+def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
+    """The fields of the reasoning stage's ``result.json``."""
+    return {
+        **_reasoning_outcome(result),
         "terminated_by": result.terminated_by,
         "n_turns": len(result.turns),
         "turns": [

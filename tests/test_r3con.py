@@ -22,6 +22,7 @@ GPT_4O = "openai/gpt-4o"
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 ASK_FILES = {
     "manifest.json",
+    "events.jsonl",
     "reasoning/calls.json",
     "reasoning/result.json",
     "reasoning/transcript.yaml",
@@ -639,6 +640,71 @@ def test_a_failed_ask_leaves_its_folder_with_its_error_and_names_it(
     assert (folder / "manifest.json").is_file()
     assert "bad key" in (folder / "reasoning" / "error.txt").read_text()
     assert not (folder / "reasoning" / "result.json").exists()
+
+
+def test_an_ask_reports_its_own_events_into_its_folder(
+    answering_llm, events_in, tmp_path
+):
+    ran = []
+    built = finished_run(answering_llm, tmp_path, on_event=ran.append)
+    asked = []
+    answer = ask(built, "Who else?", completion=answering_llm, on_event=asked.append)
+    assert [event["type"] for event in asked] == [
+        "ask_started",
+        "reasoning_started",
+        "reasoning_finished",
+        "ask_finished",
+    ]
+    started, reasoning, answered, finished = asked
+    folder = Path(started["ask_dir"])
+    assert folder == answer.run_dir
+    assert folder.parent == built.run_dir / "asks"
+    assert (started["question"], started["model"]) == ("Who else?", "openai/gpt-6-luna")
+    assert (reasoning["question"], reasoning["model"]) == (
+        "Who else?",
+        "openai/gpt-6-luna",
+    )
+    assert answered["answer"] == JOINED
+    assert finished["ask_dir"] == started["ask_dir"]
+    assert finished["tokens"] == {"prompt": 10, "completion": 20, "total": 30}
+    assert events_in(folder) == asked
+    assert events_in(built.run_dir) == ran
+
+
+def test_a_failed_ask_reports_ask_failed_into_its_folder(
+    answering_llm, events_in, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path)
+    answering_llm.answers(reasoning=bad_key())
+    events = []
+    with pytest.raises(litellm.AuthenticationError):
+        ask(built, "Who else?", completion=answering_llm, on_event=events.append)
+    assert [event["type"] for event in events] == [
+        "ask_started",
+        "reasoning_started",
+        "ask_failed",
+    ]
+    assert (events[-1]["stage"], events[-1]["error"]) == (
+        "reasoning",
+        "AuthenticationError: litellm.AuthenticationError: bad key",
+    )
+    assert events_in(Path(events[0]["ask_dir"])) == events
+
+
+def test_without_a_run_folder_only_the_callback_gets_events(answering_llm, tmp_path):
+    events = []
+    run(
+        "Who?",
+        DOCS,
+        completion=answering_llm,
+        save_artifacts=False,
+        on_event=events.append,
+    )
+    assert (events[0]["type"], events[-1]["type"]) == ("run_started", "run_finished")
+    assert all(json.loads(json.dumps(event)) == event for event in events)
+    finished = events[-1]
+    assert (finished["run_dir"], finished["tokens"], finished["usd"]) == (None,) * 3
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_run_is_reachable_from_the_package_and_from_its_module():

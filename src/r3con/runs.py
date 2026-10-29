@@ -46,9 +46,14 @@ Layout per ``logs/<run-folder>/``:
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
+- ``events.jsonl`` — the run's progress events (:class:`EventRecorder`), one JSON
+  object per line, in the order and at the wall-clock time they happened, so the run
+  can be replayed: each stage's start and finish, each document's (or part's) in
+  relevance and parsing, and the run's own start and its finish or failure.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
   is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
-  run folder's name, and ``reasoning/`` as above.
+  run folder's name, ``events.jsonl`` (the ask's own events) and ``reasoning/`` as
+  above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that completed, plus ``transcript.yaml`` where the stage writes one) and
@@ -76,10 +81,11 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import re
 import secrets
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -91,12 +97,20 @@ from pydantic import BaseModel
 # ``RunConfig.label()`` uses too; shared here so the transcript header below records the
 # same normalized name the run label does.
 from r3con.config import normalize_model_name
+from r3con.logging_setup import get_logger
 from r3con.settings import active_logs_dir
+
+_log = get_logger("runs")
 
 # Pulls the source-document index (and, for a document read in parts, the part index)
 # out of a call kind so calls.json carries per-call provenance. Matches ``parse-d0``,
 # ``relevance-r2-d3`` and ``parse-d3c1``.
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
+_EVENTS = "events.jsonl"
+
+Emit = Callable[..., None]
+"""Reports one progress event, ``emit(event_type, **fields)``, as
+:class:`EventRecorder` does."""
 
 
 def new_run_folder() -> str:
@@ -164,6 +178,73 @@ class TaskLogger:
         path = self._path(name, "txt")
         path.write_text(text, encoding="utf-8")
         return path
+
+
+def no_events(event_type: str, /, **fields: Any) -> None:
+    """An :data:`Emit` that drops every event."""
+
+
+class EventRecorder:
+    """An :data:`Emit` for one run or ask: each event is ``{"type": event_type,
+    "time": ..., **fields}``, ``time`` the wall clock in ISO 8601, written as one line
+    of JSON (a value JSON can't hold as its ``str``) to ``events.jsonl`` in
+    ``task_logger``'s folder, if there is one, and handed to ``on_event``, if there is
+    one, as that line decoded: a copy, so changing it changes nothing in the run.
+
+    Stages emit from worker threads. Each event is stamped, written and handed over
+    under one lock, so ``on_event`` is never entered twice at once and the file's lines
+    are in time order; workers wait while it runs, so it should return quickly (put the
+    event on a queue, say). Recording never fails the run: when writing the file or
+    ``on_event`` raises, the error is logged, at warning level with its traceback the
+    first time its type is raised there and at debug level after, and the run goes on.
+    """
+
+    def __init__(
+        self,
+        on_event: Callable[[dict[str, Any]], None] | None,
+        task_logger: TaskLogger | None,
+    ) -> None:
+        self._on_event = on_event
+        self._path = None if task_logger is None else task_logger.dir / _EVENTS
+        self._lock = threading.Lock()
+        self._raised: set[tuple[str, type[Exception]]] = set()
+
+    def __call__(self, event_type: str, /, **fields: Any) -> None:
+        with self._lock:
+            now = datetime.datetime.now(datetime.UTC)
+            event = {
+                "type": event_type,
+                "time": now.isoformat(timespec="milliseconds"),
+                **fields,
+            }
+            line = json.dumps(event, ensure_ascii=False, default=str)
+            if self._path is not None:
+                where = f"writing {self._path}"
+                self._guarded(where, event_type, _append_line, self._path, line)
+            if self._on_event is not None:
+                self._guarded("on_event", event_type, self._on_event, json.loads(line))
+
+    def _guarded(
+        self, what: str, event_type: str, action: Callable[..., None], *args: Any
+    ) -> None:
+        try:
+            action(*args)
+        except Exception as error:  # noqa: BLE001 — recording a paid run must not kill it
+            raised = (what, type(error))
+            _log.log(
+                logging.DEBUG if raised in self._raised else logging.WARNING,
+                "%s raised %s on a %s event; the run goes on",
+                what,
+                type(error).__name__,
+                event_type,
+                exc_info=True,
+            )
+            self._raised.add(raised)
+
+
+def _append_line(path: Path, line: str) -> None:
+    with path.open("a", encoding="utf-8") as lines:
+        lines.write(line + "\n")
 
 
 def write_manifest(
@@ -264,6 +345,28 @@ class StepRecord:
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
+
+
+def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
+    """The step count and summed tokens of ``steps`` (``None`` when none counted any),
+    and their ``usd``: the sum of theirs, or ``None`` when litellm could not price one
+    of them."""
+    prompt = completion = total = 0
+    any_tokens = False
+    costs = [s.usd for s in steps]
+    for s in steps:
+        if s.tokens is not None:
+            any_tokens = True
+            prompt += s.tokens.get("prompt", 0)
+            completion += s.tokens.get("completion", 0)
+            total += s.tokens.get("total", 0)
+    return {
+        "n_steps": len(steps),
+        "tokens": {"prompt": prompt, "completion": completion, "total": total}
+        if any_tokens
+        else None,
+        "usd": None if None in costs else float(sum(cast("list[float]", costs))),
+    }
 
 
 class StageRun:
@@ -370,25 +473,8 @@ class StageRun:
         return path
 
     def compute_totals(self) -> dict[str, Any]:
-        """Aggregate per-step tokens / step-count for the stage's ``result.json``, and
-        the stage's ``usd``: the sum of its calls', or ``None`` when litellm could not
-        price one of them."""
-        prompt = completion = total = 0
-        any_tokens = False
-        costs = [s.usd for s in self.steps]
-        for s in self.steps:
-            if s.tokens is not None:
-                any_tokens = True
-                prompt += s.tokens.get("prompt", 0)
-                completion += s.tokens.get("completion", 0)
-                total += s.tokens.get("total", 0)
-        return {
-            "n_steps": len(self.steps),
-            "tokens": {"prompt": prompt, "completion": completion, "total": total}
-            if any_tokens
-            else None,
-            "usd": None if None in costs else float(sum(cast("list[float]", costs))),
-        }
+        """The stage's :func:`step_totals`, for its ``result.json``."""
+        return step_totals(self.steps)
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
         """The readable conversation = the final step's full message thread + its

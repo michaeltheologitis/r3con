@@ -234,6 +234,7 @@ def run(
     completion: Callable[..., Any] | None = None,
     logs_dir: str | Path | None = None,
     save_artifacts: bool = True,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> Answer:
     """Run the pipeline: answer ``question`` over ``documents``.
 
@@ -271,6 +272,14 @@ def run(
             proposed schema, the parse, the reasoning transcript — into a run folder.
             On by default: they are how you see what the run actually did. Set ``False``
             to run without touching the filesystem.
+        on_event: called with each progress event as it happens, a copy as a dict of
+            JSON values with its ``type`` (``run_started``, ``relevance_started``, …,
+            ``run_finished`` or ``run_failed``), its ``time`` and its fields, listed in
+            :func:`~r3con.pipeline.run_pipeline`. It is called from worker threads,
+            but never twice at once, so it needs no lock of its own; the workers wait
+            for it, so it should return quickly (put the event on a queue, say). If it
+            raises, the error is logged and the run goes on. The run folder's
+            ``events.jsonl`` records the same events, whether or not it is given.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
@@ -339,6 +348,7 @@ def run(
         api_base=api_base,
         api_key=api_key,
         completion=completion,
+        on_event=on_event,
     )
 
 
@@ -352,6 +362,7 @@ def ask(
     api_key: str | None = None,
     api_base: str | None = None,
     completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> Answer:
     """Answer a new ``question`` over what a finished run built, running only reasoning.
 
@@ -376,11 +387,15 @@ def ask(
             model, since one provider's params (``reasoning_effort``, ``extra_body``)
             can break another's request.
         api_key, api_base, completion: as in :func:`run`.
+        on_event: as in :func:`run`, called with the ask's events: ``ask_started``,
+            ``reasoning_started``, ``reasoning_finished``, then ``ask_finished`` or
+            ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
     folder is: a ``manifest.json`` as a run writes one, for the run's config with this
-    ask's overrides (its ``task`` the question, ``ask_of`` the run folder's name), and
-    ``reasoning/`` as a run writes it. The run's own files are left as they are.
+    ask's overrides (its ``task`` the question, ``ask_of`` the run folder's name),
+    ``events.jsonl`` and ``reasoning/`` as a run writes them. The run's own files are
+    left as they are.
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
@@ -416,6 +431,7 @@ def ask(
         api_base=api_base,
         api_key=api_key,
         completion=completion,
+        on_event=on_event,
     )
 
 

@@ -1,7 +1,11 @@
 import ast
+import datetime
 import json
+import logging
 import random
 import re
+import threading
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -62,7 +66,13 @@ DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
 
 
 def answer(
-    llm, task_logger=None, *, documents=DOCS, max_reasoning_turns=None, **fields
+    llm,
+    task_logger=None,
+    *,
+    documents=DOCS,
+    max_reasoning_turns=None,
+    on_event=None,
+    **fields,
 ):
     """A whole run over ``documents`` on CONFIG with ``fields`` changed, ``llm``
     answering."""
@@ -73,6 +83,7 @@ def answer(
         max_reasoning_turns=max_reasoning_turns,
         task_logger=task_logger,
         completion=llm,
+        on_event=on_event,
     )
 
 
@@ -84,6 +95,19 @@ def provider_down() -> litellm.APIConnectionError:
 
 def read_json(logger, name: str):
     return json.loads((logger.dir / f"{name}.json").read_text())
+
+
+def node(event) -> tuple:
+    """What an event starts or finishes: its stage, and the round and document it
+    names, if any."""
+    stage = event["type"].rpartition("_")[0]
+    return stage, event.get("round"), event.get("doc_id")
+
+
+def snippet_id(event) -> str:
+    """The id of the snippet a ``relevance_finished`` event reports."""
+    part = event["part"]
+    return event["doc_id"] if part is None else f"{event['doc_id']}.{part}"
 
 
 def notes_by_round():
@@ -279,6 +303,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
     assert written == {
         "manifest.json",
         "ids.json",
+        "events.jsonl",
         "relevance/calls.json",
         "relevance/result.json",
         "structuring/schema/calls.json",
@@ -1018,3 +1043,247 @@ def test_a_refused_first_turn_goes_again_once_with_samples(
     assert SAMPLE not in whole["messages"][0]["content"]
     assert tokens(whole) > 8_192
     assert SAMPLE in samples["messages"][0]["content"]
+
+
+def test_a_run_reports_each_stage_and_document_from_its_start_to_its_finish(
+    answering_llm,
+):
+    events = []
+    result = answer(
+        answering_llm, documents=[*DOCS, "Calder memo"], on_event=events.append
+    )
+    assert events[0] == {
+        "type": "run_started",
+        "time": events[0]["time"],
+        "question": "Who?",
+        "model": MODEL,
+        "document_ids": result.document_ids,
+        "rounds": 2,
+    }
+    types = [event["type"] for event in events]
+    assert types.count("run_finished") == 1
+    assert types[-1] == "run_finished"
+    for i, event in enumerate(events):
+        if event["type"].endswith("_finished"):
+            earlier = [node(e) for e in events[:i] if e["type"].endswith("_started")]
+            assert node(event) in earlier
+    started = [node(e) for e in events if e["type"].endswith("_started")]
+    finished = [node(e) for e in events if e["type"].endswith("_finished")]
+    assert Counter(started) == Counter(finished)
+    assert Counter(stage for stage, *_ in started) == {
+        "run": 1,
+        "relevance": 6,
+        "schema": 1,
+        "parsing": 3,
+        "reasoning": 1,
+    }
+    last = {t.partition("_")[0]: i for i, t in enumerate(types)}
+    assert last["relevance"] < types.index("schema_started")
+    assert last["schema"] < types.index("parsing_started")
+    assert last["parsing"] < types.index("reasoning_started")
+
+
+def test_each_finished_event_carries_what_the_run_folder_records(
+    answering_llm, shown_ids, priced_model, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+    logger = TaskLogger("run", root=tmp_path)
+    events = []
+    llm = answering_llm.answers(relevance=citing_every_shown_id(shown_ids))
+    result = answer(
+        llm, logger, documents=[*DOCS, "Calder memo"], on_event=events.append
+    )
+    by_type = {}
+    for event in events:
+        by_type.setdefault(event.pop("type"), []).append(event)
+        del event["time"]
+    rounds = read_json(logger, "relevance/result")["rounds"]
+    assert by_type["relevance_finished"] == [
+        {
+            "round": r["round"],
+            "doc_id": s["id"],
+            "part": None,
+            "summary": s["summary"],
+            "provenance": s["provenance"],
+        }
+        for r in rounds
+        for s in r["snippets"]
+    ]
+    assert any(e["provenance"] for e in by_type["relevance_finished"])
+    schema = read_json(logger, "structuring/schema/result")
+    assert by_type["schema_finished"] == [
+        {"schema_code": schema["schema_code"], "thought": schema["thought"]}
+    ]
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert by_type["parsing_finished"] == [
+        {"doc_id": id_, "n_records": 1, "provenance": parsing["provenance"][i]}
+        for i, id_ in enumerate(result.document_ids)
+    ]
+    reasoning = read_json(logger, "reasoning/result")
+    assert by_type["reasoning_finished"] == [
+        {f: reasoning[f] for f in ("answer", "provenance", "path", "fallback")}
+    ]
+    assert by_type["run_finished"] == [
+        {
+            "run_dir": str(logger.dir),
+            "tokens": {"prompt": 110, "completion": 220, "total": 330},
+            "usd": 110.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("cause", ["estimate", "refusal"])
+def test_a_split_document_starts_once_a_round_and_finishes_each_part_it_ends_up_in(
+    answering_llm, grown_registry, window, tmp_path, cause
+):
+    logger = TaskLogger("run", root=tmp_path)
+    events = []
+    llm, model = {
+        "estimate": (answering_llm, window(5_000)),
+        "refusal": (answering_llm.refuses_over(18_000), QWEN),
+    }[cause]
+    documents = memos_with(grown_registry(40_000))
+    result = answer(
+        llm, logger, documents=documents, model=model, on_event=events.append
+    )
+    record = read_json(logger, "splits")["documents"]["3"]
+    assert {event["cause"] for event in record["events"]} == {cause}
+    starts = [node(e) for e in events if e["type"] == "relevance_started"]
+    assert sorted(starts) == sorted(
+        ("relevance", r, id_) for r in (1, 2) for id_ in result.document_ids
+    )
+    for i, event in enumerate(events):
+        if event["type"] == "relevance_finished":
+            assert node(event) in [node(e) for e in events[:i]]
+    reported = [
+        (e["round"], snippet_id(e), e["summary"], e["provenance"])
+        for e in events
+        if e["type"] == "relevance_finished"
+    ]
+    recorded = [
+        (r["round"], s["id"], s["summary"], s["provenance"])
+        for r in read_json(logger, "relevance/result")["rounds"]
+        for s in r["snippets"]
+    ]
+    assert sorted(reported) == sorted(recorded)
+    assert len(recorded) == 2 * len(REGISTRY_IN_4_PARTS)
+    records = {
+        e["doc_id"]: e["n_records"] for e in events if e["type"] == "parsing_finished"
+    }
+    assert records == {id_: 1 for id_ in result.document_ids} | {
+        result.document_ids[3]: 4
+    }
+
+
+def test_events_jsonl_holds_each_event_the_callback_saw_in_time_order(
+    answering_llm, events_in, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    events = []
+    answer(answering_llm, logger, on_event=events.append)
+    assert events_in(logger.dir) == events
+    times = [datetime.datetime.fromisoformat(event["time"]) for event in events]
+    assert times == sorted(times)
+    assert all(t.tzinfo == datetime.UTC for t in times)
+
+
+def test_a_callback_that_changes_its_events_changes_nothing_in_the_run(
+    answering_llm, events_in, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+
+    def clears_every_list_and_dict(event):
+        for value in event.values():
+            if isinstance(value, (list, dict)):
+                value.clear()
+
+    result = answer(answering_llm, logger, on_event=clears_every_list_and_dict)
+    assert result.answer == "Halloran memo; Merrow memo"
+    assert len(result.document_ids) == 2
+    assert result.provenance["parse_ids"] == result.document_ids
+    assert events_in(logger.dir)[0]["document_ids"] == result.document_ids
+
+
+def test_the_callback_is_never_entered_twice_at_once(answering_llm):
+    inside = threading.Lock()
+    overlapping = []
+
+    def on_event(event):
+        if not inside.acquire(blocking=False):
+            overlapping.append(event["type"])
+            return
+        time.sleep(0.002)
+        inside.release()
+
+    def slow_note(request):
+        time.sleep(0.01)
+        return f"Notes on {request['messages'][1]['content']}."
+
+    documents = [f"Memo {k}" for k in range(8)]
+    llm = answering_llm.answers(relevance=slow_note)
+    answer(llm, documents=documents, on_event=on_event)
+    assert llm.peak_in_flight > 1
+    assert overlapping == []
+
+
+def test_a_raising_callback_is_logged_once_per_kind_of_error_and_the_run_goes_on(
+    answering_llm, events_in, tmp_path, caplog
+):
+    caplog.set_level(logging.DEBUG, logger="r3con.runs")
+    logger = TaskLogger("run", root=tmp_path)
+
+    def on_event(event):
+        if event["type"] == "run_started":
+            raise RuntimeError("the panel broke")
+        raise ValueError("the panel broke again")
+
+    result = answer(answering_llm, logger, on_event=on_event)
+    assert result.answer == "Halloran memo; Merrow memo"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert [w.getMessage() for w in warnings] == [
+        "on_event raised RuntimeError on a run_started event; the run goes on",
+        "on_event raised ValueError on a relevance_started event; the run goes on",
+    ]
+    assert all(w.exc_info for w in warnings)
+    assert len(caplog.records) == len(events_in(logger.dir))
+    assert events_in(logger.dir)[-1]["type"] == "run_finished"
+
+
+def test_a_run_whose_events_file_cannot_be_written_still_finishes(
+    answering_llm, tmp_path, caplog
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    logger = TaskLogger("run", root=tmp_path)
+    (logger.dir / "events.jsonl").mkdir()
+    events = []
+    result = answer(answering_llm, logger, on_event=events.append)
+    assert result.answer == "Halloran memo; Merrow memo"
+    assert (events[0]["type"], events[-1]["type"]) == ("run_started", "run_finished")
+    [warning] = caplog.records
+    assert warning.getMessage() == (
+        f"writing {logger.dir / 'events.jsonl'} raised IsADirectoryError on a "
+        "run_started event; the run goes on"
+    )
+
+
+@pytest.mark.parametrize("stage", list(STAGE_FOLDERS))
+def test_a_failing_stage_reports_run_failed_with_its_name_and_no_finish(
+    answering_llm, events_in, tmp_path, stage
+):
+    logger = TaskLogger("run", root=tmp_path)
+    events = []
+    with pytest.raises(litellm.APIConnectionError):
+        answer(
+            answering_llm.answers(**{stage: provider_down()}),
+            logger,
+            on_event=events.append,
+        )
+    *_, failed = events
+    assert failed == {
+        "type": "run_failed",
+        "time": failed["time"],
+        "stage": stage,
+        "error": "APIConnectionError: litellm.APIConnectionError: provider down",
+    }
+    assert "run_finished" not in [event["type"] for event in events]
+    assert events_in(logger.dir) == events
