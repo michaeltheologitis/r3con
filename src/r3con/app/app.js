@@ -10,6 +10,7 @@
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
   /** @typedef {{ name: string, text: string, size: number, sample: boolean, uid: number }} LoadedFile */
+  /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
   /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
   /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
@@ -120,6 +121,7 @@
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File) => Blob} readable
+   * @property {(file: File) => Promise<FileRead>} readPdf
    * @property {(question: string) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
@@ -522,6 +524,9 @@
   const EXCERPT_CHARS = 60;
   const READ_BYTES = 20000;
   const MAX_FILES = 40;
+  const PDF_SUFFIX = '.pdf';
+  // A NUL byte this near a file's start means it isn't text, as git judges it.
+  const SNIFF_BYTES = 8000;
   const MAX_SIMULATED_CITES = 4;
   const SIMULATED_SUMMARY_STRIDE = 2;
   const SIMULATED_PARSE_STRIDE = 3;
@@ -567,6 +572,7 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
+  const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
@@ -584,6 +590,7 @@
     "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
+  const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -784,6 +791,8 @@
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
   /** @param {LoadedFile} file */
   const fileLabel = (file) => shortLabel(stripExt(file.name));
+  /** @param {{ name: string }} file */
+  const isPdf = (file) => file.name.toLowerCase().endsWith(PDF_SUFFIX);
   /** @param {string} model */
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
@@ -883,14 +892,16 @@
 
   const lostConnection = () => new ServerError(LOST_CONNECTION);
 
+  // A file is sent as its own bytes, any other body as JSON.
   /** @param {string} path @param {{ method?: string, body?: unknown }} [request] */
   async function api(path, { method = 'GET', body } = {}) {
+    const headers = { Authorization: `Bearer ${token}` };
     let response;
     try {
       response = await fetch(path, {
         method,
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        headers: body instanceof Blob ? headers : { ...headers, 'Content-Type': 'application/json' },
+        body: body instanceof Blob ? body : body === undefined ? undefined : JSON.stringify(body),
       });
     } catch {
       connectionProblem = LOST_CONNECTION;
@@ -1714,7 +1725,8 @@
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
     if (isPending(state.shown, file)) meta.push('not run yet');
-    if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    // A PDF's size is its file's, not its text's.
+    if ((isPdf(file) ? file.text.length : file.size) > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
     return meta.join(' · ');
   }
 
@@ -2765,9 +2777,20 @@
     });
   }
 
+  // A PDF's text comes from r3con app, which extracts it as r3con does. Any other file is read here as text,
+  // unless its start holds a NUL byte, as no text does: so Word files, images and archives are refused.
+  /** @param {File} file @returns {Promise<FileRead>} */
+  async function readFile(file) {
+    if (isPdf(file)) return mode.readPdf(file);
+    // A file that can't be read goes on to readText, which reads it as no text.
+    const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
+    return start.includes(0) ? { why: NOT_TEXT } : { text: await readText(file) };
+  }
+
   /** @param {Iterable<File | null>} list */
   async function addFiles(list) {
     const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    picked.sort((a, b) => a.name.localeCompare(b.name));
     const error = $('files-error');
     if (!picked.length) {
       error.textContent = 'No files found there. Try picking the files themselves.';
@@ -2775,8 +2798,23 @@
       return;
     }
     error.hidden = true;
-    const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
-    read.sort((a, b) => a.name.localeCompare(b.name));
+    $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
+    const results = await Promise.all(picked.map(readFile));
+    /** @type {LoadedFile[]} */
+    const read = [];
+    /** @type {Map<string, string[]>} */
+    const refused = new Map();
+    picked.forEach((f, i) => {
+      const result = results[i];
+      if ('why' in result) refused.set(result.why, [...(refused.get(result.why) ?? []), f.name]);
+      else read.push(withUid({ name: f.name, size: f.size, text: result.text, sample: false }));
+    });
+    error.textContent = [...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' ');
+    error.hidden = !refused.size;
+    if (!read.length) {
+      $('files-said').textContent = '';
+      return;
+    }
     // Files added over the sample memos take the place of any that are left.
     const replaced = state.files.filter((f) => f.sample).length;
     state.files = [...state.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
@@ -3349,6 +3387,7 @@
     refuseFiles: () => null,
     // It shows a file's start only, so it reads no more than that.
     readable: (file) => file.slice(0, READ_BYTES),
+    readPdf: async () => ({ why: PDFS_NEED_APP }),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
@@ -3373,6 +3412,14 @@
     needsModel: () => true,
     refuseFiles: unreadableFiles,
     readable: (file) => file,
+    async readPdf(file) {
+      try {
+        const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+        return { text: (await extracted.json()).text };
+      } catch (error) {
+        return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a PDF's text")}.` };
+      }
+    },
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),

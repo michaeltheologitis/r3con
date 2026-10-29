@@ -43,7 +43,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from dotenv import find_dotenv, load_dotenv
 from pypdf import PdfReader
@@ -95,25 +95,33 @@ TEXT_SUFFIXES: frozenset[str] = frozenset(
 def _read_one(path: Path) -> str:
     """One file's text.
 
-    A PDF is extracted page by page; everything else is read as UTF-8, replacing
-    undecodable bytes rather than failing — one bad byte in one document should not sink
-    a run. A PDF with no text layer (a scan) extracts to nothing and is dropped by the
-    caller, so say so rather than letting it vanish: the fix is OCR, outside this package.
+    A PDF is extracted page by page (:func:`_pdf_text`); everything else is read as
+    UTF-8, replacing undecodable bytes rather than failing — one bad byte in one document
+    should not sink a run.
     """
     if path.suffix.lower() != ".pdf":
         return path.read_text(encoding="utf-8", errors="replace")
+    return _pdf_text(str(path), path)
+
+
+def _pdf_text(name: str, pdf: Path | IO[bytes]) -> str:
+    """A PDF's text, page by page, read from its path or from a stream of its bytes;
+    ``name`` is what the warnings call it.
+
+    A PDF pypdf can't read gives ``""``, and so does one with no text layer (a scan),
+    which the caller then drops: say so rather than letting it vanish. The fix is OCR,
+    outside this package.
+    """
     try:
-        text = "\n\n".join(
-            page.extract_text() or "" for page in PdfReader(str(path)).pages
-        )
+        text = "\n\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
-            "%s: not readable as a PDF (%s); skipping it", path, type(e).__name__
+            "%s: not readable as a PDF (%s); skipping it", name, type(e).__name__
         )
         return ""
     if not text.strip():
         _log.warning(
-            "%s: no extractable text — a scanned PDF needs OCR first; skipping it", path
+            "%s: no extractable text — a scanned PDF needs OCR first; skipping it", name
         )
     return text
 

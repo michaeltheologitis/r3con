@@ -1,6 +1,6 @@
 // Checks the run panel in src/r3con/app/ (index.html, app.css, app.js) in headless Chromium: node tests/app/check.mjs
 // The live area serves it with tests/app/fake_server.py, through uv.
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -147,6 +147,14 @@ const STOPPED_ASK_TAIL = '· stopped in reasoning';
 const CANCEL_REFUSED = 'no run with that id';
 const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a status of 404';
 const LIVE_ASK = 'live ask over this run';
+const PDF_TEXT = 'Incidents this quarter: 7.';
+// tests/pdfs.py's write_pdf, so that the checks and the tests make their PDFs one way.
+const WRITE_PDF = 'import sys; from pathlib import Path; from tests.pdfs import write_pdf; write_pdf(Path(sys.argv[1]), *sys.argv[2:])';
+// A .docx is a ZIP, whose first header's version field holds a NUL byte.
+const DOCX_START = [0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00];
+const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
+const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
+const SCAN_REFUSED = 'no readable text in 02_scan.pdf; nothing was sent';
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -721,6 +729,39 @@ async function files() {
     const hintHidden = await page.$eval('#panel-hint', (el) => el.hidden);
     const sampleOnly = removed && hintHidden && (await count(page, '.node.doc')) === SAMPLE_DOCS;
     check('files', 'using the sample memos removes it', sampleOnly);
+  });
+}
+
+// A PDF made by tests/pdfs.py, with `text` as its text layer, or with none, as a scan has.
+function pdf(name, text) {
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-pdf-'));
+  try {
+    const path = join(dir, name);
+    execFileSync('uv', ['run', 'python', '-c', WRITE_PDF, path, ...(text ? [text] : [])], { cwd: REPO_DIR, stdio: 'ignore' });
+    return { name, mimeType: 'application/pdf', buffer: readFileSync(path) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const docx = () => ({
+  name: 'report.docx',
+  mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  buffer: Buffer.from([...DOCX_START, ...Buffer.from('word/document.xml')]),
+});
+const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? null : el.textContent));
+
+// The prototype has no r3con app to extract a PDF's text.
+async function filesNotText() {
+  await withPage('files', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    await page.setInputFiles('#file-input', [pdf('01_memo.pdf', PDF_TEXT), docx(), memo('notes.log', 'A log line.\n')]);
+    await removeButton(page, 'notes.log').waitFor();
+    const listed = await removeNames(page);
+    const error = await filesError(page);
+    const expected = `Not added: 01_memo.pdf. ${PDFS_NEED_APP} Not added: report.docx. ${NOT_TEXT}`;
+    const name = 'the prototype refuses a PDF, saying PDFs need r3con app, and a .docx, saying to save it as PDF or text, and adds a .log';
+    check('files', name, isDeepStrictEqual(listed, ['remove notes.log']) && error === expected, `${listed.join(', ')}; ${error}`);
   });
 }
 
@@ -1988,6 +2029,62 @@ async function liveFailure(url) {
   });
 }
 
+const openFileView = async (page, name) => {
+  await page.click(`#file-list .file:has-text("${name}")`);
+  return page.$eval('#file-view', (view) => ({ meta: view.querySelector(':scope > .k').textContent, text: view.querySelector('pre, p.k').textContent }));
+};
+
+async function livePdf(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    const memoPdf = pdf('01_memo.pdf', PDF_TEXT);
+    await page.setInputFiles('#file-input', [memoPdf, pdf('02_scan.pdf')]);
+    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
+    await page.click('#tab-files');
+    const shown = await openFileView(page, '01_memo.pdf');
+    const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B · your file`, text: PDF_TEXT });
+    const sentToApp = isDeepStrictEqual(posts, ['/api/documents/text', '/api/documents/text']);
+    const name = "each PDF added goes to r3con app for its text, and the files tab shows a PDF's extracted text and its file's size";
+    check('live', name, extracted && sentToApp, `${JSON.stringify(shown)}; ${posts.join(', ')}`);
+
+    await page.click('#file-back');
+    const scan = (await openFileView(page, '02_scan.pdf')).text;
+    await page.click('#tab-chat');
+    await page.click('#run-btn');
+    const status = await page.textContent('#run-status');
+    const scanName = 'a scanned PDF has no text: its preview says so, and a run is refused, naming it, with nothing sent';
+    check('live', scanName, scan === 'This file has no readable text.' && status === SCAN_REFUSED && posts.length === 2, `${scan}; ${status}; ${posts.length} posts`);
+
+    await page.click('#tab-files');
+    await removeButton(page, '02_scan.pdf').click();
+    await page.click('#tab-chat');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', "a run is sent a PDF's extracted text", isDeepStrictEqual(sent, [PDF_TEXT]), JSON.stringify(sent));
+  });
+}
+
+async function liveNotText(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    const binary = { name: 'data.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('a header\0with a NUL byte') };
+    await page.setInputFiles('#file-input', [docx(), binary, memo('notes.log', 'A log line.\n'), memo('README', 'An extensionless note.\n')]);
+    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
+    await page.click('#tab-files');
+    const listed = await removeNames(page);
+    const error = await filesError(page);
+    const refused = error === `Not added: data.bin, report.docx. ${NOT_TEXT}` && isDeepStrictEqual(listed, ['remove notes.log', 'remove README']);
+    const name = 'a .docx and a file with a NUL byte are refused, named, with what to do, and nothing is sent; a .log and an extensionless file are added';
+    check('live', name, refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
+    await page.click('#tab-chat');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', 'a run is sent only the text files', isDeepStrictEqual(sent, ['A log line.\n', 'An extensionless note.\n']), JSON.stringify(sent));
+  });
+}
+
 async function liveUnreadable(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = postsOf(page);
@@ -2311,6 +2408,8 @@ async function live() {
     await liveParts(url);
     await liveFailure(url);
     await liveUnreadable(url);
+    await livePdf(url);
+    await liveNotText(url);
     await liveStaleToken(url);
     await liveStopRefused(url);
     await liveStopLate(url);
@@ -2323,7 +2422,7 @@ async function live() {
 
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, filesNotText, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
