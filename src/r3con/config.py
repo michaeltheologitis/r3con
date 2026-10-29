@@ -44,20 +44,21 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from r3con import settings
 from r3con.prompts import require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
-PROMPT_STAGES: tuple[str, ...] = (
+PromptStage = Literal[
     "relevance/first-round",
     "relevance/later-rounds",
     "structuring/schema",
     "structuring/parsing",
     "reasoning/direct",
     "reasoning/coding",
-)
+]
+PROMPT_STAGES: tuple[PromptStage, ...] = get_args(PromptStage)
 
 DEFAULT_CONFIG = "default"
 
@@ -109,17 +110,12 @@ class RunConfig(BaseModel):
     relevance_rounds: Annotated[int, Field(ge=0, strict=True)] = 2
     # keep in sync with configs/default.yaml
     reasoning: ReasoningPath = "direct"
-    prompts: dict[str, str]  # {stage: version} for every stage in PROMPT_STAGES
+    # {stage: version}; check_prompts refuses a config that leaves a stage unpinned
+    prompts: dict[PromptStage, str] = Field(default_factory=dict)
     # extra kwargs for litellm.completion
     params: dict[str, Any] = Field(default_factory=dict)
     # the overrides applied on load, recorded with the config
     overrides: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("prompts")
-    @classmethod
-    def _only_known_stages(cls, prompts: dict[str, str]) -> dict[str, str]:
-        _check_stages(prompts, "RunConfig")
-        return prompts
 
     def _identity_parts(self) -> list[str]:
         """The output-shaping components that make up the run identity, in label
@@ -190,38 +186,16 @@ def resolve_config_path(name: str) -> Path | None:
     return _find(f"{name}.yaml")
 
 
-def _check_stages(prompts: Mapping[str, Any], where: str) -> None:
-    """Refuse a prompt pinned for a stage not in :data:`PROMPT_STAGES`, naming the
-    stages there are."""
-    unknown = sorted(set(prompts) - set(PROMPT_STAGES))
-    if unknown:
-        raise ValueError(
-            f"{where} pins a prompt for stage(s) r3con does not have: {unknown}. The "
-            f"stages are {list(PROMPT_STAGES)}."
-        )
-
-
-def _validated(
-    fields: Mapping[str, Any], name: str, overridden: Collection[str]
-) -> RunConfig:
-    """``fields`` as a :class:`RunConfig`, else a one-line ``ValueError`` naming each
-    setting refused and whether it was an override or set in config ``name``."""
-    try:
-        return RunConfig.model_validate(fields)
-    except ValidationError as invalid:
-        problems = "; ".join(
-            _refused(error, name, overridden) for error in invalid.errors()
-        )
-        raise ValueError(f"{problems}.") from None
-
-
 def _refused(error: Mapping[str, Any], name: str, overridden: Collection[str]) -> str:
     """One setting pydantic refused: whether it was an override or set in config
-    ``name``, its name, a short repr of the value given, and why."""
+    ``name``, its path, a short repr of the value given (a refused key is already in
+    the path), and why."""
     where = "override" if error["loc"][0] in overridden else f"config {name!r}"
-    setting = ".".join(map(str, error["loc"]))
+    setting = ".".join(str(part) for part in error["loc"] if part != "[key]")
     if error["type"] == "missing":
         return f"{where}: `{setting}` is empty or missing"
+    if error["loc"][-1] == "[key]":
+        return f"{where}: `{setting}`: {error['msg']}"
     return f"{where}: `{setting}={reprlib.repr(error['input'])}`: {error['msg']}"
 
 
@@ -246,10 +220,8 @@ def load_config(
     ``None`` taking the place of the file's value. Every override is recorded on the
     config and shows up in its label, because each of them shapes the output.
 
-    Raises ``KeyError`` for an unknown config name, ``ValueError`` if the config sets a
-    field r3con does not read, pins a prompt for a stage r3con does not have or none
-    for some stage, if neither it nor an override sets a ``model``, or if a setting in
-    the file or an override is not valid for its field (in one line naming each), and
+    Raises ``KeyError`` for an unknown config name, ``ValueError`` for any invalid
+    setting, in the file or an override, in one line naming each, and
     ``FileNotFoundError`` if a pinned prompt version has no file
     (:func:`check_prompts`).
     """
@@ -269,8 +241,6 @@ def load_config(
                 f"(params: {{seed: {raw['seed']}}})."
             )
         raise ValueError(message)
-    _check_stages(raw.get("prompts") or {}, f"config {name!r}")
-
     overrides = {
         "model": model,
         "relevance_rounds": relevance_rounds,
@@ -278,12 +248,16 @@ def load_config(
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
-    # A setting left empty in the file takes its default, as an override of None does;
-    # empty prompts are left to check_prompts, which names the stages missing.
+    # A setting left empty in the file takes its default, as an override of None does.
     fields = {key: value for key, value in raw.items() if value is not None}
-    cfg = _validated({"prompts": {}, **fields, **applied, "name": name}, name, applied)
-    # Recorded as resolved, so the manifest shows both the value and that it was
-    # overridden.
+    try:
+        cfg = RunConfig.model_validate({**fields, **applied, "name": name})
+    except ValidationError as invalid:
+        problems = "; ".join(
+            _refused(error, name, applied) for error in invalid.errors()
+        )
+        raise ValueError(f"{problems}.") from None
+    # Resolved values, so the manifest shows what each override became.
     cfg.overrides = {key: getattr(cfg, key) for key in applied}
     check_prompts(cfg)
     return cfg
