@@ -104,6 +104,12 @@ const TAB_LABEL = '1 Which maintenance… · gpt-6-luna';
 const STARTING = 'running · starting';
 // A model whose name makes an answer's label far wider than the run's own.
 const LONG_MODEL = 'hosted_vllm/qwen3-32b-instruct-awq';
+// Longer than the page's GLIDE_MS, so a recording of the view holds a whole glide.
+const GLIDE_RECORD_MS = 600;
+// How far a frame of the view, as [zoom, x, y], may stray past a glide's ends: rounding, no more.
+const VIEW_SLACK = [0.005, 1, 1];
+// A new tab's view before its first fit, which a run's start must never show.
+const NEW_TAB_VIEW = [1, 0, 0];
 
 const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
 const FAKE_SERVER = ['run', 'python', 'tests/app/fake_server.py'];
@@ -633,6 +639,25 @@ function fitOfRun() {
   return { outside, zoom: document.getElementById('zoom-level').textContent };
 }
 
+// Records the view as drawn, mid-glide included, as [zoom, x, y]: now, then every frame until tab `tab`
+// opens and for `ms` after, or for `timeout` if it never does.
+function recordViews([tab, ms, timeout]) {
+  const world = document.getElementById('world');
+  const views = [];
+  const start = performance.now();
+  let opened = null;
+  window.recordedViews = new Promise((resolve) => {
+    const frame = (now) => {
+      const { a, e, f } = new DOMMatrix(getComputedStyle(world).transform);
+      views.push([a, e, f]);
+      if (opened === null && document.getElementById(`run-tab-${tab}`)) opened = now;
+      if (now < (opened === null ? start + timeout : opened + ms)) requestAnimationFrame(frame);
+      else resolve({ views, opened: opened !== null });
+    };
+    frame(start);
+  });
+}
+
 // ---------- areas ----------
 
 async function load() {
@@ -728,6 +753,41 @@ async function arrange() {
     const [dx, dy] = [dragged.x, dragged.y].map(Math.round);
     const detail = `${home.x},${home.y} → ${dx},${dy}, back in ${frames} frames`;
     check('arrange', 'arrange slides a dragged node back to where it was', moved && back && frames > 0, detail);
+  });
+}
+
+// Records the view while `start` starts the run of tab `tab`. It passes if that tab opened, the view moved, and
+// every frame lies on a glide from where the view was to where it ends, none of them at a new tab's view.
+async function viewOnStart(page, tab, start) {
+  await page.evaluate(recordViews, [tab, GLIDE_RECORD_MS, ACTION_TIMEOUT_MS]);
+  await start();
+  const { views, opened } = await page.evaluate(() => window.recordedViews);
+  const [from, to] = [views[0], views.at(-1)];
+  const near = (view, other) => view.every((v, i) => Math.abs(v - other[i]) <= VIEW_SLACK[i]);
+  const between = (view) => view.every((v, i) => v >= Math.min(from[i], to[i]) - VIEW_SLACK[i] && v <= Math.max(from[i], to[i]) + VIEW_SLACK[i]);
+  const strays = views.filter((view) => !between(view));
+  const snaps = near(from, NEW_TAB_VIEW) ? [] : views.filter((view) => near(view, NEW_TAB_VIEW));
+  const shown = ([k, x, y]) => `${Math.round(k * 100)}% at ${Math.round(x)},${Math.round(y)}`;
+  const detail = `tab ${tab} ${opened ? 'opened' : 'never opened'}; ${shown(from)} → ${shown(to)} over ${views.length} frames; ${strays.length} off that glide, ${snaps.length} at 100% at 0,0`;
+  return { pass: opened && !near(from, to) && !strays.length && !snaps.length, detail };
+}
+
+// With motion on, a run's view glides to its fit from where the panel was; a new tab's own starting view never shows.
+async function runView() {
+  await withPage('run view', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    // The panel's first resize observation refits the view a frame after load.
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const first = await viewOnStart(page, 1, () => page.click('#run-btn'));
+    check('run view', "the first run glides the view from where it was to the run's fit, never through 100% at the top left", first.pass, first.detail);
+    await waitLit(page, REPLAY_MS);
+    const fitted = await transform(page);
+    const frame = await page.evaluate(panelBox);
+    await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, 200);
+    await becomes(page, viewChanged, fitted);
+    const second = await viewOnStart(page, 2, () => send(page, NEW_QUESTION, 'Control+Enter'));
+    const secondName = "a new run, started once the first has finished and been zoomed out, glides likewise from that zoom to its own tab's fit";
+    check('run view', secondName, second.pass, second.detail);
   });
 }
 
@@ -2534,7 +2594,7 @@ async function live() {
 try {
   pdfs = writePdfs(PDF_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, filesNotText, filesAddFails, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, runView, files, filesNotText, filesAddFails, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
