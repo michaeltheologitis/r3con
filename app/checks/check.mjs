@@ -47,8 +47,11 @@ const POPUP_ROWS = {
   'parsed-0': ['read', 'drew on', 'filled from'],
   answer: ['asked', 'drew on summaries', 'drew on parses'],
 };
-const SETTINGS_KEY = 'r3con-proto-settings';
+const MODEL_KEY = 'r3con-proto-model';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
+const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
+const LISTED_MODEL = 'gemini/gemini-3.8-flash';
+const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 
@@ -244,6 +247,24 @@ function placesHolding(key) {
   return [...fields.map((el) => `#${el.id}`), ...stores, ...markup];
 }
 
+function pickerState() {
+  const select = document.getElementById('model-pick');
+  return {
+    value: select.value,
+    groups: [...select.querySelectorAll('optgroup')].map((g) => g.label),
+    models: [...select.options].map((o) => o.value),
+    hint: !document.getElementById('model-hint').hidden,
+  };
+}
+
+function keyStates() {
+  return [...document.querySelectorAll('[id^="state-"]')].filter((el) => el.textContent).map((el) => el.id);
+}
+
+function storedEntries() {
+  return Object.fromEntries(Object.entries(localStorage));
+}
+
 function hasFilledIcons(els) {
   return els.map((el) => Boolean(el.querySelector('.fill-orange')));
 }
@@ -378,35 +399,91 @@ async function files() {
 }
 
 async function settings() {
-  await withPage('settings', { sample: false }, async (page) => {
-    const stored = () => page.evaluate((key) => localStorage.getItem(key), SETTINGS_KEY);
-    const saved = () => page.textContent('#settings-saved');
-    await page.click(nodeSel('doc-0'));
-    await page.click('#settings-btn');
-    await page.fill('#setting-model', '');
-    await page.click('#settings-save');
-    const blocked = async () => (await saved()) === '' && (await stored()) === null;
-    check('settings', 'an empty model blocks the save', await blocked());
-    await page.fill('#setting-model', 'hosted_vllm/qwen3-32b');
-    await page.fill('#setting-endpoint', 'localhost:8000/v1');
-    await page.click('#settings-save');
-    check('settings', 'an endpoint without http(s) blocks the save', await blocked());
-    await page.fill('#setting-endpoint', 'http://localhost:8000/v1');
-    await page.fill('#setting-key', TEST_KEY);
-    await page.click('#settings-save');
-    const kept = await stored();
-    const expected = JSON.stringify({ model: 'hosted_vllm/qwen3-32b', endpoint: 'http://localhost:8000/v1' });
-    const savedOnly = (await saved()) === 'saved' && kept === expected;
-    check('settings', 'a valid save stores only the model and endpoint', savedOnly, kept);
-    await page.keyboard.press('Escape');
-    const settingsOpen = await page.$eval('#settings', (el) => el.matches(':popover-open'));
-    check('settings', 'Escape closes the settings but not the popup', !settingsOpen && Boolean(await popup(page)));
-    await page.click('#settings-btn');
-    const keyField = await page.inputValue('#setting-key');
-    const holders = await page.evaluate(placesHolding, TEST_KEY);
-    const notKept = 'the key is not kept: reopened settings show it empty, and no field, storage or markup holds it';
-    check('settings', notKept, keyField === '' && holders.length === 0, holders.join(', '));
-  });
+  for (const layout of Object.values(LAYOUTS)) {
+    await withPage('settings', { layout, sample: false }, async (page) => {
+      await keys(page, layout.name);
+      await picker(page, layout.name);
+    });
+  }
+}
+
+async function keys(page, layoutName) {
+  const at = (name) => `${layoutName}: ${name}`;
+  const states = () => page.evaluate(keyStates);
+  const blocked = async () => (await page.textContent('#settings-saved')) === '' && (await states()).length === 0;
+  const fresh = await page.evaluate(pickerState);
+  const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL, ''], hint: true };
+  const freshName = 'with no keys the picker shows the default model, other model… and the hint';
+  check('settings', at(freshName), isDeepStrictEqual(fresh, defaultOnly), JSON.stringify(fresh));
+
+  await page.click(nodeSel('doc-0'));
+  await page.click('#settings-btn');
+  await page.fill('#endpoint-other', 'localhost:8000/v1');
+  await page.click('#settings-save');
+  check('settings', at('an endpoint without http(s) blocks the save'), await blocked());
+  await page.fill('#endpoint-other', '');
+  await page.fill('#key-other', TEST_KEY);
+  await page.click('#settings-save');
+  check('settings', at('an Other key without an endpoint blocks the save'), await blocked());
+
+  await page.fill('#endpoint-other', TEST_ENDPOINT);
+  await page.fill('#key-openai', TEST_KEY);
+  await page.fill('#key-gemini', TEST_KEY);
+  await page.click('#settings-save');
+  await becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
+  const set = await states();
+  const marked = isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
+  check('settings', at('a save marks OpenAI, Google and Other as set'), marked, set.join(', '));
+  const keyed = await page.evaluate(pickerState);
+  const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
+  const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google']) && noAnthropic && !keyed.hint;
+  check('settings', at('the picker offers only the providers with a key'), onlyKeyed, keyed.groups.join(', '));
+
+  await page.keyboard.press('Escape');
+  const settingsOpen = await page.$eval('#settings', (el) => el.matches(':popover-open'));
+  check('settings', at('Escape closes the settings but not the popup'), !settingsOpen && Boolean(await popup(page)));
+  const holding = (value) => page.evaluate(placesHolding, value);
+  const holders = [...(await holding(TEST_KEY)), ...(await holding(TEST_ENDPOINT))];
+  const notKept = 'once closed, no field, storage or markup holds a key or the endpoint';
+  check('settings', at(notKept), holders.length === 0, holders.join(', '));
+  await page.click('#settings-btn');
+  const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
+  const reopened = filled.length === 0 && isDeepStrictEqual(await states(), set);
+  check('settings', at('reopened, every field is empty and the providers are still set'), reopened, filled.join(', '));
+  await page.keyboard.press('Escape');
+}
+
+async function picker(page, layoutName) {
+  const at = (name) => `${layoutName}: ${name}`;
+  const status = () => page.textContent('#run-status');
+  const stored = () => page.evaluate(storedEntries);
+  await page.selectOption('#model-pick', LISTED_MODEL);
+  const named = await status();
+  const namesIt = named === `${SAMPLE_DOCS} documents ready · ${LISTED_MODEL}`;
+  check('settings', at('the status names the picked model'), namesIt, named);
+
+  await page.selectOption('#model-pick', '');
+  await page.click('#run-btn');
+  const invalid = await page.$eval('#model-other', (el) => !el.hidden && el.matches(':invalid'));
+  const noRun = (await count(page, '.turn')) === 0;
+  const kept = await stored();
+  const rejected = invalid && noRun && isDeepStrictEqual(kept, { [MODEL_KEY]: LISTED_MODEL });
+  const rejectName = 'other model… rejects an empty model and keeps the last choice';
+  check('settings', at(rejectName), rejected, JSON.stringify(kept));
+  await page.fill('#model-other', OTHER_MODEL);
+  const typed = await stored();
+  const onlyModel = isDeepStrictEqual(typed, { [MODEL_KEY]: OTHER_MODEL });
+  const typedName = 'other model… takes a typed model, and storage holds only that string';
+  check('settings', at(typedName), onlyModel, JSON.stringify(typed));
+  await page.click('#run-btn');
+  const ran = await becomes(page, () => document.querySelector('#panel.is-lit'));
+  check('settings', at('a run starts with the typed model'), ran);
+
+  await page.reload();
+  const after = await page.evaluate(pickerState);
+  const keysGone = after.groups.length === 0 && after.hint && (await page.evaluate(keyStates)).length === 0;
+  const survives = after.value === OTHER_MODEL && keysGone && (await status()).endsWith(OTHER_MODEL);
+  check('settings', at('after a reload the choice is kept and the keys are not'), survives, JSON.stringify(after));
 }
 
 async function popupArea() {
