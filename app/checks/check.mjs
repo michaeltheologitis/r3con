@@ -78,8 +78,16 @@ const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SIMULATED_ASK = 'simulated ask over this run';
 const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
-const NOT_IN_RUN = "1 new document isn't in this run · new run to include it";
-const FILE_ADDED_AFTER_RUN = '1 file added. A new run would cover 1 document; ask stays on this run.';
+// Files added over the sample memos take their place.
+const NOT_IN_RUN = "1 new document isn't in this run · 5 documents of this run aren't in the files now · a new run would cover 1 document";
+const REMOVED_FROM_RUN = "1 document of this run isn't in the files now · a new run would cover 4 documents";
+// WCAG 2.2's minimum target size.
+const MIN_TARGET_PX = 24;
+const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
+const ALL_LEFT_OUT = "5 documents of this run aren't in the files now · a new run would cover 0 documents";
+const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
+const FILE_ADDED_AFTER_RUN = '1 file added, in place of the 5 sample memos: a new run would cover 1 document, and ask stays on this run.';
+const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
 const TYPE_A_MODEL = 'type a model first';
 // Its faint lines: each of the 5 round-2 summaries, and the 4 parses with records.
 const SAMPLE_ANSWER_INPUTS = 9;
@@ -711,6 +719,136 @@ async function files() {
     const hintHidden = await page.$eval('#panel-hint', (el) => el.hidden);
     const sampleOnly = removed && hintHidden && (await count(page, '.node.doc')) === SAMPLE_DOCS;
     check('files', 'using the sample memos removes it', sampleOnly);
+  });
+}
+
+// ---------- remove: one file at a time, from the files tab ----------
+
+const removeButton = (page, name) => page.getByRole('button', { name: `remove ${name}`, exact: true });
+const focusedName = (page) => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.id);
+const removeNames = (page) => page.$$eval('#file-list .remove', (els) => els.map((el) => el.getAttribute('aria-label')));
+const docNames = (page) => page.$$eval('#world .node.doc', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
+
+// Each button in the files list, to open a file or remove it, is at least `px` wide and tall.
+function targetsFit(px) {
+  return [...document.querySelectorAll('#file-list button')].every((button) => {
+    const box = button.getBoundingClientRect();
+    return box.width >= px && box.height >= px;
+  });
+}
+
+// The files pane scrolls on its own, so the page's width says nothing about it.
+function listFits() {
+  const view = document.getElementById('file-list-view');
+  return view.scrollWidth <= view.clientWidth;
+}
+
+async function removeArea() {
+  const names = recordedSample().docs.map((d) => d.name);
+  for (const layout of Object.values(LAYOUTS)) {
+    await withPage('remove', { layout, sample: false }, async (page) => {
+      await page.click('#tab-files');
+      const buttons = await removeNames(page);
+      const named = isDeepStrictEqual(buttons, names.map((name) => `remove ${name}`));
+      const big = await page.evaluate(targetsFit, MIN_TARGET_PX);
+      check('remove', `${layout.name}: each file has a remove button named for it, and each button in the list is at least ${MIN_TARGET_PX} px each way`, named && big, buttons.join(', '));
+      await page.setInputFiles('#file-input', memo(LONG_NAME, 'A memo with a long name.\n'));
+      await removeButton(page, LONG_NAME).waitFor();
+      check('remove', `${layout.name}: with a long file name, the files list has no horizontal scroll`, await page.evaluate(listFits));
+    });
+  }
+
+  await withPage('remove', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, names[1]).click();
+    const left = names.filter((_, i) => i !== 1);
+    const after = {
+      docs: await docNames(page),
+      count: await page.textContent('#files-count'),
+      hint: await page.textContent('#panel-hint'),
+      status: await page.textContent('#run-status'),
+      head: (await page.textContent('#files-head')).split(' · ').at(-1),
+      said: await page.textContent('#files-said'),
+      live: await page.$eval('#files-said', (el) => el.getAttribute('aria-live')),
+      focus: await focusedName(page),
+    };
+    const expected = {
+      docs: left,
+      count: String(left.length),
+      hint: `${left.length} documents · ready to run`,
+      status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
+      head: 'sample memos',
+      said: `Removed ${names[1]}.`,
+      live: 'polite',
+      focus: `remove ${names[2]}`,
+    };
+    const beforeName = "removing a file before a run drops its node, recounts, still calls the memos left the sample, says so in the files pane's live line, and the focus moves to the next file's remove";
+    check('remove', beforeName, isDeepStrictEqual(after, expected), JSON.stringify(after));
+
+    const offer = await page.$eval('#sample-btn', (button) => (button.hidden ? null : button.textContent));
+    check('remove', 'with a sample memo removed, the sample button offers all of them back', offer === ALL_SAMPLE_MEMOS, offer);
+
+    await page.click('#tab-chat');
+    await page.click('#run-btn');
+    const simulated = await page.textContent('#run-status');
+    check('remove', 'with a sample memo removed, the next run is simulated, not the recording', simulated.startsWith('● done · simulated run'), simulated);
+    const stillSaid = await page.textContent('#files-said');
+    check('remove', "after a removal and then a run, the files pane's line says only what happened, nothing of the next run", stillSaid === `Removed ${names[1]}.`, stillSaid);
+
+    await page.click('#tab-files');
+    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
+    await removeButton(page, '06_extra_memo.txt').waitFor();
+    const listed = await removeNames(page);
+    const head = await page.textContent('#files-head');
+    const said = [await page.textContent('#files-said'), await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent)];
+    const inPlace = `1 file added, in place of the ${left.length} sample memos`;
+    const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
+    const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && saysSo;
+    check('remove', 'files added over the sample memos left take their place, and the files pane and the chat say which they replaced', replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
+
+    await page.click('#sample-btn');
+    const back = { files: (await removeNames(page)).length, hidden: await page.$eval('#sample-btn', (button) => button.hidden) };
+    check('remove', 'the sample button brings back all the sample memos, then hides', isDeepStrictEqual(back, { files: names.length, hidden: true }), JSON.stringify(back));
+  });
+
+  await withPage('remove', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, names.at(-1)).click();
+    const previous = await focusedName(page);
+    for (const name of names.slice(0, -1)) await removeButton(page, name).click();
+    const none = await focusedName(page);
+    const moves = previous === `remove ${names.at(-2)}` && none === 'file-input';
+    check('remove', "removing the last file in the list moves the focus to the previous one's remove, and with none left to adding files", moves, `${previous}; ${none}`);
+    await page.click('#tab-chat');
+    await send(page, NEW_QUESTION);
+    const said = await page.evaluate(lastTurnLines);
+    check('remove', 'with every file removed, run refuses with the line it gives for no files', said.includes(ADD_FILES_FIRST) && (await count(page, '#world .node')) === 0, said.join(' | '));
+  });
+
+  const asks = recordedAsks();
+  await withPage('remove', {}, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, names[1]).click();
+    const footer = await page.evaluate(composer);
+    const nodes = await count(page, '#world .node');
+    const status = await page.textContent('#run-status');
+    await page.click('#tab-chat');
+    await send(page, asks[0].question);
+    const answered = await becomes(page, landedNode, 'answer-1');
+    const docs = await count(page, '#world .node.doc');
+    const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-1')));
+    const overRun = answered && docs === SAMPLE_DOCS && into.length === SAMPLE_ANSWER_INPUTS && into.includes('r2-1>answer-1');
+    const kept = nodes === SAMPLE_COUNTS.nodes && footer.primary === 'ask ⏎' && footer.note === REMOVED_FROM_RUN && status === SAMPLE_STATUS;
+    const keptName = "after a run, removing one of its files keeps the run's nodes and done line, an ask still answers over the run, the removed file's summary too, and the footer says what a new run would cover";
+    check('remove', keptName, kept && overRun, `${nodes} nodes; ${footer.note}; ${status}; ${into.length} lines into answer-1`);
+
+    await page.click('#tab-files');
+    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
+    await page.waitForSelector('.node.pending');
+    await removeButton(page, '06_extra_memo.txt').click();
+    const note = (await page.evaluate(composer)).note;
+    const dropped = (await count(page, '.node.pending')) === 0 && note === ALL_LEFT_OUT;
+    check('remove', "after a run, removing a file added since drops its not-run node, and the footer's line for it", dropped, note);
   });
 }
 
@@ -1857,6 +1995,13 @@ async function liveUnreadable(url) {
     const status = await page.textContent('#run-status');
     const refused = status === 'no readable text in 02_blank.txt; nothing was sent' && posts.length === 0;
     check('live', 'a file with no readable text is named, and nothing is sent', refused, `${status}; ${posts.length} posts`);
+    await page.click('#tab-files');
+    await page.getByRole('button', { name: 'remove 02_blank.txt', exact: true }).click();
+    await page.click('#tab-chat');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', 'once the unreadable file is removed, the next run sends only the readable one', isDeepStrictEqual(sent, ['A memo.\n']), JSON.stringify(sent));
   });
 }
 
@@ -1915,6 +2060,19 @@ async function liveLoadProblem(url) {
     const cleared = saved && status === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;
     const problemName = 'a connection lost at load stays in the status, through typing and a 500, until a call to r3con-app succeeds';
     check('live', problemName, atLoad && typing && unwell && cleared, `typing ${typing}; 500 ${unwell}; then ${status}`);
+  });
+}
+
+// Loses the connection at load, so the status holds the error, and then removes a file.
+async function liveRemoveKeepsProblem(url) {
+  const before = (page) => page.route('**/api/keys', (route) => route.abort());
+  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
+    const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
+    check('live', 'a connection lost at load shows in the status', atLoad, await page.textContent('#run-status'));
+    await page.click('#tab-files');
+    await page.locator('#file-list .remove').first().click();
+    const status = await page.textContent('#run-status');
+    check('live', 'removing a file before a run leaves a connection error in the status', status === LOST_CONNECTION, status);
   });
 }
 
@@ -1982,6 +2140,11 @@ async function liveStop(url, server) {
     const disabled = await page.$eval('#stop-btn', (button) => button.disabled);
     await pressStop(page);
     check('live', 'while a stopped run finishes its call in flight, the status says it is stopping, and stop is disabled', stoppingSaid === STOPPING && disabled, stoppingSaid);
+    await page.click('#tab-files');
+    await page.locator('#file-list .remove').first().click();
+    const afterRemoval = await page.textContent('#run-status');
+    await page.click('#tab-chat');
+    check('live', 'removing a file while a run is stopping leaves the stopping line', afterRemoval === STOPPING, afterRemoval);
 
     server.release();
     const ended = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
@@ -2146,6 +2309,7 @@ async function live() {
     await liveStaleToken(url);
     await liveStopRefused(url);
     await liveStopLate(url);
+    await liveRemoveKeepsProblem(url);
   });
   const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
   for (const body of stateful) await withFakeServer(body);
@@ -2154,7 +2318,7 @@ async function live() {
 
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
