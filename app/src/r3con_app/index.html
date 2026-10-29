@@ -963,6 +963,7 @@ p { margin: 0; }
   const LOST_CONNECTION = 'lost the connection to r3con-app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
+  const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
   const TYPE_A_MODEL = 'type a model to run';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const LIVE_KEYS_NOTE =
@@ -1044,9 +1045,8 @@ p { margin: 0; }
     filesDirty: true,
     run: null,
     runTurn: null,
-    // Aborts every stream of the run on the panel: its events and its asks.
-    streams: new AbortController(),
-    running: false,
+    // The streams open on r3con-app, a run's events or an ask's: each `{ kind }`, dropped once closed.
+    streams: new Set(),
     nodes: new Map(),
     edges: new Map(),
     timers: [],
@@ -1166,7 +1166,7 @@ p { margin: 0; }
   // An error whose message is for the user: r3con-app's own words, or what went wrong reaching it.
   class ServerError extends Error {}
 
-  // A stale token or a lost connection, kept for the status until a call to r3con-app succeeds.
+  // A stale token or r3con-app out of reach, kept for the status until a call to it succeeds.
   let connectionProblem = null;
 
   // What to tell the user about `error`; one that is not the server's is a bug, so it also goes to the console.
@@ -1176,32 +1176,28 @@ p { margin: 0; }
     return fallback;
   }
 
-  // A fetch or a read that failed, or with no error a stream that ended early: aborted on purpose,
-  // or r3con-app is out of reach.
-  function lost(error) {
-    if (error?.name === 'AbortError') return error;
-    connectionProblem = LOST_CONNECTION;
-    return new ServerError(LOST_CONNECTION);
-  }
+  const lostConnection = () => new ServerError(LOST_CONNECTION);
 
-  async function api(path, { method = 'GET', body, signal } = {}) {
+  async function api(path, { method = 'GET', body } = {}) {
     let response;
     try {
       response = await fetch(path, {
         method,
-        signal,
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-    } catch (error) {
-      throw lost(error);
+    } catch {
+      connectionProblem = LOST_CONNECTION;
+      throw lostConnection();
     }
     if (response.status === UNAUTHORIZED) {
       connectionProblem = STALE_TOKEN;
       throw new ServerError(STALE_TOKEN);
     }
-    connectionProblem = null;
-    if (response.ok) return response;
+    if (response.ok) {
+      connectionProblem = null;
+      return response;
+    }
     const reply = await response.json().catch(() => null);
     throw new ServerError(reply?.error ?? `r3con-app answered ${response.status} ${response.statusText}`.trim());
   }
@@ -1218,8 +1214,8 @@ p { margin: 0; }
     let buffer = '';
     try {
       for (;;) {
-        const { value, done } = await reader.read().catch((error) => {
-          throw lost(error);
+        const { value, done } = await reader.read().catch(() => {
+          throw lostConnection();
         });
         if (done) return;
         const frames = (buffer + value).split(/\r?\n\r?\n/);
@@ -1234,14 +1230,27 @@ p { margin: 0; }
   }
 
   // Hands each of a run's or an ask's events to `onEvent`; a stream that stops before its last event lost the server.
-  async function follow(path, onEvent, signal) {
-    const response = await api(path, { signal });
+  async function follow(path, onEvent) {
+    const response = await api(path);
     let last = null;
     for await (const event of serverEvents(response.body)) {
       last = event;
       onEvent(event);
     }
-    if (!ENDINGS.has(last?.type)) throw lost();
+    if (!ENDINGS.has(last?.type)) throw lostConnection();
+  }
+
+  const streaming = (kind) => [...state.streams].some((stream) => stream.kind === kind);
+
+  function openStream(kind) {
+    const stream = { kind };
+    state.streams.add(stream);
+    return stream;
+  }
+
+  function closeStream(stream) {
+    state.streams.delete(stream);
+    updateRunLabel();
   }
 
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
@@ -1999,8 +2008,8 @@ p { margin: 0; }
     setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
-  // A question asks over the run on the panel once it has an answer, until the files change.
-  const canAsk = () => Boolean(state.run?.answer) && !state.filesDirty;
+  // A question asks over the run on the panel once it has its answer and has ended, until the files change.
+  const canAsk = () => Boolean(state.run?.answer) && !streaming('run') && !state.filesDirty;
 
   function updateRunLabel() {
     $('run-btn').textContent = canAsk() ? 'send ⏎' : 'run ⏎';
@@ -2040,7 +2049,8 @@ p { margin: 0; }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
   function refusal(question, asks) {
-    if (state.running) return state.filesDirty ? RUN_STILL_GOING : ASK_WHEN_DONE;
+    if (streaming('run')) return state.filesDirty ? RUN_STILL_GOING : ASK_WHEN_DONE;
+    if (!asks && streaming('ask')) return ASK_STILL_GOING;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.files);
   }
@@ -2280,7 +2290,6 @@ p { margin: 0; }
 
   // Fills in `run` from one of its events and draws it.
   function drawEvent(run, narr, event) {
-    if (run !== state.run) return;
     const doc = (id) => docIndices(run, [id])[0];
     switch (event.type) {
       case 'run_started':
@@ -2340,19 +2349,19 @@ p { margin: 0; }
     settle(run, narr, id);
   }
 
+  // No new run starts while a stream is open, so the panel's run is this one until it ends.
   async function streamRun(run, narr) {
-    const { signal } = state.streams;
-    state.running = true;
+    const stream = openStream('run');
     narr.phase('starting');
     try {
       const body = { question: run.question, model: run.model, documents: run.docs.map((f) => f.text) };
-      const started = await api('/api/runs', { method: 'POST', body, signal });
+      const started = await api('/api/runs', { method: 'POST', body });
       run.id = (await started.json()).run_id;
-      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event), signal);
+      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event));
     } catch (error) {
-      if (error.name !== 'AbortError') failRun(narr, explain(error, error.message, 'the live run stopped'));
+      failRun(narr, explain(error, error.message, 'the live run stopped'));
     } finally {
-      state.running = false;
+      closeStream(stream);
     }
   }
 
@@ -2360,14 +2369,11 @@ p { margin: 0; }
   async function askOver(run, question, model) {
     const narr = narrator(addTurn(question).body, { status: false });
     const how = `an ask over this run · ${model}`;
-    const { signal } = state.streams;
     const failed = (text) => {
       narr.done();
       sayError(narr, text);
     };
-    // Once another run is on the panel, this ask's citations would point at its nodes.
     const onEvent = (event) => {
-      if (run !== state.run) return;
       if (event.type === 'reasoning_finished') {
         narr.done();
         sayAnswer(run, narr, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
@@ -2375,21 +2381,20 @@ p { margin: 0; }
       if (event.type === 'ask_finished') narr.say('sub', [how, ...spent(totalsOf(event))].join(' · '));
       if (event.type === 'ask_failed') failed(`${how} · failed · ${event.error}`);
     };
+    const stream = openStream('ask');
     narr.phase(`asking · ${model}`);
     try {
-      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model }, signal });
-      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent, signal);
+      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
+      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent);
     } catch (error) {
-      if (error.name !== 'AbortError') return failed(explain(error, error.message, 'the ask stopped'));
-      narr.done();
-      narr.say('main', 'stopped when a new run started', { dim: true });
+      failed(explain(error, error.message, 'the ask stopped'));
+    } finally {
+      closeStream(stream);
     }
   }
 
   function playRun(run) {
     cancelTimers();
-    state.streams.abort();
-    state.streams = new AbortController();
     const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
     clearPanel();
     state.run = run;
@@ -2455,7 +2460,7 @@ p { margin: 0; }
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => resolve('');
-      reader.readAsText(file);
+      reader.readAsText(mode.readable(file));
     });
   }
 
@@ -2674,9 +2679,30 @@ p { margin: 0; }
     $('settings-saved').textContent = text;
   }
 
-  // Other is entered once it has an endpoint. Keys are saved one at a time, the markers following
-  // each answer; on a failure the save stops there, and the fields keep what was typed until they close.
+  function clearKey(provider) {
+    $(`key-${provider}`).value = '';
+    if (provider !== OTHER) return;
+    $('endpoint-other').value = '';
+    $('endpoint-other').required = false;
+  }
+
+  let saving = false;
+
+  // A save asked for while one is in flight is dropped: it would send the same keys again.
   async function saveSettings() {
+    if (saving) return;
+    saving = true;
+    try {
+      await saveEnteredKeys();
+    } finally {
+      saving = false;
+    }
+  }
+
+  // Other is entered once it has an endpoint. Keys are saved one at a time, each field cleared once
+  // its key is saved and the markers following each answer; a failure stops the save, and the fields
+  // left keep what was typed until they close.
+  async function saveEnteredKeys() {
     const endpoint = $('endpoint-other').value;
     const entered = Object.keys(PROVIDERS)
       .map((provider) => [provider, $(`key-${provider}`).value.trim()])
@@ -2688,6 +2714,7 @@ p { margin: 0; }
       } catch (error) {
         return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't save", "couldn't save the keys")}`);
       }
+      clearKey(provider);
     }
     clearSettings();
     showSaveResult('saved');
@@ -2954,6 +2981,8 @@ p { margin: 0; }
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
     needsModel: (question, asks) => !asks && !replaysRecording(question),
     refuseFiles: () => null,
+    // It shows a file's start only, so it reads no more than that.
+    readable: (file) => file.slice(0, READ_BYTES),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
     followUp: simulatedFollowUp,
@@ -2969,6 +2998,7 @@ p { margin: 0; }
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
+    readable: (file) => file,
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     followUp: (question) => askOver(state.run, question, pickedModel()),

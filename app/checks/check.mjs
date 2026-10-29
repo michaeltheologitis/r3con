@@ -97,8 +97,12 @@ const UNAUTHORIZED_LOG = 'Failed to load resource: the server responded with a s
 const CUT_STREAM_LOG = 'Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING';
 const REFUSED_LOG = 'Failed to load resource: the server responded with a status of 422';
 const ABORTED_LOG = 'Failed to load resource: net::ERR_FAILED';
+const SERVER_ERROR_LOG = 'Failed to load resource: the server responded with a status of 500';
 const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
 const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
+const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
+// Long enough that a second click lands while the first save is still in flight.
+const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
 const scriptedSummary = (text) => text.split('\n').find((line) => line.trim() && !line.includes(QUIET)) ?? '';
 
@@ -374,6 +378,30 @@ function cutEventStreams(size) {
         const { value, done } = await reader.read();
         if (done) return controller.close();
         for (let i = 0; i < value.length; i += size) controller.enqueue(value.slice(i, i + size));
+      },
+    });
+    return new Response(body, { status: response.status, headers: response.headers });
+  };
+}
+
+// Holds back each event stream from its run_finished frame on, until the page sets window.releaseRunEnd.
+function holdRunEnd() {
+  const realFetch = window.fetch;
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 50));
+  window.fetch = async (...args) => {
+    const response = await realFetch(...args);
+    if (!response.headers.get('content-type')?.startsWith('text/event-stream')) return response;
+    const reader = response.body.getReader();
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) return controller.close();
+        const text = new TextDecoder().decode(value);
+        if (!text.includes('"run_finished"')) return controller.enqueue(value);
+        const end = text.lastIndexOf('data: ', text.indexOf('"run_finished"'));
+        controller.enqueue(new TextEncoder().encode(text.slice(0, end)));
+        while (!window.releaseRunEnd) await wait();
+        controller.enqueue(new TextEncoder().encode(text.slice(end)));
       },
     });
     return new Response(body, { status: response.status, headers: response.headers });
@@ -850,6 +878,7 @@ function postsOf(page) {
   return posts;
 }
 
+// Saves a key on its server.
 async function liveSession(url) {
   const token = tokenOf(url);
   await withPage('live', { url, sample: false }, async (page, messages) => {
@@ -940,20 +969,41 @@ async function liveParts(url) {
     const missing = expected.filter((start) => !lines.some((text) => text.startsWith(start)));
     const partsName = 'a document read in two parts, the first with nothing relevant, is narrated from both';
     check('live', partsName, done && missing.length === 0, missing.join(' | ') || 'all four lines');
+  });
+}
 
+async function liveRunEnd(url) {
+  const before = (page) => page.addInitScript(holdRunEnd);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.click('#run-btn');
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
+    const whileOpen = await page.textContent('#run-btn');
+    await page.evaluate(() => (window.releaseRunEnd = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const once = await page.textContent('#run-btn');
+    const endName = 'the button offers to ask only once the run has ended, not when its answer lands';
+    check('live', endName, answered && done && whileOpen === 'run ⏎' && once === 'send ⏎', `${whileOpen} → ${once}`);
+  });
+}
+
+// Leaves an ask hanging on its server.
+async function liveAskGoing(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await page.fill('#question', `Which site is quietest? ${HANGS}`);
     await page.click('#run-btn');
-    await becomes(page, lastTurnSays, [`asking · ${DEFAULT_MODEL}`]);
-    await page.setInputFiles('#file-input', memo('07_extra.txt', 'An extra memo.\n'));
+    const asking = await becomes(page, lastTurnSays, [`asking · ${DEFAULT_MODEL}`]);
+    await page.setInputFiles('#file-input', memo('06_extra.txt', 'An extra memo.\n'));
     await page.waitForSelector('.node.pending');
     await page.fill('#question', 'Which memo is the extra one?');
     await page.click('#run-btn');
-    const stopped = await becomes(page, () => {
-      const ask = [...document.querySelectorAll('.turn')].at(-2);
-      return !ask.querySelector('.line.spin') && ask.textContent.includes('stopped when a new run started');
-    });
-    const ranOn = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-    check('live', 'a new run stops an ask still going over the last one', stopped && ranOn, await page.textContent('#run-status'));
+    const refused = await page.textContent('#run-status');
+    const sent = posts.filter((path) => path === '/api/runs').length;
+    const stillAsking = await page.evaluate(lastTurnLines);
+    const askName = "while an ask is going, a new run is refused: it can't be stopped yet";
+    check('live', askName, asking && refused === ASK_STILL_GOING && sent === 1 && stillAsking.includes(`asking · ${DEFAULT_MODEL}`), `${refused}; ${sent} runs`);
   });
 }
 
@@ -986,18 +1036,24 @@ async function liveUnreadable(url) {
   });
 }
 
+// Saves keys on its server.
 async function liveKeySaves(url) {
-  const refuseGemini = (route) => {
+  const saves = [];
+  const refuseGemini = async (route) => {
     const request = route.request();
-    if (request.method() !== 'POST' || request.postDataJSON().provider !== 'gemini') return route.continue();
-    return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'refused by the check' }) });
+    if (request.method() !== 'POST') return route.continue();
+    const { provider } = request.postDataJSON();
+    saves.push(provider);
+    if (provider === 'gemini') return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'refused by the check' }) });
+    await new Promise((resolve) => setTimeout(resolve, SLOW_SAVE_MS));
+    return route.continue();
   };
   const before = (page) => page.route('**/api/keys', refuseGemini);
   await withPage('live', { url, sample: false, before, expectedErrors: [REFUSED_LOG] }, async (page) => {
     await page.click('#settings-btn');
     await page.fill('#key-anthropic', TEST_KEY);
     await page.fill('#key-gemini', TEST_KEY);
-    await page.click('#settings-save');
+    await page.dblclick('#settings-save');
     const named = await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
     const said = await page.textContent('#settings-saved');
     const marked = (await page.evaluate(keyStates)).sort();
@@ -1005,24 +1061,36 @@ async function liveKeySaves(url) {
     const keysName = 'a key save one provider refuses names it, and the set markers match the server';
     const matches = named && said === 'Google · refused by the check' && isDeepStrictEqual(marked, onServer);
     check('live', keysName, matches, `${said}; page ${marked.join(' ')}; server ${onServer.join(' ')}`);
+    const fields = [await page.inputValue('#key-anthropic'), await page.inputValue('#key-gemini')];
+    const clearedName = 'a save stopped partway clears each key it saved and keeps the rest';
+    check('live', clearedName, isDeepStrictEqual(fields, ['', TEST_KEY]), fields.map((value) => (value ? 'kept' : 'cleared')).join(', '));
+    check('live', 'a second click while a save is in flight sends nothing more', isDeepStrictEqual(saves, ['anthropic', 'gemini']), saves.join(' '));
   });
 }
 
+// Saves a key on its server.
 async function liveLoadProblem(url) {
   const before = (page) => page.route('**/api/keys', (route) => route.abort());
-  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
+  const failing = (route) => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'still unwell' }) });
+  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG, SERVER_ERROR_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
     await page.fill('#question', 'Which memo mentions the storm?');
-    const kept = (await page.textContent('#run-status')) === LOST_CONNECTION;
+    const typing = (await page.textContent('#run-status')) === LOST_CONNECTION;
     await page.unroute('**/api/keys');
+    await page.route('**/api/keys', failing);
     await page.click('#settings-btn');
     await page.fill('#key-anthropic', TEST_KEY);
+    await page.click('#settings-save');
+    await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
+    await page.fill('#question', 'Which memo mentions the storm, again?');
+    const unwell = (await page.textContent('#run-status')) === LOST_CONNECTION;
+    await page.unroute('**/api/keys');
     const saved = await saveKeys(page);
     await page.keyboard.press('Escape');
     const status = await page.textContent('#run-status');
     const cleared = saved && status === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;
-    const problemName = 'a connection lost at load stays in the status until a call to r3con-app succeeds';
-    check('live', problemName, atLoad && kept && cleared, `kept ${kept}; then ${status}`);
+    const problemName = 'a connection lost at load stays in the status, through typing and a 500, until a call to r3con-app succeeds';
+    check('live', problemName, atLoad && typing && unwell && cleared, `typing ${typing}; 500 ${unwell}; then ${status}`);
   });
 }
 
@@ -1081,18 +1149,17 @@ async function liveElsewhere() {
   });
 }
 
+// A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
-    await liveSession(url);
     await liveCutStream(url);
+    await liveRunEnd(url);
     await liveParts(url);
     await liveFailure(url);
     await liveUnreadable(url);
-    await liveKeySaves(url);
-    await liveLoadProblem(url);
     await liveStaleToken(url);
   });
-  await withFakeServer(liveGoingThenLost);
+  for (const stateful of [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost]) await withFakeServer(stateful);
   await liveElsewhere();
 }
 
