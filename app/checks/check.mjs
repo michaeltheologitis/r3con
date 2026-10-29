@@ -1,6 +1,11 @@
 // Checks the run panel in app/src/r3con_app/index.html in headless Chromium: node app/checks/check.mjs
-import { readFileSync } from 'node:fs';
+// The live area serves it with app/checks/fake_server.py, through uv.
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -67,6 +72,29 @@ const FIELD_NAMES = {
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 
+const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
+const FAKE_SERVER = ['run', '--project', 'app', 'python', 'app/checks/fake_server.py'];
+const KEY_VARIABLES = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'];
+// A first uv run may have to build the app's environment.
+const SERVER_START_MS = 120_000;
+const LIVE_RUN_MS = 30_000;
+// What fake_server.py's model does: the markers it obeys, its answer, and what it cites.
+const FAILS = '(the model is down)';
+const HANGS = '(the model hangs)';
+const SCRIPTED_ANSWER = "The check's scripted model answers this.";
+const SCRIPTED_CITES = {
+  r2: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i === 0 ? 1 : 0] })),
+  parsed: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i] })),
+  answer: { provenance: { summary_ids: [0, 1], parse_ids: [0, 1] } },
+};
+const LIVE_NODES = 22;
+const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
+const LIVE_FAILED = "● failed in relevance · RuntimeError: the check's model is down";
+const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
+const LOST_CONNECTION = '● lost the connection to r3con-app';
+const UNAUTHORIZED_LOG = 'Failed to load resource: the server responded with a status of 401';
+const CUT_STREAM_LOG = 'Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING';
+
 let browser;
 let failures = 0;
 
@@ -77,7 +105,7 @@ function check(area, name, pass, detail = '') {
 
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
-async function withPage(area, { layout = LAYOUTS.desktop, sample = true, expectedErrors = [] }, body) {
+async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample = true, expectedErrors = [], before }, body) {
   const messages = [];
   let context;
   try {
@@ -86,7 +114,8 @@ async function withPage(area, { layout = LAYOUTS.desktop, sample = true, expecte
     const page = await context.newPage();
     page.on('console', (m) => messages.push({ type: m.type(), text: m.text() }));
     page.on('pageerror', (e) => messages.push({ type: 'error', text: e.message }));
-    await page.goto(PAGE_URL);
+    await before?.(page);
+    await page.goto(url);
     if (sample) await runSample(page);
     await body(page, messages);
   } catch (error) {
@@ -114,9 +143,9 @@ async function runSample(page) {
 }
 
 // Waits for a condition in the page; false if it never holds.
-async function becomes(page, predicate, arg) {
+async function becomes(page, predicate, arg, timeout = SETTLE_TIMEOUT_MS) {
   try {
-    await page.waitForFunction(predicate, arg, { timeout: SETTLE_TIMEOUT_MS });
+    await page.waitForFunction(predicate, arg, { timeout });
     return true;
   } catch (error) {
     if (error.name !== 'TimeoutError') throw error;
@@ -299,6 +328,43 @@ function pickerState() {
 
 function keyStates() {
   return [...document.querySelectorAll('[id^="state-"]')].filter((el) => el.textContent).map((el) => el.id);
+}
+
+function statusIs(text) {
+  return document.getElementById('run-status').textContent === text;
+}
+
+function statusMatches(source) {
+  return new RegExp(source).test(document.getElementById('run-status').textContent);
+}
+
+function lastTurnLines() {
+  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  return turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
+}
+
+function lastTurnSays(starts) {
+  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const lines = turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
+  return starts.every((start) => lines.some((text) => text.startsWith(start)));
+}
+
+// Cuts every event stream the page reads into chunks of `size` bytes.
+function cutEventStreams(size) {
+  const realFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const response = await realFetch(...args);
+    if (!response.headers.get('content-type')?.startsWith('text/event-stream')) return response;
+    const reader = response.body.getReader();
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) return controller.close();
+        for (let i = 0; i < value.length; i += size) controller.enqueue(value.slice(i, i + size));
+      },
+    });
+    return new Response(body, { status: response.status, headers: response.headers });
+  };
 }
 
 function storedEntries() {
@@ -706,9 +772,173 @@ async function scale() {
   }
 }
 
+// ---------- live: served by r3con-app, with a scripted model ----------
+
+// Starts fake_server.py with no provider key in its environment, in a process group of its own.
+function startFakeServer() {
+  const logsDir = mkdtempSync(join(tmpdir(), 'r3con-checks-'));
+  const env = { ...process.env };
+  for (const variable of KEY_VARIABLES) delete env[variable];
+  const server = spawn('uv', [...FAKE_SERVER, logsDir], { cwd: REPO_DIR, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  server.stderr.on('data', (chunk) => (stderr += chunk));
+  const exited = new Promise((resolve) => server.once('exit', resolve));
+  const url = new Promise((resolve, reject) => {
+    createInterface({ input: server.stdout }).once('line', resolve);
+    exited.then((code) => reject(new Error(`the fake server exited (${code}): ${stderr.trim().split('\n').at(-1)}`)));
+    setTimeout(() => reject(new Error('the fake server printed no URL in time')), SERVER_START_MS).unref();
+  });
+  const stop = async () => {
+    try {
+      process.kill(-server.pid, 'SIGKILL');
+    } catch {
+      // Its process group is already gone.
+    }
+    await exited;
+    rmSync(logsDir, { recursive: true, force: true });
+  };
+  return { url, stop };
+}
+
+const tokenOf = (url) => new URL(url).hash.replace('#token=', '');
+
+async function summaryOf(page, id) {
+  await page.keyboard.press('Escape');
+  await page.click(nodeSel(id));
+  return page.textContent('#inspector .insp-text');
+}
+
+async function liveSession(url) {
+  const token = tokenOf(url);
+  await withPage('live', { url, sample: false }, async (page, messages) => {
+    const address = await page.evaluate(() => location.href);
+    check('live', 'the launch token leaves the address bar at once', !address.includes(token) && !address.includes('#'), address);
+    const ready = await page.textContent('#run-status');
+    const readyName = 'before a run the status names the picked model, not a recording';
+    check('live', readyName, ready === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`, ready);
+
+    await page.click('#settings-btn');
+    await page.fill('#key-openai', TEST_KEY);
+    const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
+    await page.keyboard.press('Escape');
+    const fresh = await page.context().newPage();
+    await fresh.goto(url);
+    const kept = await becomes(fresh, () => document.getElementById('state-openai').textContent === 'set');
+    await fresh.close();
+    const keyName = 'a saved key marks OpenAI as set, and a fresh page of the launch reads it from the server';
+    check('live', keyName, marked && kept, `marked ${marked}, fresh page ${kept}`);
+
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    check('live', 'a run ends with the done status: its model, total tokens and cost', done, await page.textContent('#run-status'));
+    const nodes = await count(page, '.node');
+    const working = await count(page, '.node.working');
+    const drawn = nodes === LIVE_NODES && working === 0;
+    check('live', `a run draws all ${LIVE_NODES} nodes from its events, none left working`, drawn, `${nodes} nodes, ${working} working`);
+
+    const summaries = [];
+    for (let i = 0; i < SAMPLE_DOCS; i++) summaries.push(await summaryOf(page, `r1-${i}`));
+    const firstLines = recordedSample().docs.map((d) => d.text.split('\n').find((text) => text.trim()));
+    const ownName = "each summary lands on its own document's node: the run's ids map to the files by order";
+    check('live', ownName, isDeepStrictEqual(summaries, firstLines), summaries[0]);
+    const lit = await page.$$eval('.edge.lit', (els) => els.map((e) => e.dataset.key).sort());
+    const docIds = await page.$$eval('.node.doc', (els) => els.map((el) => el.dataset.id));
+    const expected = lineage(SCRIPTED_CITES, docIds);
+    const litName = 'the lit edges are exactly the lineage of the provenance the events carried';
+    check('live', litName, isDeepStrictEqual(lit, expected), `${lit.length} lit, ${expected.length} expected`);
+    const costed = [];
+    for (const id of ['r1-0', 'r2-0', 'schema', 'parsed-0']) {
+      await page.keyboard.press('Escape');
+      await page.click(nodeSel(id));
+      if ((await page.textContent('#inspector')).includes('tokens')) costed.push(id);
+    }
+    check('live', 'no node shows per-call tokens or cost, which events do not carry', costed.length === 0, costed.join(', '));
+
+    await page.keyboard.press('Escape');
+    await page.fill('#question', 'Which memo is the registry?');
+    await page.click('#run-btn');
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, 'an ask over this run'], LIVE_RUN_MS);
+    const lines = await page.evaluate(lastTurnLines);
+    const cited = lines.filter((text) => text.startsWith('drew on ')).length === 2;
+    const named = lines.some((text) => text.startsWith(`an ask over this run · ${DEFAULT_MODEL} · `));
+    const askName = 'a follow-up runs an ask and shows its answer, provenance and model in the chat';
+    check('live', askName, answered && cited && named, lines.slice(1).join(' | '));
+
+    const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
+    const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
+    const keptName = 'no storage, field, address, markup or console message holds the token or the key';
+    check('live', keptName, holders.length === 0 && logged === 0, [...holders, `${logged} messages`].join(', '));
+  });
+}
+
+async function liveCutStream(url) {
+  const before = (page) => page.addInitScript(cutEventStreams, 1);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const nodes = await count(page, '.node');
+    const summary = nodes === LIVE_NODES ? await summaryOf(page, 'r1-0') : null;
+    const whole = done && summary === recordedSample().docs[0].text.split('\n')[0];
+    const cutName = 'a stream read one byte at a time, every frame split across reads, draws the same run';
+    check('live', cutName, whole, `${nodes} nodes; ${await page.textContent('#run-status')}`);
+  });
+}
+
+async function liveFailure(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.fill('#question', `Which site logged the most incidents? ${FAILS}`);
+    await page.click('#run-btn');
+    const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
+    const working = await count(page, '.node.working');
+    const failName = "a failed run's status gives its stage and error, and no node is left working";
+    check('live', failName, failed && working === 0, `${await page.textContent('#run-status')}; ${working} working`);
+    const label = await page.textContent('#run-btn');
+    check('live', 'after a failed run the next question starts a new run', label === 'run ⏎', label);
+  });
+}
+
+async function liveStaleToken(url) {
+  const wrong = url.replace(/#token=.*/, '#token=not-this-launch');
+  await withPage('live', { url: wrong, sample: false, expectedErrors: [UNAUTHORIZED_LOG] }, async (page) => {
+    const atLoad = await becomes(page, statusIs, `● ${STALE_TOKEN}`);
+    await page.click('#run-btn');
+    const inChat = await becomes(page, lastTurnSays, [STALE_TOKEN]);
+    const staleName = 'a wrong token shows the stale-token message, at load and when a run is tried';
+    check('live', staleName, atLoad && inChat, await page.textContent('#run-status'));
+  });
+}
+
+async function liveLostConnection(url, server) {
+  await withPage('live', { url, sample: false, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
+    await page.fill('#question', `Which site logged the most incidents? ${HANGS}`);
+    await page.click('#run-btn');
+    const held = await becomes(page, () => document.querySelector('.node.r1.working') !== null, null, LIVE_RUN_MS);
+    await server.stop();
+    const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
+    const lostName = 'a run whose server goes away mid-stream says the connection was lost';
+    check('live', lostName, held && lost, await page.textContent('#run-status'));
+  });
+}
+
+async function live() {
+  const server = startFakeServer();
+  try {
+    const url = await server.url;
+    await liveSession(url);
+    await liveCutStream(url);
+    await liveFailure(url);
+    await liveStaleToken(url);
+    await liveLostConnection(url, server);
+  } catch (error) {
+    check('live', firstLine(error), false);
+  } finally {
+    await server.stop();
+  }
+}
+
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, settings, popupArea, gestures, scale];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

@@ -28,7 +28,7 @@ dev = [
 r3context = { path = "..", editable = true }
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "checks"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

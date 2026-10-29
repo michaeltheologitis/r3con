@@ -1,10 +1,8 @@
 # r3con app
 
-A prototype of the app's run panel, to iterate on its look and feel before it is connected to r3con. It replays one recorded run, on the quickstart's five memos.
+The app's run panel. Served by the local server below, it runs r3con for real: keys go to the server, a run streams its events into the panel, and a follow-up question is an ask over that run. Opened as a file (`src/r3con_app/index.html`), it is the prototype: it replays one recorded run on the quickstart's five memos, or simulates one. The design notes are on the project's Notion page, under App: the run panel.
 
-Open `src/r3con_app/index.html` in a browser. The design notes are on the project's Notion page, under App: the run panel.
-
-`node checks/check.mjs` checks the page in headless Chromium with Playwright: one line per check, and a non-zero exit if any fails.
+`node checks/check.mjs` checks the page in headless Chromium with Playwright: one line per check, and a non-zero exit if any fails. Its live area serves the page with `checks/fake_server.py`, a scripted model behind the real server, so it needs `uv`.
 
 It finds Playwright through `NODE_PATH`, as in Claude's cloud containers. Elsewhere, run `npm i -g playwright && npx playwright install chromium` once, then `NODE_PATH="$(npm root -g)" node checks/check.mjs`.
 
