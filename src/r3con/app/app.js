@@ -679,8 +679,8 @@
   const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
 
   // A tab is one run and its own drawing, so a tab in the background keeps drawing its events.
-  /** @returns {Tab} */
-  function newTab() {
+  /** @param {View} [view] @returns {Tab} */
+  function newTab(view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
     const layers = { base: group(), mid: group(), lit: group() };
     const edges = document.createElementNS(SVG_NS, 'svg');
@@ -701,7 +701,7 @@
       nodes: new Map(),
       edges: new Map(),
       layout: new Map(),
-      view: { x: 0, y: 0, k: 1 },
+      view: { ...view },
       userMoved: false,
       timers: [],
       narr: null,
@@ -2547,11 +2547,11 @@
     updateComposer();
   }
 
-  // Every run opens a tab of its own, its documents starting where the shown tab has them.
+  // Every run opens a tab of its own, its documents and view starting where the shown tab has them.
   /** @param {string} question */
   function startRun(question) {
     const at = docPositions(state.shown);
-    const tab = newTab();
+    const tab = newTab(state.shown.view);
     tab.id = state.nextTab++;
     tab.run = { ...mode.newRun(question), lit: null };
     tab.turn = addTurn(tab, question, RUN_ANSWER);
