@@ -566,7 +566,7 @@ p { margin: 0; }
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
             <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
           </div>
-          <input class="field" id="model-other" type="text" required pattern=".*\S.*" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
+          <input class="field" id="model-other" type="text" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
         </form>
       </section>
@@ -1821,8 +1821,9 @@ p { margin: 0; }
 
   function readyStatus() {
     if (state.run) return;
-    const kind = replaysRecording(questionEl.value.trim()) ? 'recorded run' : 'simulated run';
-    setStatus(`${plural(state.files.length, 'document')} ready · ${kind} · ${pickedModel() || 'no model yet'}`);
+    const recorded = replaysRecording(questionEl.value.trim());
+    const run = recorded ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`;
+    setStatus(`${plural(state.files.length, 'document')} ready · ${run}`);
   }
 
   function updateRunLabel() {
@@ -1843,14 +1844,18 @@ p { margin: 0; }
       questionEl.focus();
       return;
     }
-    questionEl.value = '';
     if (!state.files.length) {
       narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
     } else if (state.run && !state.filesDirty) {
       followUp(question);
+    } else if (!replaysRecording(question) && !pickedModel()) {
+      setStatus('type a model to run');
+      $('model-other').focus();
+      return;
     } else {
       startRun(question);
     }
+    questionEl.value = '';
     updateRunLabel();
   }
 
@@ -2269,7 +2274,7 @@ p { margin: 0; }
     });
   }
 
-  function endpointField(describedBy) {
+  function endpointField(props) {
     return h('input', {
       class: 'field',
       id: 'endpoint-other',
@@ -2281,21 +2286,21 @@ p { margin: 0; }
       spellcheck: 'false',
       autocapitalize: 'off',
       placeholder: 'http://localhost:8000/v1',
-      'aria-describedby': describedBy,
+      ...props,
     });
   }
 
   // A row is a label, a field and the provider's state; Other's field is its endpoint, with its key below.
   function keyRows() {
     return Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
-      const state = h('span', { class: 'k', id: `state-${provider}` });
+      const marker = h('span', { class: 'k', id: `state-${provider}` });
       if (provider !== OTHER) {
-        const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': state.id });
-        return [h('label', { for: key.id }, label), key, state];
+        const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
+        return [h('label', { for: key.id }, label), key, marker];
       }
-      const endpoint = endpointField(`${state.id} other-hint`);
-      const key = keyField(provider, { placeholder: 'key, if it needs one', 'aria-label': `${label} key` });
-      return [h('label', { for: endpoint.id }, label), endpoint, state, key];
+      const endpoint = endpointField({ 'aria-label': `${label}: server URL`, 'aria-describedby': `${marker.id} other-hint` });
+      const key = keyField(provider, { placeholder: 'key, if it needs one', 'aria-label': `${label}: key` });
+      return [h('label', { for: endpoint.id }, label), endpoint, marker, key];
     });
   }
 
@@ -2348,7 +2353,12 @@ p { margin: 0; }
     if (!entered.length) return showSaveResult('nothing to save');
     await Promise.all(entered.map(([provider, key]) => saveKey(provider, key, provider === OTHER ? endpoint : undefined)));
     clearSettings();
-    await refreshKeys();
+    try {
+      await refreshKeys();
+    } catch (error) {
+      console.error("couldn't read which providers have keys", error);
+      return showSaveResult("saved · couldn't refresh");
+    }
     showSaveResult('saved');
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
@@ -2530,6 +2540,7 @@ p { margin: 0; }
     $('arrange-btn').addEventListener('click', arrange);
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
+    $('settings').addEventListener('input', () => showSaveResult(''));
     $('keys-show').addEventListener('click', () => showKeys(document.querySelector('.key').type === 'password'));
     $('key-other').addEventListener('input', () => ($('endpoint-other').required = Boolean($('key-other').value.trim())));
     // The key fields sit outside the form, so Enter there doesn't submit it on its own.
@@ -2615,7 +2626,9 @@ p { margin: 0; }
     questionEl.value = SAMPLE.question;
     renderFiles();
     updateRunLabel();
-    refreshKeys();
+    renderPicker([]);
+    readyStatus();
+    refreshKeys().catch((error) => console.error("couldn't read which providers have keys", error));
     transcript.append(line('main', 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.', { dim: true }));
     applyView();
     syncDocNodes();
