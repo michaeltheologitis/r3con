@@ -9,8 +9,9 @@
   /** @typedef {{ x: number, y: number, k: number }} View */
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
-  /** @typedef {{ name: string, text: string, size: number, sample: boolean, uid: number }} LoadedFile */
-  /** @typedef {{ text?: string, why?: string }} FileRead A file's text, or why it can't be added. */
+  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
+  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
+  /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
   /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
   /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
@@ -120,7 +121,6 @@
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
-   * @property {(file: File) => Blob} readable
    * @property {(file: File) => Promise<FileRead>} readPdf
    * @property {(question: string) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
@@ -527,7 +527,6 @@
   const PDF_SUFFIX = '.pdf';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
   const SNIFF_BYTES = 8000;
-  // UTF-16 text holds NUL bytes, but with a byte-order mark, as Windows writes it, readText decodes it.
   const UTF16_BOMS = [
     [0xff, 0xfe],
     [0xfe, 0xff],
@@ -667,12 +666,12 @@
 
   let nextUid = 0;
 
-  /** @param {Omit<LoadedFile, 'uid'>} file @returns {LoadedFile} */
-  function withUid(file) {
-    return { ...file, uid: nextUid++ };
+  /** @param {Omit<LoadedFile, 'bytes' | 'uid'>} file @returns {LoadedFile} */
+  function loaded(file) {
+    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++ };
   }
 
-  const SAMPLE_FILES = SAMPLE.docs.map((d) => withUid({ ...d, sample: true }));
+  const SAMPLE_FILES = SAMPLE.docs.map((d) => loaded({ ...d, sample: true }));
 
   /** @param {LoadedFile} file */
   const docId = (file) => `doc-${file.uid}`;
@@ -803,9 +802,8 @@
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
   const totalBytes = (files) => files.reduce((sum, f) => sum + f.size, 0);
-  // What r3con is sent: the files' texts, in UTF-8, which for a PDF is far less than its file.
   /** @param {LoadedFile[]} files */
-  const textBytes = (files) => files.reduce((sum, f) => sum + new Blob([f.text]).size, 0);
+  const textBytes = (files) => files.reduce((sum, f) => sum + f.bytes, 0);
   const reduceMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Every event handled here starts at an element.
   /** @param {Event} event */
@@ -1734,8 +1732,7 @@
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
     if (isPending(state.shown, file)) meta.push('not run yet');
-    // A PDF's size is its file's, not its text's.
-    if ((isPdf(file) ? file.text.length : file.size) > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    if (file.text.length > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
     return meta.join(' · ');
   }
 
@@ -2782,8 +2779,17 @@
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => resolve('');
-      reader.readAsText(mode.readable(file));
+      reader.readAsText(file);
     });
+  }
+
+  // No text holds a NUL byte but UTF-16, which readText decodes after a byte-order mark, as Windows writes it;
+  // even then, no code unit of text is zero, as one of UTF-32 or of binary that starts the same way is.
+  /** @param {Uint8Array} start */
+  function looksLikeText(start) {
+    if (!UTF16_BOMS.some(([first, second]) => start[0] === first && start[1] === second)) return !start.includes(0);
+    for (let i = 2; i + 1 < start.length; i += 2) if (!start[i] && !start[i + 1]) return false;
+    return true;
   }
 
   /** @param {File} file @returns {Promise<FileRead>} */
@@ -2791,38 +2797,45 @@
     if (isPdf(file)) return mode.readPdf(file);
     // A file that can't be read goes on to readText, which reads it as no text.
     const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
-    const utf16 = UTF16_BOMS.some(([first, second]) => start[0] === first && start[1] === second);
-    return utf16 || !start.includes(0) ? { text: await readText(file) } : { why: NOT_TEXT };
+    return looksLikeText(start) ? { text: await readText(file) } : { why: NOT_TEXT };
   }
 
-  // Batches are added one after another, so that each one's lines in the files pane stand.
+  // Each batch is read at once, but applied after the batches before it, so that each one's lines stand.
   let adding = Promise.resolve();
 
-  // The list is copied now: a file input's empties once its value is reset.
   /** @param {Iterable<File | null>} list */
   function addFiles(list) {
-    const files = [...list];
-    adding = adding.then(() => addBatch(files)).catch((error) => console.error("couldn't add files", error));
+    const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    picked.sort((a, b) => a.name.localeCompare(b.name));
+    if (picked.length) $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
+    const reads = Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
+    adding = adding.then(async () => applyFiles(await reads)).catch(failedToAdd);
   }
 
-  /** @param {(File | null)[]} files */
-  async function addBatch(files) {
-    const picked = files.filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
-    picked.sort((a, b) => a.name.localeCompare(b.name));
-    const error = $('files-error');
-    if (!picked.length) {
-      error.hidden = false;
-      error.textContent = 'No files found there. Try picking the files themselves.';
-      return;
+  /** @param {unknown} error */
+  function failedToAdd(error) {
+    $('files-said').textContent = '';
+    const shown = $('files-error');
+    shown.hidden = false;
+    shown.textContent = `Couldn't add the files: ${explain(error, /** @type {Error} */ (error).message, "couldn't add files")}.`;
+  }
+
+  /** @param {({ file: File } & FileRead)[]} reads */
+  function applyFiles(reads) {
+    /** @type {LoadedFile[]} */
+    const read = [];
+    /** @type {Map<string, string[]>} */
+    const refused = new Map();
+    for (const r of reads) {
+      if ('why' in r) refused.set(r.why, [...(refused.get(r.why) ?? []), r.file.name]);
+      else read.push(loaded({ name: r.file.name, size: r.file.size, text: r.text, sample: false }));
     }
-    error.hidden = true;
-    $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
-    const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
-    const refused = Map.groupBy(reads.filter((r) => r.why), (r) => r.why);
+    const notAdded = [...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' ');
+    const said = reads.length ? notAdded : 'No files found there. Try picking the files themselves.';
+    const error = $('files-error');
     // Shown before it is filled, so that the alert is announced.
-    error.hidden = !refused.size;
-    error.textContent = [...refused].map(([why, rs]) => `Not added: ${rs.map((r) => r.file.name).join(', ')}. ${why}`).join(' ');
-    const read = reads.filter((r) => !r.why).map(({ file, text }) => withUid({ name: file.name, size: file.size, text, sample: false }));
+    error.hidden = !said;
+    error.textContent = said;
     if (!read.length) {
       $('files-said').textContent = '';
       return;
@@ -3397,8 +3410,6 @@
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
-    // It shows a file's start only, so it reads no more than that.
-    readable: (file) => file.slice(0, READ_BYTES),
     readPdf: async () => ({ why: PDFS_NEED_APP }),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
@@ -3423,7 +3434,6 @@
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
-    readable: (file) => file,
     async readPdf(file) {
       try {
         const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });

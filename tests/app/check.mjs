@@ -151,13 +151,19 @@ const PDF_TEXT = 'Incidents this quarter: 7.';
 const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
 // The page's READ_BYTES: a file's preview shows this much of its text.
 const READ_BYTES = 20000;
+// A stream this long, which no page uses, makes a PDF bigger than its preview.
+const PDF_PADDING = READ_BYTES + 5000;
 // Every PDF the checks add, by name: write_pdf's arguments for it, in tests/pdfs.py, so that the checks
 // and the tests make their PDFs one way. No text makes a scan.
 const PDF_SPECS = {
   '01_memo.pdf': { text: PDF_TEXT },
   '02_scan.pdf': {},
-  '03_padded.pdf': { text: PADDED_TEXT, padding: READ_BYTES + 5000 },
+  '03_padded.pdf': { text: PADDED_TEXT, padding: PDF_PADDING },
 };
+const UTF16LE_BOM = [0xff, 0xfe];
+const UTF32LE_BOM = [0xff, 0xfe, 0x00, 0x00];
+// Over READ_BYTES in UTF-16, under it in characters.
+const LONG_UTF16_CHARS = READ_BYTES * 0.75;
 const WRITE_PDFS =
   'import json, sys; from pathlib import Path; from tests.pdfs import write_pdf\n' +
   'for name, spec in json.loads(sys.argv[2]).items(): write_pdf(Path(sys.argv[1], name), **spec)';
@@ -766,17 +772,46 @@ const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? nul
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
-    await page.setInputFiles('#file-input', [pdfs['01_memo.pdf'], docx(), memo('notes.log', 'A log line.\n')]);
+    const long = utf16('utf16_long.txt', 'A Notepad note, saved as Unicode. '.repeat(LONG_UTF16_CHARS).slice(0, LONG_UTF16_CHARS), UTF16LE_BOM);
+    await page.setInputFiles('#file-input', [pdfs['01_memo.pdf'], docx(), memo('notes.log', 'A log line.\n'), long]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
     const expected = `Not added: 01_memo.pdf. ${PDFS_NEED_APP} Not added: report.docx. ${NOT_TEXT}`;
     const name = 'the prototype refuses a PDF, saying PDFs need r3con app, and a .docx, saying to save it as PDF or text, and adds a .log';
-    check('files', name, isDeepStrictEqual(listed, ['remove notes.log']) && error === expected, `${listed.join(', ')}; ${error}`);
+    check('files', name, isDeepStrictEqual(listed, ['remove notes.log', 'remove utf16_long.txt']) && error === expected, `${listed.join(', ')}; ${error}`);
+    const shown = await openFileView(page, 'utf16_long.txt');
+    const whole = shown.meta === `${fmtKb(long.buffer.length)} · your file` && shown.text.length === LONG_UTF16_CHARS;
+    const wholeName = `a UTF-16 file over ${fmtKb(READ_BYTES)} whose text is shorter shows its whole text, with no note that only the first part is shown`;
+    check('files', wholeName, long.buffer.length > READ_BYTES && whole, `${shown.meta}; ${shown.text.length} characters`);
   });
 }
 
-// ---------- remove: one file at a time, from the files tab ----------
+// With the files list taken out of the page, applying a batch throws; put back, the next batch is added.
+async function filesAddFails() {
+  await withPage('files', { sample: false, expectedErrors: ["couldn't add files"] }, async (page) => {
+    await page.click('#tab-files');
+    await page.evaluate(() => {
+      const list = document.getElementById('file-list');
+      const { parentNode, nextSibling } = list;
+      window.putBack = () => parentNode.insertBefore(list, nextSibling);
+      list.remove();
+    });
+    await page.setInputFiles('#file-input', memo('first.txt', 'A first memo.\n'));
+    const failed = `Couldn't add the files: the page has no #file-list of that type.`;
+    const said = await becomes(page, (text) => document.getElementById('files-error').textContent === text, failed);
+    const shown = [await page.textContent('#files-error'), await page.textContent('#files-said')];
+    await page.evaluate(() => window.putBack());
+    await page.setInputFiles('#file-input', memo('second.txt', 'A second memo.\n'));
+    const next = await becomes(page, () => document.getElementById('files-said').textContent === '1 file added.');
+    const listed = await removeNames(page);
+    const name = 'a batch whose adding fails says so in the files pane, without the reading line, and the next batch is still added';
+    const recovered = said && shown[1] === '' && next && listed.includes('remove second.txt') && (await filesError(page)) === null;
+    check('files', name, recovered, `${shown.join(' | ')}; then ${listed.join(', ')}`);
+  });
+}
+
+// ---------- remove: one file at a time, from the files tab ----------// ---------- remove: one file at a time, from the files tab ----------
 
 const removeButton = (page, name) => page.getByRole('button', { name: `remove ${name}`, exact: true });
 const focusedName = (page) => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.id);
@@ -2086,27 +2121,38 @@ async function livePdf(url) {
 }
 
 // The first PDF's text is held at the server until the second batch is in, which is refused at once.
+// The first PDF's text is held at the server until the second batch is in: that batch's PDF goes at once,
+// and its .docx is refused at once, but they are applied after the first.
 async function liveBatches(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     let release;
     const held = new Promise((resolve) => (release = resolve));
+    let requests = 0;
+    let sawSecond;
+    const second = new Promise((resolve) => (sawSecond = resolve));
     await page.route('**/api/documents/text?*', async (route) => {
-      await held;
+      requests += 1;
+      if (requests === 1) await held;
+      else sawSecond();
       await route.continue();
     });
     await page.setInputFiles('#file-input', pdfs['01_memo.pdf']);
-    await page.setInputFiles('#file-input', docx());
+    await page.setInputFiles('#file-input', [docx(), pdfs['03_padded.pdf']]);
+    const atOnce = await Promise.race([second.then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), SETTLE_TIMEOUT_MS))]);
     release();
-    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 1);
+    check('live', "a batch added while a PDF is still being read is read at once: its own PDF goes to r3con app before the first's text is back", atOnce);
+    await becomes(page, () => document.querySelectorAll('.node.doc').length === 2);
     const refusal = `Not added: report.docx. ${NOT_TEXT}`;
     const stands = await becomes(page, (text) => document.getElementById('files-error').textContent === text, refusal);
-    const added = await page.evaluate(() => [...document.querySelectorAll('#transcript .line .t')].some((el) => el.textContent.startsWith('1 file added')));
-    const name = "a batch added while a PDF is still being read waits its turn, so the first batch's line and the second's refusal both stand";
-    check('live', name, stands && added, `${await filesError(page)}; added said ${added}`);
+    const added = await page.evaluate(() => [...document.querySelectorAll('#transcript .line .t')].filter((el) => el.textContent.startsWith('1 file added')).length);
+    const name = "the batches are applied in turn, so both batches' lines and the second's refusal stand";
+    check('live', name, stands && added === 2, `${await filesError(page)}; ${added} lines say a file was added`);
   });
 }
 
-const utf16 = (name, text, bom) => ({ name, mimeType: 'text/plain', buffer: Buffer.concat([Buffer.from(bom ? [0xff, 0xfe] : []), Buffer.from(text, 'utf16le')]) });
+const utf16 = (name, text, bom = []) => ({ name, mimeType: 'text/plain', buffer: Buffer.concat([Buffer.from(bom), Buffer.from(text, 'utf16le')]) });
+// Its ASCII text, each character four bytes, low byte first.
+const utf32 = (name, text) => ({ name, mimeType: 'text/plain', buffer: Buffer.from([...UTF32LE_BOM, ...[...text].flatMap((c) => [c.charCodeAt(0), 0, 0, 0])]) });
 
 async function liveNotText(url) {
   await withPage('live', { url, sample: false }, async (page) => {
@@ -2117,8 +2163,10 @@ async function liveNotText(url) {
       binary,
       memo('notes.log', 'A log line.\n'),
       memo('README', 'An extensionless note.\n'),
-      utf16('utf16_bom.txt', 'A Notepad note.\n', true),
-      utf16('utf16_no_bom.txt', 'No byte-order mark.\n', false),
+      utf16('utf16_bom.txt', 'A Notepad note.\n', UTF16LE_BOM),
+      utf16('utf16_no_bom.txt', 'No byte-order mark.\n'),
+      utf32('utf32.txt', 'Four bytes a character.\n'),
+      { name: 'ff_fe.bin', mimeType: 'application/octet-stream', buffer: Buffer.from([...UTF16LE_BOM, 0x13, 0x37, 0x00, 0x00, 0x2a]) },
     ];
     await page.setInputFiles('#file-input', files);
     const three = await becomes(page, () => document.querySelectorAll('.node.doc').length === 3);
@@ -2126,10 +2174,10 @@ async function liveNotText(url) {
     const listed = await removeNames(page);
     const error = await filesError(page);
     const refused =
-      error === `Not added: data.bin, report.docx, utf16_no_bom.txt. ${NOT_TEXT}` &&
+      error === `Not added: data.bin, ff_fe.bin, report.docx, utf16_no_bom.txt, utf32.txt. ${NOT_TEXT}` &&
       isDeepStrictEqual(listed, ['remove notes.log', 'remove README', 'remove utf16_bom.txt']);
     const name =
-      'a .docx, a file with a NUL byte and UTF-16 without a byte-order mark are refused, named, with what to do, and nothing is sent; a .log, an extensionless file and UTF-16 with one are added';
+      'a .docx, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an extensionless file and UTF-16 with a byte-order mark are added';
     check('live', name, three && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
     await page.click('#tab-chat');
     const started = runPosted(page);
@@ -2479,7 +2527,7 @@ async function live() {
 try {
   pdfs = writePdfs(PDF_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, filesNotText, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, filesNotText, filesAddFails, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

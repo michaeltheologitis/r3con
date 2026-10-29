@@ -328,6 +328,19 @@ def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
     assert documents[1] == "a plain memo"
 
 
+def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_on(
+    answering_llm, tmp_path
+):
+    pdf = tmp_path / "memo.pdf"
+    # pypdf reads a font's ToUnicode CMap with surrogatepass: D800 stays half a pair.
+    write_pdf(pdf, "Memo A here", to_unicode={"A": "D800"})
+    documents = read_documents(pdf)
+    assert documents == ["Memo \ufffd here"]
+    answer = finished_run(answering_llm, tmp_path, documents)
+    assert answering_llm.requests_for("relevance")
+    assert answer.answer == "Memo \ufffd here"
+
+
 def test_a_glob_is_expanded_from_the_working_directory(tmp_path):
     write_tree(tmp_path)
     assert read_documents("*.md") == ["alpha document"]

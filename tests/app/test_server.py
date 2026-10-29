@@ -640,10 +640,13 @@ def test_a_body_over_the_limit_is_refused(
     ("text", "to_unicode", "extracted"),
     [
         (PDF_TEXT, None, PDF_TEXT),
-        # pypdf reads a ToUnicode CMap with surrogatepass: half a pair stays one.
-        ("Memo A here", {"A": "D800"}, "Memo \ud800 here"),
+        # pypdf reads a ToUnicode CMap with surrogatepass: half a pair stays half.
+        ("Memo A here", {"A": "D800"}, "Memo \ufffd here"),
+        ("Memo A here", {"A": "D83DDE00"}, "Memo \U0001f600 here"),
+        # A pair mapped from two codes comes as two code units.
+        ("Memo AB here", {"A": "D83D", "B": "DE00"}, "Memo \U0001f600 here"),
     ],
-    ids=["plain", "lone-surrogate"],
+    ids=["plain", "half-a-pair", "pair", "pair-from-two-codes"],
 )
 def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     client: TestClient,

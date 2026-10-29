@@ -110,7 +110,8 @@ def _pdf_text(name: str, pdf: Path | IO[bytes]) -> str:
 
     A PDF pypdf can't read gives ``""``, and so does one with no text layer (a scan),
     which the caller then drops: say so rather than letting it vanish. The fix is OCR,
-    outside this package.
+    outside this package. Half a surrogate pair, which a font's ToUnicode map can give
+    and no UTF-8 encoder takes, becomes U+FFFD.
     """
     try:
         text = "\n\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
@@ -119,6 +120,9 @@ def _pdf_text(name: str, pdf: Path | IO[bytes]) -> str:
             "%s: not readable as a PDF (%s); skipping it", name, type(e).__name__
         )
         return ""
+    # pypdf decodes ToUnicode maps with surrogatepass, so a pair can come as two code
+    # units, or half of one alone: UTF-16 joins the pairs and replaces the halves.
+    text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
     if not text.strip():
         _log.warning(
             "%s: no extractable text — a scanned PDF needs OCR first; skipping it", name

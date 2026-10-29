@@ -395,9 +395,7 @@ async def document_text(request: Request) -> Response:
     pdf = io.BytesIO(await request.body())
     # pypdf is CPU-bound: on the event loop, it would hold up every other request.
     text = await run_in_threadpool(r3con._pdf_text, query.name, pdf)
-    # pypdf can extract a lone surrogate, which JSONResponse can't encode as UTF-8 and
-    # json.dumps escapes.
-    return Response(json.dumps({"text": text}), media_type="application/json")
+    return JSONResponse({"text": text})
 
 
 async def start_run(request: Request) -> Response:
