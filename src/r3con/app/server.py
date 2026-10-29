@@ -1,8 +1,9 @@
 """The local server between r3con's app and r3con.
 
-It listens on 127.0.0.1 only and serves the page at ``/`` and a JSON API under
-``/api/``. A request must name this server in ``Host``, and in ``Origin`` when it sends
-one (403 otherwise). Every request but the page's must carry the launch's token as
+It listens on 127.0.0.1 only and serves the page at ``/``, its stylesheet and script
+at ``/app.css`` and ``/app.js``, and a JSON API under ``/api/``. A request must name
+this server in ``Host``, and in ``Origin`` when it sends one (403 otherwise). Every
+request but those for the page and its two files must carry the launch's token as
 ``Authorization: Bearer <token>`` (401 otherwise); the page gets the token from the
 opened URL's fragment, ``#token=...``.
 
@@ -97,7 +98,17 @@ Provider = Literal["openai", "anthropic", "gemini"]
 Kind = Literal["run", "ask"]
 
 HOST = "127.0.0.1"
-PAGE = Path(__file__).with_name("index.html")
+# Media types named, not guessed: Python 3.11, or Windows' registry, can guess otherwise.
+PAGE_FILES = {
+    "/": ("index.html", "text/html"),
+    "/app.css": ("app.css", "text/css"),
+    "/app.js": ("app.js", "text/javascript"),
+}
+# Revalidated on every load, so that a new page never runs an old version's script.
+PAGE_HEADERS = {
+    "Content-Security-Policy": "frame-ancestors 'none'",
+    "Cache-Control": "no-cache",
+}
 LOGS_DIR = platformdirs.user_data_path("r3con") / "runs"
 TOKEN_BYTES = 32
 ID_BYTES = 8
@@ -115,7 +126,6 @@ SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
-PUBLIC_PATHS = frozenset({"/"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
 logger = get_logger("app")
@@ -335,9 +345,9 @@ def _job(jobs: dict[str, Job], job_id: str, kind: Kind) -> Job:
     return job
 
 
-async def page(request: Request) -> Response:
+async def page_file(request: Request, *, name: str, media_type: str) -> Response:
     return FileResponse(
-        PAGE, headers={"Content-Security-Policy": "frame-ancestors 'none'"}
+        Path(__file__).with_name(name), media_type=media_type, headers=PAGE_HEADERS
     )
 
 
@@ -432,7 +442,7 @@ def _refusal(
     origin = headers.get("origin")
     if origin is not None and origin not in origins:
         return JSONResponse({"error": "This server answers only its own page."}, 403)
-    if scope["path"] in PUBLIC_PATHS:
+    if scope["path"] in PAGE_FILES:
         return None
     given = headers.get("authorization", "").encode()
     if not hmac.compare_digest(given, authorization):
@@ -473,7 +483,10 @@ def create_app(
     ``state.completion`` is passed to r3con as its own ``completion`` is."""
     app = Starlette(
         routes=[
-            Route("/", page),
+            *(
+                Route(path, partial(page_file, name=name, media_type=media_type))
+                for path, (name, media_type) in PAGE_FILES.items()
+            ),
             Route("/api/keys", keys, methods=["GET"]),
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
