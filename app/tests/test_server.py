@@ -351,7 +351,7 @@ def test_a_pasted_key_and_endpoint_are_used_and_masked_without_their_whitespace(
     llm.error = RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}.")
     last = run_events(client, start_run(client))[-1]
     assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
-    assert last["error"] == "RuntimeError: Incorrect API key provided: [key]."
+    assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
     llm.fail_on = None
     llm.requests.clear()
     finished_run(client, "hosted_vllm/qwen")
@@ -393,16 +393,26 @@ def test_a_stored_key_is_in_no_response_event_or_file(
     assert all(OPENAI_KEY not in path.read_text() for path in files)
 
 
+@pytest.mark.parametrize("held", ["stored", "environment"])
 def test_a_key_a_provider_quotes_in_its_error_is_masked_in_the_event_and_the_log(
-    client: TestClient, llm: FakeModel, caplog: pytest.LogCaptureFixture
+    client: TestClient,
+    llm: FakeModel,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    held: str,
 ):
-    client.post("/api/keys", json=STORED_OPENAI)
+    if held == "stored":
+        client.post("/api/keys", json=STORED_OPENAI)
+        key = OPENAI_KEY
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
+        key = ENVIRONMENT_KEY
     llm.fail_on = "RelevanceSummary"
-    llm.error = RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}.")
+    llm.error = RuntimeError(f"Incorrect API key provided: {key}.")
     with caplog.at_level(logging.ERROR, logger="r3con.app"):
         last = run_events(client, start_run(client))[-1]
     assert last["type"] == "run_failed"
-    assert last["error"] == "RuntimeError: Incorrect API key provided: [key]."
+    assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
     logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
     assert logged == [f"run_failed: {last['error']}"]
 
