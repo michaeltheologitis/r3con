@@ -603,7 +603,11 @@ def test_a_run_that_failed_in_reasoning_can_be_asked_over_the_folder_it_started_
     events = []
     with pytest.raises(litellm.AuthenticationError):
         finished_run(answering_llm, tmp_path, on_event=events.append)
-    asked = ask(events[0]["run_dir"], "Who else?", completion=answering_llm)
+    started = events[0]
+    assert started["type"] == "run_started"
+    [only] = (tmp_path / "logs").iterdir()
+    assert only == Path(started["run_dir"])
+    asked = ask(started["run_dir"], "Who else?", completion=answering_llm)
     assert asked.answer == "Calder memo"
 
 

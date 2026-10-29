@@ -1133,21 +1133,19 @@ def test_each_finished_event_carries_what_the_run_folder_records(
     ]
 
 
-def test_run_started_names_the_existing_run_folder_run_finished_names(
+def test_run_started_names_the_run_folder_already_holding_its_manifest(
     answering_llm, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
-    events, manifest_by_then = [], []
+    at_start = []
 
     def on_event(event):
-        events.append(event)
         if event["type"] == "run_started":
-            folder = Path(event["run_dir"])
-            manifest_by_then.append((folder / "manifest.json").is_file())
+            folder = event["run_dir"]
+            at_start.append((folder, (Path(folder) / "manifest.json").is_file()))
 
     answer(answering_llm, logger, on_event=on_event)
-    assert events[0]["run_dir"] == events[-1]["run_dir"] == str(logger.dir)
-    assert manifest_by_then == [True]
+    assert at_start == [(str(logger.dir), True)]
 
 
 @pytest.mark.parametrize("cause", ["estimate", "refusal"])

@@ -294,7 +294,7 @@ def run_pipeline(
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
 
     - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds`` and
-      ``run_dir``, the run folder as ``run_finished`` gives it (``None`` without one).
+      ``run_dir``, the run folder (``None`` without one).
     - ``relevance_started``, before a document is read in a round: ``round``,
       ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
       read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
@@ -308,8 +308,8 @@ def run_pipeline(
       the parse used, ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
       ``answer``, ``provenance`` (``{summary_ids, parse_ids}``), ``path``, ``fallback``.
-    - ``run_finished``: ``run_dir``, and the run's ``tokens`` and ``usd``, as a stage's
-      ``totals`` gives them (``None`` without a run folder).
+    - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
+      and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
       (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, one line.
 
@@ -350,7 +350,7 @@ def run_pipeline(
         task_logger=task_logger,
     )
     emit = EventRecorder(on_event, task_logger)
-    run_dir = str(task_logger.dir) if task_logger is not None else None
+    run_dir = task_logger.dir if task_logger is not None else None
     emit(
         "run_started",
         question=task,
@@ -501,7 +501,7 @@ def run_pipeline(
         source_docs=extraction.source_docs,
         parsing_provenance=extraction.provenance,
         document_ids=document_ids,
-        run_dir=task_logger.dir if task_logger is not None else None,
+        run_dir=run_dir,
     )
 
 
