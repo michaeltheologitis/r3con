@@ -57,21 +57,6 @@ REGISTRY_IN_4_PARTS = ["1", "2", "3", "4.1", "4.2", "4.3", "4.4", "5"]
 ROUTINE = "The site logged its routine checks and found nothing out of the ordinary. "
 SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
-DIRECT_SECTIONS = [
-    "## The task and your two views",
-    "## Document summaries",
-    "## The parsed data (`parse`)",
-    "## Rules",
-    "## Output",
-]
-CODING_SECTIONS = [
-    "## The task and your two views",
-    "## Execution environment",
-    "## Document summaries",
-    "## The parsed data (`parse`)",
-    "## Rules",
-    "## How to work",
-]
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
 
@@ -257,20 +242,23 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
-def assert_shows_the_notes_and_the_stamped_parse(
-    sections: dict[str, str], headings: list[str], ids: list[str]
-) -> None:
-    """A reasoning prompt's ``sections`` are ``headings`` and show DOCS' notes, each
+@pytest.fixture
+def shows_the_notes_and_the_stamped_parse(reasoning_sections, parse_shown):
+    """Checks a system message is ``path``'s reasoning prompt over DOCS' notes, each
     under its document's id, and their whole parse, each row stamped with its
     document's id."""
-    assert list(sections) == headings
-    assert READ_IN_PARTS not in sections["## Document summaries"]
-    assert sections["## Document summaries"].endswith(
-        f"### Document ID: {ids[0]}\nNotes on Halloran memo.\n\n"
-        f"### Document ID: {ids[1]}\nNotes on Merrow memo."
-    )
-    parse = sections["## The parsed data (`parse`)"]
-    assert json.loads(parse[parse.index("{") :]) == stamped(ids)
+
+    def check(message: dict, path: str, ids: list[str]) -> None:
+        assert message["role"] == "system"
+        shown = reasoning_sections(message["content"], path)
+        assert READ_IN_PARTS not in shown["## Document summaries"]
+        assert shown["## Document summaries"].endswith(
+            f"### Document ID: {ids[0]}\nNotes on Halloran memo.\n\n"
+            f"### Document ID: {ids[1]}\nNotes on Merrow memo."
+        )
+        assert parse_shown(shown) == stamped(ids)
+
+    return check
 
 
 def test_a_run_answers_and_leaves_every_stages_artifacts(
@@ -424,7 +412,7 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
 
 
 def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
-    answering_llm, sections, tmp_path
+    answering_llm, shows_the_notes_and_the_stamped_parse, tmp_path
 ):
     def cites_the_first_summary_and_the_second_parse(request):
         lists = citable_lists(request)
@@ -441,10 +429,7 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
     system, user = request["messages"]
-    assert system["role"] == "system"
-    assert_shows_the_notes_and_the_stamped_parse(
-        sections(system["content"]), DIRECT_SECTIONS, ids
-    )
+    shows_the_notes_and_the_stamped_parse(system, "direct", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     cited = {"summary_ids": [ids[0]], "parse_ids": [ids[1]]}
     assert (result.answer, result.provenance) == ("Halloran and Merrow.", cited)
@@ -461,7 +446,7 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
 
 
 def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
-    answering_llm, sections, tmp_path
+    answering_llm, shows_the_notes_and_the_stamped_parse, tmp_path
 ):
     llm = answering_llm.answers(reasoning=COMMITS_THE_PARSE)
     logger = TaskLogger("run", root=tmp_path)
@@ -469,10 +454,7 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
     system, user = request["messages"]
-    assert system["role"] == "system"
-    assert_shows_the_notes_and_the_stamped_parse(
-        sections(system["content"]), CODING_SECTIONS, ids
-    )
+    shows_the_notes_and_the_stamped_parse(system, "coding", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     assert ast.literal_eval(result.answer) == stamped(ids)
     assert result.provenance == {"summary_ids": [], "parse_ids": []}
@@ -483,7 +465,7 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
 
 
 def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_says_why(
-    answering_llm, tmp_path, refusal, sections
+    answering_llm, tmp_path, refusal, shows_the_notes_and_the_stamped_parse
 ):
     refused = refusal()
     llm = answering_llm.answers(reasoning=[refused, COMMITS_THE_PARSE])
@@ -492,10 +474,7 @@ def test_a_direct_prompt_the_provider_refuses_reasons_with_code_and_the_folder_s
     ids = result.document_ids
     assert ast.literal_eval(result.answer) == stamped(ids)
     direct, coding = (r["messages"][0] for r in llm.requests_for("reasoning"))
-    assert direct["role"] == "system"
-    assert_shows_the_notes_and_the_stamped_parse(
-        sections(direct["content"]), DIRECT_SECTIONS, ids
-    )
+    shows_the_notes_and_the_stamped_parse(direct, "direct", ids)
     assert SAMPLE in coding["content"] and "final_answer(" in coding["content"]
     reasoning = read_json(logger, "reasoning/result")
     assert reasoning["path"] == "coding"

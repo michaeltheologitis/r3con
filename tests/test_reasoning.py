@@ -42,36 +42,6 @@ KEYS_WARNING = (
     "coding: provenance_ids must map summary_ids and parse_ids to lists of ids; got "
     "{!r}, which cites nothing"
 )
-SECTIONS = {
-    "direct": [
-        "## The task and your two views",
-        "## Document summaries",
-        "## The parsed data (`parse`)",
-        "## Rules",
-        "## Output",
-    ],
-    "coding": [
-        "## The task and your two views",
-        "## Execution environment",
-        "## Document summaries",
-        "## The parsed data (`parse`)",
-        "## Rules",
-        "## How to work",
-    ],
-}
-# Rows of documents 0 and 1, stamped with their ids, as a prompt prints them.
-STAMPED_ROWS = """{
-  "rows": [
-    {
-      "document": "d0c000",
-      "who": "Halloran"
-    },
-    {
-      "document": "d0c001",
-      "who": "Merrow"
-    }
-  ]
-}"""
 
 
 def reasoning_prompt(llm, path="coding", **kwargs) -> str:
@@ -147,12 +117,6 @@ def summaries(prompt: str) -> str:
     return prompt.split("## Rules", 1)[0]
 
 
-def parse_shown(sections: dict[str, str]) -> object:
-    """The parse a prompt's sections print, read back from its JSON."""
-    parse = sections["## The parsed data (`parse`)"]
-    return json.loads(parse[parse.index("{") :])
-
-
 def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     summing = "<code>\nfinal_answer(sum(it['n'] for it in parse['items']))\n</code>"
     result = reason(
@@ -172,7 +136,9 @@ def test_the_parse_is_bound_in_the_sandbox_and_the_commit_returned(llm):
     )
 
 
-def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(llm, sections):
+def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(
+    llm, reasoning_sections, parse_shown
+):
     reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance_ids": NO_IDS}
     result = ask(llm, reply)
     assert result.answer == "Site 099 logged nothing unusual."
@@ -182,13 +148,7 @@ def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(llm, section
     [request] = llm.requests
     system, user = request["messages"]
     assert system["role"] == "system"
-    shown = sections(system["content"])
-    assert list(shown) == [
-        "## The task and your two views",
-        "## The parsed data (`parse`)",
-        "## Rules",
-        "## Output",
-    ]
+    shown = reasoning_sections(system["content"], "direct", summaries=False)
     assert parse_shown(shown) == ROWS
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
 
@@ -576,23 +536,29 @@ def test_a_small_parse_is_shown_whole_and_the_schema_source_is_not(llm, path):
 
 @PATHS
 def test_the_prompt_shows_each_summary_under_its_id_and_the_parse_stamped_by_id(
-    llm, sections, path
+    llm, reasoning_sections, parse_shown, path
 ):
     prompt = reasoning_prompt(
         llm,
         path,
-        parsed={"rows": [{"who": "Halloran"}, {"who": "Merrow"}]},
+        parsed={"rows": [{"who": "Café Halloran"}, {"who": "Merrow"}]},
         source_docs={"rows": [0, 1]},
         relevance_snippets=["Northgate logged 5.", "Riverside logged 6.", ""],
     )
-    shown = sections(prompt)
-    assert list(shown) == SECTIONS[path]
+    shown = reasoning_sections(prompt, path)
     assert shown["## Document summaries"].endswith(
-        "### Document ID: d0c000\nNorthgate logged 5.\n\n"
-        "### Document ID: d0c001\nRiverside logged 6.\n\n"
-        "### Document ID: d0c002\n(no relevant summary for this task)"
+        f"### Document ID: {IDS[0]}\nNorthgate logged 5.\n\n"
+        f"### Document ID: {IDS[1]}\nRiverside logged 6.\n\n"
+        f"### Document ID: {IDS[2]}\n(no relevant summary for this task)"
     )
-    assert shown["## The parsed data (`parse`)"].endswith(STAMPED_ROWS)
+    assert parse_shown(shown) == {
+        "rows": [
+            {"document": IDS[0], "who": "Café Halloran"},
+            {"document": IDS[1], "who": "Merrow"},
+        ]
+    }
+    first_row = f'      "document": "{IDS[0]}",\n      "who": "Café Halloran"\n'
+    assert first_row in shown["## The parsed data (`parse`)"]
 
 
 def test_a_huge_parse_is_shown_as_one_sample_per_field_and_says_so(llm):
@@ -659,14 +625,15 @@ def test_the_prompt_says_documents_were_read_in_parts_only_when_a_summary_is_a_p
 
 @pytest.mark.parametrize(("tokens", "whole"), [(4_000, False), (1_000_000, True)])
 def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
-    llm, window, caplog, sections, tokens, whole
+    llm, window, caplog, reasoning_sections, parse_shown, tokens, whole
 ):
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     prompt = reasoning_prompt(llm, parsed=ROWS, model=window(tokens))
     assert (LAST_ROW in prompt) is whole
     assert (SAMPLE in prompt) is not whole
     if whole:
-        assert parse_shown(sections(prompt)) == ROWS
+        shown = reasoning_sections(prompt, "coding", summaries=False)
+        assert parse_shown(shown) == ROWS
         assert caplog.messages == []
     else:
         assert caplog.messages == [

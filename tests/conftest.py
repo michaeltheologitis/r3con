@@ -320,12 +320,58 @@ def summary_ids_shown(request: Request) -> list[str]:
     return re.findall(r"^### Summary ID: (\S+)$", shown, re.MULTILINE)
 
 
+SUMMARIES = "## Document summaries"
+PARSE = "## The parsed data (`parse`)"
+REASONING_SECTIONS = {
+    "direct": [
+        "## The task and your two views",
+        SUMMARIES,
+        PARSE,
+        "## Rules",
+        "## Output",
+    ],
+    "coding": [
+        "## The task and your two views",
+        "## Execution environment",
+        SUMMARIES,
+        PARSE,
+        "## Rules",
+        "## How to work",
+    ],
+}
+# v2 shares v3's headings: only a line like this tells the versions apart.
+REASONING_V3 = "`summary_ids`: The IDs of the summaries above that you used in writing"
+
+
 def prompt_sections(prompt: str) -> dict[str, str]:
     """A prompt's ``## `` sections, in order, each heading to its body, stripped,
-    without its examples'."""
+    without its examples'. Fails on a prompt with template text left unrendered
+    (``{{``, ``{%`` or ``None``) or a heading that repeats."""
     instructions = prompt.split("\n\nExamples:\n\n", 1)[0]
+    for unrendered in ("{{", "{%", "None"):
+        assert unrendered not in instructions
     _, *parts = re.split(r"^(## .+)$", instructions, flags=re.MULTILINE)
-    return {heading: body.strip() for heading, body in zip(parts[::2], parts[1::2])}
+    headings = parts[::2]
+    assert len(set(headings)) == len(headings), f"a section repeats: {headings}"
+    return {heading: body.strip() for heading, body in zip(headings, parts[1::2])}
+
+
+def reasoning_prompt_sections(
+    prompt: str, path: str, *, summaries: bool = True
+) -> dict[str, str]:
+    """``prompt``'s sections (:func:`prompt_sections`), checked to be those of
+    ``path``'s v3 reasoning prompt, its summaries section only with ``summaries``."""
+    shown = prompt_sections(prompt)
+    expected = [h for h in REASONING_SECTIONS[path] if summaries or h != SUMMARIES]
+    assert list(shown) == expected
+    assert REASONING_V3 in prompt
+    return shown
+
+
+def shown_parse(sections: dict[str, str]) -> Any:
+    """The parse a reasoning prompt's ``sections`` print, read back from its JSON."""
+    parse = sections[PARSE]
+    return json.loads(parse[parse.index("{") :])
 
 
 def _first_line(request: Request) -> str:
@@ -409,6 +455,16 @@ def shown_ids() -> Callable[[Request], list[str]]:
 @pytest.fixture
 def sections() -> Callable[[str], dict[str, str]]:
     return prompt_sections
+
+
+@pytest.fixture
+def reasoning_sections() -> Callable[..., dict[str, str]]:
+    return reasoning_prompt_sections
+
+
+@pytest.fixture
+def parse_shown() -> Callable[[dict[str, str]], Any]:
+    return shown_parse
 
 
 @pytest.fixture

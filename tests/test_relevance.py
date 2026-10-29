@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from r3con import settings
-from r3con.prompts import load_prompt
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.relevance import (
     RelevantContext,
@@ -90,10 +89,6 @@ def allowed_ids(request) -> dict:
     """The JSON schema of each id a request's reply may cite."""
     schema = request["response_format"]["json_schema"]["schema"]
     return schema["properties"]["provenance_ids"]["items"]
-
-
-def first_round_prompt() -> str:
-    return load_prompt("relevance/first-round", version="v1", task=TASK)
 
 
 @pytest.mark.parametrize(("n_docs", "rounds"), [(3, 1), (3, 2), (3, 3), (2, 3), (1, 3)])
@@ -246,10 +241,13 @@ def test_ids_that_are_not_one_distinct_id_per_document_are_refused(llm, document
     assert llm.requests == []
 
 
-def test_round_one_sends_the_first_round_prompt_and_reads_plain_text(llm):
+def test_round_one_sends_the_first_round_prompt_and_reads_plain_text(llm, sections):
     result = surface(llm, ["DOC0", "DOC1"], rounds=1)
     for request in llm.requests:
-        assert request["messages"][0]["content"] == first_round_prompt()
+        prompt = request["messages"][0]["content"]
+        assert f"<task>\n{TASK}\n</task>" in prompt
+        assert list(sections(prompt)) == ["## Output"]
+        assert "it is fine to say so briefly (or reply with nothing)" in prompt
         assert "response_format" not in request
     assert result.records == [
         [
@@ -265,12 +263,15 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(
     surface(llm, ["DOC0", "DOC1", "DOC2"], rounds=2, workers=1)
     [request] = reads_of(llm, "DOC0")[1:]
     prompt = request["messages"][0]["content"]
-    assert "<task>\nWhich filing reports higher revenue?\n</task>" in prompt
+    assert f"<task>\n{TASK}\n</task>" in prompt
     shown = sections(prompt)
     others = "## Task-conditioned summaries of the other documents (previous round)"
     assert list(shown) == [others, "## Output"]
     assert shown[others].endswith(
         "### Summary ID: 1b1b1b\nN(DOC1,r1)\n\n### Summary ID: 2c2c2c\nN(DOC2,r1)"
+    )
+    assert (
+        "- `provenance_ids`: The IDs of the other summaries above" in shown["## Output"]
     )
     schema = request["response_format"]["json_schema"]
     assert (schema["name"], schema["strict"]) == ("RelevanceSummary", True)
@@ -468,8 +469,8 @@ def test_a_later_round_with_nothing_to_show_reads_like_round_one(
         return f"Notes on {document}."
 
     result = surface(llm, documents, rounds=2, reply=reply)
-    [_, round_2] = reads_of(llm, "DOC0")
-    assert round_2["messages"][0]["content"] == first_round_prompt()
+    [round_1, round_2] = reads_of(llm, "DOC0")
+    assert round_2["messages"][0] == round_1["messages"][0]
     assert "response_format" not in round_2
     assert result.records[1][0] == [SnippetRecord("0a0a0a", "Notes on DOC0.", [])]
 
