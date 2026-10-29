@@ -354,7 +354,7 @@ def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog)
             "provenance_ids": ["1b1b1b", "0a0a0a", "1b1b1b"],
         }
 
-    with caplog.at_level(logging.WARNING, logger="r3con.relevance"):
+    with caplog.at_level(logging.WARNING, logger="r3con.provenance"):
         result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply)
     assert result.provenance == [["1b1b1b"], ["0a0a0a"]]
     assert (

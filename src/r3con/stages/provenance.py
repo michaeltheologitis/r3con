@@ -1,14 +1,4 @@
-"""Replies that cite the notes their call was shown.
-
-Relevance's later rounds and parsing each read a document, or one part of one, beside
-notes shown by id, and ask for a structured reply: a payload (the ``summary``, the
-``parse``) and its ``provenance_ids``, the ids of the shown notes it used. Both build
-it with :func:`citing_schema` and read it with :func:`read_citing`. The ids reach the
-JSON schema as an ``enum`` (:func:`list_of_ids`), but the reply is read as plain
-strings and checked by :func:`cited`, which keeps only the ids the call showed.
-Reasoning's answer cites two lists of ids, one per view, each built and checked by
-those two functions.
-"""
+"""Replies that cite the notes their call was shown."""
 
 from __future__ import annotations
 
@@ -25,45 +15,46 @@ _log = get_logger("provenance")
 
 class CitingRequest(NamedTuple):
     """What a call sends beside the text it reads: the system prompt, the reply's
-    schema (``None`` for plain text), and the ids of the notes the reply may cite."""
+    schema (:func:`citing_schema`, or ``None`` for plain text), and the ids of the
+    notes the reply may cite."""
 
     system_prompt: str
     schema: type[BaseModel] | None
     citable: Sequence[str]
 
 
-def list_of_ids(shown_ids: Sequence[str]) -> Any:
-    """The type of a reply's list of the ids a call shows. The shown ids reach only the
-    JSON schema, as an ``enum``, or, when there are none, as any string, since an empty
-    enum is refused; the reply itself is read as plain strings and checked by
-    :func:`cited`."""
-    if not shown_ids:
-        return list[str]
-    return list[Annotated[str, Field(json_schema_extra={"enum": list(shown_ids)})]]
-
-
-def citing_schema(name: str, citable: Sequence[str], **payload: Any) -> type[BaseModel]:
-    """A reply named ``name``: each ``payload`` field, of the type given, then its
-    ``provenance_ids``, a :func:`list_of_ids` of ``citable``. A reply without
-    ``provenance_ids`` cites nothing, though the strict schema sent requires it."""
-    fields: dict[str, Any] = {field: (type_, ...) for field, type_ in payload.items()}
+def ids_field(citable: Sequence[str]) -> tuple[Any, Any]:
+    """The field, for :func:`pydantic.create_model`, of a reply's list of the ids it
+    cites from ``citable``. The ids reach only the JSON schema, as an ``enum``, or,
+    when there are none, as any string, since an empty enum is refused; the reply
+    itself is read as plain strings and checked by :func:`cited`. A reply without the
+    list cites nothing, though the strict schema sent requires it."""
+    ids: Any = list[str]
+    if citable:
+        ids = list[Annotated[str, Field(json_schema_extra={"enum": list(citable)})]]
     # A default_factory stays out of the schema; strict mode refuses a default.
-    return create_model(
-        name,
-        **fields,
-        provenance_ids=(list_of_ids(citable), Field(default_factory=list)),
-    )
+    return ids, Field(default_factory=list)
+
+
+def citing_schema(
+    name: str, citable: Sequence[str], field: str, type_: Any
+) -> type[BaseModel]:
+    """A reply named ``name``: its payload ``field``, of ``type_``, then its
+    ``provenance_ids`` (:func:`ids_field`), the order :func:`read_citing` reads."""
+    payload: dict[str, Any] = {field: (type_, ...)}
+    return create_model(name, **payload, provenance_ids=ids_field(citable))
 
 
 def cited(provenance: Sequence[str], shown: Collection[str], kind: str) -> list[str]:
     """The ids a reply cites, in order and without repeats, less those the call did not
     show, which are dropped with a warning."""
-    unshown = [id_ for id_ in provenance if id_ not in shown]
+    shown_ids = frozenset(shown)
+    unshown = [id_ for id_ in provenance if id_ not in shown_ids]
     if unshown:
         _log.warning(
             "%s: dropped provenance id(s) the call did not show: %s", kind, unshown
         )
-    return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown))
+    return list(dict.fromkeys(id_ for id_ in provenance if id_ in shown_ids))
 
 
 def read_citing(
@@ -74,11 +65,11 @@ def read_citing(
     kind: str,
     max_attempts: int,
     **llm_call: Any,
-) -> tuple[Any, list[str]]:
+) -> tuple[object, list[str]]:
     """``text`` read under ``request`` by :func:`~r3con.runtime.llm.send_until_valid`,
     which sends it again with ``rewrite`` when a reply does not fit: the reply's
-    payload, its one field besides ``provenance_ids``, and the citable ids it cites
-    (:func:`cited`); without a schema, the reply's text, citing nothing."""
+    payload and the citable ids it cites (:func:`cited`); for a request without a
+    schema, the reply's text, citing nothing."""
     reply = send_until_valid(
         request.system_prompt,
         text,
@@ -88,9 +79,9 @@ def read_citing(
         max_attempts=max_attempts,
         **llm_call,
     )
-    if isinstance(reply, str):
+    if request.schema is None:
         return reply, []
-    fields = dict(reply)
-    provenance = fields.pop("provenance_ids")
-    [payload] = fields.values()
+    payload, provenance = (
+        getattr(reply, field) for field in request.schema.model_fields
+    )
     return payload, cited(provenance, request.citable, kind)

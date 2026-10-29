@@ -46,7 +46,7 @@ import ast
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, get_args, get_origin
+from typing import Any, cast, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -269,7 +269,7 @@ def _request(
         relevance=render_relevance(relevance_snippets, document_ids),
     )
     return CitingRequest(
-        system_prompt, citing_schema("ParseReply", citable, parse=parse_cls), citable
+        system_prompt, citing_schema("ParseReply", citable, "parse", parse_cls), citable
     )
 
 
@@ -277,6 +277,29 @@ def _headed(document_id: str, part: str) -> str:
     """The user message that sends ``part``, a document or one part of one, under its
     document's id."""
     return f"Document ID: {document_id}\n\n{part}"
+
+
+def _read(
+    request: CitingRequest,
+    document_id: str,
+    part: str,
+    *,
+    kind: str,
+    max_attempts: int,
+    **llm_call: Any,
+) -> tuple[BaseModel, list[str]]:
+    """``part`` (a document or one part of one) parsed under ``request`` by
+    :func:`~r3con.stages.provenance.read_citing`, headed by its document's id: its
+    ``Parse``, and the citable ids it used."""
+    parse, provenance = read_citing(
+        request,
+        _headed(document_id, part),
+        rewrite=_REWRITE,
+        kind=kind,
+        max_attempts=max_attempts,
+        **llm_call,
+    )
+    return cast(BaseModel, parse), provenance
 
 
 def _attempts(max_attempts: int | None) -> int:
@@ -338,10 +361,10 @@ def parse_one_document(
         document_ids=document_ids,
         prompt_version=prompt_version,
     )
-    return read_citing(
+    return _read(
         request,
-        _headed(document_id, document),
-        rewrite=_REWRITE,
+        document_id,
+        document,
         kind=kind,
         max_attempts=attempts,
         model=model,
@@ -447,10 +470,10 @@ def parse_documents(
             call="parse",
             rest=request.system_prompt + _headed(document_ids[i], ""),
             schema=request.schema,
-            send=lambda part, kind: read_citing(
+            send=lambda part, kind: _read(
                 request,
-                _headed(document_ids[i], part),
-                rewrite=_REWRITE,
+                document_ids[i],
+                part,
                 kind=kind,
                 max_attempts=attempts,
                 model=model,

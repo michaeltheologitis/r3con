@@ -55,7 +55,7 @@ from r3con.runtime.codeact import (
 )
 from r3con.runtime.llm import count_tokens, schema_as_sent, send_until_valid
 from r3con.splitting import Splits
-from r3con.stages.provenance import cited, list_of_ids
+from r3con.stages.provenance import cited, ids_field
 from r3con.stages.relevance import Snippet, citable_ids, render_relevance
 from r3con.stages.structuring.parsing import DOCUMENT_KEY
 
@@ -100,13 +100,9 @@ def _documents_with_records(parse_dict: Any, document_ids: Sequence[str]) -> lis
 
 def _provenance_ids_model(citable: Mapping[str, Sequence[str]]) -> type[BaseModel]:
     """The ``provenance_ids`` an answer gives, on either path: under each of
-    ``citable``'s keys, a list of its ids
-    (:func:`~r3con.stages.provenance.list_of_ids`). A missing list cites nothing, and
-    another key is ignored."""
-    lists: dict[str, Any] = {
-        key: (list_of_ids(ids), Field(default_factory=list))
-        for key, ids in citable.items()
-    }
+    ``citable``'s keys, a list of its ids (:func:`~r3con.stages.provenance.ids_field`).
+    A missing list cites nothing, and another key is ignored."""
+    lists: dict[str, Any] = {key: ids_field(ids) for key, ids in citable.items()}
     return create_model("ProvenanceIds", **lists)
 
 

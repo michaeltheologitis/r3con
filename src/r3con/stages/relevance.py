@@ -38,7 +38,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from r3con import settings
 from r3con.config import PromptStage
@@ -219,7 +219,7 @@ def _request(
     )
     ids = list(shown)
     return CitingRequest(
-        prompt, citing_schema("RelevanceSummary", ids, summary=str | None), ids
+        prompt, citing_schema("RelevanceSummary", ids, "summary", str | None), ids
     )
 
 
@@ -243,7 +243,7 @@ def _read(
         max_attempts=max_attempts,
         **llm_call,
     )
-    return (summary or "").strip(), provenance
+    return (cast(str | None, summary) or "").strip(), provenance
 
 
 def _report_snippets(
