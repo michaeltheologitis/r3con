@@ -875,8 +875,7 @@ p { margin: 0; }
  }
 };
 
-  // Real r3con.ask answers over SAMPLE's run folder, each from its asks/<folder>/, keyed by question
-  // and model; written by a script from those folders, never by hand.
+  // Real r3con.ask answers over SAMPLE's run folder, converted from its asks/ folders by a script.
   const RECORDED_ASKS = [
  {
   "question": "Which sites does Halloran Services maintain?",
@@ -1224,7 +1223,7 @@ p { margin: 0; }
     const [kind, d] = splitId(id);
     if (kind === 'doc') return state.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return answerLabel(answerOf(state.run, id));
+    if (kind === 'answer') return answerLabel(askedOf(state.run, id));
     const label = docLabel(state.run, d);
     return `${label} · ${KIND_SUFFIX[kind]}`;
   }
@@ -1383,8 +1382,7 @@ p { margin: 0; }
     return cites;
   }
 
-  // A simulated answer to `question` over `run`: it cites every stride-th document it could, counted from
-  // `shift`, and, as in r3con, only non-empty round-2 summaries and parses with records.
+  // As r3con does, it cites only non-empty round-2 summaries and parses with records.
   function madeUpAnswer(run, question, shift) {
     const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
@@ -1440,10 +1438,16 @@ p { margin: 0; }
   // The run's own answer node is `answer`; ask k's, in run.answers, is `answer-k`.
   const askId = (k) => `answer-${k}`;
 
+  // The question an answer answers, and the model that answered it.
+  function askedOf(run, id) {
+    const [, k] = splitId(id);
+    return k === null ? { question: run.question, model: run.model } : run.answers[k];
+  }
+
   // The run's own answer or an ask's, in one shape.
   function answerOf(run, id) {
     const [, k] = splitId(id);
-    if (k === null) return { ...run.answer, question: run.question, model: run.model, simulated: run.simulated, summary: runSummary(run) };
+    if (k === null) return { ...run.answer, ...askedOf(run, id), simulated: run.simulated, summary: runSummary(run) };
     const ask = run.answers[k];
     return { ...ask, simulated: ask.source === 'simulated', summary: askSummary(ask) };
   }
@@ -1540,6 +1544,16 @@ p { margin: 0; }
     return { x: answer.x, y: answer.y + (k % 2 ? -out : out) * GRID.rowGap };
   }
 
+  // The first slot around the run's answer, where it is now, that no answer node holds.
+  function freeAskSpot() {
+    const answer = state.nodes.get('answer');
+    const answers = [...state.nodes.values()].filter((n) => n.kind === 'answer');
+    const taken = (spot) => answers.some((n) => Math.abs(n.x - spot.x) < GRID.colGap / 2 && Math.abs(n.y - spot.y) < GRID.rowGap / 2);
+    let k = 0;
+    while (taken(askSpot(answer, k))) k += 1;
+    return askSpot(answer, k);
+  }
+
   function plan(origin) {
     const files = state.run?.docs ?? state.files;
     const layout = gridLayout(files, origin);
@@ -1608,7 +1622,7 @@ p { margin: 0; }
   function ariaName(node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = answerOf(state.run, node.id);
+      const { question, model } = askedOf(state.run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
     if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
@@ -1863,8 +1877,7 @@ p { margin: 0; }
     }
   }
 
-  // Exactly one answer is lit: the newest, or the one last selected. Only it draws faint lines from what it
-  // was shown; every answer keeps its lines from what it cites.
+  // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
   function lightAnswer(run, id) {
     for (const e of [...state.edges.values()]) {
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(e);
@@ -1876,10 +1889,10 @@ p { margin: 0; }
     lightPath(run);
   }
 
-  // A landing ask is the newest answer, so it is lit, unless another answer's details are open.
+  // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open.
   function lightLanded(run, id) {
     const open = state.selected;
-    if (open && open !== id && splitId(open)[0] === 'answer') return;
+    if (open && open !== id && splitId(open)[0] === 'answer' && landed(open)) return;
     lightAnswer(run, id);
   }
 
@@ -2167,17 +2180,17 @@ p { margin: 0; }
     setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
-  // The run on the panel is still going: live, until its events end; in the prototype, until its answer lands.
-  const runGoing = () => mode.runGoing();
   // A question can ask over the run on the panel once its answer has landed and the run has ended.
-  const canAsk = () => landed('answer') && !runGoing();
+  const canAsk = () => landed('answer') && !mode.runGoing();
   // Enter asks once there is a run to ask over, or one going; before any run, or after a failed one, it runs.
-  const primaryAction = () => (canAsk() || runGoing() ? 'ask' : 'run');
+  const primaryAction = () => (canAsk() || mode.runGoing() ? 'ask' : 'run');
 
   function updateComposer() {
     const asks = canAsk();
     const pending = state.files.filter(isPending).length;
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
+    // Hiding the focused button would drop the focus to the page.
+    if (!asks && document.activeElement === $('new-run-btn')) questionEl.focus();
     $('new-run-btn').hidden = !asks;
     const note = $('ask-note');
     const one = pending === 1;
@@ -2221,7 +2234,7 @@ p { margin: 0; }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
   function refusal(question, asks) {
-    if (asks && runGoing()) return ASK_WHEN_DONE;
+    if (asks && mode.runGoing()) return ASK_WHEN_DONE;
     if (!asks && streaming('run')) return RUN_STILL_GOING;
     if (!asks && streaming('ask')) return ASK_STILL_GOING;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
@@ -2583,8 +2596,7 @@ p { margin: 0; }
     updateComposer();
   }
 
-  // The chat's links name nodes by id, which a new run reuses: the old run's go inert, and its offers of
-  // recorded asks go.
+  // A new run reuses node ids, so the older turns' links would open its nodes.
   function retireTurns() {
     for (const offer of transcript.querySelectorAll('[data-offer]')) offer.remove();
     for (const button of transcript.querySelectorAll('button')) button.disabled = true;
@@ -2601,12 +2613,9 @@ p { margin: 0; }
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
 
-  // Adds `ask` to the run and draws its node, working, stacked around the run's answer where that is now;
-  // returns the node's id.
   function addAsk(run, ask) {
-    const k = run.answers.push(ask) - 1;
-    const id = askId(k);
-    state.layout.set(id, askSpot(state.nodes.get('answer'), k));
+    const id = askId(run.answers.push(ask) - 1);
+    state.layout.set(id, freeAskSpot());
     addNode(id);
     if (!state.userMoved) fit(true);
     return id;
@@ -2623,8 +2632,7 @@ p { margin: 0; }
     return { question, model, source: 'simulated', ...madeUpAnswer(run, question, run.answers.length + 1), totals: null };
   }
 
-  // The prototype answers from a recorded ask when one has this question and model over the recorded
-  // run, else with a simulated one; either lands at once.
+  // A recorded answer when one has this question and model over the recorded run, else a simulated one.
   function prototypeAsk(run, question, model) {
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
@@ -2718,7 +2726,7 @@ p { margin: 0; }
     read.sort((a, b) => a.name.localeCompare(b.name));
     state.files = filesAreSample() ? read : [...state.files, ...read].slice(0, MAX_FILES);
     const docs = plural(state.files.length, 'document');
-    const next = canAsk() ? `A new run would cover ${docs}; ask stays on this run.` : `Your next question runs over ${docs}.`;
+    const next = primaryAction() === 'ask' ? `A new run would cover ${docs}; ask stays on this run.` : `Your next question runs over ${docs}.`;
     filesChanged(`${plural(read.length, 'file')} added. ${next}`);
   }
 
@@ -3168,11 +3176,7 @@ p { margin: 0; }
       e.preventDefault();
       submitQuestion(primaryAction());
     });
-    $('new-run-btn').addEventListener('click', () => {
-      submitQuestion('run');
-      // It hides while its run goes, which would drop the focus to the page.
-      if ($('new-run-btn').hidden) questionEl.focus();
-    });
+    $('new-run-btn').addEventListener('click', () => submitQuestion('run'));
     questionEl.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
@@ -3232,6 +3236,7 @@ p { margin: 0; }
     readable: (file) => file.slice(0, READ_BYTES),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
+    // A replay is going until its answer lands.
     runGoing: () => Boolean(state.run) && !landed('answer'),
     ask: (question) => prototypeAsk(state.run, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],

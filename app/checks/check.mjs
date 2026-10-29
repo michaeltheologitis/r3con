@@ -1116,6 +1116,16 @@ async function answersInView(asks) {
     const outside = (await page.evaluate(answerNodes)).filter((n) => !inside(n.box, frame)).map((n) => n.id);
     check('answers', 'a new answer node is fitted into view, its whole label too', outside.length === 0, outside.join(' ') || 'all in view');
   });
+  await withPage('answers', {}, async (page) => {
+    await send(page, asks[0].question);
+    const zoom = await page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
+    await dragNode(page, 'answer', 0, -ROW_GAP * zoom);
+    for (const question of [NEW_QUESTION, 'Who manages Eastfield?']) await send(page, question);
+    const placed = await page.evaluate(answerNodes);
+    const apart = placed.length === 4 && placed.every((a, i) => placed.slice(i + 1).every((b) => !overlap(a.box, b.box)));
+    const dragName = 'after the first answer is dragged a row up, new asks never land on an existing answer node';
+    check('answers', dragName, apart, placed.map((n) => `${n.id} ${Math.round(n.y)}`).join(', '));
+  });
 }
 
 // With motion on, a replay takes seconds, so a question can arrive while it is still going.
@@ -1131,6 +1141,11 @@ async function answersWhileReplaying() {
     const waits = kept === NEW_QUESTION && turns === 1 && said.includes(ASK_WHEN_DONE);
     const waitsName = "a question while the prototype's run replays waits, as live does: ask once it has finished";
     check('answers', waitsName, waits, `${turns} turns; ${said.at(-1)}`);
+    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
+    await page.waitForSelector('.node.pending');
+    const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
+    const goingName = 'while a run is still going, the file-added line says ask stays on that run, as Enter will';
+    check('answers', goingName, added === FILE_ADDED_AFTER_RUN, added);
   });
 }
 
@@ -1331,6 +1346,22 @@ async function liveAnswers(url) {
   });
 }
 
+async function liveAskAfterFailed(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    await send(page, `Which memo is the registry? ${FAILS}`);
+    const failed = await becomes(page, () => document.querySelector('.node[data-id="answer-0"]')?.classList.contains('failed'), null, LIVE_RUN_MS);
+    await clickNode(page, 'answer-0');
+    await send(page, 'Which memo is the registry?');
+    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const lit = await litAnswers(page);
+    const openOn = (await popup(page))?.title;
+    const litName = 'a landing ask is lit while the open popup is an answer that never landed';
+    check('live', litName, failed && landed && isDeepStrictEqual(lit, ['answer-1']), `lit ${lit}; popup ${openOn}`);
+  });
+}
+
 async function liveRunEnd(url) {
   const before = (page) => page.addInitScript(holdFrom, 'run_finished');
   await withPage('live', { url, sample: false, before }, async (page) => {
@@ -1513,6 +1544,7 @@ async function live() {
   await withFakeServer(async (url) => {
     await liveCutStream(url);
     await liveAnswers(url);
+    await liveAskAfterFailed(url);
     await liveRunEnd(url);
     await liveParts(url);
     await liveFailure(url);
