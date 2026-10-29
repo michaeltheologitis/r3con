@@ -439,7 +439,7 @@ p { margin: 0; }
 }
 #question:placeholder-shown { padding-left: 0; }
 .field::placeholder, #question::placeholder { color: var(--dim); opacity: 1; }
-.ask-foot { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; color: var(--dim); }
+.ask-foot { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.4em 2ch; color: var(--dim); }
 .pick { position: relative; display: flex; min-width: 0; }
 .pick::after { content: "▾"; position: absolute; right: 0; pointer-events: none; }
 .pick:hover { color: var(--fg); }
@@ -458,7 +458,7 @@ p { margin: 0; }
 }
 #model-pick optgroup, #model-pick option { color: var(--fg); background: var(--bg); }
 #model-hint { align-self: flex-start; }
-.ask-actions { display: flex; gap: 2ch; }
+.ask-actions { display: flex; gap: 2ch; margin-left: auto; }
 .run-btn { font-weight: 600; }
 .note { padding: 0.5em 2ch 0.7em; color: var(--dim); }
 
@@ -554,7 +554,7 @@ p { margin: 0; }
 
   <div class="frame">
     <main class="board" aria-label="Run panel">
-      <div class="run-tabs" id="run-tabs" role="tablist" aria-label="runs" hidden></div>
+      <div class="run-tabs" id="run-tabs" role="tablist" aria-label="runs"></div>
       <div class="panel" id="panel">
         <div class="world" id="world"></div>
         <div class="panel-hint" id="panel-hint" hidden></div>
@@ -583,14 +583,14 @@ p { margin: 0; }
           <div class="ask-foot">
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
             <span class="ask-actions">
-              <button class="btn" id="stop-btn" type="button" hidden>stop</button>
-              <button class="btn" id="new-run-btn" type="button" title="⌘/Ctrl+Enter" aria-keyshortcuts="Control+Enter Meta+Enter" hidden>new run</button>
-              <button class="btn run-btn" id="run-btn" type="submit">run ⏎</button>
+              <button class="btn" id="stop-btn" type="button">stop</button>
+              <button class="btn" id="new-run-btn" type="button" title="⌘/Ctrl+Enter" aria-keyshortcuts="Control+Enter Meta+Enter">new run</button>
+              <button class="btn run-btn" id="run-btn" type="submit"></button>
             </span>
           </div>
           <input class="field" id="model-other" type="text" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
-          <p class="k" id="ask-note" hidden></p>
+          <p class="k" id="ask-note"></p>
         </form>
       </section>
 
@@ -1059,10 +1059,9 @@ p { margin: 0; }
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
-  // r3con gives a cancelled job's error as its Cancelled exception, by name.
-  const CANCELLED_ERROR = 'Cancelled:';
-  // The r3con stage each kind of node is drawn in, so a stopped replay can say where it stopped.
+  // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
+  const READING = 'reading';
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
   const LIVE_MODE_NOTE = 'live · r3con-app on this computer';
@@ -1362,7 +1361,8 @@ p { margin: 0; }
     if (!ENDINGS.has(last?.type)) throw lostConnection();
   }
 
-  const streaming = (kind, tab) => [...state.streams].some((stream) => stream.kind === kind && stream.tab === tab);
+  const streamsOf = (tab) => [...state.streams].filter((stream) => stream.tab === tab);
+  const streaming = (kind, tab) => streamsOf(tab).some((stream) => stream.kind === kind);
 
   function openStream(kind, tab, job) {
     const stream = { kind, tab, job, stopping: false };
@@ -1376,16 +1376,29 @@ p { margin: 0; }
     updateComposer();
   }
 
-  const stopping = (tab) => [...state.streams].some((stream) => stream.tab === tab && stream.stopping);
+  const stopping = (tab) => streamsOf(tab).some((stream) => stream.stopping);
 
-  // From the 202 on, r3con sends no new model call, and the stream ends with the job's last event.
-  async function cancelJob(stream) {
+  // A stop pressed before the job's id has come back is sent as soon as it does.
+  function stopJob(stream) {
     stream.stopping = true;
     showStatus(stream.tab);
+    if (stream.job.id) sendCancel(stream);
+  }
+
+  function jobStarted(stream, id) {
+    stream.job.id = id;
+    if (stream.stopping) sendCancel(stream);
+  }
+
+  // From the 202 on, r3con sends no new model call, and the stream ends with the job's last event.
+  async function sendCancel(stream) {
     try {
       await api(`/api/${stream.kind}s/${stream.job.id}/cancel`, { method: 'POST' });
     } catch (error) {
+      // A refusal that comes back once the job has ended has nothing left to stop.
+      if (!state.streams.has(stream)) return;
       stream.stopping = false;
+      updateComposer();
       if (stream.tab === state.shown) errorStatus(`couldn't stop · ${explain(error, error.message, "couldn't stop")}`);
     }
   }
@@ -2229,6 +2242,8 @@ p { margin: 0; }
     };
     return {
       say,
+      // The r3con stage being told, or READING before the first.
+      stage: null,
       // Says a line once under `name`; saying it again rewrites it in place.
       sayAs(name, kind, text, opts) {
         const said = named.get(name);
@@ -2283,10 +2298,13 @@ p { margin: 0; }
     showStatus(tab);
   }
 
-  const stoppedIn = (stage) => (stage ? `stopped in ${stage}` : 'stopped');
-  const failureLine = ({ stage, error }) => (error.startsWith(CANCELLED_ERROR) ? stoppedIn(stage) : [stage ? `failed in ${stage}` : 'failed', error].join(' · '));
-  // Stages run in turn, so the newest node's kind is the stage a replay is in.
-  const stageReached = (tab) => STAGE_OF[[...tab.nodes.values()].filter((n) => n.kind !== 'doc').at(-1)?.kind] ?? null;
+  function inStage(verb, stage) {
+    if (!stage) return verb;
+    return stage === READING ? `${verb} while reading` : `${verb} in ${stage}`;
+  }
+
+  // A job the page asked to stop ends as stopped; any other failure gives its error.
+  const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
 
   function readyStatus() {
     if (state.tabs.length) return;
@@ -2300,10 +2318,11 @@ p { margin: 0; }
   // failed one, they run. The composer's labels follow this, so they say what a press does.
   const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
 
-  // Hiding the focused button would drop the focus to the page.
-  function showButton(button, shown) {
-    if (!shown && document.activeElement === button) questionEl.focus();
+  // Hiding or disabling the focused button would drop the focus to the page.
+  function offer(button, shown, enabled = true) {
+    if (!(shown && enabled) && document.activeElement === button) questionEl.focus();
     button.hidden = !shown;
+    button.disabled = !enabled;
   }
 
   function updateComposer() {
@@ -2311,8 +2330,8 @@ p { margin: 0; }
     const pending = pendingFiles(state.shown).length;
     updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
-    showButton($('stop-btn'), tabBusy(state.shown));
-    showButton($('new-run-btn'), asks);
+    offer($('stop-btn'), tabBusy(state.shown), !stopping(state.shown));
+    offer($('new-run-btn'), asks);
     const note = $('ask-note');
     const one = pending === 1;
     note.textContent = asks && pending ? `${plural(pending, 'new document')} ${one ? "isn't" : "aren't"} in this run · new run to include ${one ? 'it' : 'them'}` : '';
@@ -2445,6 +2464,7 @@ p { margin: 0; }
     };
     if (kind === 'r2') narr.sayAs(ROUND_TWO_HEAD, 'main', heads.r2);
     else if (heads[kind]) narr.say('main', heads[kind]);
+    narr.stage = STAGE_OF[kind];
     narr.phase(stageProgress(tab, kind));
   }
 
@@ -2512,11 +2532,12 @@ p { margin: 0; }
     rerenderIfOpen(tab, RUN_ANSWER);
   }
 
-  // Marks every node still working as stopped; with no answer, the next question starts a new run.
+  // Marks every stage node still working as stopped, while a document being read just settles; with no
+  // answer, the next question starts a new run.
   function failRun(tab, narr, text) {
     narr.done();
     for (const node of tab.nodes.values()) {
-      if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: true });
+      if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: node.kind !== 'doc' });
     }
     sayError(narr, text);
     tabStatus(tab, ...errorLine(text));
@@ -2531,6 +2552,7 @@ p { margin: 0; }
     let t = TIMING.start;
 
     at(t, () => {
+      narr.stage = READING;
       narr.say('main', `reading ${plural(n, 'document')}`);
       if (run.simulated) {
         narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
@@ -2638,7 +2660,7 @@ p { margin: 0; }
         lightRun(tab);
         break;
       case 'run_failed':
-        failRun(tab, narr, failureLine(event));
+        failRun(tab, narr, endLine(stopping(tab), event));
         break;
     }
   }
@@ -2662,7 +2684,7 @@ p { margin: 0; }
       const { question, model } = run.answers[0];
       const body = { question, model, documents: run.docs.map((f) => f.text) };
       const started = await api('/api/runs', { method: 'POST', body });
-      run.id = (await started.json()).run_id;
+      jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
     } catch (error) {
       failRun(tab, narr, explain(error, error.message, 'the live run stopped'));
@@ -2677,6 +2699,7 @@ p { margin: 0; }
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
     const narr = narrator(tab, addTurn(tab, question, id), { status: false });
+    const stream = openStream('ask', tab, ask);
     const failed = (text) => {
       narr.done();
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
@@ -2693,13 +2716,17 @@ p { margin: 0; }
         narr.say('sub', askSummary(ask));
         rerenderIfOpen(tab, id);
       }
-      if (event.type === 'ask_failed') failed(`${askSummary(ask)} · ${failureLine(event)}`);
+      if (event.type === 'ask_failed') {
+        const end = endLine(stream.stopping, event);
+        failed(`${askSummary(ask)} · ${end}`);
+        // An ask leaves the status alone, but its stop was asked for there, so its end is said there too.
+        if (stream.stopping) tabStatus(tab, ...errorLine(`ask ${end}`));
+      }
     };
-    const stream = openStream('ask', tab, ask);
     narr.phase(`asking · ${model}`);
     try {
       const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
-      ask.id = (await asked.json()).ask_id;
+      jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
       failed(explain(error, error.message, 'the ask stopped'));
@@ -3468,12 +3495,12 @@ p { margin: 0; }
     readable: (file) => file.slice(0, READ_BYTES),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
-    // A replay is going while it has steps to come, until its answer lands.
+    // A replay is going once it was started with motion, and not cancelled, until its answer lands.
     runGoing: (tab) => tab.timers.length > 0 && !landed(tab, RUN_ANSWER),
     // It stops where it is, as a live run does once its call in flight is back.
     stop(tab) {
       cancelTimers(tab);
-      failRun(tab, tab.narr, stoppedIn(stageReached(tab)));
+      failRun(tab, tab.narr, inStage('stopped', tab.narr.stage));
     },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
@@ -3492,7 +3519,7 @@ p { margin: 0; }
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
-    stop: (tab) => [...state.streams].filter((stream) => stream.tab === tab).forEach(cancelJob),
+    stop: (tab) => streamsOf(tab).forEach(stopJob),
     ask: (question) => askOver(state.shown, question, pickedModel()),
     async saveKey(provider, key, endpoint) {
       const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
