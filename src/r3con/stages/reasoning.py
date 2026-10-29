@@ -62,6 +62,7 @@ from r3con.stages.relevance import (
     list_of_ids,
     render_relevance,
 )
+from r3con.stages.structuring.parsing import DOCUMENT_KEY
 
 _log = get_logger("reasoning")
 
@@ -93,11 +94,11 @@ def _documents_with_records(parse_dict: Any, document_ids: Sequence[str]) -> lis
     if not isinstance(parse_dict, dict):
         return []
     named = {
-        record["document"]
+        record[DOCUMENT_KEY]
         for records in parse_dict.values()
         if isinstance(records, list)
         for record in records
-        if isinstance(record, dict) and isinstance(record.get("document"), str)
+        if isinstance(record, dict) and isinstance(record.get(DOCUMENT_KEY), str)
     }
     return [id_ for id_ in document_ids if id_ in named]
 
@@ -215,7 +216,8 @@ def tag_source_documents(
     (``"document": "<id>"``), from the parsing step's ``source_docs``, so the model can
     say which document a fact came from and match it against that document's summary,
     headed by the same id. No-op without ``source_docs`` or for a non-dict parse.
-    Mutates and returns ``parse_dict`` (``document`` first, so it reads first)."""
+    Mutates and returns ``parse_dict`` (``document`` first, so it reads first).
+    A record's own ``document`` value is kept; ``check_schema`` warns of such schemas."""
     if not source_docs or not isinstance(parse_dict, dict):
         return parse_dict
     for name, idxs in source_docs.items():
@@ -223,8 +225,8 @@ def tag_source_documents(
         if not isinstance(recs, list):
             continue
         for k in range(min(len(recs), len(idxs))):
-            if isinstance(recs[k], dict) and "document" not in recs[k]:
-                recs[k] = {"document": document_ids[idxs[k]], **recs[k]}
+            if isinstance(recs[k], dict) and DOCUMENT_KEY not in recs[k]:
+                recs[k] = {DOCUMENT_KEY: document_ids[idxs[k]], **recs[k]}
     return parse_dict
 
 

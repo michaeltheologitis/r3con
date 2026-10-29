@@ -46,7 +46,7 @@ import ast
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple, cast, get_origin
+from typing import Any, NamedTuple, cast, get_args, get_origin
 
 from pydantic import BaseModel, Field, create_model
 
@@ -75,6 +75,8 @@ from r3con.stages.relevance import (
 _log = get_logger("structuring.parsing")
 
 _REWRITE = "Re-extract the same document"
+# Reasoning stamps each record with its document's id under this key.
+DOCUMENT_KEY = "document"
 
 _SCHEMA_IMPORTS = ("pydantic", "typing", "datetime", "enum", "decimal")
 # Bound before a schema runs, so one that forgets its pydantic import still loads.
@@ -195,6 +197,23 @@ def check_schema(schema_code: str) -> type[BaseModel]:
             "        # ...other fields...\n"
             "    class Parse(BaseModel):\n"
             "        documents: list[DocRecord]"
+        )
+
+    hiding = [
+        f"Parse.{name}"
+        for name, fld in parse_cls.model_fields.items()
+        for item in get_args(fld.annotation)
+        if isinstance(item, type)
+        and issubclass(item, BaseModel)
+        and DOCUMENT_KEY in item.model_fields
+    ]
+    if hiding:
+        _log.warning(
+            "records of %s declare their own %r field, whose value will hide r3con's "
+            "document stamp: those records will not trace back to the document they "
+            "came from",
+            ", ".join(hiding),
+            DOCUMENT_KEY,
         )
 
     return parse_cls
