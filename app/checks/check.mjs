@@ -78,7 +78,11 @@ const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SIMULATED_ASK = 'simulated ask over this run';
 const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
-const NOT_IN_RUN = "1 new document isn't in this run · new run to include it";
+// Files added over the sample memos take their place.
+const NOT_IN_RUN = "1 new document isn't in this run · 5 documents of this run aren't in the files now · a new run would cover 1 document";
+const REMOVED_FROM_RUN = "1 document of this run isn't in the files now · a new run would cover 4 documents";
+const SAMPLE_NAMES = ['01_northgate.txt', '02_eastfield.txt', '03_riverside.txt', '04_contractor_registry.txt', '05_cafeteria.txt'];
+const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const FILE_ADDED_AFTER_RUN = '1 file added. A new run would cover 1 document; ask stays on this run.';
 const TYPE_A_MODEL = 'type a model first';
 // Its faint lines: each of the 5 round-2 summaries, and the 4 parses with records.
@@ -711,6 +715,87 @@ async function files() {
     const hintHidden = await page.$eval('#panel-hint', (el) => el.hidden);
     const sampleOnly = removed && hintHidden && (await count(page, '.node.doc')) === SAMPLE_DOCS;
     check('files', 'using the sample memos removes it', sampleOnly);
+  });
+}
+
+// ---------- remove: one file at a time, from the files tab ----------
+
+const removeButton = (page, name) => page.getByRole('button', { name: `remove ${name}`, exact: true });
+const focusedName = (page) => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.id);
+const removeNames = (page) => page.$$eval('#file-list .remove', (els) => els.map((el) => el.getAttribute('aria-label')));
+const docNames = (page) => page.$$eval('#world .node.doc', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
+
+async function removeArea() {
+  for (const layout of Object.values(LAYOUTS)) {
+    await withPage('remove', { layout, sample: false }, async (page) => {
+      await page.click('#tab-files');
+      const buttons = await removeNames(page);
+      const named = isDeepStrictEqual(buttons, SAMPLE_NAMES.map((name) => `remove ${name}`));
+      check('remove', `${layout.name}: each file has a remove button named for it, and the page has no horizontal scroll`, named && (await page.evaluate(noHorizontalScroll)), buttons.join(', '));
+    });
+  }
+
+  await withPage('remove', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, SAMPLE_NAMES[1]).click();
+    const after = {
+      docs: await docNames(page),
+      count: await page.textContent('#files-count'),
+      hint: await page.textContent('#panel-hint'),
+      status: await page.textContent('#run-status'),
+      focus: await focusedName(page),
+    };
+    const left = SAMPLE_NAMES.filter((_, i) => i !== 1);
+    const expected = {
+      docs: left,
+      count: String(left.length),
+      hint: `${left.length} documents · ready to run`,
+      status: `removed ${SAMPLE_NAMES[1]} · ${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
+      focus: `remove ${SAMPLE_NAMES[2]}`,
+    };
+    const beforeName = "removing a file before a run drops its node, recounts, says so in the status, and the focus moves to the next file's remove";
+    check('remove', beforeName, isDeepStrictEqual(after, expected), JSON.stringify(after));
+
+    await page.click('#tab-chat');
+    await page.click('#run-btn');
+    const simulated = await page.textContent('#run-status');
+    check('remove', 'with a sample memo removed, the next run is simulated, not the recording', simulated.startsWith('● done · simulated run'), simulated);
+  });
+
+  await withPage('remove', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, SAMPLE_NAMES.at(-1)).click();
+    const previous = await focusedName(page);
+    for (const name of SAMPLE_NAMES.slice(0, -1)) await removeButton(page, name).click();
+    const none = await focusedName(page);
+    const moves = previous === `remove ${SAMPLE_NAMES.at(-2)}` && none === 'file-input';
+    check('remove', "removing the last file in the list moves the focus to the previous one's remove, and with none left to adding files", moves, `${previous}; ${none}`);
+    await page.click('#tab-chat');
+    await send(page, NEW_QUESTION);
+    const said = await page.evaluate(lastTurnLines);
+    check('remove', 'with every file removed, run refuses with the line it gives for no files', said.includes(ADD_FILES_FIRST) && (await count(page, '#world .node')) === 0, said.join(' | '));
+  });
+
+  const asks = recordedAsks();
+  await withPage('remove', {}, async (page) => {
+    await page.click('#tab-files');
+    await removeButton(page, SAMPLE_NAMES[1]).click();
+    const footer = await page.evaluate(composer);
+    const nodes = await count(page, '#world .node');
+    const status = await page.textContent('#run-status');
+    await page.click('#tab-chat');
+    await send(page, asks[2].question);
+    const answered = await becomes(page, landedNode, 'answer-1');
+    const kept = nodes === SAMPLE_COUNTS.nodes && footer.primary === 'ask ⏎' && footer.note === REMOVED_FROM_RUN && status === `removed ${SAMPLE_NAMES[1]} · a new run would cover 4 documents`;
+    const keptName = "after a run, removing one of its files keeps the run's nodes, an ask still answers over the run, and the footer says what a new run would cover";
+    check('remove', keptName, kept && answered && (await count(page, '#world .node.doc')) === SAMPLE_DOCS, `${nodes} nodes; ${footer.note}; ${status}`);
+
+    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
+    await page.waitForSelector('.node.pending');
+    await page.click('#tab-files');
+    await removeButton(page, '06_extra_memo.txt').click();
+    const dropped = (await count(page, '.node.pending')) === 0 && (await page.evaluate(composer)).note === REMOVED_FROM_RUN;
+    check('remove', "after a run, removing a file added since drops its not-run node, and the footer's line for it", dropped, (await page.evaluate(composer)).note);
   });
 }
 
@@ -1857,6 +1942,13 @@ async function liveUnreadable(url) {
     const status = await page.textContent('#run-status');
     const refused = status === 'no readable text in 02_blank.txt; nothing was sent' && posts.length === 0;
     check('live', 'a file with no readable text is named, and nothing is sent', refused, `${status}; ${posts.length} posts`);
+    await page.click('#tab-files');
+    await page.getByRole('button', { name: 'remove 02_blank.txt', exact: true }).click();
+    await page.click('#tab-chat');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', 'once the unreadable file is removed, the next run sends only the readable one', isDeepStrictEqual(sent, ['A memo.\n']), JSON.stringify(sent));
   });
 }
 
@@ -2154,7 +2246,7 @@ async function live() {
 
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
