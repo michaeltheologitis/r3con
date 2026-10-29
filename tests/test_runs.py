@@ -21,7 +21,7 @@ from r3con.settings import settings_snapshot
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
-DOWN = "APIConnectionError: litellm.APIConnectionError: provider down"
+ERROR_LINE = "RateLimitError: slow down"
 TOKENS = {"prompt": 10, "completion": 2, "total": 12}
 
 
@@ -159,7 +159,7 @@ def test_calls_keep_non_ascii_as_text(logger):
     [
         (
             [
-                ({"prompt": 10, "completion": 2, "total": 12}, 0.25),
+                (TOKENS, 0.25),
                 ({"prompt": 25, "completion": 6, "total": 31}, 0.5),
             ],
             {
@@ -169,10 +169,10 @@ def test_calls_keep_non_ascii_as_text(logger):
             },
         ),
         (
-            [({"prompt": 10, "completion": 2, "total": 12}, 0.25), (None, None)],
+            [(TOKENS, 0.25), (None, None)],
             {
                 "n_steps": 2,
-                "tokens": {"prompt": 10, "completion": 2, "total": 12},
+                "tokens": TOKENS,
                 "usd": None,
             },
         ),
@@ -191,7 +191,7 @@ def test_a_stage_totals_its_steps_tokens_and_cost(logger, calls, totals):
 def test_a_stage_counts_only_the_calls_that_answered(logger):
     run = StageRun(stage="relevance", task_logger=logger)
     run.add_step(messages=[], response=reply(), tokens=TOKENS, usd=0.25)
-    run.add_step(messages=[], response={}, usd=0.0, error=DOWN)
+    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE)
     assert run.compute_totals() == {"n_steps": 1, "tokens": TOKENS, "usd": 0.25}
 
 
@@ -217,24 +217,24 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
 def test_each_call_records_its_error_and_one_that_raised_no_output(logger):
     run = StageRun(stage="relevance", task_logger=logger)
     run.add_step(messages=[], response=reply("a"))
-    run.add_step(messages=[], response={}, usd=0.0, error=DOWN)
+    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE)
     run.flush(write_transcript=False)
     calls = json.loads((run.dir / "calls.json").read_text())
     recorded = [
         (call["error"], call["finish_reason"], call["output"]) for call in calls
     ]
-    assert recorded == [(None, "stop", "a"), (DOWN, None, None)]
+    assert recorded == [(None, "stop", "a"), (ERROR_LINE, None, None)]
 
 
-def test_a_transcript_leaves_out_a_call_that_raised(logger):
+def test_a_transcript_ending_in_a_call_that_raised_shows_what_it_sent(logger):
     run = StageRun(stage="reasoning", task_logger=logger)
     first = [{"role": "system", "content": "S"}, {"role": "user", "content": "U1"}]
     run.add_step(kind="turn-1", messages=first, response=reply("A1"))
     second = [*first, {"role": "assistant", "content": "A1"}]
     second.append({"role": "user", "content": "<observation>obs</observation>"})
-    run.add_step(kind="turn-2", messages=second, response={}, usd=0.0, error=DOWN)
+    run.add_step(kind="turn-2", messages=second, response={}, usd=0.0, error=ERROR_LINE)
     contents = [m["content"] for m in flushed_transcript(run)["messages"]]
-    assert contents == ["S", "U1", "A1"]
+    assert contents == ["S", "U1", "A1", "<observation>obs</observation>"]
 
 
 def test_a_multi_turn_transcript_is_the_last_turns_whole_thread(logger):

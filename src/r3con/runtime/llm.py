@@ -235,36 +235,32 @@ def litellm_chat_completion_full(
             },
         }
 
-    attempts: list[tenacity.RetryCallState] = []
-    try:
-        if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
-            response = _resend_temporary_errors(request, attempts)
-        else:
-            response = (completion or litellm.completion)(**request)
-    except Exception as error:
+    resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
+
+    def record(**outcome: Any) -> None:
         if run is not None:
             run.add_step(
                 kind=kind,
                 messages=request_messages,
-                response={},
                 schema=request.get("response_format"),
-                usd=0.0,
-                error=_error_line(error, api_key),
-                **_resends(attempts),
+                **resends,
+                **outcome,
             )
+
+    try:
+        if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
+            response = _resend_temporary_errors(request, resends)
+        else:
+            response = (completion or litellm.completion)(**request)
+    except Exception as error:
+        record(response={}, usd=0.0, error=_error_line(error, api_key))
         raise
 
-    if run is not None:
-        run.add_step(
-            kind=kind,
-            messages=request_messages,
-            response=_extract_response_dict(response),
-            schema=request.get("response_format"),
-            tokens=_extract_tokens(response),
-            usd=_extract_usd(response),
-            **_resends(attempts),
-        )
-
+    record(
+        response=_extract_response_dict(response),
+        tokens=_extract_tokens(response),
+        usd=_extract_usd(response),
+    )
     return response
 
 
@@ -423,42 +419,32 @@ def quiet_litellm() -> Iterator[None]:
             logger.setLevel(level)
 
 
-def _resend_temporary_errors(
-    request: dict[str, Any], attempts: list[tenacity.RetryCallState]
-) -> Any:
-    """The response to ``request``. Each send appends tenacity's state to
-    ``attempts``, for :func:`_resends` to read whether the last send answered or
-    raised."""
+def _resend_temporary_errors(request: dict[str, Any], resends: dict[str, Any]) -> Any:
+    """The response to ``request``. Before each send, ``resends`` gets the times the
+    request has been sent, this send included, and the seconds, to hundredths, waited
+    between those sends, so it holds both whether the last send answers or raises."""
+
+    def count(state: tenacity.RetryCallState) -> None:
+        resends["sends"] = state.attempt_number
+        resends["resend_wait_seconds"] = round(state.idle_for, _WAIT_DIGITS)
+
     resending = tenacity.Retrying(
         sleep=_sleep,
         retry=tenacity.retry_if_exception(is_temporary),
         stop=_give_up,
         wait=_wait_before_resending,
-        before=attempts.append,
+        before=count,
         before_sleep=tenacity.before_sleep_log(_log, logging.WARNING),
         reraise=True,
     )
     return resending(litellm.completion, **request, num_retries=0)
 
 
-def _resends(attempts: list[tenacity.RetryCallState]) -> dict[str, Any]:
-    """The times a request was sent and the seconds waited between those sends, to
-    hundredths, or ``None`` both when r3con did not resend it itself."""
-    if not attempts:
-        return {"sends": None, "resend_wait_seconds": None}
-    # tenacity hands each hook the one RetryCallState it updates on every send.
-    state = attempts[-1]
-    return {
-        "sends": state.attempt_number,
-        "resend_wait_seconds": round(state.idle_for, _WAIT_DIGITS),
-    }
-
-
 def _error_line(error: Exception, api_key: str | None) -> str:
     """``error``'s class and the first non-empty line of its message, ``api_key``
     masked unless it is a placeholder, cut to :data:`_ERROR_CHARS`. A provider may echo
     the key back, and litellm passes it on."""
-    first_line = next(iter(str(error).strip().splitlines()), "")
+    first_line = str(error).strip().partition("\n")[0]
     if api_key and len(api_key) >= _MIN_MASKED_KEY_CHARS:
         first_line = first_line.replace(api_key, _MASKED_KEY)
     return f"{type(error).__name__}: {first_line}"[:_ERROR_CHARS]

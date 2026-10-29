@@ -412,7 +412,8 @@ class StageRun:
         error: str | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
-        completion order; each call's ``kind`` carries its own identity."""
+        completion order, and identify a call: a kind can repeat, as when a refused
+        turn is sent again under the same kind."""
         with self._lock:
             step = StepRecord(
                 step=len(self.steps) + 1,
@@ -487,16 +488,15 @@ class StageRun:
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
         """The readable conversation = the final step's full message thread + its
-        response, among the steps that did not raise. For a multi-turn loop (codeact)
-        the last step's ``messages`` already contain the whole grown conversation; for a
-        retry loop (the schema proposal) they are the final (successful) attempt —
-        earlier attempts, and calls that raised, live in ``calls.json``. No such step →
-        ``[]``. (Stages with many parallel calls flush with ``write_transcript=False``
-        and never reach here.)"""
-        replied = [step for step in self.steps if step.error is None]
-        if not replied:
+        reply, if it got one. For a multi-turn loop (codeact) the last step's
+        ``messages`` already contain the whole grown conversation; for a retry loop (the
+        schema proposal) they are the final attempt — earlier attempts live in
+        ``calls.json``. A stage that ended on a call that raised shows the thread that
+        call sent, with no reply. Empty run → ``[]``. (Stages with many parallel calls
+        flush with ``write_transcript=False`` and never reach here.)"""
+        if not self.steps:
             return []
-        last = replied[-1]
+        last = self.steps[-1]
         thread = list(last.messages)
         if last.response.get("content"):
             thread.append(last.response)
