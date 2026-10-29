@@ -679,6 +679,21 @@ def test_a_first_turn_refused_with_samples_is_raised(llm, refusal):
     assert [SAMPLE in prompt for prompt in first_turn_prompts(llm)] == [False, True]
 
 
+def test_a_direct_prompt_that_fits_without_the_enum_it_drops_is_sent(llm, window):
+    ids = [f"d{n:03x}" for n in range(1_001)]
+    # About 14,070 tokens as sent, but 18,880 counting the ids' enum: the line is 17,000.
+    result = ask(
+        llm,
+        citing("direct"),
+        model=window(20_000),
+        document_ids=ids,
+        relevance_snippets=["Logged."] * len(ids),
+    )
+    assert (result.answer, result.path, result.fallback) == ("ok", "direct", None)
+    [request] = llm.requests
+    assert "enum" not in lists_of_ids(request)["summary_ids"]["items"]
+
+
 def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     llm, window, caplog
 ):

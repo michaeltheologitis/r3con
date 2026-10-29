@@ -189,6 +189,24 @@ def test_an_enum_past_openais_limit_is_sent_without_its_values(llm, n, kept):
 
 
 @pytest.mark.parametrize(
+    ("sizes", "kept"),
+    [
+        ((700, 400), [False, True]),
+        ((400, 700), [True, False]),
+        ((500, 500), [True, True]),
+        ((600, 300, 200), [False, True, True]),
+    ],
+)
+def test_enums_over_openais_limit_together_are_dropped_largest_first(llm, sizes, kept):
+    fields: dict = {
+        f"pick{k}": (Literal[tuple(f"v{k}.{i}" for i in range(n))], ...)
+        for k, n in enumerate(sizes)
+    }
+    picks = sent_schema(llm, create_model("Choices", **fields))["properties"]
+    assert ["enum" in picks[f"pick{k}"] for k in range(len(sizes))] == kept
+
+
+@pytest.mark.parametrize(
     ("pattern", "kept"),
     [
         (r"^\d{4}$", True),
