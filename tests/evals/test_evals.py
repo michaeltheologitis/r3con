@@ -3,7 +3,6 @@ import json
 import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import httpx
 import litellm
@@ -30,7 +29,7 @@ LUNA_PRICE = {
 }
 USD_PER_CALL = 10
 ANSWER_MODEL = "anthropic/claude-sonnet-5-5"
-ASKED = "asks/anthropic-claude-sonnet-5-5"
+ASKED = "asks/anthropic-claude-sonnet-5-5-d1236105"
 # What ANSWER_MODEL answers each task: the fake judge rates a Loong answer naming ACME 100.
 ANSWER = "ACME, says the other model."
 GIT_IDENTITY = ("-c", "user.name=evals", "-c", "user.email=evals@example.invalid")
@@ -43,6 +42,7 @@ INFRASTRUCTURE_FAILURES = [
     exceptions.APIConnectionError(**LITELLM_ERROR),
     exceptions.Timeout(**LITELLM_ERROR),
     exceptions.RateLimitError(**LITELLM_ERROR),
+    exceptions.NotFoundError(**LITELLM_ERROR),
     exceptions.ServiceUnavailableError(**LITELLM_ERROR),
     exceptions.InternalServerError(**LITELLM_ERROR),
     exceptions.BadGatewayError(**LITELLM_ERROR),
@@ -429,6 +429,7 @@ def test_a_comparison_judges_the_models_answers_over_the_runs_and_writes_its_lin
     assert line["ask_of"] == {
         "run": "run",
         "commit": ran["commit"],
+        "dirty": False,
         "label": ran["label"],
     }
     assert line["commit"] != ran["commit"]
@@ -444,8 +445,8 @@ def test_a_comparison_judges_the_models_answers_over_the_runs_and_writes_its_lin
     ]
     record = read_json(run / ASKED / "loong" / "loong-paper" / "record.json")
     assert (record["answer"], record["score"], record["error"]) == (ANSWER, 100, None)
-    assert Path(record["run_dir"]).parent == run / "loong" / "loong-paper"
-    assert Path(record["ask_dir"]).parent == Path(record["run_dir"]) / "asks"
+    assert (run / record["run_dir"]).parent == run / "loong" / "loong-paper"
+    assert (run / record["ask_dir"]).parent == run / record["run_dir"] / "asks"
 
 
 def reply(answer: str) -> dict:
@@ -537,14 +538,14 @@ def test_a_runs_cost_leaves_out_the_asks_over_its_tasks(
 
 
 def test_main_asks_over_a_run_and_prints_the_comparisons_line(
-    loong_cache, corpusqa_cache, judging_llm, cli_paths, capsys
+    loong_cache, corpusqa_cache, judging_llm, cli_paths, capsys, monkeypatch
 ):
     (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
     assert main([]) == 0
     run = json.loads(capsys.readouterr().out)["run"]
-    folder = cli_paths / "runs_dir" / run
+    monkeypatch.chdir(cli_paths / "runs_dir" / run)
 
-    assert main(["--ask-over", str(folder), "--model", ANSWER_MODEL]) == 0
+    assert main(["--ask-over", ".", "--model", ANSWER_MODEL]) == 0
 
     assert json.loads(capsys.readouterr().out)["ask_of"]["run"] == run
     results = (cli_paths / "results_path").read_text().splitlines()
@@ -564,3 +565,107 @@ def test_ask_over_takes_a_model_and_no_resume(argv):
     with pytest.raises(SystemExit) as raised:
         main(argv)
     assert raised.value.code == 2
+
+
+def test_a_model_whose_provider_litellm_does_not_know_stops_the_comparison(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path
+):
+    run, results = tmp_path / "run", tmp_path / "results.jsonl"
+    evaluate(PINNED, run, results)
+    requests = len(judging_llm.requests)
+
+    with pytest.raises(SystemExit, match="no provider for --model antropic/claude"):
+        compare(PINNED, run, "antropic/claude-sonnet-5-5", results)
+    assert len(judging_llm.requests) == requests
+    assert not (run / "asks").exists()
+
+
+def test_a_model_the_provider_does_not_know_saves_no_answer_and_fails_the_comparison(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path
+):
+    run, results = tmp_path / "run", tmp_path / "results.jsonl"
+    ran = evaluate(PINNED, run, results)
+    judging_llm.answers(reasoning=exceptions.NotFoundError(**LITELLM_ERROR))
+
+    assert compare(PINNED, run, ANSWER_MODEL, results) is None
+    assert not list((run / ASKED).rglob("answer.json"))
+    assert [json.loads(text) for text in results.read_text().splitlines()] == [ran]
+
+
+def test_each_model_has_its_own_comparison_even_when_their_names_look_alike(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path
+):
+    run, results = tmp_path / "run", tmp_path / "results.jsonl"
+    evaluate(PINNED, run, results)
+
+    for model in ("openai/gpt-4.1", "openai/gpt-4-1"):
+        assert compare(PINNED, run, model, results, limit=1) is not None
+
+    started = {
+        path.parent.name: read_json(path) for path in run.glob("asks/*/run.json")
+    }
+    assert {name: info["answer_model"] for name, info in started.items()} == {
+        "openai-gpt-4-1-c8893463": "openai/gpt-4.1",
+        "openai-gpt-4-1-16cdc59d": "openai/gpt-4-1",
+    }
+
+
+def test_a_moved_run_still_prices_its_asks_when_judged_again(
+    loong_cache, corpusqa_cache, judging_llm, prices, tmp_path
+):
+    run, results = tmp_path / "run", tmp_path / "results.jsonl"
+    evaluate(PINNED, run, results)
+    line = compare(PINNED, run, ANSWER_MODEL, results)
+    moved = tmp_path / "moved"
+    shutil.move(run, moved)
+    for record in moved.glob(f"{ASKED}/*/*/record.json"):
+        record.unlink()
+
+    assert compare(PINNED, moved, ANSWER_MODEL, results)["usd"] == line["usd"]
+
+
+def test_a_task_whose_r3con_run_is_gone_is_recorded_as_an_error_when_asked(
+    loong_cache, corpusqa_cache, judging_llm, tmp_path
+):
+    run, results = tmp_path / "run", tmp_path / "results.jsonl"
+    evaluate(PINNED, run, results)
+    [manifest] = (run / "loong" / "loong-paper").glob("*/manifest.json")
+    shutil.rmtree(manifest.parent)
+
+    line = compare(PINNED, run, ANSWER_MODEL, results)
+
+    assert line["benchmarks"]["loong"]["errors"] == 1
+    record = read_json(run / ASKED / "loong" / "loong-paper" / "record.json")
+    assert record["error"].startswith("FileNotFoundError: ")
+    assert record["error"].endswith("loong-paper holds no r3con run")
+
+
+@pytest.mark.parametrize(
+    ("argv", "refusal"),
+    [
+        (["--resume", "{comparison}"], "is a comparison; finish it with {finish}"),
+        (
+            ["--ask-over", "{comparison}", "--model", ANSWER_MODEL],
+            "is a comparison; finish it with {finish}",
+        ),
+        (
+            ["--ask-over", "{elsewhere}", "--model", ANSWER_MODEL],
+            "is not a run: it has no run.json with a label",
+        ),
+    ],
+    ids=["resume-a-comparison", "ask-over-a-comparison", "ask-over-no-run"],
+)
+def test_a_comparison_or_a_folder_that_is_no_run_is_refused_with_what_to_do(
+    cli_paths, argv, refusal
+):
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    run = cli_paths / "runs_dir" / "run"
+    comparison = run / ASKED
+    comparison.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"label": "default[...]"}))
+    (comparison / "run.json").write_text(json.dumps({"answer_model": ANSWER_MODEL}))
+    paths = {"comparison": comparison, "elsewhere": cli_paths / "elsewhere"}
+    finish = f"--ask-over {run} --model {ANSWER_MODEL}"
+
+    with pytest.raises(SystemExit, match=re.escape(refusal.format(finish=finish))):
+        main([arg.format(**paths) for arg in argv])

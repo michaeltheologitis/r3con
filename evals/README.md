@@ -47,8 +47,8 @@ git-ignored.
 
 A task is left without a record when its r3con run raises an error r3con resends (a
 failed connection, a server error, a timeout or a rate limit) once its resends are
-spent, or a refused key, access or quota, and when loading the task or judging its
-answer raises: the run logs it, exits non-zero and writes no line, and `--resume`
+spent, a refused key, access or quota, or a model the provider does not know, and when
+loading the task or judging its answer raises: the run logs it, exits non-zero and writes no line, and `--resume`
 retries it, judging a saved answer again rather than running r3con twice. Every other
 error is recorded with the task and scored worst (Loong 1, CorpusQA 0); to retry a
 recorded task, delete its folder and resume.
@@ -73,18 +73,27 @@ folder, with the run's question, and the answer is judged as in a run.
 uv run python -m evals --ask-over evals/runs/<folder> --model anthropic/claude-sonnet-5-5
 ```
 
-It writes to `<folder>/asks/<model>/` (`/` and other punctuation as `-`), laid out as a
-run folder; each `answer.json` also names `ask_dir`, where r3con wrote the ask (in the
-`asks/` of the task's r3con run). Errors are kept as in a run, and a task whose r3con
-run never finished parsing cannot be asked, so it is recorded with that error. Every
-task asked over needs a record in the run. Running the command again finishes the
-comparison; it resumes only from the commit it started with and a clean tree, and to
-start it over, delete its folder. `--limit` and `--workers` work as for a run.
+It writes to `<folder>/asks/<model>-<hash>/` (`/` and other punctuation in the model as
+`-`, then a hash of the exact model string), laid out as a run folder; each
+`answer.json` names, relative to `<folder>`, the task's r3con run (`run_dir`) and where
+r3con wrote the ask (`ask_dir`, in that run's `asks/`). A model whose provider litellm
+does not know stops the comparison before any call. Errors are kept as in a run, and a
+task whose r3con run never finished parsing cannot be asked, so it is recorded with that
+error. Every task asked over needs a record in the run. Running the command again
+finishes the comparison; it resumes only from the commit it started with and a clean
+tree, and to start it over, delete its folder. `--limit` and `--workers` work as for a
+run.
 
-The asks run this checkout's reasoning over what the run's commit built, so the line
-names both commits. On Luna a comparison costs about 2% of a run (for the run of
-2026-10-28 at `c6c8e60`, reasoning cost $0.06 and judging $0.01 of $3.06); on another
-model, its price for about 340k input and 30k output tokens.
+Redoing a task of the run (`--resume` after deleting its answer) rebuilds its r3con run,
+so the comparisons over it are stale and must be redone. An ask that raises a temporary
+error and is retried leaves its partial ask folder, whose calls the comparison's `usd`
+does not count.
+
+The asks run this checkout's reasoning over what the run built, from its commit or, when
+`ask_of.dirty`, from uncommitted changes to it, so the line names both commits. On Luna
+a comparison costs about 2% of a run (for the run of 2026-10-28 at `c6c8e60`, reasoning
+cost $0.06 and judging $0.01 of $3.06); on another model, its price for about 340k input
+and 30k output tokens.
 
 ## Reading `results.jsonl`
 
@@ -94,7 +103,7 @@ One JSON object per full run, and one per full comparison:
 | --- | --- |
 | `date`, `commit`, `dirty` | When the run or comparison started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
 | `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, generation params when set, and every prompt version. A comparison has no `label` |
-| `ask_of`, `answer_model` | A comparison's only: the run it asked over (its `run` folder, `commit` and `label`), and the model that answered |
+| `ask_of`, `answer_model` | A comparison's only: the run it asked over (its `run` folder, `commit`, `dirty` and `label`), and the model that answered |
 | `judge_model` | The judge |
 | `benchmarks.loong` | `n`, `errors`, `avg_score` (1–100), `perfect_rate` (0–1) |
 | `benchmarks.corpusqa` | `n`, `errors`, `accuracy` (0–1) |

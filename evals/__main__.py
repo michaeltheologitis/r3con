@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+import litellm
 from litellm import exceptions
 
 import r3con
@@ -48,18 +50,24 @@ RUNS_DIR = EVALS_DIR / "runs"
 STARTED = "run.json"
 ANSWER = "answer.json"
 RECORD = "record.json"
+MANIFEST = "manifest.json"
+# A comparison's folder is the model with these characters as "-", then a hash of the
+# exact model string, so that no two models share one.
+FOLDER_UNSAFE = re.compile(r"[^\w-]+")
+MODEL_HASH_CHARS = 8
 BENCHMARKS: dict[str, ModuleType] = {"loong": loong, "corpusqa": corpusqa}
 SAMPLE_SIZES = {"loong": 40, "corpusqa": 35}
 SEED = 20261028
 DEFAULT_WORKERS = 32
 USD_DIGITS = 4
-# A refused key, access or quota: the setup's problem, not r3con's.
+# A refused key, access or quota, or a model the provider does not know: the setup's
+# problem, not r3con's.
 SETUP_ERRORS = (
     exceptions.AuthenticationError,
     exceptions.PermissionDeniedError,
     exceptions.RateLimitError,
+    exceptions.NotFoundError,
 )
-# What answers one task: (benchmark, row, task folder) -> its answer.json.
 Answering = Callable[[str, dict[str, Any], Path], dict[str, Any]]
 
 
@@ -91,10 +99,12 @@ def evaluate(
     run. Else log what is missing and return ``None``."""
     earlier = _results_lines(results) if limit is None else []
     config = load_config()
+    _as_run(folder)
     header = _start(folder, "label", config.label())
     selection = {name: pinned[name][:limit] for name in BENCHMARKS}
-    answer = functools.partial(_answer, config=config)
-    scored = _score(selection, folder, answer, workers, f"--resume {folder}")
+    answer = functools.partial(_answer, root=folder, config=config)
+    again = f"--resume {folder}"
+    scored = _score(selection, folder, answer, folder, workers, again)
     if scored is None:
         return None
     line = {**header, **scored, "run": folder.name}
@@ -119,7 +129,17 @@ def compare(
     a record is skipped; the results line is returned and written as :func:`evaluate`
     does."""
     earlier = _results_lines(results) if limit is None else []
-    asked = _started_run(run)
+    asked = _as_run(run)
+    if "label" not in asked:
+        raise SystemExit(
+            f"evals: {run} is not a run: it has no {STARTED} with a label."
+        )
+    try:
+        litellm.get_llm_provider(model)
+    except exceptions.BadRequestError:
+        raise SystemExit(
+            f"evals: litellm knows no provider for --model {model}; check its spelling."
+        ) from None
     selection = {name: pinned[name][:limit] for name in BENCHMARKS}
     unfinished = _missing(selection, run)
     if unfinished:
@@ -127,18 +147,20 @@ def compare(
             f"evals: {unfinished} task(s) of {run} have no record; finish it with "
             f"--resume {run} first."
         )
-    folder = run / ASKS_FOLDER / re.sub(r"[^\w-]+", "-", model)
+    digest = hashlib.sha256(model.encode()).hexdigest()[:MODEL_HASH_CHARS]
+    folder = run / ASKS_FOLDER / f"{FOLDER_UNSAFE.sub('-', model)}-{digest}"
     header = _start(
         folder, "answer_model", model, anew=f"delete {folder} to start it again"
     )
     answer = functools.partial(_ask, run=run, model=model)
     again = f"--ask-over {run} --model {model}"
-    scored = _score(selection, folder, answer, workers, again)
+    scored = _score(selection, folder, answer, run, workers, again)
     if scored is None:
         return None
+    ask_of = {key: asked[key] for key in ("commit", "dirty", "label")}
     line = {
         **header,
-        "ask_of": {"run": run.name, "commit": asked["commit"], "label": asked["label"]},
+        "ask_of": {"run": run.name, **ask_of},
         **scored,
         "run": f"{run.name}/{ASKS_FOLDER}/{folder.name}",
     }
@@ -151,19 +173,21 @@ def _score(
     selection: dict[str, list[str]],
     folder: Path,
     answer: Answering,
+    root: Path,
     workers: int,
     again: str,
 ) -> dict[str, Any] | None:
     """Answer and judge each selected task that has no record in ``folder``, ``workers``
-    at a time. Once every one has a record, return their scores per benchmark and their
-    cost; else log what is missing and how to finish (``again``), and return ``None``."""
+    at a time, ``root`` being the run folder an answer's paths are relative to. Once
+    every one has a record, return their scores per benchmark and their cost; else log
+    what is missing and how to finish (``again``), and return ``None``."""
     pending = _pending(selection, folder)
     log.info("%s: %d task(s) to run, %d at a time", folder, len(pending), workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {}
         for name, row in pending:
             task_dir = folder / name / row["id"]
-            future = pool.submit(run_task, name, row, task_dir, answer)
+            future = pool.submit(run_task, name, row, task_dir, answer, root)
             futures[future] = (name, row["id"])
         try:
             for future in as_completed(futures):
@@ -192,11 +216,12 @@ def _score(
 
 
 def run_task(
-    name: str, row: dict[str, Any], task_dir: Path, answer: Answering
+    name: str, row: dict[str, Any], task_dir: Path, answer: Answering, root: Path
 ) -> dict[str, Any]:
     """Answer one task with ``answer`` unless its answer is saved already, judge the
     answer, and write the task's record, with the cost of the calls in ``task_dir``
-    and, for an ask, in the ask's folder."""
+    and, for an ask, in the ask's folder, which the answer names relative to the run
+    folder ``root``."""
     if not (task_dir / ANSWER).exists():
         _write_json(task_dir / ANSWER, answer(name, row, task_dir))
     answered = json.loads((task_dir / ANSWER).read_text(encoding="utf-8"))
@@ -209,7 +234,7 @@ def run_task(
         score, rationale = BENCHMARKS[name].judge(row, answered["answer"], run=judging)
     finally:
         judging.flush(write_transcript=False)
-    asked = [Path(answered["ask_dir"])] if answered.get("ask_dir") else []
+    asked = [root / answered["ask_dir"]] if answered.get("ask_dir") else []
     record = {
         "benchmark": name,
         "task_id": row["id"],
@@ -223,43 +248,45 @@ def run_task(
 
 
 def _answer(
-    name: str, row: dict[str, Any], task_dir: Path, *, config: RunConfig
+    name: str, row: dict[str, Any], task_dir: Path, *, root: Path, config: RunConfig
 ) -> dict[str, Any]:
     """r3con's answer to one task, from a fresh folder, kept as :func:`_answered`
-    says."""
+    says, with ``run_dir``, its r3con run folder, relative to the run folder
+    ``root``."""
     question, documents = BENCHMARKS[name].inputs(row)
     shutil.rmtree(task_dir, ignore_errors=True)
     answered = _answered(
         row["id"],
         lambda: r3con.run(question, documents, config=config, logs_dir=task_dir).answer,
     )
-    run_dir = _run_folder(task_dir)
-    return {**answered, "run_dir": str(run_dir) if run_dir else None}
+    return {**answered, "run_dir": _relative(_run_folder(task_dir), root)}
 
 
 def _ask(
     name: str, row: dict[str, Any], _task_dir: Path, *, run: Path, model: str
 ) -> dict[str, Any]:
     """``model``'s answer to one task, kept as :func:`_answered` says: by
-    :func:`r3con.ask` over the task's r3con run folder in ``run``, with its question.
-    ``ask_dir`` is where r3con wrote the ask, in that folder's ``asks/``, made absolute
-    so that a resume from elsewhere still finds its cost."""
+    :func:`r3con.ask` over the task's r3con run folder in the run folder ``run``, with
+    its question. ``run_dir`` is that r3con run folder and ``ask_dir`` the one r3con
+    wrote the ask to, in its ``asks/``, both relative to ``run``."""
     run_dir = _run_folder(run / name / row["id"])
-    events: list[dict[str, Any]] = []
+    asked: list[Path] = []
+
+    def note(event: dict[str, Any]) -> None:
+        if event["type"] == "ask_started" and not asked:
+            asked.append(Path(event["ask_dir"]))
 
     def ask() -> str:
         if run_dir is None:
             raise FileNotFoundError(f"{run / name / row['id']} holds no r3con run")
-        manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-        question = manifest["task"]
-        return r3con.ask(run_dir, question, model=model, on_event=events.append).answer
+        manifest = json.loads((run_dir / MANIFEST).read_text(encoding="utf-8"))
+        return r3con.ask(run_dir, manifest["task"], model=model, on_event=note).answer
 
     answered = _answered(row["id"], ask)
-    started = [event for event in events if event["type"] == "ask_started"]
     return {
         **answered,
-        "run_dir": str(run_dir) if run_dir else None,
-        "ask_dir": str(Path(started[0]["ask_dir"]).resolve()) if started else None,
+        "run_dir": _relative(run_dir, run),
+        "ask_dir": _relative(asked[0] if asked else None, run),
     }
 
 
@@ -286,7 +313,13 @@ def _answered(task_id: str, answer: Callable[[], str]) -> dict[str, Any]:
 
 def _run_folder(task_dir: Path) -> Path | None:
     """The r3con run folder in ``task_dir``, if r3con made one."""
-    return next((path.parent for path in task_dir.glob("*/manifest.json")), None)
+    return next((path.parent for path in task_dir.glob(f"*/{MANIFEST}")), None)
+
+
+def _relative(path: Path | None, root: Path) -> str | None:
+    """``path`` relative to the run folder ``root``, so that a moved or copied run
+    still finds it."""
+    return path.relative_to(root).as_posix() if path else None
 
 
 def spend(*folders: Path) -> dict[str, Any]:
@@ -346,13 +379,15 @@ def _start(
     return started
 
 
-def _started_run(run: Path) -> dict[str, Any]:
-    """What the run in ``run`` was started as (:func:`_start`)."""
-    path = run / STARTED
+def _as_run(folder: Path) -> dict[str, Any]:
+    """What the run in ``folder`` was started as (:func:`_start`), if it was. The
+    folder of a comparison is refused, with how to finish it."""
+    path = folder / STARTED
     started = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    if "label" not in started:
+    if "answer_model" in started:
         raise SystemExit(
-            f"evals: {run} is not a run: it has no {STARTED} with a label."
+            f"evals: {folder} is a comparison; finish it with --ask-over "
+            f"{folder.parent.parent} --model {started['answer_model']}"
         )
     return started
 
@@ -517,14 +552,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.ask_over:
         line = compare(
             pinned,
-            args.ask_over,
+            args.ask_over.resolve(),
             args.model,
             RESULTS_PATH,
             limit=args.limit,
             workers=args.workers,
         )
     else:
-        folder = args.resume or RUNS_DIR / new_run_folder()
+        folder = args.resume.resolve() if args.resume else RUNS_DIR / new_run_folder()
         line = evaluate(
             pinned, folder, RESULTS_PATH, limit=args.limit, workers=args.workers
         )
