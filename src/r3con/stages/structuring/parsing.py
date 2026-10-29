@@ -54,7 +54,7 @@ from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
-from r3con.runs import StageRun
+from r3con.runs import Emit, StageRun, no_events
 from r3con.runtime.llm import send_until_valid
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
@@ -429,6 +429,7 @@ def parse_documents(
     run: StageRun | None = None,
     workers: int | None = None,
     splits: Splits | None = None,
+    emit: Emit = no_events,
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
@@ -448,6 +449,10 @@ def parse_documents(
     document's. Each document's cited ids are in :attr:`ParseResult.provenance`.
     ``max_attempts`` bounds each call's retries (see :func:`parse_one_document`).
     Returns a :class:`ParseResult`.
+
+    Around each document's parse, all its parts', ``emit`` reports ``parsing_started``
+    with its ``doc_id``, and ``parsing_finished`` with that, its ``n_records`` (across
+    every list field) and its ``provenance``. It is called from worker threads.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per document, or ``max_attempts``
@@ -478,7 +483,8 @@ def parse_documents(
 
     def one(i: int, _document: str) -> list[tuple[BaseModel, list[str]]]:
         _log.info("parse doc %d/%d", i + 1, len(documents))
-        return reader.read_in_parts(
+        emit("parsing_started", doc_id=document_ids[i])
+        parts = reader.read_in_parts(
             i,
             call="parse",
             rest=request.system_prompt + _headed(document_ids[i], ""),
@@ -494,6 +500,17 @@ def parse_documents(
                 **llm_kwargs,
             ),
         )
+        emit(
+            "parsing_finished",
+            doc_id=document_ids[i],
+            n_records=sum(
+                len(getattr(parse, f))
+                for parse, _ in parts
+                for f in parse_cls.model_fields
+            ),
+            provenance=combine_parts(ids for _, ids in parts),
+        )
+        return parts
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(

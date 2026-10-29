@@ -130,6 +130,7 @@ resends and the wait between them, to a folder under `./logs`.
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
 ├── ids.json                     <- each document's id
+├── events.jsonl                 <- each stage's start and finish, as they happened
 ├── splits.json                  <- only when a document was read in parts
 ├── relevance/
 │   ├── result.json              <- each round's snippets
@@ -146,7 +147,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   ├── result.json              <- the answer
 │   ├── calls.json
 │   └── transcript.yaml
-└── asks/<folder>/               <- one per r3con.ask: manifest.json and reasoning/
+└── asks/<folder>/               <- one per r3con.ask: manifest.json, events.jsonl and reasoning/
 ```
 
 ## Evaluation

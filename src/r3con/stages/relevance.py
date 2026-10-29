@@ -47,10 +47,10 @@ from r3con.config import PromptStage
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
-from r3con.runs import StageRun
+from r3con.runs import Emit, StageRun, no_events
 from r3con.runtime.llm import send_until_valid
 from r3con.settings import active_doc_workers
-from r3con.splitting import Splits
+from r3con.splitting import Splits, part_number
 
 _log = get_logger("relevance")
 
@@ -301,6 +301,17 @@ def _read(
     return summary, cited(reply.provenance_ids, request.shown, kind)
 
 
+def _reported_read(
+    emit: Emit, where: dict[str, Any], request: _Request, part: str, **read: Any
+) -> tuple[str, list[str]]:
+    """:func:`_read` of ``part``, between its ``relevance_started`` and
+    ``relevance_finished`` events, which carry ``where``."""
+    emit("relevance_started", **where)
+    summary, provenance = _read(request, part, **read)
+    emit("relevance_finished", **where, summary=summary, provenance=provenance)
+    return summary, provenance
+
+
 def _attempts(max_attempts: int | None) -> int:
     """``max_attempts``, or ``settings.RELEVANCE_MAX_ATTEMPTS`` for ``None``.
 
@@ -372,6 +383,7 @@ def surface_relevance(
     workers: int | None = None,
     splits: Splits | None = None,
     max_attempts: int | None = None,
+    emit: Emit = no_events,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -392,6 +404,12 @@ def surface_relevance(
     per part, and stays split in later rounds. A part never sees its own document's
     other parts: the others' block holds the other documents only, a split one's
     snippets listed separately under their part ids.
+
+    Around each document's call in a round, or each part's, ``emit`` reports
+    ``relevance_started`` with its ``round``, ``doc_id`` and ``part`` (the ``k`` of its
+    snippet id ``<id>.<k>``, ``None`` for a document read whole), and
+    ``relevance_finished`` with those and its snippet's ``summary`` and ``provenance``.
+    It is called from worker threads.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -438,7 +456,13 @@ def surface_relevance(
                 call=f"relevance-r{round_idx}",
                 rest=request.system_prompt,
                 schema=request.schema,
-                send=lambda part, kind: _read(
+                send=lambda part, kind: _reported_read(
+                    emit,
+                    {
+                        "round": round_idx,
+                        "doc_id": document_ids[i],
+                        "part": part_number(kind),
+                    },
                     request,
                     part,
                     kind=kind,

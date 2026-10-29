@@ -41,6 +41,8 @@ from r3con.runtime.llm import count_tokens, quiet_litellm, schema_as_sent
 _log = get_logger("splitting")
 
 T = TypeVar("T")
+# The part index at the end of a split document's call kind (:func:`_kind`).
+_PART_OF_KIND = re.compile(r"-d\d+c(\d+)$")
 
 
 class Splits:
@@ -408,6 +410,13 @@ def _utf8_size(text: str) -> int:
 def _kind(call: str, doc: int, k: int, n_parts: int) -> str:
     """The kind a call records for part ``k`` of ``n_parts`` of document ``doc``."""
     return f"{call}-d{doc}" if n_parts == 1 else f"{call}-d{doc}c{k}"
+
+
+def part_number(kind: str) -> int | None:
+    """The part that :meth:`Splits.read_in_parts` sends under ``kind``, from 1 as its
+    snippet's id ``<id>.<k>`` numbers it, or ``None`` for a document read whole."""
+    found = _PART_OF_KIND.search(kind)
+    return None if found is None else int(found[1]) + 1
 
 
 def _no_room(rest_tokens: int) -> str:
