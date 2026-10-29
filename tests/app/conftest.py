@@ -1,16 +1,11 @@
-from pathlib import Path
-
 import pytest
 
-KEY_VARIABLES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")
+from r3con.app.server import KEY_VARIABLES
 
 
-# In place of the root's: the server's tests need litellm.completion and r3con's
-# resend wait as they are.
+# In place of the root's: no fake model or recorded resend waits, as the server's
+# tests need the real ones.
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    for variable in KEY_VARIABLES:
+def _isolated(monkeypatch: pytest.MonkeyPatch, isolated_r3con: None) -> None:
+    for variable in KEY_VARIABLES.values():
         monkeypatch.delenv(variable, raising=False)
-    # Each test starts with no key registered for masking by an earlier one's runs.
-    monkeypatch.setattr("r3con.masking._registered", set())
-    monkeypatch.chdir(tmp_path)

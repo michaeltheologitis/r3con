@@ -530,21 +530,21 @@ class _Server(uvicorn.Server):
             await asyncio.sleep(WORKER_POLL_SECONDS)
 
 
+def listen(port: int) -> socket.socket:
+    """A socket listening on 127.0.0.1 at ``port``, 0 for a free one."""
+    return socket.create_server((HOST, port))
+
+
 def _server(
-    port: int, logs_dir: Path, completion: Callable[..., Any] | None
-) -> tuple[_Server, socket.socket, str]:
-    """A server for a socket already listening on ``port`` (0 for a free one), and the
-    URL that opens its page."""
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((HOST, port))
-    listener.listen()
+    listener: socket.socket, logs_dir: Path, completion: Callable[..., Any] | None
+) -> tuple[_Server, str]:
+    """A server for ``listener``, and the URL that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
     state = ServerState(logs_dir=logs_dir, completion=completion)
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
-    return _Server(config, state), listener, f"http://{HOST}:{port}/#token={token}"
+    return _Server(config, state), f"http://{HOST}:{port}/#token={token}"
 
 
 def serve(
@@ -557,7 +557,8 @@ def serve(
     with this launch's token, and a function that stops the server, returning once its
     runs and asks have ended, at most ``WORKERS_EXIT_SECONDS`` after its connections
     have closed."""
-    server, listener, url = _server(port, logs_dir, completion)
+    listener = listen(port)
+    server, url = _server(listener, logs_dir, completion)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
@@ -570,12 +571,14 @@ def serve(
     return url, stop
 
 
-def launch(*, port: int, logs_dir: Path, browser: bool) -> None:
-    """Serve the app until stopped, as ``r3con app`` does: print the URL that opens
-    the page, with this launch's token, and with ``browser``, open it."""
+def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
+    """Serve the app on ``listener`` until stopped, as ``r3con app`` does: print the
+    URL that opens the page, with this launch's token, and where its run folders go,
+    and with ``browser``, open the page."""
     configure_logging()
-    server, listener, url = _server(port, logs_dir, None)
+    server, url = _server(listener, logs_dir, None)
     print(f"r3con app: {url}", flush=True)
+    print(f"r3con app: runs go to {logs_dir}", flush=True)
     if browser:
         webbrowser.open(url)
     # uvicorn shuts down on Ctrl-C, then raises it again, as its own run() expects.

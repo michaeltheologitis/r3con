@@ -106,8 +106,9 @@ other = r3con.ask(result, "Which supplier delivered on time most often?")
 print(other)
 ```
 
-Pass `cancel=threading.Event()` and set it to stop a run; it raises `r3con.Cancelled` and
-keeps what it did. A call already sent finishes first.
+Pass `cancel=threading.Event()` to `run` or `ask` and set it to stop: no new model call is
+sent and it raises `r3con.Cancelled`, keeping what it did. A call already sent, and
+retries you set yourself (`completion=` or `params`), run their course.
 
 ## Notebooks
 
@@ -140,7 +141,9 @@ r3con also records provenance, how the answer, each summary and each parse came 
 
 Every run writes each stage's output and model calls, failed ones included, with their
 tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
-API keys are masked in anything r3con writes or logs.
+API keys a provider's error echoes are masked before r3con writes or logs them; a
+`completion=` wrapper that adds its own key registers it with
+`r3con.masking.register_key(key)`.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir

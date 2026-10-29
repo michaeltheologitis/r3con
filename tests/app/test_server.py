@@ -14,7 +14,7 @@ from litellm.exceptions import RateLimitError
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp
 
-from r3con.app.server import ServerState, _server, create_app, serve
+from r3con.app.server import ServerState, _server, create_app, listen, serve
 
 litellm.suppress_debug_info = True
 
@@ -719,7 +719,8 @@ def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly
 ):
     unhandled: list[threading.ExceptHookArgs] = []
     monkeypatch.setattr(threading, "excepthook", unhandled.append)
-    server, listener, url = _server(0, logs_dir, held_llm)
+    listener = listen(0)
+    server, url = _server(listener, logs_dir, held_llm)
     serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
     serving.start()
 
@@ -744,7 +745,8 @@ def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly
 def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
     llm: FakeModel, logs_dir: Path
 ):
-    server, listener, url = _server(0, logs_dir, llm)
+    listener = listen(0)
+    server, url = _server(listener, logs_dir, llm)
     serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
     serving.start()
     server.should_exit = True

@@ -78,8 +78,7 @@ module-root = "src"
 extend-exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pyright]
-# tests/app kept the type checks it had as the app's own project; the rest of tests/
-# never had them.
+# tests/app keeps the type checks it had as the app's own project.
 include = ["src", "evals", "tests/app"]
 exclude = ["src/r3con/runtime/python_executor.py"]
 

@@ -37,6 +37,12 @@ from r3con.runs import TaskLogger, new_run_folder
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
 _log = get_logger("cli")
+# The packages of the app extra, and what to install when one is missing.
+APP_PACKAGES = frozenset({"platformdirs", "starlette", "uvicorn"})
+APP_EXTRA_HINT = (
+    'the app needs its extra: uv tool install "r3context[app]" '
+    '(or pip install "r3context[app]")'
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Serve the app's page on 127.0.0.1.",
         description=(
             "Serve the app's page on 127.0.0.1 and open it, with this launch's token "
-            'in its URL. Needs the app extra: pip install "r3context[app]".'
+            f"in its URL; {APP_EXTRA_HINT}."
         ),
     )
     app_cmd.add_argument(
@@ -177,7 +183,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="DIR",
-        help="Where run folders go (default: runs/ in r3con's user data directory).",
+        help="Where run folders go (default: R3CON_LOGS_DIR, else runs/ in r3con's "
+        "user data directory).",
     )
     app_cmd.add_argument(
         "--no-browser", action="store_true", help="Print the URL, but don't open it."
@@ -263,14 +270,18 @@ def _app(args: argparse.Namespace) -> int:
     # Imported here: its dependencies are the app extra, which run and ask don't need.
     try:
         from r3con.app import server
-    except ModuleNotFoundError:
-        _error('the app needs its extra: pip install "r3context[app]"')
+    except ModuleNotFoundError as missing:
+        if (missing.name or "").partition(".")[0] not in APP_PACKAGES:
+            raise
+        _error(APP_EXTRA_HINT)
         return 1
-    server.launch(
-        port=args.port,
-        logs_dir=args.logs_dir or server.LOGS_DIR,
-        browser=not args.no_browser,
-    )
+    try:
+        listener = server.listen(args.port)
+    except (OSError, OverflowError) as error:
+        _error(f"can't listen on port {args.port}: {error}")
+        return 2
+    logs_dir = args.logs_dir or os.environ.get("R3CON_LOGS_DIR") or server.LOGS_DIR
+    server.launch(listener, logs_dir=Path(logs_dir), browser=not args.no_browser)
     return 0
 
 

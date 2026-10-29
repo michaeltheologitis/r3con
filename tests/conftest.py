@@ -545,12 +545,10 @@ def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return recorded
 
 
-@pytest.fixture(autouse=True)
-def _isolated(
-    request: pytest.FixtureRequest,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> Iterator[None]:
+@pytest.fixture
+def isolated_r3con(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
+    """No ``R3CON_*`` variable, no key registered for masking, the test's own working
+    directory, and the ``r3con`` logger restored afterwards."""
     for name in R3CON_VARIABLES:
         # Set, then delete, so the undo also removes a value the code under test writes.
         monkeypatch.setenv(name, "")
@@ -558,16 +556,24 @@ def _isolated(
     monkeypatch.chdir(tmp_path)
     # Each test starts with no key registered for masking by an earlier one's calls.
     monkeypatch.setattr("r3con.masking._registered", set())
-    if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
-        monkeypatch.setattr(litellm, "completion", FakeLLM())
-    if not request.node.get_closest_marker("live"):
-        request.getfixturevalue("waits")
     logger = logging.getLogger("r3con")
     level, propagate, handlers = logger.level, logger.propagate, list(logger.handlers)
     yield
     logger.setLevel(level)
     logger.propagate = propagate
     logger.handlers[:] = handlers
+
+
+@pytest.fixture(autouse=True)
+def _isolated(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_r3con: None,
+) -> None:
+    if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
+        monkeypatch.setattr(litellm, "completion", FakeLLM())
+    if not request.node.get_closest_marker("live"):
+        request.getfixturevalue("waits")
 
 
 @pytest.fixture(scope="session")
