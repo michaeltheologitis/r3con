@@ -19,6 +19,7 @@ from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
+    Cancelled,
     litellm_chat_completion,
     litellm_chat_completion_full,
     quiet_litellm,
@@ -75,6 +76,9 @@ KEY = "sk-not-a-real-key-0123456789"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
+CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
+LONG_RETRY_AFTER_SECONDS = 60
+CANCEL_AFTER_SECONDS = 0.2
 
 
 class Flat(BaseModel):
@@ -621,6 +625,46 @@ def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm
 
     [step] = run.steps
     assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+@pytest.mark.parametrize("supplied", [False, True], ids=["litellm", "supplied"])
+def test_once_cancel_is_set_a_call_is_neither_sent_nor_recorded(
+    llm, monkeypatch, run, supplied
+):
+    monkeypatch.setattr(litellm, "completion", llm)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(Cancelled, match="no further model call"):
+        litellm_chat_completion(
+            system_prompt="s",
+            user_prompt="u",
+            model=MODEL,
+            completion=llm if supplied else None,
+            run=run,
+            cancel=cancel,
+        )
+    assert llm.requests == []
+    assert run.steps == []
+
+
+def test_a_wait_to_resend_ends_at_once_when_cancel_is_set_and_nothing_is_resent(
+    llm, monkeypatch, run
+):
+    # A real sleep in place of the recorded one, so a wait deaf to cancel would last.
+    monkeypatch.setattr("r3con.runtime.llm._sleep", time.sleep)
+    slow_down = slowed_down(retry_after=str(LONG_RETRY_AFTER_SECONDS))
+    monkeypatch.setattr(litellm, "completion", llm.replies(slow_down, "ok"))
+    cancel = threading.Event()
+    threading.Timer(CANCEL_AFTER_SECONDS, cancel.set).start()
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model=MODEL, run=run, cancel=cancel
+        )
+    assert time.monotonic() - started < LONG_RETRY_AFTER_SECONDS / 10
+    assert len(llm.requests) == 1
+    [step] = run.steps
+    assert (step.sends, step.error) == (1, CANCELLED)
 
 
 def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(

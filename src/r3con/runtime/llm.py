@@ -58,6 +58,16 @@ too, with its error on one line, keys masked (:func:`r3con.masking.one_line`), a
 the error is raised as it was. Every credential a request carries is registered for
 masking before it is sent (:func:`register_credentials`), so the warning logged before a
 resend, and any error r3con writes later, mask it.
+
+**A call is never sent once ``cancel`` is set.** Every model call r3con makes, from
+every stage and every document's worker thread, goes through
+:func:`litellm_chat_completion_full`, which checks its ``cancel``, a
+``threading.Event``, right before it sends, and raises :class:`Cancelled` instead once
+it is set. A resend waits on that event rather than sleeping, so the wait ends the
+moment it is set, and raises :class:`Cancelled` instead of resending. A call already
+sent is not interrupted, since litellm cannot stop one: it finishes and is recorded. A
+supplied ``completion=`` owns its retrying, and its waits between resends run their
+course.
 """
 
 from __future__ import annotations
@@ -98,7 +108,17 @@ _WAIT_DIGITS = 2
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
+_CANCELLED = "cancel was set, so no further model call is sent"
 _sleep = time.sleep
+
+
+class Cancelled(Exception):
+    """Raised in place of a model call once the ``cancel`` event it was given is set."""
+
+
+def _raise_if_cancelled(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled(_CANCELLED)
 
 
 def _enforce_strict_objects(schema: Any) -> Any:
@@ -174,6 +194,7 @@ def litellm_chat_completion_full(
     completion: Callable[..., Any] | None = None,
     run: StageRun | None = None,
     kind: str = "llm_call",
+    cancel: threading.Event | None = None,
     **kwargs: Any,
 ) -> Any:
     """Call an LLM via LiteLLM and return the full response object.
@@ -198,6 +219,10 @@ def litellm_chat_completion_full(
     so the transcript renders them as a labeled block. A call that raises an error is
     recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
     error is raised unchanged.
+
+    If ``cancel`` is set, :class:`Cancelled` is raised before the request is sent, and
+    nothing is recorded; if it is set while r3con waits to resend, the wait ends at
+    once and :class:`Cancelled` is raised and recorded as the call's error.
     """
 
     if messages is not None:
@@ -248,9 +273,10 @@ def litellm_chat_completion_full(
                 **outcome,
             )
 
+    _raise_if_cancelled(cancel)
     try:
         if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
-            response = _resend_temporary_errors(request, resends)
+            response = _resend_temporary_errors(request, resends, cancel)
         else:
             response = (completion or litellm.completion)(**request)
     except Exception as error:
@@ -278,13 +304,14 @@ def litellm_chat_completion(
     run: StageRun | None = None,
     kind: str = "llm_call",
     max_empty_retries: int | None = None,
+    cancel: threading.Event | None = None,
     **kwargs: Any,
 ) -> str | BaseModel:
     """Call an LLM via LiteLLM and optionally parse structured output.
 
     See :func:`litellm_chat_completion_full` for the two prompt-input paths
-    (``system_prompt``/``user_prompt`` vs ``messages``) and the ``run`` /
-    ``kind`` recording behavior.
+    (``system_prompt``/``user_prompt`` vs ``messages``), the ``run`` /
+    ``kind`` recording behavior and ``cancel``.
 
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
@@ -316,6 +343,7 @@ def litellm_chat_completion(
             completion=completion,
             run=run,
             kind=kind,
+            cancel=cancel,
             **kwargs,
         )
 
@@ -443,17 +471,30 @@ def quiet_litellm() -> Iterator[None]:
             logger.setLevel(level)
 
 
-def _resend_temporary_errors(request: dict[str, Any], resends: dict[str, Any]) -> Any:
+def _resend_temporary_errors(
+    request: dict[str, Any],
+    resends: dict[str, Any],
+    cancel: threading.Event | None,
+) -> Any:
     """The response to ``request``. Before each send, ``resends`` gets the times the
     request has been sent, this send included, and the seconds, to hundredths, waited
-    between those sends, so it holds both whether the last send answers or raises."""
+    between those sends, so it holds both whether the last send answers or raises.
+    Each wait before a resend ends once ``cancel`` is set, and raises
+    :class:`Cancelled` instead of resending."""
 
     def count(state: tenacity.RetryCallState) -> None:
         resends["sends"] = state.attempt_number
         resends["resend_wait_seconds"] = round(state.idle_for, _WAIT_DIGITS)
 
+    def wait(seconds: float) -> None:
+        if cancel is None:
+            _sleep(seconds)
+        else:
+            cancel.wait(seconds)
+        _raise_if_cancelled(cancel)
+
     resending = tenacity.Retrying(
-        sleep=_sleep,
+        sleep=wait,
         retry=tenacity.retry_if_exception(is_temporary),
         stop=_give_up,
         wait=_wait_before_resending,

@@ -35,6 +35,7 @@ written to the folder's ``events.jsonl`` and handed to the caller's ``on_event``
 from __future__ import annotations
 
 import json
+import threading
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -261,6 +262,7 @@ def run_pipeline(
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Run all three stages for one ``(task, documents)`` pair under one ``config``.
 
@@ -287,6 +289,10 @@ def run_pipeline(
     after that stage succeeds, so a later failure still leaves earlier artifacts; a
     stage that raises writes its completed calls and ``error.txt``, and the exception
     carries a note naming the run folder.
+
+    ``cancel`` stops the run as :func:`r3con.run` says: once it is set, no new model
+    call is sent, and the stage then under way raises
+    :class:`~r3con.runtime.llm.Cancelled` as any failing stage raises.
 
     The run reports its progress as events, each a dict of JSON values with its
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
@@ -326,7 +332,11 @@ def run_pipeline(
     model = config.model
     rounds = config.relevance_rounds
     llm_kwargs = _llm_kwargs(
-        config.params, api_base=api_base, api_key=api_key, completion=completion
+        config.params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        cancel=cancel,
     )
 
     document_ids = draw_document_ids(len(documents))
@@ -606,6 +616,7 @@ def ask_pipeline(
     api_key: str | None = None,
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Rerun only reasoning over ``built`` for ``task`` under ``config``
     (:func:`ask_config`), as :func:`r3con.ask` says.
@@ -614,10 +625,14 @@ def ask_pipeline(
     folder's own ``events.jsonl``: ``ask_started`` (``question``, ``model``,
     ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, then
     ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
-    ``error``)."""
+    ``error``). ``cancel`` stops it as it stops :func:`run_pipeline`."""
     caps = settings_snapshot()
     llm_kwargs = _llm_kwargs(
-        config.params, api_base=api_base, api_key=api_key, completion=completion
+        config.params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        cancel=cancel,
     )
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
@@ -678,20 +693,23 @@ def _llm_kwargs(
     api_base: str | None,
     api_key: str | None,
     completion: Callable[..., Any] | None,
+    cancel: threading.Event | None,
 ) -> dict[str, Any]:
     """What every request is sent with: the output knobs in ``params``, then the
-    transport. Each credential among them, a Router's included, is registered for
-    masking (:func:`r3con.runtime.llm.register_credentials`), so call this before
-    writing ``manifest.json``."""
+    transport and ``cancel``. Each credential among them, a Router's included, is
+    registered for masking (:func:`r3con.runtime.llm.register_credentials`), so call
+    this before writing ``manifest.json``."""
     llm_kwargs: dict[str, Any] = {**params}
     if api_base:
         llm_kwargs["api_base"] = api_base
     if api_key:
         llm_kwargs["api_key"] = api_key
+    # Named parameters of `litellm_chat_completion`, so they bind there rather than
+    # being forwarded into the provider request.
     if completion is not None:
-        # A named parameter of `litellm_chat_completion`, so it binds there rather than
-        # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
+    if cancel is not None:
+        llm_kwargs["cancel"] = cancel
     register_credentials(llm_kwargs, completion)
     return llm_kwargs
 

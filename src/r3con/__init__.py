@@ -38,7 +38,11 @@ from r3con.prompts import load_prompt
 from r3con.r3con import ask, read_documents, run
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
-from r3con.runtime.llm import litellm_chat_completion, litellm_chat_completion_full
+from r3con.runtime.llm import (
+    Cancelled,
+    litellm_chat_completion,
+    litellm_chat_completion_full,
+)
 from r3con.stages.reasoning import ReasoningResult, reason
 from r3con.stages.relevance import (
     RelevantContext,
@@ -66,6 +70,7 @@ except _metadata.PackageNotFoundError:  # a source tree that was never installed
 
 __all__ = [
     "Answer",
+    "Cancelled",
     "CodeActResult",
     "CodeActTurn",
     "ParseResult",

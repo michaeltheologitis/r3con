@@ -40,6 +40,7 @@ self-hosted endpoint.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
@@ -63,6 +64,7 @@ from r3con.pipeline import (
     run_pipeline,
 )
 from r3con.runs import TaskLogger, new_run_folder
+from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
 
 _log = get_logger("documents")
@@ -235,6 +237,7 @@ def run(
     logs_dir: str | Path | None = None,
     save_artifacts: bool = True,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Run the pipeline: answer ``question`` over ``documents``.
 
@@ -280,6 +283,17 @@ def run(
             for it, so it should return quickly (put the event on a queue, say). If it
             raises, the error is logged and the run goes on. The run folder's
             ``events.jsonl`` records the same events, whether or not it is given.
+        cancel: a ``threading.Event`` that stops the run once it is set, from any
+            thread. From then on no new model call is sent, and a wait to resend a
+            rate-limited call ends at once; the stage under way raises
+            :class:`Cancelled` and fails as any stage does, with ``run_failed``
+            naming it and, with artifacts on, its folder holding the calls it made
+            and ``error.txt``, beside the earlier stages' artifacts. What is already
+            under way is not interrupted: a call already sent finishes (litellm cannot
+            stop one) and is recorded, a step the coding path is running in its
+            sandbox runs to its end or its timeout, and a supplied ``completion``'s
+            own waits between resends run their course. A run that has sent its last
+            call by then finishes as usual.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
@@ -309,6 +323,7 @@ def run(
         document leave it no room in the model's window. With
         artifacts on, an exception from a stage carries a note naming the run folder,
         where the stage left its completed calls and ``error.txt``.
+        Cancelled: once ``cancel`` is set, in place of the next model call.
     """
     # `run` is the batteries-included path, so it loads the caller's .env (from THEIR
     # working directory) the way the CLI does. Importing r3con does not.
@@ -349,6 +364,7 @@ def run(
         api_key=api_key,
         completion=completion,
         on_event=on_event,
+        cancel=cancel,
     )
 
 
@@ -363,6 +379,7 @@ def ask(
     api_base: str | None = None,
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
 ) -> Answer:
     """Answer a new ``question`` over what a finished run built, running only reasoning.
 
@@ -390,6 +407,8 @@ def ask(
         on_event: as in :func:`run`, called with the ask's events: ``ask_started``,
             ``reasoning_started``, ``reasoning_finished``, then ``ask_finished`` or
             ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
+        cancel: as in :func:`run`: the ask fails with ``ask_failed``, its folder
+            holding the calls reasoning made and ``error.txt``.
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
     folder is: a ``manifest.json`` as a run writes one, for the run's config with this
@@ -413,7 +432,8 @@ def ask(
         Each of these is raised in one line, before any request and before the ask's
         folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left
-        its completed calls and ``error.txt``.
+        its completed calls and ``error.txt``; :class:`Cancelled` among them, once
+        ``cancel`` is set.
     """
     load_dotenv(find_dotenv(usecwd=True))
     run_dir = source.run_dir if isinstance(source, Answer) else Path(source)
@@ -432,7 +452,8 @@ def ask(
         api_key=api_key,
         completion=completion,
         on_event=on_event,
+        cancel=cancel,
     )
 
 
-__all__ = ["TEXT_SUFFIXES", "Answer", "ask", "read_documents", "run"]
+__all__ = ["TEXT_SUFFIXES", "Answer", "Cancelled", "ask", "read_documents", "run"]
