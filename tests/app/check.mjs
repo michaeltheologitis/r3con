@@ -90,6 +90,14 @@ const ALL_LEFT_OUT = "5 documents of this run aren't in the files now · a new r
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const FILE_ADDED_AFTER_RUN = '1 file added, in place of the 5 sample memos: a new run would cover 1 document, and ask stays on this run.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
+// The page's intros, for a sample of n memos.
+const memosLoaded = (n) => (n === 1 ? 'The 1 sample memo is loaded' : `The ${n} sample memos are loaded`);
+const prototypeIntro = (n) => `${memosLoaded(n)}, with the question this run answered. Press run to watch it.`;
+const liveIntro = (n) => `${memosLoaded(n)}, with a question about them. Press run to run r3con on them, or add your own files.`;
+const INTRO = '#transcript > .line:first-child .t';
+const ASKS_HEADER = 'recorded asks over this run · any other question or model is simulated';
+// Fewer memos than the shipped sample has, for a page shipped with another sample: one, to be counted in the singular.
+const FEWER_MEMOS = 1;
 const TYPE_A_MODEL = 'type a model first';
 // Its faint lines: each of the 5 round-2 summaries, and the 4 parses with records.
 const SAMPLE_ANSWER_INPUTS = 9;
@@ -321,6 +329,32 @@ function recordedSample() {
 function recordedAsks() {
   const match = readFileSync(SCRIPT_FILE, 'utf8').match(/const RECORDED_ASKS = (\[[\s\S]*?\n\]);/);
   return match ? JSON.parse(match[1]) : [];
+}
+
+// app.js as it would be shipped with a sample of fewer memos, or with no recorded asks.
+function withFewerMemos(script) {
+  const sample = recordedSample();
+  if (!sample) throw new Error('app.js has no SAMPLE literal for the checks to cut down');
+  const fewer = `const SAMPLE = ${JSON.stringify({ ...sample, docs: sample.docs.slice(0, FEWER_MEMOS) })};`;
+  return script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => fewer);
+}
+const withNoAsks = (script) => script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, 'const RECORDED_ASKS = [];');
+
+// What `read` finds on the page as shipped, then on the page with app.js passed through `edit`.
+async function shippedAndEdited(area, options, edit, read) {
+  const serveEdited = (page) => {
+    const body = edit(readFileSync(SCRIPT_FILE, 'utf8'));
+    return page.route('**/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body }));
+  };
+  const found = [];
+  for (const before of [undefined, serveEdited]) await withPage(area, { ...options, before }, async (page) => found.push(await read(page)));
+  return found;
+}
+
+async function introCounts(area, options, intro) {
+  const intros = await shippedAndEdited(area, options, withFewerMemos, (page) => page.textContent(INTRO));
+  const name = `the intro counts the sample memos: ${SAMPLE_DOCS} as shipped, ${FEWER_MEMOS} in a page shipped with ${FEWER_MEMOS}`;
+  check(area, name, isDeepStrictEqual(intros, [SAMPLE_DOCS, FEWER_MEMOS].map(intro)), intros.join(' | '));
 }
 
 // The edges an answer's lit path holds: the run's own answer by default, or `answerId` with `provenance`.
@@ -689,6 +723,7 @@ async function beforeRun() {
     const once = writes === 1 && (await page.textContent('#run-status')) === ready('simulated run', DEFAULT_MODEL);
     check('before a run', 'typing a question rewrites the status once, not on every key', once, `${writes} writes`);
   });
+  await introCounts('before a run', { sample: false }, prototypeIntro);
 }
 
 async function sampleReplay() {
@@ -734,6 +769,14 @@ async function sampleReplay() {
     const geometryDetail = `${geometry.dotted} dotted lines at zoom ${geometry.k?.toFixed(2)}${hitsNote}`;
     check('geometry', 'no dotted line passes through an icon or a label', clear, geometryDetail);
   });
+
+  const asks = recordedAsks();
+  const offers = [ASKS_HEADER, ...asks.map(offerLabel)];
+  const [shipped, none] = await shippedAndEdited('sample replay', {}, withNoAsks, (page) => page.evaluate(lastTurnLines));
+  const offered = shipped.slice(-offers.length);
+  check('sample replay', `the replay ends by offering the ${asks.length} recorded asks under their header`, isDeepStrictEqual(offered, offers), offered.join(' | '));
+  const withoutName = 'a page shipped with no recorded asks ends the replay with neither offers nor their header';
+  check('sample replay', withoutName, isDeepStrictEqual(none, shipped.slice(0, -offers.length)), none.at(-1));
 }
 
 async function arrange() {
@@ -2570,6 +2613,7 @@ async function liveElsewhere() {
 // A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
+    await introCounts('live', { url, sample: false }, liveIntro);
     await liveCutStream(url);
     await liveAnswers(url);
     await liveAskAfterFailed(url);

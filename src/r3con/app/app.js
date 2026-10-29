@@ -589,11 +589,11 @@
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con app. A saved key stays in r3con app's memory on this computer until it stops; it is never written to disk.";
   const LIVE_MODE_NOTE = 'live · r3con app on this computer';
-  const LIVE_INTRO = 'The 5 sample memos are loaded, with a question about them. Press run to run r3con on them, or add your own files.';
+  const LIVE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with a question about them. Press run to run r3con on them, or add your own files.`;
   const PROTOTYPE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
-  const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
+  const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
   const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 
@@ -788,8 +788,11 @@
   const fmtUsd = (n) => `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(2)}`;
   /** @param {number} n */
   const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
+  // A declaration, so that the intros above can use it.
   /** @param {number} n @param {string} one */
-  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  function plural(n, one, many = `${one}s`) {
+    return `${n} ${n === 1 ? one : many}`;
+  }
   /** @param {string} name */
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
   /** @param {string} s */
@@ -2604,6 +2607,7 @@
   // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
   /** @param {Tab} tab @param {Narrator} narr */
   function offerRecordedAsks(tab, narr) {
+    if (!RECORDED_ASKS.length) return;
     /** @param {RecordedAsk} ask @param {number} i */
     const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
     narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
