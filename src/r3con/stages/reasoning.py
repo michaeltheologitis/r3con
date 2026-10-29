@@ -45,7 +45,7 @@ from pydantic import BaseModel, Field, ValidationError, create_model, field_vali
 from r3con import settings
 from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import get_logger
-from r3con.masking import masked
+from r3con.masking import masked, one_line
 from r3con.prompts import load_prompt
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
@@ -255,9 +255,9 @@ class ReasoningResult:
       path, no turns and ``"reply"``.
     - ``fallback``: why a direct run took the coding path, else ``None``:
       ``{"cause": "estimate", "estimate": tokens, "line": tokens}``,
-      ``{"cause": "refusal", "error": message}``, keys masked
-      (:func:`r3con.masking.masked`), or, when no reply fit its schema,
-      ``{"cause": "invalid", "error": message}``.
+      ``{"cause": "refusal", "error": message}``, keys masked, or, when no reply fit
+      its schema, ``{"cause": "invalid", "error": line}``, the last reply's errors as
+      :func:`r3con.masking.one_line` gives them.
     """
 
     answer: str
@@ -375,13 +375,6 @@ def _reason_with_code(
     )
 
 
-def _in_brief(error: ValidationError) -> str:
-    """``error`` on one line, without the reply it quotes."""
-    return "; ".join(
-        f"{'.'.join(map(str, e['loc'])) or 'reply'}: {e['msg']}" for e in error.errors()
-    )
-
-
 def _reason_directly(
     *,
     render: Callable[..., str],
@@ -432,7 +425,7 @@ def _reason_directly(
             "with code instead",
             max_attempts,
         )
-        return {"cause": "invalid", "error": _in_brief(invalid)}
+        return {"cause": "invalid", "error": one_line(invalid)}
     reply = cast(_DirectReply, reply)
     return ReasoningResult(
         answer=reply.answer.strip(),

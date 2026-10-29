@@ -15,13 +15,14 @@ from litellm.types.router import RetryPolicy
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from r3con import settings
-from r3con.masking import _ERROR_CHARS
+from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
     quiet_litellm,
+    register_credentials,
 )
 
 MODEL = "openai/gpt-6-luna"
@@ -642,17 +643,7 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
         (
             refused("refused\nTraceback (most recent call last):"),
             KEY,
-            f"{BAD_REQUEST}refused",
-        ),
-        (
-            ConnectionError("\n\nprovider down\nTraceback (most recent call last):"),
-            KEY,
-            "ConnectionError: provider down",
-        ),
-        (
-            refused("x" * _ERROR_CHARS),
-            KEY,
-            BAD_REQUEST + "x" * (_ERROR_CHARS - len(BAD_REQUEST)),
+            f"{BAD_REQUEST}refused Traceback (most recent call last):",
         ),
         (
             refused(f"bad key Bearer {KEY}"),
@@ -665,15 +656,9 @@ def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
             f"{BAD_REQUEST}maximum context length is 4000 tokens",
         ),
     ],
-    ids=[
-        "first-line",
-        "first-non-empty-line",
-        "cut-short",
-        "key-masked",
-        "placeholder-key-left-alone",
-    ],
+    ids=["one-line", "key-masked", "placeholder-key-left-alone"],
 )
-def test_a_recorded_error_is_its_first_line_cut_short_without_the_key(
+def test_a_recorded_error_is_one_line_without_the_key(
     llm, run, error, api_key, recorded
 ):
     with pytest.raises(type(error)):
@@ -718,3 +703,29 @@ def test_a_quiet_block_in_another_thread_leaves_litellm_as_it_found_it(loud_lite
     assert not other.is_alive()
     assert seen_inside == [QUIET]
     assert litellm_settings() == LOUD
+
+
+def test_every_credential_a_request_sends_is_registered_for_masking(
+    monkeypatch, router
+):
+    monkeypatch.setenv("MY_GATEWAY", "gateway-from-the-environment")
+    routing = router(
+        {"model": MODEL, "api_key": "router-key-0123456789"},
+        {"model": OPENAI, "api_key": "os.environ/MY_GATEWAY"},
+        {"model": VLLM, "extra_headers": {"x-tenant-auth": "tenant-0123456789"}},
+    )
+    params = {
+        "api_key": "call-key-0123456789",
+        "extra_headers": {"x-gateway-auth": "header-0123456789"},
+        "azure_ad_token": "ad-token-0123456789",
+        "user": "end-user-0123456789",
+        "max_tokens": 4096,
+    }
+    sent = (
+        "router-key-0123456789 gateway-from-the-environment tenant-0123456789 "
+        "call-key-0123456789 header-0123456789 ad-token-0123456789"
+    )
+    register_credentials(params, routing.completion)
+    assert masked(f"{sent} end-user-0123456789 4096") == (
+        "REDACTED " * 6 + "end-user-0123456789 4096"
+    )

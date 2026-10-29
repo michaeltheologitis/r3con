@@ -335,3 +335,19 @@ def test_a_failed_run_shows_no_key_on_stderr(answering, capsys):
     assert "r3con: AuthenticationError: " in err
     assert "Incorrect API key provided: REDACTED" in err
     assert KEY not in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["run", "Who?", "./missing"], ["ask", "./missing", "Who?"]],
+    ids=["run", "ask"],
+)
+def test_a_refused_setting_that_quotes_a_key_shows_it_masked(
+    scripted, capsys, monkeypatch, argv
+):
+    monkeypatch.setenv("OPENAI_API_KEY", KEY)
+    monkeypatch.setenv("R3CON_DOC_WORKERS", KEY)
+    assert r3con(*argv) == 2
+    assert capsys.readouterr().err == (
+        "r3con: R3CON_DOC_WORKERS must be an integer >= 1, got 'REDACTED'.\n"
+    )

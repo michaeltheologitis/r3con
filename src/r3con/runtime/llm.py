@@ -54,11 +54,10 @@ called as it is, once per request, and owns its retrying: a ``litellm.Router`` r
 the same status rule, with its own cooldowns and fallbacks. A recorded call's ``sends``
 and ``resend_wait_seconds`` come from tenacity, and are ``None`` for a call r3con did not
 resend itself. A call that raises an error, once r3con stops resending it, is recorded
-too, with the error's class and first non-empty line, keys masked
-(:func:`r3con.masking.one_line`), and then the error is raised as it was. Each call's
-``api_key`` is registered for masking (:func:`r3con.masking.register_key`) before it is
-sent, so the warning logged before a resend, and any error r3con writes later, mask it
-too.
+too, with its error on one line, keys masked (:func:`r3con.masking.one_line`), and then
+the error is raised as it was. Every credential a request carries is registered for
+masking before it is sent (:func:`register_credentials`), so the warning logged before a
+resend, and any error r3con writes later, mask it.
 """
 
 from __future__ import annotations
@@ -69,12 +68,13 @@ import random
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
 
 import litellm
 import tenacity
+from litellm.router import Router
 from pydantic import BaseModel, ValidationError
 
 from r3con import settings
@@ -98,6 +98,7 @@ _WAIT_DIGITS = 2
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
+_CREDENTIAL_NAME = re.compile("key|token|secret|password|auth", re.IGNORECASE)
 _sleep = time.sleep
 
 
@@ -236,7 +237,7 @@ def litellm_chat_completion_full(
         }
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
-    register_key(api_key)
+    register_credentials(request, completion)
 
     def record(**outcome: Any) -> None:
         if run is not None:
@@ -390,6 +391,26 @@ def send_until_valid(
             )
             text = _retry_prompt(user_prompt, error, rewrite)
     return send(text, max_attempts)
+
+
+def register_credentials(
+    params: Mapping[str, Any], completion: Callable[..., Any] | None = None
+) -> None:
+    """Register for masking (:func:`r3con.masking.register_key`) every credential a
+    request with ``params`` sends: each value of its ``extra_headers``, and the value of
+    each parameter whose name says key, token, secret, password or auth, ``api_key``
+    among them; and when ``completion`` is a ``litellm.Router``'s, the same of each of
+    its deployments' ``litellm_params``, where the Router has already read an
+    ``os.environ/NAME`` from the environment."""
+    headers = params.get("extra_headers") or {}
+    named = [value for name, value in params.items() if _CREDENTIAL_NAME.search(name)]
+    for value in [*headers.values(), *named]:
+        if isinstance(value, str):
+            register_key(value)
+    router = getattr(completion, "__self__", None)
+    if isinstance(router, Router):
+        for deployment in router.model_list:
+            register_credentials(deployment.get("litellm_params") or {})
 
 
 def count_tokens(text: str) -> int:

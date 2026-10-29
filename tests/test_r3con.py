@@ -23,6 +23,15 @@ GPT_4O = "openai/gpt-4o"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 NAMES_A_KEY = "The setup memo's example config reads api_key=abcdefgh12345."
+ECHOING = {
+    "message": f"Incorrect API key provided: {KEY}",
+    "llm_provider": "openai",
+    "model": "gpt-6-luna",
+}
+REFUSED_LINE = (
+    "AuthenticationError: litellm.AuthenticationError: Incorrect API key provided: "
+    "REDACTED"
+)
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 ASK_FILES = {
     "manifest.json",
@@ -38,6 +47,12 @@ def finished_run(llm, tmp_path: Path, documents=DOCS, **options) -> Answer:
     ``tmp_path / "logs"``."""
     logs = tmp_path / "logs"
     return run("Who?", documents, completion=llm, logs_dir=logs, **options)
+
+
+def files_holding(text: str, folder: Path) -> list[str]:
+    """The files under ``folder`` that hold ``text``, by path."""
+    files = [path for path in folder.rglob("*") if path.is_file()]
+    return [str(path.relative_to(folder)) for path in files if text in path.read_text()]
 
 
 def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
@@ -741,13 +756,8 @@ def test_a_failed_run_writes_and_logs_no_key_but_keeps_the_documents_text(
     caplog.set_level(logging.WARNING, logger="r3con")
     if given == "environment":
         monkeypatch.setenv("OPENAI_API_KEY", KEY)
-    echoing = {
-        "message": f"Incorrect API key provided: {KEY}",
-        "llm_provider": "openai",
-        "model": "gpt-6-luna",
-    }
     answering_llm.replies(
-        litellm.InternalServerError(**echoing), litellm.AuthenticationError(**echoing)
+        litellm.InternalServerError(**ECHOING), litellm.AuthenticationError(**ECHOING)
     )
     monkeypatch.setattr(litellm, "completion", answering_llm)
     options = {"api_key": KEY} if given == "api_key" else {}
@@ -756,15 +766,50 @@ def test_a_failed_run_writes_and_logs_no_key_but_keeps_the_documents_text(
         run("Who?", [NAMES_A_KEY], logs_dir=tmp_path / "logs", **options)
 
     [run_dir] = (tmp_path / "logs").iterdir()
-    files = [path for path in run_dir.rglob("*") if path.is_file()]
-    assert [path for path in files if KEY in path.read_text()] == []
+    assert files_holding(KEY, run_dir) == []
     assert KEY not in caplog.text
-    line = (
-        "AuthenticationError: litellm.AuthenticationError: Incorrect API key provided: "
-    )
     [call] = json.loads((run_dir / "relevance" / "calls.json").read_text())
-    assert call["error"] == f"{line}REDACTED"
-    assert events_in(run_dir)[-1]["error"] == f"{line}REDACTED"
-    assert f"{line}REDACTED" in (run_dir / "relevance" / "error.txt").read_text()
+    assert call["error"] == REFUSED_LINE
+    assert events_in(run_dir)[-1]["error"] == REFUSED_LINE
+    assert REFUSED_LINE in (run_dir / "relevance" / "error.txt").read_text()
     assert "Incorrect API key provided: REDACTED" in caplog.text
     assert NAMES_A_KEY in call["prompt"][1]["content"]
+
+
+@pytest.mark.parametrize("sent_by", ["router", "extra_headers"])
+def test_a_key_a_router_or_a_header_sends_is_in_no_file_or_event_of_a_failed_run(
+    answering_llm, monkeypatch, router, tmp_path, sent_by
+):
+    monkeypatch.setattr(litellm, "completion", answering_llm)
+    answering_llm.replies(litellm.AuthenticationError(**ECHOING))
+    if sent_by == "router":
+        routing = router({"model": "openai/gpt-6-luna", "api_key": KEY})
+        options: dict[str, Any] = {"completion": routing.completion}
+    else:
+        options = {"params": {"extra_headers": {"x-gateway-auth": KEY}}}
+    events = []
+
+    with pytest.raises(litellm.AuthenticationError):
+        run(
+            "Who?",
+            DOCS[:1],
+            logs_dir=tmp_path / "logs",
+            on_event=events.append,
+            **options,
+        )
+
+    [run_dir] = (tmp_path / "logs").iterdir()
+    assert files_holding(KEY, run_dir) == []
+    assert KEY not in repr(events)
+    assert events[-1]["error"].startswith(REFUSED_LINE)
+
+
+def test_an_asks_manifest_holds_no_credential_of_its_params(answering_llm, tmp_path):
+    built = finished_run(answering_llm, tmp_path)
+    headers = {"extra_headers": {"x-gateway-auth": KEY}}
+    asked = ask(built, "Who else?", params=headers, completion=answering_llm)
+    assert files_holding(KEY, asked.run_dir) == []
+    manifest = json.loads((asked.run_dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == {
+        "extra_headers": {"x-gateway-auth": "REDACTED"}
+    }

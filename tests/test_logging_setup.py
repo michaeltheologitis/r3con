@@ -1,10 +1,27 @@
 import logging
+import traceback
 
 import pytest
 
 from r3con.logging_setup import configure_logging, get_logger
+from r3con.masking import register_key
 
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+
+
+class OwnTracebacks(logging.Handler):
+    """Renders a record's ``exc_info`` itself, as rich, structlog or Sentry do, and
+    the text a formatter would append only when there is none."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.exc_info:
+            self.shown.append("".join(traceback.format_exception(*record.exc_info)))
+        else:
+            self.shown.append(record.exc_text or "")
 
 
 def test_loggers_live_under_the_r3con_namespace():
@@ -64,3 +81,36 @@ def test_a_logged_message_and_its_traceback_have_keys_masked(caplog, monkeypatch
     assert "sending again after echoed REDACTED" in caplog.text
     assert "RuntimeError: echoed REDACTED" in caplog.text
     assert KEY not in caplog.text
+
+
+def test_a_handler_that_renders_tracebacks_itself_sees_the_chained_error_masked(
+    monkeypatch,
+):
+    register_key(KEY)
+    handler = OwnTracebacks()
+    logger = get_logger("llm")
+    monkeypatch.setattr(logger, "handlers", [handler])
+    try:
+        try:
+            raise RuntimeError(f"inner {KEY}")
+        except RuntimeError as inner:
+            raise ValueError("outer") from inner
+    except ValueError:
+        logger.exception("gave up")
+    [shown] = handler.shown
+    assert "RuntimeError: inner REDACTED" in shown
+    assert KEY not in shown
+
+
+def test_a_logged_stack_is_masked(caplog):
+    register_key(KEY)
+    caplog.set_level(logging.WARNING, logger="r3con")
+    get_logger("llm").warning("not-a-real-key-q7RkT2mXv9LpA4sW", stack_info=True)
+    assert "Stack (most recent call last)" in caplog.text
+    assert KEY not in caplog.text
+
+
+def test_a_log_call_whose_message_does_not_format_returns_and_logs_its_parts(caplog):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    get_logger("llm").warning("doc %d", "seven")
+    assert caplog.messages == ["doc %d ('seven',)"]

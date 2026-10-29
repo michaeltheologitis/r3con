@@ -63,6 +63,7 @@ from r3con.runs import (
     write_manifest,
 )
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
+from r3con.runtime.llm import register_credentials
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
@@ -309,8 +310,8 @@ def run_pipeline(
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
       (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, the
-      error's class and the first non-empty line of its message, keys masked
-      (:func:`r3con.masking.one_line`).
+      error on one line, keys masked (:func:`r3con.masking.one_line`): its class and
+      its message, or each of a ``ValidationError``'s errors as ``loc: msg``.
 
     Each event is appended to ``events.jsonl`` in the run folder, when there is one,
     and handed to ``on_event``, when given, as a copy. ``on_event`` is called from the
@@ -615,6 +616,9 @@ def ask_pipeline(
     ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
     ``error``)."""
     caps = settings_snapshot()
+    llm_kwargs = _llm_kwargs(
+        config.params, api_base=api_base, api_key=api_key, completion=completion
+    )
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     write_manifest(
@@ -651,12 +655,7 @@ def ask_pipeline(
             max_attempts=caps["reasoning_max_attempts"],
             max_turns=caps["reasoning_max_turns"],
             run=record.run,
-            **_llm_kwargs(
-                config.params,
-                api_base=api_base,
-                api_key=api_key,
-                completion=completion,
-            ),
+            **llm_kwargs,
         )
         record.result = _reasoning_record(result)
     emit("reasoning_finished", **_reasoning_outcome(result))
@@ -681,7 +680,9 @@ def _llm_kwargs(
     completion: Callable[..., Any] | None,
 ) -> dict[str, Any]:
     """What every request is sent with: the output knobs in ``params``, then the
-    transport."""
+    transport. Each credential among them, a Router's included, is registered for
+    masking (:func:`r3con.runtime.llm.register_credentials`), so call this before
+    writing ``manifest.json``."""
     llm_kwargs: dict[str, Any] = {**params}
     if api_base:
         llm_kwargs["api_base"] = api_base
@@ -691,6 +692,7 @@ def _llm_kwargs(
         # A named parameter of `litellm_chat_completion`, so it binds there rather than
         # being forwarded into the provider request.
         llm_kwargs["completion"] = completion
+    register_credentials(llm_kwargs, completion)
     return llm_kwargs
 
 

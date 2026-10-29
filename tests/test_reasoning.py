@@ -333,7 +333,7 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback == {
         "cause": "invalid",
-        "error": "answer: Value error, the answer is empty",
+        "error": "ValidationError: answer: Value error, the answer is empty",
     }
     *direct, coding = llm.requests
     assert len(direct) == settings.REASONING_MAX_ATTEMPTS
@@ -350,7 +350,7 @@ def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(
     monkeypatch.setattr(settings, "REASONING_MAX_ATTEMPTS", 2)
     result = ask(llm, "not JSON", "{", citing("coding"))
     assert result.fallback is not None and result.fallback["cause"] == "invalid"
-    assert result.fallback["error"].startswith("reply: Invalid JSON")
+    assert result.fallback["error"].startswith("ValidationError: Invalid JSON")
     assert len(llm.requests) == 3
 
 
