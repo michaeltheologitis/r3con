@@ -207,6 +207,8 @@ p { margin: 0; }
 .node.working .spin { display: block; }
 .node.working .icon { color: var(--dim); }
 .node.void { opacity: 0.45; }
+.node.failed .icon, .node.failed .label { color: var(--err); }
+.node.failed .icon { opacity: 0.6; }
 .node:hover .label, .node.selected .label { color: var(--fg); }
 .node.selected .name { font-weight: 600; }
 .node.answer .icon {
@@ -521,7 +523,7 @@ p { margin: 0; }
       </div>
       <div class="keys" id="keys"></div>
       <p class="k" id="other-hint">Other is a self-hosted or OpenAI-compatible server, such as vLLM: pick other model… under the question and type its model.</p>
-      <p class="k">Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.</p>
+      <p class="k" id="keys-note"></p>
       <div class="field-row">
         <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
         <button class="btn" id="keys-show" type="button">show keys</button>
@@ -588,7 +590,7 @@ p { margin: 0; }
         <div class="files file-view" id="file-view" hidden></div>
       </section>
 
-      <p class="note">prototype · replays one recorded run</p>
+      <p class="note" id="mode-note"></p>
       <div class="drop-overlay" aria-hidden="true">drop to add files</div>
     </aside>
   </div>
@@ -952,6 +954,26 @@ p { margin: 0; }
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
   const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema', answer: 'the answer' };
+  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
+  // The relevance rounds the panel has columns for, as r3con's default config runs them.
+  const ROUNDS = 2;
+  const LOOPBACK = ['127.0.0.1', 'localhost'];
+  const UNAUTHORIZED = 401;
+  const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
+  const LOST_CONNECTION = 'lost the connection to r3con-app';
+  const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+  const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
+  const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
+  const TYPE_A_MODEL = 'type a model to run';
+  const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
+  const LIVE_KEYS_NOTE =
+    "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
+  const LIVE_MODE_NOTE = 'live · r3con-app on this computer';
+  const LIVE_INTRO = 'The 5 sample memos are loaded, with a question about them. Press run to run r3con on them, or add your own files.';
+  const PROTOTYPE_KEYS_NOTE =
+    "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
+  const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
+  const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -995,6 +1017,18 @@ p { margin: 0; }
   const questionEl = $('question');
   const side = $('side');
 
+  // Served by r3con-app on this computer the page runs r3con; anywhere else it is the prototype,
+  // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
+  // once and never reaches storage.
+  const live = ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
+  const token = live ? takeToken() : null;
+
+  function takeToken() {
+    const found = new URLSearchParams(location.hash.slice(1)).get('token');
+    if (found !== null) history.replaceState(null, '', `${location.pathname}${location.search}`);
+    return found;
+  }
+
   let nextUid = 0;
 
   function withUid(file) {
@@ -1011,6 +1045,8 @@ p { margin: 0; }
     filesDirty: true,
     run: null,
     runTurn: null,
+    // The streams open on r3con-app, a run's events or an ask's: each `{ kind }`, dropped once closed.
+    streams: new Set(),
     nodes: new Map(),
     edges: new Map(),
     timers: [],
@@ -1117,6 +1153,118 @@ p { margin: 0; }
     return [...code.matchAll(/class (\w+)\(BaseModel\)/g)].map((m) => m[1]).filter((c) => c !== 'Parse');
   }
 
+  function spent(totals) {
+    const { tokens = null, usd = null } = totals ?? {};
+    return [tokens !== null && `${fmtInt(tokens)} tokens`, usd !== null && fmtUsd(usd)].filter(Boolean);
+  }
+
+  // A recorded or simulated parse holds its records; a live one, only how many there were.
+  const recordCount = (parse) => parse.records?.length ?? parse.n_records;
+
+  // ---------- r3con-app ----------
+
+  // An error whose message is for the user: r3con-app's own words, or what went wrong reaching it.
+  class ServerError extends Error {}
+
+  // A stale token or r3con-app out of reach, kept for the status until a call to it succeeds.
+  let connectionProblem = null;
+
+  // What to tell the user about `error`; one that is not the server's is a bug, so it also goes to the console.
+  function explain(error, fallback, consoleText = fallback) {
+    if (error instanceof ServerError) return error.message;
+    console.error(consoleText, error);
+    return fallback;
+  }
+
+  const lostConnection = () => new ServerError(LOST_CONNECTION);
+
+  async function api(path, { method = 'GET', body } = {}) {
+    let response;
+    try {
+      response = await fetch(path, {
+        method,
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch {
+      connectionProblem = LOST_CONNECTION;
+      throw lostConnection();
+    }
+    if (response.status === UNAUTHORIZED) {
+      connectionProblem = STALE_TOKEN;
+      throw new ServerError(STALE_TOKEN);
+    }
+    if (response.ok) {
+      connectionProblem = null;
+      return response;
+    }
+    const reply = await response.json().catch(() => null);
+    throw new ServerError(reply?.error ?? `r3con-app answered ${response.status} ${response.statusText}`.trim());
+  }
+
+  function frameData(frame) {
+    const fields = frame.split(/\r?\n/).filter((field) => field.startsWith('data:'));
+    return fields.map((field) => field.slice('data:'.length).replace(/^ /, '')).join('\n');
+  }
+
+  // Server-sent events, read with fetch since EventSource can't send the token. A frame ends at a
+  // blank line, and a chunk can end anywhere in one.
+  async function* serverEvents(body) {
+    const reader = body.pipeThrough(new TextDecoderStream()).getReader();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read().catch(() => {
+          throw lostConnection();
+        });
+        if (done) return;
+        const frames = (buffer + value).split(/\r?\n\r?\n/);
+        buffer = frames.pop();
+        for (const data of frames.map(frameData).filter(Boolean)) yield JSON.parse(data);
+      }
+    } finally {
+      // Closes the response when drawing an event throws; a stream that already failed rejects with
+      // the error the read threw.
+      reader.cancel().catch(() => {});
+    }
+  }
+
+  // Hands each of a run's or an ask's events to `onEvent`; a stream that stops before its last event lost the server.
+  async function follow(path, onEvent) {
+    const response = await api(path);
+    let last = null;
+    for await (const event of serverEvents(response.body)) {
+      last = event;
+      onEvent(event);
+    }
+    if (!ENDINGS.has(last?.type)) throw lostConnection();
+  }
+
+  const streaming = (kind) => [...state.streams].some((stream) => stream.kind === kind);
+
+  function openStream(kind) {
+    const stream = { kind };
+    state.streams.add(stream);
+    return stream;
+  }
+
+  function closeStream(stream) {
+    state.streams.delete(stream);
+    updateRunLabel();
+  }
+
+  // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
+  function docIndices(run, ids) {
+    return [...new Set(ids.map((id) => run.ids.indexOf(id.split('.')[0])))];
+  }
+
+  function provenanceOf(run, { summary_ids, parse_ids }) {
+    return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids) };
+  }
+
+  const totalsOf = (event) => ({ tokens: event.tokens?.total, usd: event.usd });
+  const keyedProviders = (status) => Object.keys(PROVIDERS).filter((provider) => status[provider]);
+
   // ---------- spinner ----------
 
   let spinFrame = 0;
@@ -1143,6 +1291,7 @@ p { margin: 0; }
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       model: SAMPLE.model,
+      source: 'recorded run',
       order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
   }
@@ -1185,9 +1334,15 @@ p { margin: 0; }
     };
   }
 
+  // Filled in by r3con-app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
+  function liveRun(question, model) {
+    const empty = { r1: [], r2: [], schema: null, parsed: [], answer: null, calls: null, totals: null };
+    return { simulated: false, id: null, ids: [], question, model, docs: state.files, ...empty };
+  }
+
   function runSummary(run) {
     if (run.simulated) return `simulated run · ${run.model} · nothing was sent`;
-    return `recorded run · ${run.model} · ${fmtInt(run.totals.tokens)} tokens · ${fmtUsd(run.totals.usd)}`;
+    return [run.source, run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
   function cites(run, id) {
@@ -1337,8 +1492,9 @@ p { margin: 0; }
   }
 
   function ariaName(node) {
-    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}`;
-    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}`;
+    const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
+    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
     return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
@@ -1468,14 +1624,17 @@ p { margin: 0; }
     state.nodes.get(id).el.classList.add('working');
   }
 
-  function settleNode(id, { empty = false } = {}) {
+  // A node is settled when its call finished, empty or not, or failed when the run stopped first.
+  function settleNode(id, { empty = false, failed = false } = {}) {
     const node = state.nodes.get(id);
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
+    node.el.classList.toggle('failed', failed);
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = '✻';
     });
-    if (node.kind === 'parsed' && !empty) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    node.el.setAttribute('aria-label', ariaName(node));
     if (state.selected === id) renderInspector();
   }
 
@@ -1560,6 +1719,7 @@ p { margin: 0; }
   }
 
   function lightPath(run) {
+    if (!cites(run, 'answer').length) return;
     const path = answerLineage(run);
     panel.classList.add('is-lit');
     for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', path.nodes.has(id));
@@ -1620,7 +1780,7 @@ p { margin: 0; }
   }
 
   function fileText(file) {
-    return file.text ? h('pre', { class: 'code wrap' }, file.text) : h('p', { class: 'k' }, 'This file has no readable text.');
+    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, READ_BYTES)) : h('p', { class: 'k' }, 'This file has no readable text.');
   }
 
   function openFileButton(file, label) {
@@ -1654,6 +1814,7 @@ p { margin: 0; }
     const node = state.nodes.get(id);
     if (kind === 'doc') return docBody(node);
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
+    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, 'the run stopped before this finished')];
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
@@ -1664,9 +1825,10 @@ p { margin: 0; }
       ];
     }
     if (kind === 'parsed') {
-      const { records } = run.parsed[d];
+      const parse = run.parsed[d];
+      const count = recordCount(parse);
       return [
-        records.length ? recordBlock(records) : textBlock('', 'no records'),
+        parse.records?.length ? recordBlock(parse.records) : textBlock(count ? plural(count, 'record') : '', 'no records'),
         row('read', refs([docId(run.docs[d])])),
         row('drew on', refs(cites(run, id))),
         row('filled from', refs(['schema'])),
@@ -1774,18 +1936,34 @@ p { margin: 0; }
     );
   }
 
+  let scrollQueued = false;
+
+  // Once a frame at most: reading scrollHeight lays the page out.
   function scrollTranscript() {
-    transcript.scrollTop = transcript.scrollHeight;
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      transcript.scrollTop = transcript.scrollHeight;
+    });
   }
 
   function narrator(body, { status = true } = {}) {
     let spinner = null;
+    const named = new Map();
+    const say = (kind, text, opts) => {
+      const el = line(kind, text, opts);
+      body.insertBefore(el, spinner);
+      scrollTranscript();
+      return el;
+    };
     return {
-      say(kind, text, opts) {
-        const el = line(kind, text, opts);
-        body.insertBefore(el, spinner);
-        scrollTranscript();
-        return el;
+      say,
+      // Says a line once under `name`; saying it again rewrites it in place.
+      sayAs(name, kind, text, opts) {
+        const said = named.get(name);
+        if (said) said.querySelector('.t').textContent = text;
+        else named.set(name, say(kind, text, opts));
       },
       phase(text) {
         if (!spinner) {
@@ -1811,9 +1989,14 @@ p { margin: 0; }
     return { body, question };
   }
 
+  // The status is a live region, so rewriting it unchanged, as on each keystroke, would talk over the user.
   function setStatus(...content) {
-    $('run-status').replaceChildren(...content);
+    const text = content.map((part) => (typeof part === 'string' ? part : part.textContent)).join('');
+    if ($('run-status').textContent !== text) $('run-status').replaceChildren(...content);
   }
+
+  const errorStatus = (text) => setStatus(h('span', { class: 'err' }, '● '), text);
+  const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
 
   function doneStatus(run) {
     setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`);
@@ -1821,15 +2004,15 @@ p { margin: 0; }
 
   function readyStatus() {
     if (state.run) return;
-    const recorded = replaysRecording(questionEl.value.trim());
-    const run = recorded ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`;
-    const text = `${plural(state.files.length, 'document')} ready · ${run}`;
-    // The status is a live region, so rewriting it unchanged on each keystroke would talk over typing.
-    if ($('run-status').textContent !== text) setStatus(text);
+    if (connectionProblem) return errorStatus(connectionProblem);
+    setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
+  // A question asks over the run on the panel once it has its answer and has ended, until the files change.
+  const canAsk = () => Boolean(state.run?.answer) && !streaming('run') && !state.filesDirty;
+
   function updateRunLabel() {
-    $('run-btn').textContent = state.run && !state.filesDirty ? 'send ⏎' : 'run ⏎';
+    $('run-btn').textContent = canAsk() ? 'send ⏎' : 'run ⏎';
   }
 
   function updateHint() {
@@ -1846,14 +2029,17 @@ p { margin: 0; }
       questionEl.focus();
       return;
     }
+    const asks = canAsk();
+    const refused = state.files.length ? refusal(question, asks) : null;
+    if (refused) {
+      setStatus(refused);
+      if (refused === TYPE_A_MODEL) $('model-other').focus();
+      return;
+    }
     if (!state.files.length) {
       narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
-    } else if (state.run && !state.filesDirty) {
-      followUp(question);
-    } else if (!replaysRecording(question) && !pickedModel()) {
-      setStatus('type a model to run');
-      $('model-other').focus();
-      return;
+    } else if (asks) {
+      mode.followUp(question);
     } else {
       startRun(question);
     }
@@ -1861,7 +2047,15 @@ p { margin: 0; }
     updateRunLabel();
   }
 
-  function followUp(question) {
+  // Why the question can't be sent yet, if it can't; it then stays in the box.
+  function refusal(question, asks) {
+    if (streaming('run')) return state.filesDirty ? RUN_STILL_GOING : ASK_WHEN_DONE;
+    if (!asks && streaming('ask')) return ASK_STILL_GOING;
+    if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
+    return asks ? null : mode.refuseFiles(state.files);
+  }
+
+  function simulatedFollowUp(question) {
     const narr = narrator(addTurn(question).body, { status: false });
     const reply = () => {
       narr.done();
@@ -1904,13 +2098,11 @@ p { margin: 0; }
   }
 
   function parseLine(run, i) {
-    const { records } = run.parsed[i];
-    const count = records.length ? plural(records.length, 'record') : 'no records';
-    return `${docLabel(run, i)} — ${count}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
+    const count = recordCount(run.parsed[i]);
+    return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
   }
 
-  function answerCiteLines(run) {
-    const { summary_ids, parse_ids } = run.answer.provenance;
+  function answerCiteLines(run, { summary_ids, parse_ids }) {
     const view = (label, id) => h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, label);
     return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
       const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
@@ -1923,7 +2115,7 @@ p { margin: 0; }
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
     if (kind === 'r2') return every('r1', (j) => j !== i && run.r1[j].summary);
     if (kind === 'parsed' || kind === 'schema') return every('r2');
-    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => run.parsed[j].records.length)];
+    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => recordCount(run.parsed[j]))];
     return [];
   }
 
@@ -1938,11 +2130,103 @@ p { margin: 0; }
     for (const from of cites(run, to)) addEdge(from, to, 'cite', 'draw');
   }
 
+  // ---------- drawing a run ----------
+  // A replay's timeline and a live run's events both draw through these, so the two look the same.
+
+  const hasNodes = (kind) => [...state.nodes.values()].some((n) => n.kind === kind);
+  const settledCount = (kind) => [...state.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
+  // Round 2's first line, rewritten once every document is through it.
+  const ROUND_TWO_HEAD = 'round 2 head';
+
+  function stageProgress(kind, n) {
+    return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(kind)} of ${n}`;
+  }
+
+  function beginStage(run, narr, kind) {
+    const n = run.docs.length;
+    const heads = {
+      r1: 'round 1 · one summary per document',
+      r2: 'round 2 · each document beside the other summaries',
+      schema: STAGE_PHASE.schema,
+      parsed: `parsing ${plural(n, 'document')}`,
+    };
+    if (kind === 'r2') narr.sayAs(ROUND_TWO_HEAD, 'main', heads.r2);
+    else if (heads[kind]) narr.say('main', heads[kind]);
+    narr.phase(stageProgress(kind, n));
+  }
+
+  function appear(run, id) {
+    const [kind, i] = splitId(id);
+    addNode(id);
+    if (kind === 'r1') return addEdge(docId(run.docs[i]), id, 'flow', 'draw');
+    if (kind === 'parsed') addEdge('schema', id, 'flow', 'draw');
+    showInputs(run, id);
+  }
+
+  function isVoid(run, id) {
+    const [kind, i] = splitId(id);
+    if (kind === 'r1' || kind === 'r2') return !run[kind][i].summary;
+    return kind === 'parsed' && !recordCount(run.parsed[i]);
+  }
+
+  function settledLine(run, id) {
+    const [kind, i] = splitId(id);
+    if (kind === 'r1') return `round 1 · ${docLabel(run, i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`;
+    if (kind === 'r2') return roundTwoLine(run, i);
+    if (kind === 'parsed') return parseLine(run, i);
+    return schemaClasses(run.schema.code).join(', ') || 'structure ready';
+  }
+
+  // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
+  function settle(run, narr, id) {
+    const [kind] = splitId(id);
+    const n = run.docs.length;
+    settleNode(id, { empty: isVoid(run, id) });
+    showCites(run, id);
+    narr.sayAs(id, 'sub', settledLine(run, id), { node: id });
+    narr.phase(stageProgress(kind, n));
+    if (kind !== 'r2' || settledCount('r2') < n) return;
+    const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
+    narr.sayAs(ROUND_TWO_HEAD, 'main', `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`);
+  }
+
+  function sayAnswer(run, narr, answer, node = null) {
+    narr.say('answer', answer.text, { node });
+    const citeLines = answerCiteLines(run, answer.provenance);
+    for (const text of citeLines) narr.say('sub', text);
+    if (!citeLines.length) narr.say('sub', 'cites no document');
+  }
+
+  function showAnswer(run, narr) {
+    settleNode('answer');
+    showCites(run, 'answer');
+    narr.done();
+    if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
+    sayAnswer(run, narr, run.answer, 'answer');
+    updateRunLabel();
+  }
+
+  function finishRun(run, narr) {
+    narr.say('sub', runSummary(run));
+    doneStatus(run);
+    if (state.selected === 'answer') renderInspector();
+  }
+
+  // Marks every node still working as stopped; with no answer, the next question starts a new run.
+  function failRun(narr, text) {
+    narr.done();
+    for (const node of state.nodes.values()) {
+      if (node.el.classList.contains('working')) settleNode(node.id, { failed: true });
+    }
+    sayError(narr, text);
+    errorStatus(text);
+  }
+
   function buildTimeline(run, narr) {
     const steps = [];
     const at = (t, fn) => steps.push({ at: t, run: fn });
     const n = run.docs.length;
-    const name = (i) => docLabel(run, i);
+    const perDocument = (t0, kind) => stage(at, t0, run.order[kind], n, (i) => appear(run, `${kind}-${i}`), (i) => settle(run, narr, `${kind}-${i}`));
     let t = TIMING.start;
 
     at(t, () => {
@@ -1959,91 +2243,154 @@ p { margin: 0; }
     }, PACE.read);
     at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`));
 
-    t += TIMING.phaseGap;
-    at(t, () => {
-      narr.say('main', 'round 1 · one summary per document');
-      narr.phase(`round 1 · 0 of ${n}`);
-    });
-    t = stage(at, t, run.order.r1, n, (i) => {
-      addNode(`r1-${i}`);
-      addEdge(docAt(i), `r1-${i}`, 'flow', 'draw');
-    }, (i, rank) => {
-      settleNode(`r1-${i}`, { empty: !run.r1[i].summary });
-      narr.say('sub', `round 1 · ${name(i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`, { node: `r1-${i}` });
-      narr.phase(`round 1 · ${rank + 1} of ${n}`);
-    });
-
-    t += TIMING.phaseGap;
-    let roundTwoHead;
-    at(t, () => {
-      roundTwoHead = narr.say('main', 'round 2 · each document beside the other summaries');
-      narr.phase(`round 2 · 0 of ${n}`);
-    });
-    t = stage(at, t, run.order.r2, n, (i) => {
-      addNode(`r2-${i}`);
-      showInputs(run, `r2-${i}`);
-    }, (i, rank) => {
-      settleNode(`r2-${i}`, { empty: !run.r2[i].summary });
-      showCites(run, `r2-${i}`);
-      narr.say('sub', roundTwoLine(run, i), { node: `r2-${i}` });
-      narr.phase(`round 2 · ${rank + 1} of ${n}`);
-    });
-    const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
-    at(t, () => {
-      roundTwoHead.querySelector('.t').textContent = `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`;
-    });
+    for (const kind of ['r1', 'r2']) {
+      t += TIMING.phaseGap;
+      at(t, () => beginStage(run, narr, kind));
+      t = perDocument(t, kind);
+    }
 
     t += TIMING.phaseGap;
     at(t, () => {
-      narr.say('main', 'proposing a structure');
-      narr.phase('proposing a structure');
-      addNode('schema');
-      showInputs(run, 'schema');
+      beginStage(run, narr, 'schema');
+      appear(run, 'schema');
     });
     t += TIMING.schemaWork;
-    at(t, () => {
-      settleNode('schema');
-      narr.say('sub', schemaClasses(run.schema.code).join(', ') || 'structure ready', { node: 'schema' });
-    });
+    at(t, () => settle(run, narr, 'schema'));
+
+    t += TIMING.phaseGap;
+    at(t, () => beginStage(run, narr, 'parsed'));
+    t = perDocument(t, 'parsed');
 
     t += TIMING.phaseGap;
     at(t, () => {
-      narr.say('main', `parsing ${plural(n, 'document')}`);
-      narr.phase(`parsing · 0 of ${n}`);
-    });
-    t = stage(at, t, run.order.parsed, n, (i) => {
-      addNode(`parsed-${i}`);
-      addEdge('schema', `parsed-${i}`, 'flow', 'draw');
-      showInputs(run, `parsed-${i}`);
-    }, (i, rank) => {
-      settleNode(`parsed-${i}`, { empty: !run.parsed[i].records.length });
-      showCites(run, `parsed-${i}`);
-      narr.say('sub', parseLine(run, i), { node: `parsed-${i}` });
-      narr.phase(`parsing · ${rank + 1} of ${n}`);
-    });
-
-    t += TIMING.phaseGap;
-    at(t, () => {
-      narr.phase('answering');
-      addNode('answer');
-      showInputs(run, 'answer');
+      beginStage(run, narr, 'answer');
+      appear(run, 'answer');
     });
     t += TIMING.answerWork;
     at(t, () => {
-      settleNode('answer');
-      showCites(run, 'answer');
-      narr.done();
-      if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-      narr.say('answer', run.answer.text, { node: 'answer' });
-      const citeLines = answerCiteLines(run);
-      for (const text of citeLines) narr.say('sub', text);
-      if (!citeLines.length) narr.say('sub', 'cites no document');
-      narr.say('sub', runSummary(run));
-      doneStatus(run);
+      showAnswer(run, narr);
+      finishRun(run, narr);
     });
     t += TIMING.litDelay;
-    if (cites(run, 'answer').length) at(t, () => lightPath(run));
+    at(t, () => lightPath(run));
     return steps;
+  }
+
+  function playTimeline(run, narr) {
+    $('replay-btn').hidden = false;
+    const steps = buildTimeline(run, narr);
+    if (reduceMotion()) {
+      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
+      return;
+    }
+    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
+  }
+
+  // ---------- live ----------
+
+  // Fills in `run` from one of its events and draws it.
+  function drawEvent(run, narr, event) {
+    const doc = (id) => docIndices(run, [id])[0];
+    switch (event.type) {
+      case 'run_started':
+        if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con-app is set to ${event.rounds}`);
+        run.ids = event.document_ids;
+        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(totalBytes(run.docs))}`);
+        break;
+      case 'relevance_started':
+        if (!hasNodes(`r${event.round}`)) beginStage(run, narr, `r${event.round}`);
+        appear(run, `r${event.round}-${doc(event.doc_id)}`);
+        break;
+      case 'relevance_finished':
+        addSnippet(run, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance));
+        break;
+      case 'schema_started':
+      case 'reasoning_started': {
+        const kind = event.type === 'schema_started' ? 'schema' : 'answer';
+        beginStage(run, narr, kind);
+        appear(run, kind);
+        break;
+      }
+      case 'schema_finished':
+        run.schema = { code: event.schema_code, thought: event.thought };
+        settle(run, narr, 'schema');
+        break;
+      case 'parsing_started':
+        if (!hasNodes('parsed')) beginStage(run, narr, 'parsed');
+        appear(run, `parsed-${doc(event.doc_id)}`);
+        break;
+      case 'parsing_finished':
+        run.parsed[doc(event.doc_id)] = { n_records: event.n_records, provenance: docIndices(run, event.provenance) };
+        settle(run, narr, `parsed-${doc(event.doc_id)}`);
+        break;
+      case 'reasoning_finished':
+        run.answer = { text: event.answer, provenance: provenanceOf(run, event.provenance) };
+        showAnswer(run, narr);
+        break;
+      case 'run_finished':
+        run.totals = totalsOf(event);
+        finishRun(run, narr);
+        lightPath(run);
+        break;
+      case 'run_failed':
+        failRun(narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
+        break;
+    }
+  }
+
+  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them.
+  function addSnippet(run, narr, id, summary, provenance) {
+    const [kind, i] = splitId(id);
+    const earlier = run[kind][i] ?? { summary: '', provenance: [] };
+    run[kind][i] = {
+      summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
+      provenance: [...new Set([...earlier.provenance, ...provenance])],
+    };
+    settle(run, narr, id);
+  }
+
+  // No new run starts while a stream is open, so the panel's run is this one until it ends.
+  async function streamRun(run, narr) {
+    const stream = openStream('run');
+    narr.phase('starting');
+    try {
+      const body = { question: run.question, model: run.model, documents: run.docs.map((f) => f.text) };
+      const started = await api('/api/runs', { method: 'POST', body });
+      run.id = (await started.json()).run_id;
+      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event));
+    } catch (error) {
+      failRun(narr, explain(error, error.message, 'the live run stopped'));
+    } finally {
+      closeStream(stream);
+    }
+  }
+
+  // An ask runs only reasoning, over what the run built; its answer is told in the chat, not drawn.
+  async function askOver(run, question, model) {
+    const narr = narrator(addTurn(question).body, { status: false });
+    const how = `an ask over this run · ${model}`;
+    const failed = (text) => {
+      narr.done();
+      sayError(narr, text);
+    };
+    const onEvent = (event) => {
+      if (event.type === 'reasoning_finished') {
+        narr.done();
+        sayAnswer(run, narr, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
+      }
+      if (event.type === 'ask_finished') narr.say('sub', [how, ...spent(totalsOf(event))].join(' · '));
+      if (event.type === 'ask_failed') failed(`${how} · failed · ${event.error}`);
+    };
+    const stream = openStream('ask');
+    narr.phase(`asking · ${model}`);
+    try {
+      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
+      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent);
+    } catch (error) {
+      failed(explain(error, error.message, 'the ask stopped'));
+    } finally {
+      closeStream(stream);
+    }
   }
 
   function playRun(run) {
@@ -2054,19 +2401,13 @@ p { margin: 0; }
     // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
     panel.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / run.docs.length));
     state.runTurn.body.replaceChildren();
-    $('replay-btn').hidden = false;
     state.userMoved = false;
     syncDocNodes({ at: docPositions, animate: true, replan: true });
-    const steps = buildTimeline(run, narrator(state.runTurn.body));
-    if (reduceMotion()) {
-      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
-      return;
-    }
-    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
+    mode.play(run, narrator(state.runTurn.body));
   }
 
   function startRun(question) {
-    const run = replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel());
+    const run = mode.newRun(question);
     state.filesDirty = false;
     state.runTurn = addTurn(question);
     playRun(run);
@@ -2119,7 +2460,7 @@ p { margin: 0; }
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => resolve('');
-      reader.readAsText(file.slice(0, READ_BYTES));
+      reader.readAsText(mode.readable(file));
     });
   }
 
@@ -2200,24 +2541,19 @@ p { margin: 0; }
 
   // ---------- keys ----------
 
-  // The local server will take the key here and keep it; until then the page only notes that one was entered.
+  // The prototype only notes which providers were given a key; r3con-app keeps the keys themselves.
   const keyed = new Set();
 
-  async function saveKey(provider, key, endpoint) {
-    keyed.add(provider);
-  }
-
-  async function providersWithKeys() {
-    return [...keyed];
-  }
-
-  async function refreshKeys() {
-    const providers = await providersWithKeys();
+  function renderKeys(providers) {
     for (const provider of Object.keys(PROVIDERS)) {
       $(`state-${provider}`).textContent = providers.includes(provider) ? 'set' : '';
     }
     renderPicker(providers);
     readyStatus();
+  }
+
+  async function refreshKeys() {
+    renderKeys(await mode.providersWithKeys());
   }
 
   // ---------- model picker ----------
@@ -2343,21 +2679,44 @@ p { margin: 0; }
     $('settings-saved').textContent = text;
   }
 
-  // Other is entered once it has an endpoint; on failure the fields keep what was typed until they close.
+  function clearKey(provider) {
+    $(`key-${provider}`).value = '';
+    if (provider !== OTHER) return;
+    $('endpoint-other').value = '';
+    $('endpoint-other').required = false;
+  }
+
+  let saving = false;
+
+  // A save asked for while one is in flight is dropped: it would send the same keys again.
   async function saveSettings() {
+    if (saving) return;
+    saving = true;
+    try {
+      await saveEnteredKeys();
+    } finally {
+      saving = false;
+    }
+  }
+
+  // Other is entered once it has an endpoint. Keys are saved one at a time, each field cleared once
+  // its key is saved and the markers following each answer; a failure stops the save, and the fields
+  // left keep what was typed until they close.
+  async function saveEnteredKeys() {
     const endpoint = $('endpoint-other').value;
     const entered = Object.keys(PROVIDERS)
       .map((provider) => [provider, $(`key-${provider}`).value.trim()])
       .filter(([provider, key]) => (provider === OTHER ? endpoint : key));
     if (!entered.length) return showSaveResult('nothing to save');
-    await Promise.all(entered.map(([provider, key]) => saveKey(provider, key, provider === OTHER ? endpoint : undefined)));
-    clearSettings();
-    try {
-      await refreshKeys();
-    } catch (error) {
-      console.error("couldn't read which providers have keys", error);
-      return showSaveResult("saved · couldn't refresh");
+    for (const [provider, key] of entered) {
+      try {
+        renderKeys(await mode.saveKey(provider, key, provider === OTHER ? endpoint : undefined));
+      } catch (error) {
+        return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't save", "couldn't save the keys")}`);
+      }
+      clearKey(provider);
     }
+    clearSettings();
     showSaveResult('saved');
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
@@ -2548,14 +2907,9 @@ p { margin: 0; }
       e.preventDefault();
       $('settings-form').requestSubmit();
     });
-    $('settings-form').addEventListener('submit', async (e) => {
+    $('settings-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      try {
-        await saveSettings();
-      } catch (error) {
-        console.error("couldn't save the keys", error);
-        showSaveResult("couldn't save");
-      }
+      saveSettings();
     });
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
@@ -2617,6 +2971,52 @@ p { margin: 0; }
     }).observe(panel);
   }
 
+  // ---------- modes ----------
+  // What differs between the page served by r3con-app and the prototype, decided once at load.
+
+  const prototypeMode = {
+    intro: PROTOTYPE_INTRO,
+    note: PROTOTYPE_MODE_NOTE,
+    keysNote: PROTOTYPE_KEYS_NOTE,
+    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
+    needsModel: (question, asks) => !asks && !replaysRecording(question),
+    refuseFiles: () => null,
+    // It shows a file's start only, so it reads no more than that.
+    readable: (file) => file.slice(0, READ_BYTES),
+    newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
+    play: playTimeline,
+    followUp: simulatedFollowUp,
+    saveKey: async (provider) => [...keyed.add(provider)],
+    providersWithKeys: async () => [...keyed],
+  };
+
+  // A provider whose variable is set where r3con-app runs counts as having a key.
+  const liveMode = {
+    intro: LIVE_INTRO,
+    note: LIVE_MODE_NOTE,
+    keysNote: LIVE_KEYS_NOTE,
+    nextRun: () => pickedModel() || 'type a model',
+    needsModel: () => true,
+    refuseFiles: unreadableFiles,
+    readable: (file) => file,
+    newRun: (question) => liveRun(question, pickedModel()),
+    play: streamRun,
+    followUp: (question) => askOver(state.run, question, pickedModel()),
+    async saveKey(provider, key, endpoint) {
+      const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
+      return keyedProviders(await saved.json());
+    },
+    providersWithKeys: async () => keyedProviders(await (await api('/api/keys')).json()),
+  };
+
+  // r3con refuses a blank document, so a run with one is not sent.
+  function unreadableFiles(files) {
+    const names = files.filter((f) => !f.text.trim()).map((f) => f.name);
+    return names.length ? `no readable text in ${names.join(', ')}; nothing was sent` : null;
+  }
+
+  const mode = live ? liveMode : prototypeMode;
+
   function init() {
     restoreTheme();
     removeStored(RETIRED_SETTINGS_KEY);
@@ -2626,8 +3026,10 @@ p { margin: 0; }
     updateRunLabel();
     renderPicker([]);
     readyStatus();
-    refreshKeys().catch((error) => console.error("couldn't read which providers have keys", error));
-    transcript.append(line('main', 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.', { dim: true }));
+    refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
+    $('keys-note').textContent = mode.keysNote;
+    $('mode-note').textContent = mode.note;
+    transcript.append(line('main', mode.intro, { dim: true }));
     applyView();
     syncDocNodes();
     wire();

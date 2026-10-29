@@ -1,6 +1,11 @@
 // Checks the run panel in app/src/r3con_app/index.html in headless Chromium: node app/checks/check.mjs
-import { readFileSync } from 'node:fs';
+// The live area serves it with app/checks/fake_server.py, through uv.
+import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -67,6 +72,40 @@ const FIELD_NAMES = {
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 
+const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
+const FAKE_SERVER = ['run', '--project', 'app', 'python', 'app/checks/fake_server.py'];
+const KEY_VARIABLES = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'];
+// A first uv run may have to build the app's environment.
+const SERVER_START_MS = 120_000;
+const LIVE_RUN_MS = 30_000;
+// What fake_server.py's model does: the markers it obeys, its answer, and what it cites.
+const FAILS = '(the model is down)';
+const HANGS = '(the model hangs)';
+const QUIET = '(nothing relevant here)';
+const SPLIT_MEMO = '06_split_memo';
+const SCRIPTED_ANSWER = "The check's scripted model answers this.";
+const SCRIPTED_CITES = {
+  r2: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i === 0 ? 1 : 0] })),
+  parsed: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i] })),
+  answer: { provenance: { summary_ids: [0, 1], parse_ids: [0, 1] } },
+};
+const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
+const LIVE_FAILED = "● failed in relevance · RuntimeError: the check's model is down";
+const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
+const LOST_CONNECTION = '● lost the connection to r3con-app';
+const UNAUTHORIZED_LOG = 'Failed to load resource: the server responded with a status of 401';
+const CUT_STREAM_LOG = 'Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING';
+const REFUSED_LOG = 'Failed to load resource: the server responded with a status of 422';
+const ABORTED_LOG = 'Failed to load resource: net::ERR_FAILED';
+const SERVER_ERROR_LOG = 'Failed to load resource: the server responded with a status of 500';
+const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
+const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
+// Long enough that a second click lands while the first save is still in flight.
+const SLOW_SAVE_MS = 400;
+// fake_server.py's summary_of: a text's first line that is not quiet.
+const scriptedSummary = (text) => text.split('\n').find((line) => line.trim() && !line.includes(QUIET)) ?? '';
+
 let browser;
 let failures = 0;
 
@@ -77,7 +116,7 @@ function check(area, name, pass, detail = '') {
 
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
-async function withPage(area, { layout = LAYOUTS.desktop, sample = true, expectedErrors = [] }, body) {
+async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample = true, expectedErrors = [], before }, body) {
   const messages = [];
   let context;
   try {
@@ -86,7 +125,8 @@ async function withPage(area, { layout = LAYOUTS.desktop, sample = true, expecte
     const page = await context.newPage();
     page.on('console', (m) => messages.push({ type: m.type(), text: m.text() }));
     page.on('pageerror', (e) => messages.push({ type: 'error', text: e.message }));
-    await page.goto(PAGE_URL);
+    await before?.(page);
+    await page.goto(url);
     if (sample) await runSample(page);
     await body(page, messages);
   } catch (error) {
@@ -114,9 +154,9 @@ async function runSample(page) {
 }
 
 // Waits for a condition in the page; false if it never holds.
-async function becomes(page, predicate, arg) {
+async function becomes(page, predicate, arg, timeout = SETTLE_TIMEOUT_MS) {
   try {
-    await page.waitForFunction(predicate, arg, { timeout: SETTLE_TIMEOUT_MS });
+    await page.waitForFunction(predicate, arg, { timeout });
     return true;
   } catch (error) {
     if (error.name !== 'TimeoutError') throw error;
@@ -156,9 +196,15 @@ async function clickNode(page, id) {
   await page.mouse.click(c.x, c.y);
 }
 
-async function rowsOf(page, id) {
+// Opens node `id`'s details, from a closed popup, and returns the text of `selector` in them.
+async function inspect(page, id, selector = '#inspector') {
   await page.keyboard.press('Escape');
   await page.click(nodeSel(id));
+  return page.textContent(selector);
+}
+
+async function rowsOf(page, id) {
+  await inspect(page, id);
   return page.$$eval('#inspector .row', (rows) => rows.map((r) => r.firstChild.textContent));
 }
 
@@ -299,6 +345,67 @@ function pickerState() {
 
 function keyStates() {
   return [...document.querySelectorAll('[id^="state-"]')].filter((el) => el.textContent).map((el) => el.id);
+}
+
+function statusIs(text) {
+  return document.getElementById('run-status').textContent === text;
+}
+
+function statusMatches(source) {
+  return new RegExp(source).test(document.getElementById('run-status').textContent);
+}
+
+function lastTurnLines() {
+  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  return turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
+}
+
+function lastTurnSays(starts) {
+  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const lines = turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
+  return starts.every((start) => lines.some((text) => text.startsWith(start)));
+}
+
+// Cuts every event stream the page reads into chunks of `size` bytes.
+function cutEventStreams(size) {
+  const realFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const response = await realFetch(...args);
+    if (!response.headers.get('content-type')?.startsWith('text/event-stream')) return response;
+    const reader = response.body.getReader();
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) return controller.close();
+        for (let i = 0; i < value.length; i += size) controller.enqueue(value.slice(i, i + size));
+      },
+    });
+    return new Response(body, { status: response.status, headers: response.headers });
+  };
+}
+
+// Holds back each event stream from its run_finished frame on, until the page sets window.releaseRunEnd.
+function holdRunEnd() {
+  const realFetch = window.fetch;
+  const wait = () => new Promise((resolve) => setTimeout(resolve, 50));
+  window.fetch = async (...args) => {
+    const response = await realFetch(...args);
+    if (!response.headers.get('content-type')?.startsWith('text/event-stream')) return response;
+    const reader = response.body.getReader();
+    const body = new ReadableStream({
+      async pull(controller) {
+        const { value, done } = await reader.read();
+        if (done) return controller.close();
+        const text = new TextDecoder().decode(value);
+        if (!text.includes('"run_finished"')) return controller.enqueue(value);
+        const end = text.lastIndexOf('data: ', text.indexOf('"run_finished"'));
+        controller.enqueue(new TextEncoder().encode(text.slice(0, end)));
+        while (!window.releaseRunEnd) await wait();
+        controller.enqueue(new TextEncoder().encode(text.slice(end)));
+      },
+    });
+    return new Response(body, { status: response.status, headers: response.headers });
+  };
 }
 
 function storedEntries() {
@@ -490,7 +597,7 @@ async function keys(page, checkAt) {
   await page.fill('#key-openai', TEST_KEY);
   await page.evaluate(refuseKeyOnce, 'openai');
   await page.click('#settings-save');
-  const refused = await becomes(page, () => document.getElementById('settings-saved').textContent === "couldn't save");
+  const refused = await becomes(page, () => document.getElementById('settings-saved').textContent === "OpenAI · couldn't save");
   const keptKey = (await page.inputValue('#key-openai')) === TEST_KEY && (await states()).length === 0;
   checkAt('a refused save says so and keeps the typed key', refused && keptKey, await saved());
 
@@ -706,9 +813,359 @@ async function scale() {
   }
 }
 
+// ---------- live: served by r3con-app, with a scripted model ----------
+
+// Starts fake_server.py with no provider key in its environment, in a process group of its own.
+function startFakeServer() {
+  const logsDir = mkdtempSync(join(tmpdir(), 'r3con-checks-'));
+  const env = { ...process.env };
+  for (const variable of KEY_VARIABLES) delete env[variable];
+  const server = spawn('uv', [...FAKE_SERVER, logsDir], { cwd: REPO_DIR, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stderr = '';
+  server.stderr.on('data', (chunk) => (stderr += chunk));
+  const exited = new Promise((resolve) => {
+    server.once('exit', resolve);
+    server.once('error', resolve);
+  });
+  const url = new Promise((resolve, reject) => {
+    createInterface({ input: server.stdout }).once('line', resolve);
+    server.once('error', reject);
+    exited.then((code) => reject(new Error(`the fake server exited (${code}): ${stderr.trim().split('\n').at(-1)}`)));
+    setTimeout(() => reject(new Error('the fake server printed no URL in time')), SERVER_START_MS).unref();
+  });
+  const stop = async () => {
+    try {
+      process.kill(-server.pid, 'SIGKILL');
+    } catch {
+      // Its process group is already gone, or never started.
+    }
+    await exited;
+    rmSync(logsDir, { recursive: true, force: true });
+  };
+  return { url, stop };
+}
+
+async function withFakeServer(body) {
+  const server = startFakeServer();
+  try {
+    await body(await server.url, server);
+  } catch (error) {
+    check('live', firstLine(error), false);
+  } finally {
+    await server.stop();
+  }
+}
+
+const tokenOf = (url) => new URL(url).hash.replace('#token=', '');
+const memo = (name, text) => ({ name, mimeType: 'text/plain', buffer: Buffer.from(text) });
+const sampleMemos = () => recordedSample().docs.map((d) => memo(d.name, d.text));
+
+// Long enough that fake_server.py refuses it whole, with its first half quiet, so its first part summarizes to nothing.
+function splitMemo() {
+  const quiet = Array.from({ length: 32 }, (_, i) => `${QUIET} Filler paragraph ${i + 1}, which the scripted model skips.`);
+  const relevant = Array.from({ length: 16 }, (_, i) => `Westbrook site, note ${i + 1}: an equipment incident was logged in Q3.`);
+  return memo(`${SPLIT_MEMO}.txt`, [...quiet, ...relevant].join('\n\n'));
+}
+
+async function keysOnServer(url) {
+  const response = await fetch(new URL('/api/keys', url), { headers: { Authorization: `Bearer ${tokenOf(url)}` } });
+  return Object.entries(await response.json()).filter(([, set]) => set).map(([provider]) => `state-${provider}`);
+}
+
+function postsOf(page) {
+  const posts = [];
+  page.on('request', (request) => request.method() === 'POST' && posts.push(new URL(request.url()).pathname));
+  return posts;
+}
+
+// Saves a key on its server.
+async function liveSession(url) {
+  const token = tokenOf(url);
+  await withPage('live', { url, sample: false }, async (page, messages) => {
+    const address = await page.evaluate(() => location.href);
+    check('live', 'the launch token leaves the address bar at once', !address.includes(token) && !address.includes('#'), address);
+    const ready = await page.textContent('#run-status');
+    const readyName = 'before a run the status names the picked model, not a recording';
+    check('live', readyName, ready === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`, ready);
+
+    await page.click('#settings-btn');
+    await page.fill('#key-openai', TEST_KEY);
+    const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
+    await page.keyboard.press('Escape');
+    const fresh = await page.context().newPage();
+    await fresh.goto(url);
+    const kept = await becomes(fresh, () => document.getElementById('state-openai').textContent === 'set');
+    await fresh.close();
+    const keyName = 'a saved key marks OpenAI as set, and a fresh page of the launch reads it from the server';
+    check('live', keyName, marked && kept, `marked ${marked}, fresh page ${kept}`);
+
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    check('live', 'a run ends with the done status: its model, total tokens and cost', done, await page.textContent('#run-status'));
+    const nodes = await count(page, '.node');
+    const working = await count(page, '.node.working');
+    const drawn = nodes === SAMPLE_COUNTS.nodes && working === 0;
+    check('live', `a run draws all ${SAMPLE_COUNTS.nodes} nodes from its events, none left working`, drawn, `${nodes} nodes, ${working} working`);
+
+    const summaries = [];
+    for (let i = 0; i < SAMPLE_DOCS; i++) summaries.push(await inspect(page, `r1-${i}`, '#inspector .insp-text'));
+    const scripted = recordedSample().docs.map((d) => scriptedSummary(d.text));
+    const ownName = "each summary lands on its own document's node: the run's ids map to the files by order";
+    check('live', ownName, isDeepStrictEqual(summaries, scripted), summaries[0]);
+    const lit = await page.$$eval('.edge.lit', (els) => els.map((e) => e.dataset.key).sort());
+    const docIds = await page.$$eval('.node.doc', (els) => els.map((el) => el.dataset.id));
+    const expected = lineage(SCRIPTED_CITES, docIds);
+    const litName = 'the lit edges are exactly the lineage of the provenance the events carried';
+    check('live', litName, isDeepStrictEqual(lit, expected), `${lit.length} lit, ${expected.length} expected`);
+    const costed = [];
+    for (const id of ['r1-0', 'r2-0', 'schema', 'parsed-0']) {
+      if ((await inspect(page, id)).includes('tokens')) costed.push(id);
+    }
+    check('live', 'no node shows per-call tokens or cost, which events do not carry', costed.length === 0, costed.join(', '));
+
+    await page.keyboard.press('Escape');
+    await page.fill('#question', 'Which memo is the registry?');
+    await page.click('#run-btn');
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, 'an ask over this run'], LIVE_RUN_MS);
+    const lines = await page.evaluate(lastTurnLines);
+    const cited = lines.filter((text) => text.startsWith('drew on ')).length === 2;
+    const named = lines.some((text) => text.startsWith(`an ask over this run · ${DEFAULT_MODEL} · `));
+    const askName = 'a follow-up runs an ask and shows its answer, provenance and model in the chat';
+    check('live', askName, answered && cited && named, lines.slice(1).join(' | '));
+
+    const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
+    const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
+    const keptName = 'no storage, field, address, markup or console message holds the token or the key';
+    check('live', keptName, holders.length === 0 && logged === 0, [...holders, `${logged} messages`].join(', '));
+  });
+}
+
+async function liveCutStream(url) {
+  const before = (page) => page.addInitScript(cutEventStreams, 1);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const nodes = await count(page, '.node');
+    const summary = nodes === SAMPLE_COUNTS.nodes ? await inspect(page, 'r1-0', '#inspector .insp-text') : null;
+    const whole = done && summary === scriptedSummary(recordedSample().docs[0].text);
+    const cutName = 'a stream read one byte at a time, every frame split across reads, draws the same run';
+    check('live', cutName, whole, `${nodes} nodes; ${await page.textContent('#run-status')}`);
+  });
+}
+
+async function liveParts(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', [...sampleMemos(), splitMemo()]);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, SAMPLE_DOCS + 1);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const lines = await page.evaluate(lastTurnLines);
+    const expected = [
+      `round 1 · ${SPLIT_MEMO} — summary ready`,
+      `round 2 · ${SPLIT_MEMO} — drew on 01_northgate`,
+      `round 2 · ${SAMPLE_DOCS + 1} summaries cite another document`,
+      `${SPLIT_MEMO} — 2 records`,
+    ];
+    const missing = expected.filter((start) => !lines.some((text) => text.startsWith(start)));
+    const partsName = 'a document read in two parts, the first with nothing relevant, is narrated from both';
+    check('live', partsName, done && missing.length === 0, missing.join(' | ') || 'all four lines');
+  });
+}
+
+async function liveRunEnd(url) {
+  const before = (page) => page.addInitScript(holdRunEnd);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.click('#run-btn');
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
+    const whileOpen = await page.textContent('#run-btn');
+    await page.evaluate(() => (window.releaseRunEnd = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const once = await page.textContent('#run-btn');
+    const endName = 'the button offers to ask only once the run has ended, not when its answer lands';
+    check('live', endName, answered && done && whileOpen === 'run ⏎' && once === 'send ⏎', `${whileOpen} → ${once}`);
+  });
+}
+
+// Leaves an ask hanging on its server.
+async function liveAskGoing(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    await page.fill('#question', `Which site is quietest? ${HANGS}`);
+    await page.click('#run-btn');
+    const asking = await becomes(page, lastTurnSays, [`asking · ${DEFAULT_MODEL}`]);
+    await page.setInputFiles('#file-input', memo('06_extra.txt', 'An extra memo.\n'));
+    await page.waitForSelector('.node.pending');
+    await page.fill('#question', 'Which memo is the extra one?');
+    await page.click('#run-btn');
+    const refused = await page.textContent('#run-status');
+    const sent = posts.filter((path) => path === '/api/runs').length;
+    const stillAsking = await page.evaluate(lastTurnLines);
+    const askName = "while an ask is going, a new run is refused: it can't be stopped yet";
+    check('live', askName, asking && refused === ASK_STILL_GOING && sent === 1 && stillAsking.includes(`asking · ${DEFAULT_MODEL}`), `${refused}; ${sent} runs`);
+  });
+}
+
+async function liveFailure(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.fill('#question', `Which site logged the most incidents? ${FAILS}`);
+    await page.click('#run-btn');
+    const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
+    const working = await count(page, '.node.working');
+    const failName = "a failed run's status gives its stage and error, and no node is left working";
+    check('live', failName, failed && working === 0, `${await page.textContent('#run-status')}; ${working} working`);
+    const stopped = await page.$$eval('.node.failed', (els) => els.map((el) => [el.classList.contains('void'), el.getAttribute('aria-label')]));
+    const readsStopped = stopped.length > 0 && stopped.every(([empty, name]) => !empty && name.endsWith(', stopped'));
+    const stoppedName = "a failed run's unfinished nodes look and read as stopped, not as empty";
+    check('live', stoppedName, readsStopped, stopped.map(([, name]) => name).join(' | '));
+    const label = await page.textContent('#run-btn');
+    check('live', 'after a failed run the next question starts a new run', label === 'run ⏎', label);
+  });
+}
+
+async function liveUnreadable(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.setInputFiles('#file-input', [memo('01_memo.txt', 'A memo.\n'), memo('02_blank.txt', '  \n')]);
+    await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
+    await page.click('#run-btn');
+    const status = await page.textContent('#run-status');
+    const refused = status === 'no readable text in 02_blank.txt; nothing was sent' && posts.length === 0;
+    check('live', 'a file with no readable text is named, and nothing is sent', refused, `${status}; ${posts.length} posts`);
+  });
+}
+
+// Saves keys on its server.
+async function liveKeySaves(url) {
+  const saves = [];
+  const refuseGemini = async (route) => {
+    const request = route.request();
+    if (request.method() !== 'POST') return route.continue();
+    const { provider } = request.postDataJSON();
+    saves.push(provider);
+    if (provider === 'gemini') return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'refused by the check' }) });
+    await new Promise((resolve) => setTimeout(resolve, SLOW_SAVE_MS));
+    return route.continue();
+  };
+  const before = (page) => page.route('**/api/keys', refuseGemini);
+  await withPage('live', { url, sample: false, before, expectedErrors: [REFUSED_LOG] }, async (page) => {
+    await page.click('#settings-btn');
+    await page.fill('#key-anthropic', TEST_KEY);
+    await page.fill('#key-gemini', TEST_KEY);
+    await page.dblclick('#settings-save');
+    const named = await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
+    const said = await page.textContent('#settings-saved');
+    const marked = (await page.evaluate(keyStates)).sort();
+    const onServer = (await keysOnServer(url)).sort();
+    const keysName = 'a key save one provider refuses names it, and the set markers match the server';
+    const matches = named && said === 'Google · refused by the check' && isDeepStrictEqual(marked, onServer);
+    check('live', keysName, matches, `${said}; page ${marked.join(' ')}; server ${onServer.join(' ')}`);
+    const fields = [await page.inputValue('#key-anthropic'), await page.inputValue('#key-gemini')];
+    const clearedName = 'a save stopped partway clears each key it saved and keeps the rest';
+    check('live', clearedName, isDeepStrictEqual(fields, ['', TEST_KEY]), fields.map((value) => (value ? 'kept' : 'cleared')).join(', '));
+    check('live', 'a second click while a save is in flight sends nothing more', isDeepStrictEqual(saves, ['anthropic', 'gemini']), saves.join(' '));
+  });
+}
+
+// Saves a key on its server.
+async function liveLoadProblem(url) {
+  const before = (page) => page.route('**/api/keys', (route) => route.abort());
+  const failing = (route) => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'still unwell' }) });
+  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG, SERVER_ERROR_LOG] }, async (page) => {
+    const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
+    await page.fill('#question', 'Which memo mentions the storm?');
+    const typing = (await page.textContent('#run-status')) === LOST_CONNECTION;
+    await page.unroute('**/api/keys');
+    await page.route('**/api/keys', failing);
+    await page.click('#settings-btn');
+    await page.fill('#key-anthropic', TEST_KEY);
+    await page.click('#settings-save');
+    await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
+    await page.fill('#question', 'Which memo mentions the storm, again?');
+    const unwell = (await page.textContent('#run-status')) === LOST_CONNECTION;
+    await page.unroute('**/api/keys');
+    const saved = await saveKeys(page);
+    await page.keyboard.press('Escape');
+    const status = await page.textContent('#run-status');
+    const cleared = saved && status === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;
+    const problemName = 'a connection lost at load stays in the status, through typing and a 500, until a call to r3con-app succeeds';
+    check('live', problemName, atLoad && typing && unwell && cleared, `typing ${typing}; 500 ${unwell}; then ${status}`);
+  });
+}
+
+async function liveStaleToken(url) {
+  const wrong = url.replace(/#token=.*/, '#token=not-this-launch');
+  await withPage('live', { url: wrong, sample: false, expectedErrors: [UNAUTHORIZED_LOG] }, async (page) => {
+    const atLoad = await becomes(page, statusIs, `● ${STALE_TOKEN}`);
+    await page.click('#run-btn');
+    const inChat = await becomes(page, lastTurnSays, [STALE_TOKEN]);
+    const staleName = 'a wrong token shows the stale-token message, at load and when a run is tried';
+    check('live', staleName, atLoad && inChat, await page.textContent('#run-status'));
+  });
+}
+
+// Stops the server it is given: its own.
+async function liveGoingThenLost(url, server) {
+  await withPage('live', { url, sample: false, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
+    const posts = postsOf(page);
+    await page.fill('#question', `Which site logged the most incidents? ${HANGS}`);
+    await page.click('#run-btn');
+    const held = await becomes(page, () => document.querySelector('.node.r1.working') !== null, null, LIVE_RUN_MS);
+    const question = 'Which site logged the fewest?';
+    await page.fill('#question', question);
+    await page.click('#run-btn');
+    const asked = [await page.textContent('#run-status'), await page.inputValue('#question')];
+    const askName = 'while a run is going, a question stays in the box, unsent, and the status says to ask once it has finished';
+    check('live', askName, held && isDeepStrictEqual(asked, [ASK_WHEN_DONE, question]) && posts.length === 1, asked[0]);
+    await page.setInputFiles('#file-input', memo('06_extra.txt', 'An extra memo.\n'));
+    await page.waitForSelector('.node.pending');
+    await page.click('#run-btn');
+    const refused = await page.textContent('#run-status');
+    const runName = "while a run is going, a new run is refused: it can't be stopped yet";
+    check('live', runName, refused === RUN_STILL_GOING && isDeepStrictEqual(posts, ['/api/runs']), `${refused}; ${posts.join(' ')}`);
+
+    await server.stop();
+    const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
+    const lostName = 'a run whose server goes away mid-stream says the connection was lost';
+    check('live', lostName, lost, await page.textContent('#run-status'));
+  });
+}
+
+// A copy of the page served from another host must not take a token or call any API.
+async function liveElsewhere() {
+  const elsewhere = 'http://r3con.example/';
+  const calls = [];
+  const before = (page) => {
+    page.on('request', (request) => request.url().includes('/api/') && calls.push(request.url()));
+    return page.route(`${elsewhere}**`, (route) => route.fulfill({ contentType: 'text/html', body: readFileSync(PAGE_FILE, 'utf8') }));
+  };
+  await withPage('live', { url: `${elsewhere}#token=from-elsewhere`, sample: false, before }, async (page) => {
+    const status = await page.textContent('#run-status');
+    await page.click('#run-btn');
+    const replayed = await becomes(page, statusIs, SAMPLE_STATUS);
+    const name = 'a copy of the page served from another host stays the prototype and calls no API';
+    check('live', name, status === ready('recorded run', RECORDED_MODEL) && replayed && calls.length === 0, `${status}; ${calls.length} calls`);
+  });
+}
+
+// A check that leaves state on its server, a key or a hanging call, gets a server of its own.
+async function live() {
+  await withFakeServer(async (url) => {
+    await liveCutStream(url);
+    await liveRunEnd(url);
+    await liveParts(url);
+    await liveFailure(url);
+    await liveUnreadable(url);
+    await liveStaleToken(url);
+  });
+  for (const stateful of [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost]) await withFakeServer(stateful);
+  await liveElsewhere();
+}
+
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, settings, popupArea, gestures, scale];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
