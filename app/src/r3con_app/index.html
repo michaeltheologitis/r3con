@@ -153,8 +153,23 @@ p { margin: 0; }
 }
 
 /* ---- panel ---- */
+.board { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.run-tabs {
+  display: flex;
+  gap: 1ch;
+  padding: 0.45em 1.5ch;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+.run-tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
+.run-tab .num { color: var(--dim); font-weight: 400; }
+.tab-close { padding: 0 0.5ch; }
+.tab-close + .run-tab { margin-left: 1.5ch; }
 .panel {
   position: relative;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -177,10 +192,10 @@ p { margin: 0; }
 .edge.flow { opacity: 0.5; }
 .edge.cite { opacity: 0.85; }
 .edge.hl { opacity: 0.9; stroke: var(--fg); }
-.panel.is-lit .edge { opacity: 0.07; }
-.panel.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
-.panel.is-lit .edge.hl { opacity: 0.55; }
-.panel.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
+.drawing.is-lit .edge { opacity: 0.07; }
+.drawing.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
+.drawing.is-lit .edge.hl { opacity: 0.55; }
+.drawing.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
 .edge.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s ease-out forwards; }
 .edge.fade { animation: fade 0.6s ease-out; }
 
@@ -218,15 +233,15 @@ p { margin: 0; }
   font-size: 26px;
   line-height: 1;
 }
-.panel.is-lit .node { opacity: 0.3; }
-.panel.is-lit .node.on-path { opacity: 1; }
-.panel.is-lit .node.on-path .icon { color: var(--accent); }
-.panel.is-lit .node.on-path .label { color: var(--fg); }
+.drawing.is-lit .node { opacity: 0.3; }
+.drawing.is-lit .node.on-path { opacity: 1; }
+.drawing.is-lit .node.on-path .icon { color: var(--accent); }
+.drawing.is-lit .node.on-path .label { color: var(--fg); }
 .fill-orange { fill: var(--fill-orange); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
 .ink { stroke: var(--tree-ink); }
-.panel.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
+.drawing.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
 .node.pending .icon { opacity: 0.5; }
 
 .panel-hint {
@@ -382,11 +397,13 @@ p { margin: 0; }
 .line.user {
   margin-top: 0.9em;
   padding: 0.3em 1ch;
-  grid-template-columns: 2ch minmax(0, 1fr);
+  grid-template-columns: 2ch minmax(0, 1fr) auto;
   background: var(--panel);
   border-radius: 4px;
 }
 .line.user .g { color: var(--dim); }
+.marker { margin-left: 2ch; }
+.marker:disabled { cursor: default; }
 .line.answer .g { color: var(--accent); }
 .line.answer .t { font-weight: 600; }
 .line.spin { color: var(--dim); }
@@ -536,22 +553,18 @@ p { margin: 0; }
   </div>
 
   <div class="frame">
-    <main class="panel" id="panel" aria-label="Run panel">
-      <div class="world" id="world">
-        <svg class="edges" aria-hidden="true">
-          <g id="layer-base"></g>
-          <g id="layer-mid"></g>
-          <g id="layer-lit"></g>
-        </svg>
-        <div id="nodes"></div>
+    <main class="board" aria-label="Run panel">
+      <div class="run-tabs" id="run-tabs" role="tablist" aria-label="runs" hidden></div>
+      <div class="panel" id="panel">
+        <div class="world" id="world"></div>
+        <div class="panel-hint" id="panel-hint" hidden></div>
+        <div class="panel-tools">
+          <button class="btn" id="arrange-btn" type="button">arrange</button>
+          <button class="btn" id="fit-btn" type="button">fit</button>
+          <span id="zoom-level">100%</span>
+        </div>
+        <div class="inspector" id="inspector" role="dialog" aria-label="Details" tabindex="-1" hidden></div>
       </div>
-      <div class="panel-hint" id="panel-hint" hidden></div>
-      <div class="panel-tools">
-        <button class="btn" id="arrange-btn" type="button">arrange</button>
-        <button class="btn" id="fit-btn" type="button">fit</button>
-        <span id="zoom-level">100%</span>
-      </div>
-      <div class="inspector" id="inspector" role="dialog" aria-label="Details" tabindex="-1" hidden></div>
     </main>
 
     <aside class="side" id="side">
@@ -1041,8 +1054,7 @@ p { margin: 0; }
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con-app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
-  const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
-  const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
+  const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const LIVE_KEYS_NOTE =
@@ -1089,8 +1101,6 @@ p { margin: 0; }
   const root = document.documentElement;
   const panel = $('panel');
   const world = $('world');
-  const nodesLayer = $('nodes');
-  const layers = { base: $('layer-base'), mid: $('layer-mid'), lit: $('layer-lit') };
   const inspector = $('inspector');
   const transcript = $('transcript');
   const questionEl = $('question');
@@ -1119,30 +1129,56 @@ p { margin: 0; }
   const docId = (file) => `doc-${file.uid}`;
   const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
 
+  // A tab is one run and its own drawing, so a tab in the background keeps drawing its events.
+  function newTab() {
+    const group = () => document.createElementNS(SVG_NS, 'g');
+    const layers = { base: group(), mid: group(), lit: group() };
+    const edges = document.createElementNS(SVG_NS, 'svg');
+    edges.classList.add('edges');
+    edges.setAttribute('aria-hidden', 'true');
+    edges.append(layers.base, layers.mid, layers.lit);
+    const nodesEl = h('div');
+    return {
+      id: null,
+      button: null,
+      close: null,
+      run: null,
+      turn: null,
+      status: [],
+      drawing: h('div', { class: 'drawing' }, edges, nodesEl),
+      layers,
+      nodesEl,
+      nodes: new Map(),
+      edges: new Map(),
+      layout: new Map(),
+      view: { x: 0, y: 0, k: 1 },
+      userMoved: false,
+      timers: [],
+      arrangeFrame: 0,
+    };
+  }
+
   const state = {
     files: SAMPLE_FILES,
-    run: null,
-    runTurn: null,
-    // The streams open on r3con-app, a run's events or an ask's: each `{ kind }`, dropped once closed.
+    // The tabs with a run, in order; before the first run the panel shows a tab with none, never listed.
+    tabs: [],
+    shown: newTab(),
+    nextTab: 1,
+    // The streams open on r3con-app, a run's events or an ask's: each `{ kind, tab }`, dropped once closed.
     streams: new Set(),
-    nodes: new Map(),
-    edges: new Map(),
-    timers: [],
     selected: null,
     hovered: null,
-    userMoved: false,
-    layout: new Map(),
     inspectorDroppedAt: null,
   };
-  const view = { x: 0, y: 0, k: 1 };
 
   const filesAreSample = () => state.files === SAMPLE_FILES;
   const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
-  const isPending = (file) => Boolean(state.run) && !state.run.docs.includes(file);
+  const isPending = (tab, file) => Boolean(tab.run) && !tab.run.docs.includes(file);
+  const pendingFiles = (tab) => state.files.filter((f) => isPending(tab, f));
 
-  function panelFiles() {
-    const runDocs = state.run?.docs ?? [];
+  function panelFiles(tab) {
+    const runDocs = tab.run?.docs ?? [];
     return [...runDocs, ...state.files.filter((f) => !runDocs.includes(f))];
   }
 
@@ -1219,13 +1255,12 @@ p { margin: 0; }
     return stripExt(run.docs[i].name);
   }
 
-  function nodeName(id) {
+  function nodeName(tab, id) {
     const [kind, d] = splitId(id);
-    if (kind === 'doc') return state.nodes.get(id)?.file.name ?? 'document';
+    if (kind === 'doc') return tab.nodes.get(id)?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return answerLabel(askedOf(state.run, id));
-    const label = docLabel(state.run, d);
-    return `${label} · ${KIND_SUFFIX[kind]}`;
+    if (kind === 'answer') return answerLabel(answerAt(tab.run, id));
+    return `${docLabel(tab.run, d)} · ${KIND_SUFFIX[kind]}`;
   }
 
   function schemaClasses(code) {
@@ -1319,10 +1354,10 @@ p { margin: 0; }
     if (!ENDINGS.has(last?.type)) throw lostConnection();
   }
 
-  const streaming = (kind) => [...state.streams].some((stream) => stream.kind === kind);
+  const streaming = (kind, tab) => [...state.streams].some((stream) => stream.kind === kind && stream.tab === tab);
 
-  function openStream(kind) {
-    const stream = { kind };
+  function openStream(kind, tab) {
+    const stream = { kind, tab };
     state.streams.add(stream);
     return stream;
   }
@@ -1360,16 +1395,14 @@ p { margin: 0; }
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
     return {
       simulated: false,
-      question: SAMPLE.question,
       docs: state.files,
       r1: SAMPLE.r1,
       r2: SAMPLE.r2,
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
-      answer: SAMPLE.answer,
+      answers: [{ question: SAMPLE.question, model: SAMPLE.model, ...SAMPLE.answer }],
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
-      model: SAMPLE.model,
       source: 'recorded run',
       order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
@@ -1404,7 +1437,6 @@ p { margin: 0; }
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
     const run = {
       simulated: true,
-      question,
       docs: files,
       r1: files.map((f) => ({ summary: summary(f), provenance: [] })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
@@ -1412,21 +1444,21 @@ p { margin: 0; }
       parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
       calls: null,
       totals: null,
-      model,
       order: { r1: order, r2: order, parsed: order },
     };
-    return { ...run, answer: madeUpAnswer(run, question, 0) };
+    return { ...run, answers: [{ question, model, ...madeUpAnswer(run, question, 0) }] };
   }
 
   // Filled in by r3con-app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
   function liveRun(question, model) {
-    const empty = { r1: [], r2: [], schema: null, parsed: [], answer: null, calls: null, totals: null };
-    return { simulated: false, id: null, ids: [], question, model, docs: state.files, ...empty };
+    const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
+    return { simulated: false, id: null, ids: [], docs: state.files, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
   function runSummary(run) {
-    if (run.simulated) return `simulated run · ${run.model} · nothing was sent`;
-    return [run.source, run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
+    const { model } = run.answers[0];
+    if (run.simulated) return `simulated run · ${model} · nothing was sent`;
+    return [run.source, model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
   // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live.
@@ -1435,21 +1467,17 @@ p { margin: 0; }
     return [`${source} ask over this run`, model, ...spend].join(' · ');
   }
 
-  // The run's own answer node is `answer`; ask k's, in run.answers, is `answer-k`.
-  const askId = (k) => `answer-${k}`;
+  // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
+  const answerId = (k) => `answer-${k}`;
+  const RUN_ANSWER = answerId(0);
 
-  // The question an answer answers, and the model that answered it.
-  function askedOf(run, id) {
-    const [, k] = splitId(id);
-    return k === null ? { question: run.question, model: run.model } : run.answers[k];
-  }
+  const answerAt = (run, id) => run.answers[splitId(id)[1]];
 
-  // The run's own answer or an ask's, in one shape.
+  // An answer with where it came from, as the chat and its popup give it.
   function answerOf(run, id) {
-    const [, k] = splitId(id);
-    if (k === null) return { ...run.answer, ...askedOf(run, id), simulated: run.simulated, summary: runSummary(run) };
-    const ask = run.answers[k];
-    return { ...ask, simulated: ask.source === 'simulated', summary: askSummary(ask) };
+    const answer = answerAt(run, id);
+    if (id === RUN_ANSWER) return { ...answer, simulated: run.simulated, summary: runSummary(run) };
+    return { ...answer, simulated: answer.source === 'simulated', summary: askSummary(answer) };
   }
 
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
@@ -1457,7 +1485,7 @@ p { margin: 0; }
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
-      const { summary_ids, parse_ids } = answerOf(run, id).provenance;
+      const { summary_ids, parse_ids } = answerAt(run, id).provenance;
       return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
@@ -1485,6 +1513,7 @@ p { margin: 0; }
   // ---------- panel: view ----------
 
   function applyView() {
+    const { view } = state.shown;
     world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.k})`;
     world.style.setProperty('--k', view.k);
     $('zoom-level').textContent = `${Math.round(view.k * 100)}%`;
@@ -1498,6 +1527,7 @@ p { margin: 0; }
   }
 
   function zoomAt(px, py, k) {
+    const { view } = state.shown;
     const next = clamp(k, ZOOM.min, ZOOM.max);
     const wx = (px - view.x) / view.k;
     const wy = (py - view.y) / view.k;
@@ -1527,54 +1557,57 @@ p { margin: 0; }
     });
     const ys = origins.map((o) => o.y);
     layout.set('schema', { x: origins[0].x + COLUMN.schema * GRID.colGap, y: origins[0].y });
-    layout.set('answer', { x: Math.max(...origins.map((o) => o.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
+    layout.set(RUN_ANSWER, { x: Math.max(...origins.map((o) => o.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
     return layout;
   }
 
   const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
 
-  function nodeOrigin(i, file) {
-    const node = state.nodes.get(docId(file));
-    return { x: node.x, y: node.y };
+  function nodeOrigin(tab) {
+    return (i, file) => {
+      const node = tab.nodes.get(docId(file));
+      return { x: node.x, y: node.y };
+    };
   }
 
-  // Asks stack around the run's own answer, one row gap apart: below it, above it, then further out.
-  function askSpot(answer, k) {
-    const out = Math.floor(k / 2) + 1;
-    return { x: answer.x, y: answer.y + (k % 2 ? -out : out) * GRID.rowGap };
+  // Answer k sits around the run's own answer, one row gap apart: below it, above it, then further out.
+  function answerSpot(first, k) {
+    const out = Math.ceil(k / 2);
+    return { x: first.x, y: first.y + (k % 2 ? out : -out) * GRID.rowGap };
   }
 
-  // The first slot around the run's answer, where it is now, that no answer node holds.
-  function freeAskSpot() {
-    const answer = state.nodes.get('answer');
-    const answers = [...state.nodes.values()].filter((n) => n.kind === 'answer');
+  // The first spot around the run's answer, where it is now, that no answer node holds.
+  function freeAnswerSpot(tab) {
+    const first = tab.nodes.get(RUN_ANSWER);
+    const answers = [...tab.nodes.values()].filter((n) => n.kind === 'answer');
     const taken = (spot) => answers.some((n) => Math.abs(n.x - spot.x) < GRID.colGap / 2 && Math.abs(n.y - spot.y) < GRID.rowGap / 2);
     let k = 0;
-    while (taken(askSpot(answer, k))) k += 1;
-    return askSpot(answer, k);
+    while (taken(answerSpot(first, k))) k += 1;
+    return answerSpot(first, k);
   }
 
-  function plan(origin) {
-    const files = state.run?.docs ?? state.files;
+  function plan(tab, origin) {
+    const files = tab.run?.docs ?? state.files;
     const layout = gridLayout(files, origin);
-    if (!state.run) return layout;
-    state.files.filter(isPending).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
-    state.run.answers.forEach((_, k) => layout.set(askId(k), askSpot(layout.get('answer'), k)));
+    if (!tab.run) return layout;
+    pendingFiles(tab).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
+    const first = layout.get(RUN_ANSWER);
+    tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
   }
 
-  function contentBounds() {
-    const widest = Math.max('structure'.length, ...panelFiles().map((f) => fileLabel(f).length));
+  function contentBounds(tab) {
+    const widest = Math.max('structure'.length, ...panelFiles(tab).map((f) => fileLabel(f).length));
     // Once there is a run, an answer's label is its question and model, often wider than any file's.
-    const width = (id) => (state.run && splitId(id)[0] === 'answer' ? nodeName(id).length : widest) * charPx + NODE_PAD_PX;
+    const width = (id) => (tab.run && splitId(id)[0] === 'answer' ? nodeName(tab, id).length : widest) * charPx + NODE_PAD_PX;
     const b = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-    for (const [id, p] of state.layout) {
+    for (const [id, p] of tab.layout) {
       b.minX = Math.min(b.minX, p.x - width(id) / 2);
       b.maxX = Math.max(b.maxX, p.x + width(id) / 2);
       b.minY = Math.min(b.minY, p.y - BRIDGE_CLEARANCE);
       b.maxY = Math.max(b.maxY, p.y + iconHalf(splitId(id)[0]) + 2 * LABEL_LINE_PX);
     }
-    for (const n of state.nodes.values()) {
+    for (const n of tab.nodes.values()) {
       const halfW = n.el.offsetWidth / 2;
       b.minX = Math.min(b.minX, n.x - halfW);
       b.maxX = Math.max(b.maxX, n.x + halfW);
@@ -1585,10 +1618,11 @@ p { margin: 0; }
   }
 
   function fit(animate = false) {
+    const { view } = state.shown;
     const pw = panel.clientWidth;
     const ph = panel.clientHeight;
     if (!pw || !ph) return;
-    const b = contentBounds();
+    const b = contentBounds(state.shown);
     const bw = Math.max(1, b.maxX - b.minX);
     const bh = Math.max(1, b.maxY - b.minY);
     const k = clamp(Math.min((pw - 2 * FIT_MARGIN) / bw, (ph - 2 * FIT_MARGIN) / bh), ZOOM.min, ZOOM.fitMax);
@@ -1599,8 +1633,12 @@ p { margin: 0; }
     applyView();
   }
 
+  function fitShown(animate = false) {
+    if (!state.shown.userMoved) fit(animate);
+  }
+
   function refit() {
-    state.userMoved = false;
+    state.shown.userMoved = false;
     fit(true);
   }
 
@@ -1613,94 +1651,101 @@ p { margin: 0; }
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
-  function nodeLabels(id, kind, file) {
-    if (kind === 'schema' || kind === 'answer') return [nodeName(id)];
-    if (kind === 'doc') return [fileLabel(file), isPending(file) ? 'not run' : null];
+  function nodeLabels(tab, id, kind, file) {
+    if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
+    if (kind === 'doc') return [fileLabel(file), isPending(tab, file) ? 'not run' : null];
     return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
-  function ariaName(node) {
+  function ariaName(tab, node) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = askedOf(state.run, node.id);
+      const { question, model } = answerAt(tab.run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
-    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
+    if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
-    return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
+    return `${node.file.name}, ${isPending(tab, node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
-  function createNode(id, kind, pos, { working = false, file = null, enter = true } = {}) {
-    const pending = kind === 'doc' && isPending(file);
-    const classes = ['node', kind, working && 'working', pending && 'pending', enter && !reduceMotion() && 'enter'].filter(Boolean).join(' ');
+  function createNode(tab, id, kind, pos, { working = false, file = null, enter = true } = {}) {
+    const pending = kind === 'doc' && isPending(tab, file);
+    const classes = ['node', kind, working && 'working', pending && 'pending', enter && animates(tab) && 'enter'].filter(Boolean).join(' ');
     const el = h(
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id, 'aria-pressed': kind === 'answer' ? 'false' : null },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
-      nodeLabels(id, kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      nodeLabels(tab, id, kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
-    state.nodes.set(id, node);
-    el.setAttribute('aria-label', ariaName(node));
+    tab.nodes.set(id, node);
+    el.setAttribute('aria-label', ariaName(tab, node));
     placeNode(node);
-    nodesLayer.append(el);
+    tab.nodesEl.append(el);
     return node;
   }
 
-  function addNode(id) {
+  function addNode(tab, id) {
     const [kind, d] = splitId(id);
-    return createNode(id, kind, state.layout.get(id), { working: true, file: PER_DOCUMENT.has(kind) ? state.run.docs[d] : null });
+    return createNode(tab, id, kind, tab.layout.get(id), { working: true, file: PER_DOCUMENT.has(kind) ? tab.run.docs[d] : null });
   }
 
-  function addDocNode(file, pos) {
+  function addDocNode(tab, file, pos) {
     let last = null;
-    for (const n of state.nodes.values()) if (n.kind === 'doc' && (!last || n.y > last.y)) last = n;
+    for (const n of tab.nodes.values()) if (n.kind === 'doc' && (!last || n.y > last.y)) last = n;
     // A node redrawn at its old position (a run starting) is not new, so it doesn't animate in.
-    return createNode(docId(file), 'doc', pos ?? (last ? { x: last.x, y: last.y + GRID.rowGap } : tidyOrigin(0)), { file, enter: !pos });
+    return createNode(tab, docId(file), 'doc', pos ?? (last ? { x: last.x, y: last.y + GRID.rowGap } : tidyOrigin(0)), { file, enter: !pos });
   }
 
-  function removeNode(id) {
-    if (state.selected === id) closeInspector();
-    if (state.hovered === id) state.hovered = null;
-    state.nodes.get(id)?.el.remove();
-    state.nodes.delete(id);
+  function removeNode(tab, id) {
+    if (openIn(tab) === id) closeInspector();
+    if (hoveredIn(tab) === id) state.hovered = null;
+    tab.nodes.get(id)?.el.remove();
+    tab.nodes.delete(id);
   }
 
   const easeOut = (t) => 1 - (1 - t) ** 3;
 
-  let arrangeFrame = 0;
-
-  function clearPanel() {
-    cancelAnimationFrame(arrangeFrame);
-    closeInspector();
-    for (const layer of Object.values(layers)) layer.replaceChildren();
-    state.edges.clear();
-    nodesLayer.replaceChildren();
-    state.nodes.clear();
-    state.hovered = null;
-    panel.classList.remove('is-lit');
+  function clearPanel(tab) {
+    cancelAnimationFrame(tab.arrangeFrame);
+    if (openIn(tab)) closeInspector();
+    for (const layer of Object.values(tab.layers)) layer.replaceChildren();
+    tab.edges.clear();
+    tab.nodesEl.replaceChildren();
+    tab.nodes.clear();
+    tab.drawing.classList.remove('is-lit');
+    if (hoveredIn(tab)) state.hovered = null;
   }
 
-  // Document nodes are created only here: one per loaded or run file, at its position in `at` if
-  // it had one, else below the last document node. A run's grid is planned once, when it starts;
-  // later syncs only add or drop document entries.
-  function syncDocNodes({ at = new Map(), animate = false, replan = !state.run } = {}) {
-    const files = panelFiles();
+  // A slide left going in a tab that is no longer shown jumps to where it was going.
+  function finishSlide(tab) {
+    if (!tab.arrangeFrame) return;
+    cancelAnimationFrame(tab.arrangeFrame);
+    tab.arrangeFrame = 0;
+    for (const node of tab.nodes.values()) placeNode(node);
+    redrawEdges(tab);
+  }
+
+  // Document nodes are created only here: one per loaded or run file, at its position in `at` if it had
+  // one, else below the last document node. A run's grid is planned once, when it starts; later syncs
+  // only add or drop document entries.
+  function syncDocNodes(tab, { at = new Map(), animate = false, replan = !tab.run } = {}) {
+    const files = panelFiles(tab);
     const keep = new Set(files.map(docId));
-    for (const n of [...state.nodes.values()]) {
+    for (const n of [...tab.nodes.values()]) {
       if (n.kind !== 'doc' || keep.has(n.id)) continue;
-      removeNode(n.id);
-      state.layout.delete(n.id);
+      removeNode(tab, n.id);
+      tab.layout.delete(n.id);
     }
     for (const f of files) {
-      if (state.nodes.has(docId(f))) continue;
-      const node = addDocNode(f, at.get(docId(f)));
-      state.layout.set(node.id, { x: node.x, y: node.y });
+      if (tab.nodes.has(docId(f))) continue;
+      const node = addDocNode(tab, f, at.get(docId(f)));
+      tab.layout.set(node.id, { x: node.x, y: node.y });
     }
-    if (replan) state.layout = plan(nodeOrigin);
+    if (replan) tab.layout = plan(tab, nodeOrigin(tab));
     updateHint();
-    if (!state.userMoved) fit(animate);
+    fitShown(animate);
   }
 
   function placeNode(node) {
@@ -1714,22 +1759,24 @@ p { margin: 0; }
 
   // The model takes the final positions at once; only the drawing slides there.
   function arrange() {
-    cancelAnimationFrame(arrangeFrame);
-    state.layout = plan(tidyOrigin);
-    state.userMoved = false;
+    const tab = state.shown;
+    cancelAnimationFrame(tab.arrangeFrame);
+    tab.layout = plan(tab, tidyOrigin);
+    tab.userMoved = false;
     const moves = [];
-    for (const node of state.nodes.values()) {
-      const to = state.layout.get(node.id);
+    for (const node of tab.nodes.values()) {
+      const to = tab.layout.get(node.id);
       if (!to) continue;
       const from = drawnAt(node);
       Object.assign(node, to);
       if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
     }
     const finish = () => {
+      tab.arrangeFrame = 0;
       for (const { node } of moves) placeNode(node);
-      redrawEdges();
+      redrawEdges(tab);
       positionInspector();
-      if (!state.userMoved) refit();
+      fitShown(true);
     };
     if (!moves.length || reduceMotion()) return finish();
     const start = performance.now();
@@ -1746,19 +1793,19 @@ p { margin: 0; }
         node.el.style.left = `${at.x}px`;
         node.el.style.top = `${at.y}px`;
       }
-      redrawEdges((n) => drawn.get(n) ?? n);
-      arrangeFrame = requestAnimationFrame(step);
+      redrawEdges(tab, (n) => drawn.get(n) ?? n);
+      tab.arrangeFrame = requestAnimationFrame(step);
     };
-    arrangeFrame = requestAnimationFrame(step);
+    tab.arrangeFrame = requestAnimationFrame(step);
   }
 
-  function markWorking(id) {
-    state.nodes.get(id).el.classList.add('working');
+  function markWorking(tab, id) {
+    tab.nodes.get(id).el.classList.add('working');
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
-  function settleNode(id, { empty = false, failed = false } = {}) {
-    const node = state.nodes.get(id);
+  function settleNode(tab, id, { empty = false, failed = false } = {}) {
+    const node = tab.nodes.get(id);
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
     node.el.classList.toggle('failed', failed);
@@ -1766,23 +1813,31 @@ p { margin: 0; }
       g.textContent = '✻';
     });
     if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
-    node.el.setAttribute('aria-label', ariaName(node));
-    if (state.selected === id) renderInspector();
+    node.el.setAttribute('aria-label', ariaName(tab, node));
+    rerenderIfOpen(tab, id);
+  }
+
+  // Ids repeat across tabs; the popup and the hover are only ever on the shown tab's nodes.
+  const openIn = (tab) => (tab === state.shown ? state.selected : null);
+  const hoveredIn = (tab) => (tab === state.shown ? state.hovered : null);
+
+  function rerenderIfOpen(tab, id) {
+    if (openIn(tab) === id) renderInspector();
   }
 
   // A node has landed once its call finished without the run or ask stopping first.
-  function landed(id) {
-    const classes = state.nodes.get(id)?.el.classList;
+  function landed(tab, id) {
+    const classes = tab.nodes.get(id)?.el.classList;
     return Boolean(classes) && !classes.contains('working') && !classes.contains('failed');
   }
 
-  function blockers(a, b, at) {
+  function blockers(tab, a, b, at) {
     const pa = at(a);
     const pb = at(b);
     const lo = Math.min(pa.x + iconHalf(a.kind), pb.x + iconHalf(b.kind));
     const hi = Math.max(pa.x - iconHalf(a.kind), pb.x - iconHalf(b.kind));
     let count = 0;
-    for (const n of state.nodes.values()) {
+    for (const n of tab.nodes.values()) {
       if (n === a || n === b) continue;
       const p = at(n);
       if (p.x > lo && p.x < hi && Math.abs(p.y - (pa.y + pb.y) / 2) < iconHalf(n.kind) * 2) count += 1;
@@ -1791,12 +1846,12 @@ p { margin: 0; }
   }
 
   // One lane higher per blocker, so bridges from one node nest.
-  function edgePath(a, b, at = (n) => n) {
+  function edgePath(tab, a, b, at = (n) => n) {
     const pa = at(a);
     const pb = at(b);
     const sx = pa.x + iconHalf(a.kind) + EDGE_GAP;
     const tx = pb.x - iconHalf(b.kind) - EDGE_GAP;
-    const hops = Math.abs(pa.y - pb.y) < ICON_HALF && tx > sx ? blockers(a, b, at) : 0;
+    const hops = Math.abs(pa.y - pb.y) < ICON_HALF && tx > sx ? blockers(tab, a, b, at) : 0;
     if (!hops) {
       const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
       return `M${sx} ${pa.y} C${sx + c} ${pa.y} ${tx - c} ${pb.y} ${tx} ${pb.y}`;
@@ -1806,98 +1861,101 @@ p { margin: 0; }
     return `M${sx} ${pa.y} Q${sx + ramp} ${top} ${sx + 2 * ramp} ${top} H${tx - 2 * ramp} Q${tx - ramp} ${top} ${tx} ${pb.y}`;
   }
 
-  function layerFor(kind) {
-    return kind === 'context' || kind === 'self' ? layers.base : layers.mid;
+  function layerFor(tab, kind) {
+    return kind === 'context' || kind === 'self' ? tab.layers.base : tab.layers.mid;
   }
 
-  function animateEdge(el, how) {
-    if (reduceMotion()) return;
-    el.classList.remove('draw', 'fade');
+  // A tab drawn while hidden would play every animation at once when shown.
+  const animates = (tab) => tab === state.shown && !reduceMotion();
+
+  // An element put back in the page plays its animation again while the class is on: a line moved to the
+  // lit layer, or a drawing shown again.
+  function endAnimation(el) {
+    el.classList.remove('enter', 'draw', 'fade');
     el.removeAttribute('pathLength');
+  }
+
+  function animateEdge(tab, el, how) {
+    if (!animates(tab)) return;
+    endAnimation(el);
     if (how === 'draw') el.setAttribute('pathLength', '1');
     el.classList.add(how);
-    el.addEventListener(
-      'animationend',
-      () => {
-        el.classList.remove(how);
-        el.removeAttribute('pathLength');
-      },
-      { once: true },
-    );
   }
 
-  function addEdge(from, to, kind, how) {
+  function addEdge(tab, from, to, kind, how) {
     const key = `${from}>${to}`;
-    let edge = state.edges.get(key);
+    let edge = tab.edges.get(key);
     if (!edge) {
       edge = { key, from, to, kind, el: document.createElementNS(SVG_NS, 'path') };
       edge.el.classList.add('edge');
       edge.el.dataset.key = key;
-      state.edges.set(key, edge);
+      tab.edges.set(key, edge);
     }
     edge.el.classList.remove(edge.kind);
     edge.kind = kind;
     edge.el.classList.add(kind);
-    layerFor(kind).append(edge.el);
-    edge.el.setAttribute('d', edgePath(state.nodes.get(from), state.nodes.get(to)));
-    if (how) animateEdge(edge.el, how);
-    const id = state.hovered ?? state.selected;
+    layerFor(tab, kind).append(edge.el);
+    edge.el.setAttribute('d', edgePath(tab, tab.nodes.get(from), tab.nodes.get(to)));
+    if (how) animateEdge(tab, edge.el, how);
+    const id = hoveredIn(tab) ?? openIn(tab);
     edge.el.classList.toggle('hl', id !== null && (id === from || id === to));
     return edge;
   }
 
-  function dropEdge(edge) {
+  function dropEdge(tab, edge) {
     edge.el.remove();
-    state.edges.delete(edge.key);
+    tab.edges.delete(edge.key);
   }
 
-  function redrawEdges(at) {
-    for (const e of state.edges.values()) e.el.setAttribute('d', edgePath(state.nodes.get(e.from), state.nodes.get(e.to), at));
+  function redrawEdges(tab, at) {
+    for (const e of tab.edges.values()) e.el.setAttribute('d', edgePath(tab, tab.nodes.get(e.from), tab.nodes.get(e.to), at));
   }
 
   function refreshHighlight() {
+    const tab = state.shown;
     const id = state.hovered ?? state.selected;
-    for (const e of state.edges.values()) e.el.classList.toggle('hl', id !== null && (e.from === id || e.to === id));
-    for (const n of state.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
+    for (const e of tab.edges.values()) e.el.classList.toggle('hl', id !== null && (e.from === id || e.to === id));
+    for (const n of tab.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
-  // Lights the lineage of the run's lit answer, and nothing else; an answer that cites nothing lights nothing.
-  function lightPath(run) {
+  // Lights the lineage of the tab's lit answer; an answer that cites nothing lights nothing.
+  function lightPath(tab) {
+    const { run } = tab;
     const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
-    panel.classList.toggle('is-lit', Boolean(path));
-    for (const [id, n] of state.nodes) {
+    tab.drawing.classList.toggle('is-lit', Boolean(path));
+    for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    for (const e of state.edges.values()) {
+    for (const e of tab.edges.values()) {
       const on = Boolean(path?.edges.has(e.key));
-      const layer = on ? layers.lit : layerFor(e.kind);
+      const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
       e.el.classList.toggle('lit', on);
       if (e.el.parentNode !== layer) layer.append(e.el);
     }
   }
 
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
-  function lightAnswer(run, id) {
-    for (const e of [...state.edges.values()]) {
-      if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(e);
+  function lightAnswer(tab, id) {
+    for (const e of [...tab.edges.values()]) {
+      if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
     }
-    for (const from of inputsOf(run, id)) {
-      if (!state.edges.has(`${from}>${id}`)) addEdge(from, id, 'context', 'fade');
+    for (const from of inputsOf(tab.run, id)) {
+      if (!tab.edges.has(`${from}>${id}`)) addEdge(tab, from, id, 'context', 'fade');
     }
-    run.lit = id;
-    lightPath(run);
+    tab.run.lit = id;
+    lightPath(tab);
   }
 
-  // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open.
-  function lightLanded(run, id) {
-    const open = state.selected;
-    if (open && open !== id && splitId(open)[0] === 'answer' && landed(open)) return;
-    lightAnswer(run, id);
+  // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open there.
+  function lightLanded(tab, id) {
+    const open = openIn(tab);
+    if (open && open !== id && splitId(open)[0] === 'answer' && landed(tab, open)) return;
+    lightAnswer(tab, id);
   }
 
   // A run lights its own answer, or again the one lit before a replay.
-  const lightRun = (run) => lightAnswer(run, run.lit ?? 'answer');
+  const lightRun = (tab) => lightAnswer(tab, tab.run.lit ?? RUN_ANSWER);
 
   // ---------- inspector ----------
 
@@ -1905,9 +1963,9 @@ p { margin: 0; }
     if (!ids.length) return [h('span', { class: 'k' }, 'none')];
     return ids.map((id, i) => [
       i ? h('span', { class: 'k' }, ' · ') : null,
-      state.nodes.has(id)
-        ? h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, nodeName(id))
-        : h('span', { class: 'k' }, nodeName(id)),
+      state.shown.nodes.has(id)
+        ? h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, nodeName(state.shown, id))
+        : h('span', { class: 'k' }, nodeName(state.shown, id)),
     ]);
   }
 
@@ -1943,7 +2001,7 @@ p { margin: 0; }
 
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (isPending(file)) meta.push('not run yet');
+    if (isPending(state.shown, file)) meta.push('not run yet');
     if (file.size > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
     return meta.join(' · ');
   }
@@ -1957,11 +2015,12 @@ p { margin: 0; }
   }
 
   function docBody(node) {
-    const index = state.run ? state.run.docs.indexOf(node.file) : -1;
+    const { run, nodes } = state.shown;
+    const index = run ? run.docs.indexOf(node.file) : -1;
     return [
       h('div', { class: 'k' }, fileMeta(node.file)),
       fileText(node.file),
-      index >= 0 && state.nodes.has(`r1-${index}`) ? row('summary', refs([`r1-${index}`])) : null,
+      index >= 0 && nodes.has(`r1-${index}`) ? row('summary', refs([`r1-${index}`])) : null,
       openFileButton(node.file, 'open in files ›'),
     ];
   }
@@ -1978,12 +2037,12 @@ p { margin: 0; }
   }
 
   function inspectorBody(id) {
-    const run = state.run;
+    const { run, nodes } = state.shown;
     const [kind, d] = splitId(id);
-    const node = state.nodes.get(id);
+    const node = nodes.get(id);
     if (kind === 'doc') return docBody(node);
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
-    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d !== null ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
+    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
@@ -2018,16 +2077,16 @@ p { margin: 0; }
 
   function renderInspector() {
     const id = state.selected;
-    if (!id || !state.nodes.has(id)) return;
+    if (!id || !state.shown.nodes.has(id)) return;
     const [kind] = splitId(id);
-    inspector.setAttribute('aria-label', nodeName(id));
+    inspector.setAttribute('aria-label', nodeName(state.shown, id));
     inspector.classList.toggle('wide', kind === 'schema');
     fill(
       inspector,
       h(
         'div',
         { class: 'insp-head' },
-        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(id)),
+        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)),
         h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
       ),
       inspectorBody(id),
@@ -2037,7 +2096,7 @@ p { margin: 0; }
 
   // Selecting an answer that has landed also lights it.
   function openInspector(id, { focus = false } = {}) {
-    if (splitId(id)[0] === 'answer' && landed(id)) lightAnswer(state.run, id);
+    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
@@ -2049,7 +2108,7 @@ p { margin: 0; }
   function closeInspector(restoreFocus = false) {
     if (inspector.hidden) return;
     const had = inspector.contains(document.activeElement);
-    const node = state.nodes.get(state.selected);
+    const node = state.shown.nodes.get(state.selected);
     inspector.hidden = true;
     state.selected = null;
     refreshHighlight();
@@ -2057,9 +2116,10 @@ p { margin: 0; }
   }
 
   function positionInspector() {
+    const { view } = state.shown;
     if (inspector.hidden) return;
     if (state.inspectorDroppedAt) return placeInspector(state.inspectorDroppedAt);
-    const node = state.nodes.get(state.selected);
+    const node = state.shown.nodes.get(state.selected);
     if (!node) return;
     const w = inspector.offsetWidth;
     const halfW = (node.el.offsetWidth / 2) * view.k;
@@ -2078,7 +2138,8 @@ p { margin: 0; }
   }
 
   function jumpTo(id) {
-    const node = state.nodes.get(id);
+    const { view } = state.shown;
+    const node = state.shown.nodes.get(id);
     if (!node) return;
     const pw = panel.clientWidth;
     const ph = panel.clientHeight;
@@ -2087,7 +2148,7 @@ p { margin: 0; }
     if (sx < JUMP_MARGIN || sx > pw - JUMP_MARGIN || sy < JUMP_MARGIN || sy > ph - JUMP_MARGIN) {
       view.x = pw / 2 - node.x * view.k;
       view.y = ph / 2 - node.y * view.k;
-      state.userMoved = true;
+      state.shown.userMoved = true;
       glide();
       applyView();
     }
@@ -2097,12 +2158,12 @@ p { margin: 0; }
 
   // ---------- chat ----------
 
-  function line(kind, text, { node = null, glyph = null, dim = false } = {}) {
+  function line(kind, text, { node = null, tab = null, glyph = null, dim = false } = {}) {
     const g = glyph ?? { sub: '⎿', user: '›', spin: '✻' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
     return h(
       node ? 'button' : 'div',
-      { class: classes, type: node ? 'button' : null, onclick: node ? () => jumpTo(node) : null },
+      { class: classes, type: node ? 'button' : null, 'data-tab': node ? tab.id : null, 'data-node': node },
       h('span', { class: 'g', 'aria-hidden': 'true' }, g),
       h('span', { class: 't' }, text),
     );
@@ -2120,11 +2181,24 @@ p { margin: 0; }
     });
   }
 
-  function narrator(body, { status = true } = {}) {
+  // Node ids repeat across tabs, so a link from the chat names its tab as well as what it opens. A closed
+  // tab is no longer listed, so its links do nothing and nothing in the chat keeps it alive.
+  function onTranscriptClick(e) {
+    const link = e.target.closest('button[data-tab]');
+    const tab = state.tabs.find((t) => String(t.id) === link?.dataset.tab);
+    if (!tab) return;
+    const { node, answer, offer } = link.dataset;
+    switchTab(tab);
+    if (node) jumpTo(node);
+    if (answer && landed(tab, answer)) lightAnswer(tab, answer);
+    if (offer) prepareAsk(RECORDED_ASKS[offer]);
+  }
+
+  function narrator(tab, body, { status = true } = {}) {
     let spinner = null;
     const named = new Map();
     const say = (kind, text, opts) => {
-      const el = line(kind, text, opts);
+      const el = line(kind, text, { ...opts, tab });
       body.insertBefore(el, spinner);
       scrollTranscript();
       return el;
@@ -2144,7 +2218,7 @@ p { margin: 0; }
         } else {
           spinner.querySelector('.t').textContent = text;
         }
-        if (status) setStatus(`running · ${text}`);
+        if (status) tabStatus(tab, `running · ${text}`);
         scrollTranscript();
       },
       done() {
@@ -2154,11 +2228,13 @@ p { margin: 0; }
     };
   }
 
-  function addTurn(question) {
+  function addTurn(tab, question, answer) {
     const body = h('div', { class: 'turn-body' });
-    transcript.append(h('div', { class: 'turn' }, line('user', question), body));
+    const user = line('user', question);
+    if (tab) user.append(h('button', { class: 'btn marker', type: 'button', 'aria-label': `show tab ${tab.id}`, 'data-tab': tab.id, 'data-answer': answer }, `tab ${tab.id}`));
+    transcript.append(h('div', { class: 'turn', 'data-tab': tab?.id }, user, body));
     scrollTranscript();
-    return { body, question };
+    return body;
   }
 
   // The status is a live region, so rewriting it unchanged, as on each keystroke, would talk over the user.
@@ -2167,27 +2243,33 @@ p { margin: 0; }
     if ($('run-status').textContent !== text) $('run-status').replaceChildren(...content);
   }
 
-  const errorStatus = (text) => setStatus(h('span', { class: 'err' }, '● '), text);
+  const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
+  const errorStatus = (text) => setStatus(...errorLine(text));
   const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
+  const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
 
-  function doneStatus(run) {
-    setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`);
+  // A tab keeps its run's status, which the status line shows while the tab is shown.
+  function tabStatus(tab, ...content) {
+    tab.status = content;
+    if (tab === state.shown) setStatus(...content);
   }
 
   function readyStatus() {
-    if (state.run) return;
+    if (state.tabs.length) return;
     if (connectionProblem) return errorStatus(connectionProblem);
     setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
-  // A question can ask over the run on the panel once its answer has landed and the run has ended.
-  const canAsk = () => landed('answer') && !mode.runGoing();
-  // Enter asks once there is a run to ask over, or one going; before any run, or after a failed one, it runs.
-  const primaryAction = () => (canAsk() || mode.runGoing() ? 'ask' : 'run');
+  // A question can ask over the shown tab's run once its answer has landed and the run has ended.
+  const canAsk = () => landed(state.shown, RUN_ANSWER) && !mode.runGoing(state.shown);
+  // Enter and the run button ask once there is a run to ask over, or one going; before any run, or after a
+  // failed one, they run. The composer's labels follow this, so they say what a press does.
+  const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
 
   function updateComposer() {
-    const asks = canAsk();
-    const pending = state.files.filter(isPending).length;
+    const asks = primaryAction() === 'ask';
+    const pending = pendingFiles(state.shown).length;
+    updateTabs();
     $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
     // Hiding the focused button would drop the focus to the page.
     if (!asks && document.activeElement === $('new-run-btn')) questionEl.focus();
@@ -2199,9 +2281,9 @@ p { margin: 0; }
   }
 
   function updateHint() {
-    const pending = state.files.filter(isPending).length;
+    const pending = pendingFiles(state.shown).length;
     const hint = $('panel-hint');
-    if (!state.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
+    if (!state.shown.run) hint.textContent = `${plural(state.files.length, 'document')} · ready to run`;
     else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
     hint.hidden = !hint.textContent;
   }
@@ -2224,7 +2306,7 @@ p { margin: 0; }
     if (asks) {
       mode.ask(question);
     } else if (!state.files.length) {
-      narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
+      narrator(null, addTurn(null, question), { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
     } else {
       startRun(question);
     }
@@ -2234,18 +2316,16 @@ p { margin: 0; }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
   function refusal(question, asks) {
-    if (asks && mode.runGoing()) return ASK_WHEN_DONE;
-    if (!asks && streaming('run')) return RUN_STILL_GOING;
-    if (!asks && streaming('ask')) return ASK_STILL_GOING;
+    if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.files);
   }
 
   // ---------- replay ----------
 
-  function cancelTimers() {
-    state.timers.forEach(clearTimeout);
-    state.timers = [];
+  function cancelTimers(tab) {
+    tab.timers.forEach(clearTimeout);
+    tab.timers = [];
   }
 
   function stage(at, t0, order, n, appear, settle, pace = PACE.model) {
@@ -2276,11 +2356,11 @@ p { margin: 0; }
     return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
   }
 
-  function answerCiteLines(run, { summary_ids, parse_ids }) {
-    const view = (label, id) => h('button', { class: 'ref', type: 'button', onclick: () => jumpTo(id) }, label);
+  function answerCiteLines(tab, { summary_ids, parse_ids }) {
+    const view = (label, id) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-node': id }, label);
     return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
       const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
-      return [`drew on ${docLabel(run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
+      return [`drew on ${docLabel(tab.run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
     });
   }
 
@@ -2294,30 +2374,30 @@ p { margin: 0; }
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
-  function showInputs(run, to) {
-    const own = ownDocument(run, to);
-    if (own) addEdge(own, to, 'self', 'fade');
-    for (const from of inputsOf(run, to)) addEdge(from, to, 'context', 'fade');
+  function showInputs(tab, to) {
+    const own = ownDocument(tab.run, to);
+    if (own) addEdge(tab, own, to, 'self', 'fade');
+    for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context', 'fade');
   }
 
-  function showCites(run, to) {
-    for (const from of cites(run, to)) addEdge(from, to, 'cite', 'draw');
+  function showCites(tab, to) {
+    for (const from of cites(tab.run, to)) addEdge(tab, from, to, 'cite', 'draw');
   }
 
   // ---------- drawing a run ----------
   // A replay's timeline and a live run's events both draw through these, so the two look the same.
 
-  const hasNodes = (kind) => [...state.nodes.values()].some((n) => n.kind === kind);
-  const settledCount = (kind) => [...state.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
+  const hasNodes = (tab, kind) => [...tab.nodes.values()].some((n) => n.kind === kind);
+  const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
   // Round 2's first line, rewritten once every document is through it.
   const ROUND_TWO_HEAD = 'round 2 head';
 
-  function stageProgress(kind, n) {
-    return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(kind)} of ${n}`;
+  function stageProgress(tab, kind) {
+    return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
   }
 
-  function beginStage(run, narr, kind) {
-    const n = run.docs.length;
+  function beginStage(tab, narr, kind) {
+    const n = tab.run.docs.length;
     const heads = {
       r1: 'round 1 · one summary per document',
       r2: 'round 2 · each document beside the other summaries',
@@ -2326,15 +2406,15 @@ p { margin: 0; }
     };
     if (kind === 'r2') narr.sayAs(ROUND_TWO_HEAD, 'main', heads.r2);
     else if (heads[kind]) narr.say('main', heads[kind]);
-    narr.phase(stageProgress(kind, n));
+    narr.phase(stageProgress(tab, kind));
   }
 
-  function appear(run, id) {
+  function appear(tab, id) {
     const [kind, i] = splitId(id);
-    addNode(id);
-    if (kind === 'r1') return addEdge(docId(run.docs[i]), id, 'flow', 'draw');
-    if (kind === 'parsed') addEdge('schema', id, 'flow', 'draw');
-    showInputs(run, id);
+    addNode(tab, id);
+    if (kind === 'r1') return addEdge(tab, docId(tab.run.docs[i]), id, 'flow', 'draw');
+    if (kind === 'parsed') addEdge(tab, 'schema', id, 'flow', 'draw');
+    showInputs(tab, id);
   }
 
   function isVoid(run, id) {
@@ -2352,61 +2432,63 @@ p { margin: 0; }
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
-  function settle(run, narr, id) {
+  function settle(tab, narr, id) {
+    const { run } = tab;
     const [kind] = splitId(id);
     const n = run.docs.length;
-    settleNode(id, { empty: isVoid(run, id) });
-    showCites(run, id);
+    settleNode(tab, id, { empty: isVoid(run, id) });
+    showCites(tab, id);
     narr.sayAs(id, 'sub', settledLine(run, id), { node: id });
-    narr.phase(stageProgress(kind, n));
-    if (kind !== 'r2' || settledCount('r2') < n) return;
+    narr.phase(stageProgress(tab, kind));
+    if (kind !== 'r2' || settledCount(tab, 'r2') < n) return;
     const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
     narr.sayAs(ROUND_TWO_HEAD, 'main', `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`);
   }
 
-  function sayAnswer(run, narr, answer, node = null) {
+  function sayAnswer(tab, narr, answer, node) {
     narr.say('answer', answer.text, { node });
-    const citeLines = answerCiteLines(run, answer.provenance);
+    const citeLines = answerCiteLines(tab, answer.provenance);
     for (const text of citeLines) narr.say('sub', text);
     if (!citeLines.length) narr.say('sub', 'cites no document');
   }
 
   // An answer's node settles, with solid lines from what it cites.
-  function drawAnswer(run, id) {
-    settleNode(id);
-    showCites(run, id);
+  function drawAnswer(tab, id) {
+    settleNode(tab, id);
+    showCites(tab, id);
   }
 
-  function showAnswer(run, narr, id = 'answer') {
-    drawAnswer(run, id);
+  function showAnswer(tab, narr, id = RUN_ANSWER) {
+    drawAnswer(tab, id);
     narr.done();
-    const answer = answerOf(run, id);
+    const answer = answerOf(tab.run, id);
     if (answer.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-    sayAnswer(run, narr, answer, id);
+    sayAnswer(tab, narr, answer, id);
     updateComposer();
   }
 
-  function finishRun(run, narr) {
-    narr.say('sub', runSummary(run));
-    doneStatus(run);
-    if (state.selected === 'answer') renderInspector();
+  function finishRun(tab, narr) {
+    narr.say('sub', runSummary(tab.run));
+    tabStatus(tab, ...doneLine(tab.run));
+    rerenderIfOpen(tab, RUN_ANSWER);
   }
 
   // Marks every node still working as stopped; with no answer, the next question starts a new run.
-  function failRun(narr, text) {
+  function failRun(tab, narr, text) {
     narr.done();
-    for (const node of state.nodes.values()) {
-      if (node.el.classList.contains('working')) settleNode(node.id, { failed: true });
+    for (const node of tab.nodes.values()) {
+      if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: true });
     }
     sayError(narr, text);
-    errorStatus(text);
+    tabStatus(tab, ...errorLine(text));
   }
 
-  function buildTimeline(run, narr) {
+  function buildTimeline(tab, narr) {
+    const { run } = tab;
     const steps = [];
     const at = (t, fn) => steps.push({ at: t, run: fn });
     const n = run.docs.length;
-    const perDocument = (t0, kind) => stage(at, t0, run.order[kind], n, (i) => appear(run, `${kind}-${i}`), (i) => settle(run, narr, `${kind}-${i}`));
+    const perDocument = (t0, kind) => stage(at, t0, run.order[kind], n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
     let t = TIMING.start;
 
     at(t, () => {
@@ -2417,61 +2499,62 @@ p { margin: 0; }
       narr.phase(`reading · 0 of ${n}`);
     });
     const docAt = (i) => docId(run.docs[i]);
-    t = stage(at, t, range(n), n, (i) => markWorking(docAt(i)), (i, rank) => {
-      settleNode(docAt(i));
+    t = stage(at, t, range(n), n, (i) => markWorking(tab, docAt(i)), (i, rank) => {
+      settleNode(tab, docAt(i));
       narr.phase(`reading · ${rank + 1} of ${n}`);
     }, PACE.read);
     at(t, () => narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(totalBytes(run.docs))}`));
 
     for (const kind of ['r1', 'r2']) {
       t += TIMING.phaseGap;
-      at(t, () => beginStage(run, narr, kind));
+      at(t, () => beginStage(tab, narr, kind));
       t = perDocument(t, kind);
     }
 
     t += TIMING.phaseGap;
     at(t, () => {
-      beginStage(run, narr, 'schema');
-      appear(run, 'schema');
+      beginStage(tab, narr, 'schema');
+      appear(tab, 'schema');
     });
     t += TIMING.schemaWork;
-    at(t, () => settle(run, narr, 'schema'));
+    at(t, () => settle(tab, narr, 'schema'));
 
     t += TIMING.phaseGap;
-    at(t, () => beginStage(run, narr, 'parsed'));
+    at(t, () => beginStage(tab, narr, 'parsed'));
     t = perDocument(t, 'parsed');
 
     t += TIMING.phaseGap;
     at(t, () => {
-      beginStage(run, narr, 'answer');
-      appear(run, 'answer');
+      beginStage(tab, narr, 'answer');
+      appear(tab, RUN_ANSWER);
     });
     t += TIMING.answerWork;
     at(t, () => {
-      showAnswer(run, narr);
-      finishRun(run, narr);
-      run.answers.forEach((_, k) => redrawAsk(run, askId(k)));
-      if (!run.simulated) offerRecordedAsks(narr);
+      showAnswer(tab, narr);
+      finishRun(tab, narr);
+      for (let k = 1; k < run.answers.length; k += 1) redrawAsk(tab, answerId(k));
+      if (!run.simulated) offerRecordedAsks(tab, narr);
     });
     t += TIMING.litDelay;
-    at(t, () => lightRun(run));
+    at(t, () => lightRun(tab));
     return steps;
   }
 
-  function playTimeline(run, narr) {
+  function playTimeline(tab, narr) {
     $('replay-btn').hidden = false;
-    const steps = buildTimeline(run, narr);
+    const steps = buildTimeline(tab, narr);
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
       return;
     }
-    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
+    for (const s of steps) tab.timers.push(setTimeout(s.run, s.at));
   }
 
   // ---------- live ----------
 
-  // Fills in `run` from one of its events and draws it.
-  function drawEvent(run, narr, event) {
+  // Fills in the tab's run from one of its events and draws it, in that tab whether or not it is shown.
+  function drawEvent(tab, narr, event) {
+    const { run } = tab;
     const doc = (id) => docIndices(run, [id])[0];
     switch (event.type) {
       case 'run_started':
@@ -2480,97 +2563,100 @@ p { margin: 0; }
         narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(totalBytes(run.docs))}`);
         break;
       case 'relevance_started':
-        if (!hasNodes(`r${event.round}`)) beginStage(run, narr, `r${event.round}`);
-        appear(run, `r${event.round}-${doc(event.doc_id)}`);
+        if (!hasNodes(tab, `r${event.round}`)) beginStage(tab, narr, `r${event.round}`);
+        appear(tab, `r${event.round}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
-        addSnippet(run, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance));
+        addSnippet(tab, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance));
         break;
       case 'schema_started':
-      case 'reasoning_started': {
-        const kind = event.type === 'schema_started' ? 'schema' : 'answer';
-        beginStage(run, narr, kind);
-        appear(run, kind);
+        beginStage(tab, narr, 'schema');
+        appear(tab, 'schema');
         break;
-      }
+      case 'reasoning_started':
+        beginStage(tab, narr, 'answer');
+        appear(tab, RUN_ANSWER);
+        break;
       case 'schema_finished':
         run.schema = { code: event.schema_code, thought: event.thought };
-        settle(run, narr, 'schema');
+        settle(tab, narr, 'schema');
         break;
       case 'parsing_started':
-        if (!hasNodes('parsed')) beginStage(run, narr, 'parsed');
-        appear(run, `parsed-${doc(event.doc_id)}`);
+        if (!hasNodes(tab, 'parsed')) beginStage(tab, narr, 'parsed');
+        appear(tab, `parsed-${doc(event.doc_id)}`);
         break;
       case 'parsing_finished':
         run.parsed[doc(event.doc_id)] = { n_records: event.n_records, provenance: docIndices(run, event.provenance) };
-        settle(run, narr, `parsed-${doc(event.doc_id)}`);
+        settle(tab, narr, `parsed-${doc(event.doc_id)}`);
         break;
       case 'reasoning_finished':
-        run.answer = { text: event.answer, provenance: provenanceOf(run, event.provenance) };
-        showAnswer(run, narr);
+        Object.assign(run.answers[0], { text: event.answer, provenance: provenanceOf(run, event.provenance) });
+        showAnswer(tab, narr);
         break;
       case 'run_finished':
         run.totals = totalsOf(event);
-        finishRun(run, narr);
-        lightRun(run);
+        finishRun(tab, narr);
+        lightRun(tab);
         break;
       case 'run_failed':
-        failRun(narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
+        failRun(tab, narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
         break;
     }
   }
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them.
-  function addSnippet(run, narr, id, summary, provenance) {
+  function addSnippet(tab, narr, id, summary, provenance) {
+    const { run } = tab;
     const [kind, i] = splitId(id);
     const earlier = run[kind][i] ?? { summary: '', provenance: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
       provenance: [...new Set([...earlier.provenance, ...provenance])],
     };
-    settle(run, narr, id);
+    settle(tab, narr, id);
   }
 
-  // No new run starts while a stream is open, so the panel's run is this one until it ends.
-  async function streamRun(run, narr) {
-    const stream = openStream('run');
-    narr.phase('starting');
+  async function streamRun(tab, narr) {
+    const { run } = tab;
+    const stream = openStream('run', tab);
     try {
-      const body = { question: run.question, model: run.model, documents: run.docs.map((f) => f.text) };
+      const { question, model } = run.answers[0];
+      const body = { question, model, documents: run.docs.map((f) => f.text) };
       const started = await api('/api/runs', { method: 'POST', body });
       run.id = (await started.json()).run_id;
-      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event));
+      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
     } catch (error) {
-      failRun(narr, explain(error, error.message, 'the live run stopped'));
+      failRun(tab, narr, explain(error, error.message, 'the live run stopped'));
     } finally {
       closeStream(stream);
     }
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
-  async function askOver(run, question, model) {
+  async function askOver(tab, question, model) {
+    const { run } = tab;
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
-    const narr = narrator(addTurn(question).body, { status: false });
-    const id = addAsk(run, ask);
+    const id = addAsk(tab, ask);
+    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
     const failed = (text) => {
       narr.done();
-      if (!landed(id)) settleNode(id, { failed: true });
+      if (!landed(tab, id)) settleNode(tab, id, { failed: true });
       sayError(narr, text);
     };
     const onEvent = (event) => {
       if (event.type === 'reasoning_finished') {
         Object.assign(ask, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
-        showAnswer(run, narr, id);
-        lightLanded(run, id);
+        showAnswer(tab, narr, id);
+        lightLanded(tab, id);
       }
       if (event.type === 'ask_finished') {
         ask.totals = totalsOf(event);
         narr.say('sub', askSummary(ask));
-        if (state.selected === id) renderInspector();
+        rerenderIfOpen(tab, id);
       }
       if (event.type === 'ask_failed') failed(`${askSummary(ask)} · failed · ${event.error}`);
     };
-    const stream = openStream('ask');
+    const stream = openStream('ask', tab);
     narr.phase(`asking · ${model}`);
     try {
       const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
@@ -2582,75 +2668,76 @@ p { margin: 0; }
     }
   }
 
-  function playRun(run) {
-    cancelTimers();
-    const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
-    clearPanel();
-    state.run = run;
+  const docPositions = (tab) => new Map([...tab.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
+
+  // Plays the shown tab's run, its document nodes starting from `at`.
+  function playRun(tab, at = docPositions(tab)) {
+    cancelTimers(tab);
+    clearPanel(tab);
     // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
-    panel.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / run.docs.length));
-    state.runTurn.body.replaceChildren();
-    state.userMoved = false;
-    syncDocNodes({ at: docPositions, animate: true, replan: true });
-    mode.play(run, narrator(state.runTurn.body));
+    tab.drawing.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length));
+    tab.turn.replaceChildren();
+    tab.userMoved = false;
+    const narr = narrator(tab, tab.turn);
+    narr.phase('starting');
+    syncDocNodes(tab, { at, animate: true, replan: true });
+    mode.play(tab, narr);
     updateComposer();
   }
 
-  // A new run reuses node ids, so the older turns' links would open its nodes.
-  function retireTurns() {
-    for (const offer of transcript.querySelectorAll('[data-offer]')) offer.remove();
-    for (const button of transcript.querySelectorAll('button')) button.disabled = true;
-  }
-
+  // Every run opens a tab of its own, its documents starting where the shown tab has them.
   function startRun(question) {
-    retireTurns();
-    // A run's answers to later questions, and which of its answers is lit.
-    const run = Object.assign(mode.newRun(question), { answers: [], lit: null });
-    state.runTurn = addTurn(question);
-    playRun(run);
+    const at = docPositions(state.shown);
+    const tab = newTab();
+    tab.id = state.nextTab++;
+    tab.run = { ...mode.newRun(question), lit: null };
+    tab.turn = addTurn(tab, question, RUN_ANSWER);
+    state.tabs.push(tab);
+    openTab(tab);
+    showDrawing(tab);
+    playRun(tab, at);
+    revealTab(tab);
   }
 
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
 
-  function addAsk(run, ask) {
-    const id = askId(run.answers.push(ask) - 1);
-    state.layout.set(id, freeAskSpot());
-    addNode(id);
-    if (!state.userMoved) fit(true);
+  function addAsk(tab, ask) {
+    const id = answerId(tab.run.answers.push(ask) - 1);
+    tab.layout.set(id, freeAnswerSpot(tab));
+    addNode(tab, id);
+    fitShown(true);
     return id;
   }
 
   // Draws a landed ask again, as a replay does, without saying it in the chat again.
-  function redrawAsk(run, id) {
-    addNode(id);
-    drawAnswer(run, id);
+  function redrawAsk(tab, id) {
+    addNode(tab, id);
+    drawAnswer(tab, id);
   }
 
   // Shifted per ask, so that each simulated answer cites other documents than the last.
   function simulatedAsk(run, question, model) {
-    return { question, model, source: 'simulated', ...madeUpAnswer(run, question, run.answers.length + 1), totals: null };
+    return { question, model, source: 'simulated', ...madeUpAnswer(run, question, run.answers.length), totals: null };
   }
 
   // A recorded answer when one has this question and model over the recorded run, else a simulated one.
-  function prototypeAsk(run, question, model) {
+  function prototypeAsk(tab, question, model) {
+    const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
-    const narr = narrator(addTurn(question).body, { status: false });
-    const id = addAsk(run, ask);
-    showAnswer(run, narr, id);
+    const id = addAsk(tab, ask);
+    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
+    showAnswer(tab, narr, id);
     narr.say('sub', askSummary(ask));
-    lightLanded(run, id);
+    lightLanded(tab, id);
   }
 
   // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
-  function offerRecordedAsks(narr) {
-    const offer = (ask) => h('button', { class: 'ref', type: 'button', onclick: () => prepareAsk(ask) }, `${ask.question} · ${bareModel(ask.model)}`);
-    const lines = [
-      narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true }),
-      ...RECORDED_ASKS.map((ask) => narr.say('sub', offer(ask))),
-    ];
-    for (const el of lines) el.dataset.offer = '';
+  function offerRecordedAsks(tab, narr) {
+    const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
+    narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
+    RECORDED_ASKS.forEach((ask, i) => narr.say('sub', offer(ask, i)));
   }
 
   function prepareAsk({ question, model }) {
@@ -2660,6 +2747,98 @@ p { margin: 0; }
     onPick();
     questionEl.value = question;
     questionEl.focus();
+  }
+
+  // ---------- tabs ----------
+
+  const tabLabel = (tab) => answerLabel(tab.run.answers[0]);
+  const tabButtonId = (tab) => `run-tab-${tab.id}`;
+  // A tab can't close while its run or an ask over it is going.
+  const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
+
+  // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
+  function openTab(tab) {
+    const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
+    tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
+    tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
+    $('run-tabs').append(tab.button, tab.close);
+  }
+
+  function updateTabs() {
+    const row = $('run-tabs');
+    row.hidden = !state.tabs.length;
+    for (const tab of state.tabs) {
+      const shown = tab === state.shown;
+      tab.button.setAttribute('aria-selected', String(shown));
+      tab.button.tabIndex = shown ? 0 : -1;
+      tab.close.hidden = state.tabs.length === 1;
+      tab.close.disabled = tabBusy(tab);
+      tab.button.ariaKeyShortcuts = tab.close.hidden || tab.close.disabled ? null : 'Delete';
+    }
+    if (!state.tabs.length) return;
+    panel.setAttribute('role', 'tabpanel');
+    panel.setAttribute('aria-labelledby', tabButtonId(state.shown));
+  }
+
+  function showDrawing(tab) {
+    finishSlide(state.shown);
+    // A drawing taken out of the page mid-animation never hears the animation end.
+    for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
+    closeInspector();
+    state.hovered = null;
+    state.shown = tab;
+    world.replaceChildren(tab.drawing);
+    applyView();
+    refreshHighlight();
+  }
+
+  // On a phone the tab row scrolls, and the shown tab could be out of sight.
+  function revealTab(tab) {
+    for (const el of [tab.button, tab.close]) if (!el.hidden) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  function switchTab(tab) {
+    if (tab === state.shown) return;
+    showDrawing(tab);
+    // Nodes drawn while their tab was hidden had no size to fit by, and files may have changed since.
+    syncDocNodes(tab);
+    setStatus(...tab.status);
+    updateComposer();
+    revealTab(tab);
+  }
+
+  function closeTab(tab) {
+    if (state.tabs.length === 1) return;
+    // Only Delete gets here for a busy tab: its × is disabled, and hidden from assistive tech.
+    if (tabBusy(tab)) return setStatus(tabStillGoing(tab));
+    cancelTimers(tab);
+    const i = state.tabs.indexOf(tab);
+    state.tabs.splice(i, 1);
+    tab.button.remove();
+    tab.close.remove();
+    for (const turn of transcript.querySelectorAll(`.turn[data-tab="${tab.id}"]`)) {
+      for (const button of turn.querySelectorAll('button')) button.disabled = true;
+      const marker = turn.querySelector('.marker');
+      marker.removeAttribute('aria-label');
+      marker.textContent = `tab ${tab.id} · closed`;
+    }
+    if (tab === state.shown) switchTab(state.tabs[Math.min(i, state.tabs.length - 1)]);
+    else updateTabs();
+    state.shown.button.focus();
+  }
+
+  const TAB_KEYS = { ArrowRight: 1, ArrowLeft: -1 };
+
+  function onTabKey(e) {
+    const tab = state.tabs.find((t) => t.button === e.target);
+    if (!tab) return;
+    if (e.key === 'Delete') return closeTab(tab);
+    const step = TAB_KEYS[e.key];
+    if (!step) return;
+    e.preventDefault();
+    const next = state.tabs[(state.tabs.indexOf(tab) + step + state.tabs.length) % state.tabs.length];
+    switchTab(next);
+    next.button.focus();
   }
 
   // ---------- files ----------
@@ -2685,7 +2864,7 @@ p { margin: 0; }
   function openFile(file) {
     showTab('files');
     const fileView = $('file-view');
-    const node = state.nodes.get(docId(file));
+    const node = state.shown.nodes.get(docId(file));
     fill(
       fileView,
       h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
@@ -2740,7 +2919,7 @@ p { margin: 0; }
     closeFile();
     renderFiles();
     updateComposer();
-    syncDocNodes();
+    syncDocNodes(state.shown);
     readyStatus();
     transcript.append(line('main', message, { dim: true }));
     scrollTranscript();
@@ -2981,12 +3160,14 @@ p { margin: 0; }
   }
 
   function startPinch() {
+    const { view } = state.shown;
     const [a, b] = [...gesture.pointers.values()];
     gesture.mode = 'pinch';
     gesture.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2), view: { ...view } };
   }
 
   function updatePinch() {
+    const { view } = state.shown;
     const [a, b] = [...gesture.pointers.values()];
     const p = gesture.pinch;
     const k = clamp((p.view.k * Math.hypot(a.x - b.x, a.y - b.y)) / p.dist, ZOOM.min, ZOOM.max);
@@ -2996,18 +3177,19 @@ p { margin: 0; }
     view.k = k;
     view.x = mid.x - wx * k;
     view.y = mid.y - wy * k;
-    state.userMoved = true;
+    state.shown.userMoved = true;
     applyView();
   }
 
   function onPointerDown(e) {
+    const { view } = state.shown;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.target.closest('.inspector, .panel-tools')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
     const nodeEl = e.target.closest('.node');
-    gesture.node = nodeEl ? state.nodes.get(nodeEl.dataset.id) : null;
+    gesture.node = nodeEl ? state.shown.nodes.get(nodeEl.dataset.id) : null;
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
     gesture.origin = { x: e.clientX, y: e.clientY };
@@ -3015,6 +3197,7 @@ p { margin: 0; }
   }
 
   function onPointerMove(e) {
+    const { view } = state.shown;
     const p = gesture.pointers.get(e.pointerId);
     if (!p) return;
     // A mouse released outside the panel before the gesture was captured sent its pointerup elsewhere.
@@ -3032,13 +3215,13 @@ p { margin: 0; }
       gesture.node.x = gesture.from.x + dx / view.k;
       gesture.node.y = gesture.from.y + dy / view.k;
       placeNode(gesture.node);
-      redrawEdges();
+      redrawEdges(state.shown);
       if (state.selected === gesture.node.id) positionInspector();
     } else {
       panel.classList.add('panning');
       view.x = gesture.from.x + dx;
       view.y = gesture.from.y + dy;
-      state.userMoved = true;
+      state.shown.userMoved = true;
       applyView();
     }
   }
@@ -3056,6 +3239,7 @@ p { margin: 0; }
   }
 
   function onWheel(e) {
+    const { view } = state.shown;
     if (e.target.closest('.inspector')) return;
     e.preventDefault();
     const scale = e.deltaMode === 1 ? WHEEL_LINE_PX : 1;
@@ -3067,7 +3251,7 @@ p { margin: 0; }
       view.y -= e.deltaY * scale;
       applyView();
     }
-    state.userMoved = true;
+    state.shown.userMoved = true;
   }
 
   const inspectorGrab = { x: 0, y: 0, left: 0, top: 0 };
@@ -3106,23 +3290,25 @@ p { margin: 0; }
     inspector.addEventListener('pointermove', onInspectorMove);
     inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
 
-    nodesLayer.addEventListener('pointerover', (e) => {
+    world.addEventListener('pointerover', (e) => {
       state.hovered = hoverFrom(e);
       refreshHighlight();
     });
-    nodesLayer.addEventListener('pointerout', (e) => {
+    world.addEventListener('pointerout', (e) => {
       if (e.relatedTarget && e.target.closest('.node')?.contains(e.relatedTarget)) return;
       state.hovered = null;
       refreshHighlight();
     });
-    nodesLayer.addEventListener('focusin', (e) => {
+    world.addEventListener('focusin', (e) => {
       state.hovered = hoverFrom(e);
       refreshHighlight();
     });
-    nodesLayer.addEventListener('focusout', () => {
+    world.addEventListener('focusout', () => {
       state.hovered = null;
       refreshHighlight();
     });
+    // An animation's class comes off once it has played, so the node or line can play it again.
+    world.addEventListener('animationend', (e) => endAnimation(e.target));
     // On click, not pointerup: a tap's click would otherwise land on the inspector that just opened under it.
     panel.addEventListener('click', (e) => {
       const id = hoverFrom(e);
@@ -3130,7 +3316,7 @@ p { margin: 0; }
       const endsDrag = gesture.moved && e.detail > 0;
       if (id && !endsDrag) openInspector(id);
     });
-    nodesLayer.addEventListener('keydown', (e) => {
+    world.addEventListener('keydown', (e) => {
       const id = hoverFrom(e);
       if (id && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
@@ -3162,7 +3348,9 @@ p { margin: 0; }
       saveSettings();
     });
     $('fit-btn').addEventListener('click', refit);
-    $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
+    $('replay-btn').addEventListener('click', () => state.shown.run && playRun(state.shown));
+    $('run-tabs').addEventListener('keydown', onTabKey);
+    transcript.addEventListener('click', onTranscriptClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
 
@@ -3217,7 +3405,7 @@ p { margin: 0; }
     window.addEventListener('drop', (e) => hasFiles(e) && e.preventDefault());
 
     new ResizeObserver(() => {
-      if (!state.userMoved) fit();
+      fitShown();
       positionInspector();
     }).observe(panel);
   }
@@ -3237,8 +3425,8 @@ p { margin: 0; }
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
     // A replay is going until its answer lands.
-    runGoing: () => Boolean(state.run) && !landed('answer'),
-    ask: (question) => prototypeAsk(state.run, question, pickedModel()),
+    runGoing: (tab) => Boolean(tab.run) && !landed(tab, RUN_ANSWER),
+    ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
     providersWithKeys: async () => [...keyed],
   };
@@ -3254,8 +3442,8 @@ p { margin: 0; }
     readable: (file) => file,
     newRun: (question) => liveRun(question, pickedModel()),
     play: streamRun,
-    runGoing: () => streaming('run'),
-    ask: (question) => askOver(state.run, question, pickedModel()),
+    runGoing: (tab) => streaming('run', tab),
+    ask: (question) => askOver(state.shown, question, pickedModel()),
     async saveKey(provider, key, endpoint) {
       const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
       return keyedProviders(await saved.json());
@@ -3277,15 +3465,14 @@ p { margin: 0; }
     buildSettings();
     questionEl.value = SAMPLE.question;
     renderFiles();
-    updateComposer();
+    showDrawing(state.shown);
+    syncDocNodes(state.shown);
     renderPicker([]);
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('keys-note').textContent = mode.keysNote;
     $('mode-note').textContent = mode.note;
     transcript.append(line('main', mode.intro, { dim: true }));
-    applyView();
-    syncDocNodes();
     wire();
   }
 

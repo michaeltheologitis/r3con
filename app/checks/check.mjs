@@ -50,7 +50,7 @@ const POPUP_ROWS = {
   'r2-3': ['read', 'drew on'],
   schema: ['why', 'fills'],
   'parsed-0': ['read', 'drew on', 'filled from'],
-  answer: ['asked', 'drew on summaries', 'drew on parses'],
+  'answer-0': ['asked', 'drew on summaries', 'drew on parses'],
 };
 const MODEL_KEY = 'r3con-proto-model';
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
@@ -85,6 +85,13 @@ const TYPE_A_MODEL = 'type a model first';
 const SAMPLE_ANSWER_INPUTS = 9;
 const ANSWERED_RUN_COUNTS = { nodes: SAMPLE_COUNTS.nodes, answers: 1 };
 const SHORT_DESKTOP = { width: 1440, height: 450 };
+// The page's TIMING.litDelay and ARRANGE_MS: a replay lights its answer this long after it lands, and arrange slides this long.
+const LIT_DELAY_MS = 650;
+const ARRANGE_MS = 420;
+// Long enough for a whole replay with motion on.
+const REPLAY_MS = 20_000;
+const TAB_LABEL = '1 Which maintenance… · gpt-6-luna';
+const STARTING = 'running · starting';
 // A model whose name makes an answer's label far wider than the run's own.
 const LONG_MODEL = 'hosted_vllm/qwen3-32b-instruct-awq';
 
@@ -115,8 +122,6 @@ const REFUSED_LOG = 'Failed to load resource: the server responded with a status
 const ABORTED_LOG = 'Failed to load resource: net::ERR_FAILED';
 const SERVER_ERROR_LOG = 'Failed to load resource: the server responded with a status of 500';
 const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
-const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
-const ASK_STILL_GOING = "an ask is still going; it can't be stopped yet";
 const LIVE_ASK = 'live ask over this run';
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
@@ -165,9 +170,12 @@ async function saveKeys(page) {
   return becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
 }
 
+// The drawing has no box of its own, so it is never visible: wait for it to be in the page.
+const waitLit = (page, timeout = ACTION_TIMEOUT_MS) => page.waitForSelector('#world .is-lit', { state: 'attached', timeout });
+
 async function runSample(page) {
   await page.click('#run-btn');
-  await page.waitForSelector('#panel.is-lit');
+  await waitLit(page);
 }
 
 // Waits for a condition in the page; false if it never holds.
@@ -190,6 +198,15 @@ const docIdsOf = (page) => page.$$eval('.node.doc', (els) => els.map((el) => el.
 const rect = (page, selector) => page.$eval(selector, (el) => el.getBoundingClientRect().toJSON());
 const transform = (page) => page.$eval('#world', (el) => el.style.transform);
 const sameSpot = (a, b) => Boolean(a && b) && a.left === b.left && a.top === b.top;
+const focusedId = (page) => page.evaluate(() => document.activeElement.id);
+const shownTab = async (page) => (await page.evaluate(tabRow)).findIndex((tab) => tab.selected);
+
+async function zoomAt(page, { x, y }, deltaY) {
+  await page.mouse.move(x, y);
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, deltaY);
+  await page.keyboard.up('Control');
+}
 
 function positionOf(page, id) {
   return page.$eval(nodeSel(id), (el) => ({ x: parseFloat(el.style.left), y: parseFloat(el.style.top) }));
@@ -250,7 +267,7 @@ function recordedAsks() {
 }
 
 // The edges an answer's lit path holds: the run's own answer by default, or `answerId` with `provenance`.
-function lineage(sample, docIds, answerId = 'answer', provenance = sample.answer.provenance) {
+function lineage(sample, docIds, answerId = 'answer-0', provenance = sample.answer.provenance) {
   const { summary_ids, parse_ids } = provenance;
   const cites = (id) => {
     const [kind, i] = id.split('-');
@@ -464,6 +481,65 @@ function answerLines() {
   return { faint: ends('context'), cited: ends('cite') };
 }
 
+// Each tab in the row, with the × after it: shown while there are two tabs or more, and enabled while the tab is idle.
+function tabRow() {
+  return [...document.querySelectorAll('#run-tabs .run-tab')].map((tab) => {
+    const close = tab.nextElementSibling;
+    return {
+      id: tab.id,
+      role: tab.getAttribute('role'),
+      label: tab.textContent,
+      selected: tab.getAttribute('aria-selected') === 'true',
+      focusable: tab.tabIndex === 0,
+      keys: tab.getAttribute('aria-keyshortcuts'),
+      hasClose: !close.hidden,
+      closable: !close.hidden && !close.disabled,
+      closeForMouseOnly: close.tabIndex === -1 && close.getAttribute('aria-hidden') === 'true',
+    };
+  });
+}
+
+// The shown tab as drawn, so it can be compared with how it was left: the view, every node's place, every
+// line's path, whether the drawing is lit and along which lines, and the status line.
+function panelSnapshot() {
+  const world = document.getElementById('world');
+  const nodes = [...world.querySelectorAll('.node')].map((el) => `${el.dataset.id} ${el.style.left},${el.style.top} ${el.className}`);
+  const edges = [...world.querySelectorAll('.edge')].map((el) => `${el.dataset.key} ${el.getAttribute('d')}`);
+  return {
+    view: world.style.transform,
+    nodes: nodes.sort(),
+    edges: edges.sort(),
+    isLit: world.querySelector('.drawing.is-lit') !== null,
+    lit: [...world.querySelectorAll('.edge.lit')].map((el) => el.dataset.key).sort(),
+    status: document.getElementById('run-status').textContent,
+  };
+}
+
+function noHorizontalScroll() {
+  return document.documentElement.scrollWidth <= document.documentElement.clientWidth;
+}
+
+// Only the animations a node or line plays as it appears count, not transitions such as the view's glide.
+function panelStill() {
+  const world = document.getElementById('world');
+  return !document.getAnimations().some((a) => a.playState === 'running' && world.contains(a.effect?.target) && ['node-in', 'draw', 'fade'].includes(a.animationName));
+}
+
+// Lines playing an animation that do not end at answer `id`, whose own lines draw and fade in as it lands.
+function linesReplayed(id) {
+  const replays = (a) => a.playState === 'running' && a.effect?.target?.matches?.('#world .edge') && !a.effect.target.dataset.key.endsWith(`>${id}`);
+  return document.getAnimations().filter(replays).length;
+}
+
+function answerWorking() {
+  return document.querySelector('#world .node.answer.working') !== null;
+}
+
+// The shown tab's run has ended with its status matching `source`, and it has no asks: a new run's tab.
+function newRunDone(source) {
+  return !document.querySelector('.node[data-id="answer-1"]') && new RegExp(source).test(document.getElementById('run-status').textContent);
+}
+
 function pressedAnswers() {
   return [...document.querySelectorAll('.node.answer')].map((el) => [el.dataset.id, el.getAttribute('aria-pressed')]);
 }
@@ -487,11 +563,6 @@ function hasFilledIcons(els) {
   return els.map((el) => Boolean(el.querySelector('.fill-orange')));
 }
 
-function layoutSnapshot() {
-  const nodes = [...document.querySelectorAll('.node')].map((el) => `${el.style.left},${el.style.top}`);
-  return [document.getElementById('world').style.transform, ...nodes].join(' ');
-}
-
 function fitOfRun() {
   const panel = document.getElementById('panel').getBoundingClientRect();
   const isOutside = (el) => {
@@ -507,12 +578,7 @@ function fitOfRun() {
 async function load() {
   for (const layout of Object.values(LAYOUTS)) {
     await withPage('load', { layout, sample: false }, async (page) => {
-      const [scrollWidth, clientWidth] = await page.evaluate(() => {
-        const { scrollWidth: scroll, clientWidth: client } = document.documentElement;
-        return [scroll, client];
-      });
-      const noScroll = scrollWidth <= clientWidth;
-      check('load', `${layout.name}: the page has no horizontal scroll`, noScroll, `${scrollWidth} ≤ ${clientWidth}`);
+      check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
     });
   }
 }
@@ -734,7 +800,7 @@ async function picker(page, checkAt) {
   await page.fill('#question', NEW_QUESTION);
   await page.click('#run-btn');
   const asked = await status();
-  const focused = await page.evaluate(() => document.activeElement.id);
+  const focused = await focusedId(page);
   const questionKept = (await page.inputValue('#question')) === NEW_QUESTION && (await count(page, '.turn')) === 0;
   const kept = await stored();
   const lastChoice = isDeepStrictEqual(kept, { [MODEL_KEY]: FIRST_TYPED_MODEL });
@@ -806,10 +872,7 @@ async function popupArea() {
     const afterPan = await transform(page);
     const panName = 'a pan from outside it moves the view and leaves it where it was';
     check('popup', panName, afterPan !== beforePan && sameSpot(await popup(page), dropped), afterPan);
-    await page.mouse.move(panel.left + 100, panel.top + 100);
-    await page.keyboard.down('Control');
-    await page.mouse.wheel(0, -300);
-    await page.keyboard.up('Control');
+    await zoomAt(page, { x: panel.left + 100, y: panel.top + 100 }, -300);
     const zoomed = await becomes(page, viewChanged, afterPan);
     const zoomName = 'a zoom from outside it moves the view and leaves it where it was';
     check('popup', zoomName, zoomed && sameSpot(await popup(page), dropped), await page.textContent('#zoom-level'));
@@ -838,7 +901,7 @@ async function gestures() {
     check('gestures', 'a click with no pointer after a drag still opens the node', opensNode, clicked?.title);
     await page.keyboard.press('Escape');
 
-    const before = await page.evaluate(layoutSnapshot);
+    const before = await page.evaluate(panelSnapshot);
     const press = await centre(page, 'r1-0');
     const side = await rect(page, '#side');
     // Leave the panel in one move and release outside it, so the panel sees neither the move nor the release.
@@ -849,7 +912,7 @@ async function gestures() {
     await page.mouse.move(panel.left + 300, panel.top + 300, { steps: 12 });
     await page.mouse.move(panel.left + 500, panel.top + 500, { steps: 12 });
     const stuckName = 'a press released outside the panel ends: coming back with no button neither pans nor drags';
-    check('gestures', stuckName, (await page.evaluate(layoutSnapshot)) === before);
+    check('gestures', stuckName, isDeepStrictEqual(await page.evaluate(panelSnapshot), before));
   });
   await withPage('gestures', { layout: LAYOUTS.phone }, async (page) => {
     const tap = await centre(page, 'r2-3');
@@ -876,7 +939,7 @@ async function scale() {
       await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, LARGE_RUN_DOCS);
       await page.fill('#question', 'Which site logged the most incidents?');
       await page.click('#run-btn');
-      await page.waitForSelector('#panel.is-lit');
+      await waitLit(page);
       const nodes = await count(page, '.node');
       const edges = await count(page, '.edge');
       const fit = await page.evaluate(fitOfRun);
@@ -890,7 +953,6 @@ async function scale() {
 // ---------- answers: asks over the run on the panel ----------
 
 const offerLabel = (ask) => `${ask.question} · ${ask.model.split('/').pop()}`;
-const offers = (page) => page.$$eval('[data-offer] .ref', (els) => els.map((el) => !el.disabled));
 const overlap = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
 const inside = (box, frame) => box.left >= frame.left && box.right <= frame.right && box.top >= frame.top && box.bottom <= frame.bottom;
 const tally = (ids) => ids.reduce((counts, id) => ({ ...counts, [id]: (counts[id] ?? 0) + 1 }), {});
@@ -919,10 +981,10 @@ async function answers() {
   await withPage('answers', { layout: LAYOUTS.phone }, async (page) => {
     await send(page, asks[0].question);
     await send(page, NEW_QUESTION);
-    const newest = isDeepStrictEqual(await litAnswers(page), ['answer-1']);
-    const tap = await centre(page, 'answer');
+    const newest = isDeepStrictEqual(await litAnswers(page), ['answer-2']);
+    const tap = await centre(page, 'answer-0');
     await page.touchscreen.tap(tap.x, tap.y);
-    const selected = await becomes(page, () => document.querySelector('.node.answer.on-path')?.dataset.id === 'answer');
+    const selected = await becomes(page, () => document.querySelector('.node.answer.on-path')?.dataset.id === 'answer-0');
     check('answers', '400 dark: the newest ask is lit, and a tap on the first answer lights it again', newest && selected);
   });
 }
@@ -931,19 +993,19 @@ async function answersOnTheRun(sample, asks) {
   await withPage('answers', {}, async (page) => {
     const docIds = await docIdsOf(page);
     const runPath = lineage(sample, docIds);
-    const askPath = (k) => lineage(sample, docIds, `answer-${k}`, asks[k].provenance);
+    const askPath = (k) => lineage(sample, docIds, `answer-${k + 1}`, asks[k].provenance);
     const offered = await page.evaluate(composer);
     const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', newRun: true, note: null });
     check('answers', 'after a run the composer offers ask ⏎ and new run', offersBoth, JSON.stringify(offered));
 
-    const first = await positionOf(page, 'answer');
+    const first = await positionOf(page, 'answer-0');
     const nodes = await count(page, '.node');
     await page.evaluate(countStatusWrites);
     await send(page, asks[0].question);
     const added = (await count(page, '.node')) - nodes;
     const lit = await litEdges(page);
-    const oneNode = added === 1 && isDeepStrictEqual(await answerIds(page), ['answer', 'answer-0']);
-    const onlyItsPath = isDeepStrictEqual(lit, askPath(0)) && isDeepStrictEqual(await litAnswers(page), ['answer-0']);
+    const oneNode = added === 1 && isDeepStrictEqual(await answerIds(page), ['answer-0', 'answer-1']);
+    const onlyItsPath = isDeepStrictEqual(lit, askPath(0)) && isDeepStrictEqual(await litAnswers(page), ['answer-1']);
     check('answers', 'a recorded ask adds exactly one answer node and lights only its path', oneNode && onlyItsPath, `${added} added; ${lit.length} lit`);
     const status = await page.textContent('#run-status');
     const turns = await count(page, '.turn');
@@ -957,53 +1019,53 @@ async function answersOnTheRun(sample, asks) {
     const cited = new Set([...summary_ids, ...parse_ids]).size;
     const summary = `${RECORDED_ASK} · ${asks[0].model} · ${asks[0].totals.tokens.toLocaleString('en-US')} tokens · $`;
     const told = lines.includes(asks[0].text) && lines.filter((text) => text.startsWith('drew on ')).length === cited && lines.some((text) => text.startsWith(summary));
-    const shown = await inspect(page, 'answer-0');
+    const shown = await inspect(page, 'answer-1');
     const rows = await page.$$eval('#inspector .row', (els) => els.map((r) => r.firstChild.textContent));
-    const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS.answer);
+    const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']);
     check('answers', "a recorded ask's chat and popup give its real answer, citations and source", told && inPopup, lines.slice(1).join(' | '));
-    const label = await page.textContent(`${nodeSel('answer-0')} .label`);
+    const label = await page.textContent(`${nodeSel('answer-1')} .label`);
     check('answers', 'an answer node is labelled with a short form of its question, and its model', label === ASK_LABEL, label);
-    const kept = await positionOf(page, 'answer');
-    const below = await positionOf(page, 'answer-0');
+    const kept = await positionOf(page, 'answer-0');
+    const below = await positionOf(page, 'answer-1');
     const stacked = isDeepStrictEqual(kept, first) && below.x === first.x && below.y === first.y + ROW_GAP;
     check('answers', 'the first answer keeps its place, and the ask stacks one row gap below it', stacked, `${first.x},${first.y} → ${below.x},${below.y}`);
 
     await page.keyboard.press('Escape');
-    await clickNode(page, 'answer');
-    const byNode = isDeepStrictEqual(await litEdges(page), runPath) && isDeepStrictEqual(await litAnswers(page), ['answer']);
+    await clickNode(page, 'answer-0');
+    const byNode = isDeepStrictEqual(await litEdges(page), runPath) && isDeepStrictEqual(await litAnswers(page), ['answer-0']);
     check('answers', 'selecting the first answer by its node lights its path again', byNode);
     const pressed = await page.evaluate(pressedAnswers);
-    const saysLit = isDeepStrictEqual(pressed, [['answer', 'true'], ['answer-0', 'false']]);
+    const saysLit = isDeepStrictEqual(pressed, [['answer-0', 'true'], ['answer-1', 'false']]);
     check('answers', 'each answer node says with aria-pressed whether it is the lit one', saysLit, JSON.stringify(pressed));
     const linesWhileRunLit = await page.evaluate(answerLines);
     const runCites = sample.answer.provenance.summary_ids.length + sample.answer.provenance.parse_ids.length;
     const askCites = summary_ids.length + parse_ids.length;
-    const citeLines = { answer: runCites, 'answer-0': askCites };
+    const citeLines = { 'answer-0': runCites, 'answer-1': askCites };
     const faintFollows =
-      isDeepStrictEqual(tally(linesWhileAskLit.faint), { 'answer-0': SAMPLE_ANSWER_INPUTS - askCites }) &&
-      isDeepStrictEqual(tally(linesWhileRunLit.faint), { answer: SAMPLE_ANSWER_INPUTS - runCites }) &&
+      isDeepStrictEqual(tally(linesWhileAskLit.faint), { 'answer-1': SAMPLE_ANSWER_INPUTS - askCites }) &&
+      isDeepStrictEqual(tally(linesWhileRunLit.faint), { 'answer-0': SAMPLE_ANSWER_INPUTS - runCites }) &&
       [linesWhileAskLit, linesWhileRunLit].every(({ cited: ends }) => isDeepStrictEqual(tally(ends), citeLines));
     const faintName = 'only the lit answer has faint lines from what it was shown, and every answer keeps its cite lines';
     check('answers', faintName, faintFollows, `${JSON.stringify(tally(linesWhileAskLit.faint))} → ${JSON.stringify(tally(linesWhileRunLit.faint))}`);
     await page.keyboard.press('Escape');
-    const name = await page.getAttribute(nodeSel('answer-0'), 'aria-label');
-    await page.focus(nodeSel('answer-0'));
+    const name = await page.getAttribute(nodeSel('answer-1'), 'aria-label');
+    await page.focus(nodeSel('answer-1'));
     await page.keyboard.press('Enter');
-    const byKey = isDeepStrictEqual(await litAnswers(page), ['answer-0']) && (await popup(page))?.title === `● ${ASK_LABEL}`;
+    const byKey = isDeepStrictEqual(await litAnswers(page), ['answer-1']) && (await popup(page))?.title === `● ${ASK_LABEL}`;
     const named = name === `answer to ${asks[0].question} · ${asks[0].model}`;
     check('answers', 'an answer node is named for its question and model, takes focus, and Enter on it lights it', named && byKey, name);
     await page.keyboard.press('Escape');
     await page.locator('.turn').first().locator('.line.answer').click();
-    const byLine = isDeepStrictEqual(await litEdges(page), runPath) && isDeepStrictEqual(await litAnswers(page), ['answer']);
+    const byLine = isDeepStrictEqual(await litEdges(page), runPath) && isDeepStrictEqual(await litAnswers(page), ['answer-0']);
     check('answers', 'selecting the first answer by its chat line lights its path again', byLine);
 
     const openTitle = (await popup(page))?.title;
     await send(page, NEW_QUESTION);
-    const leftAlone = isDeepStrictEqual(await litAnswers(page), ['answer']) && (await popup(page))?.title === openTitle;
+    const leftAlone = isDeepStrictEqual(await litAnswers(page), ['answer-0']) && (await popup(page))?.title === openTitle;
     check('answers', "a landing ask leaves an open answer's popup, and its lit path, alone", leftAlone, openTitle);
     const simulated = await page.evaluate(lastTurnLines);
     const flaggedInChat = simulated.includes(SIMULATED_LABEL) && simulated.some((text) => text.startsWith(`${SIMULATED_ASK} · ${DEFAULT_MODEL} · nothing was sent`));
-    const flaggedInPopup = (await inspect(page, 'answer-1')).includes(SIMULATED_LABEL);
+    const flaggedInPopup = (await inspect(page, 'answer-2')).includes(SIMULATED_LABEL);
     check('answers', 'an unrecorded ask is labelled simulated, in the chat and its popup', flaggedInChat && flaggedInPopup, simulated.slice(1, 3).join(' | '));
 
     await page.keyboard.press('Escape');
@@ -1019,7 +1081,7 @@ async function answersOnTheRun(sample, asks) {
     await page.getByRole('button', { name: offerLabel(asks[2]), exact: true }).click();
     await page.press('#question', 'Enter');
     for (const question of ['Which memo is the registry?', 'Who manages Eastfield?']) await send(page, question);
-    await dragNode(page, 'answer-1', 80, 50);
+    await dragNode(page, 'answer-2', 80, 50);
     await page.click('#arrange-btn');
     const placed = await page.evaluate(answerNodes);
     const offsets = placed.map((n) => (n.y - first.y) / ROW_GAP).sort((a, b) => a - b);
@@ -1042,31 +1104,37 @@ async function answersOnTheRun(sample, asks) {
     const litBefore = [await litAnswers(page), await litEdges(page)];
     const idsBefore = (await answerIds(page)).sort();
     await page.click('#replay-btn');
-    await page.waitForSelector('#panel.is-lit');
+    await waitLit(page);
     const redrawn = isDeepStrictEqual((await answerIds(page)).sort(), idsBefore) && (await count(page, '.node.answer.working')) === 0;
     const stillLit = isDeepStrictEqual([await litAnswers(page), await litEdges(page)], litBefore);
     check('answers', "replay draws the run's asks again, and keeps the answer that was lit", redrawn && stillLit, `${idsBefore.length} answers; lit ${litBefore[0]}`);
 
     await page.fill('#question', sample.question);
     await page.click('#new-run-btn');
-    await page.waitForSelector('#panel.is-lit');
+    const newTabLit = await becomes(page, () => document.querySelector('#world .is-lit') !== null);
     const after = { nodes: await count(page, '.node'), answers: (await answerIds(page)).length };
-    const fresh = isDeepStrictEqual(after, ANSWERED_RUN_COUNTS) && isDeepStrictEqual(await litEdges(page), runPath);
-    const replacedName = 'new run replaces the panel: the asks go, and the new run\'s answer is the one lit';
-    check('answers', replacedName, fresh && (await page.textContent('#run-status')) === SAMPLE_STATUS, JSON.stringify(after));
-    const offeredOnce = await offers(page);
-    const onceName = 'a new recorded replay offers the recorded asks once, not again beside the old offers';
-    check('answers', onceName, isDeepStrictEqual(offeredOnce, asks.map(() => true)), JSON.stringify(offeredOnce));
+    const fresh = newTabLit && isDeepStrictEqual(after, ANSWERED_RUN_COUNTS) && isDeepStrictEqual(await litEdges(page), runPath);
+    const opened = (await shownTab(page)) === 1;
+    const openedName = 'new run opens a second tab and shows it, with only its own answer, lit';
+    check('answers', openedName, fresh && opened && (await page.textContent('#run-status')) === SAMPLE_STATUS, JSON.stringify(after));
 
-    await send(page, asks[0].question);
-    await clickNode(page, 'answer');
+    const offerOf = page.getByRole('button', { name: offerLabel(asks[0]), exact: true });
+    await offerOf.first().click();
+    const backOnFirst = (await shownTab(page)) === 0 && (await page.inputValue('#question')) === asks[0].question;
+    const offersName = "each recorded tab's turn offers the recorded asks, and an offer shows its own tab";
+    check('answers', offersName, (await offerOf.count()) === 2 && backOnFirst, `${await offerOf.count()} offers of the first ask`);
+
+    await page.locator('.run-tab').nth(1).click();
+    await page.locator('.turn[data-tab="1"]').nth(1).locator('.line.answer').click();
+    const opensThere = (await shownTab(page)) === 0 && isDeepStrictEqual(await litAnswers(page), ['answer-1']) && (await popup(page))?.title === `● ${ASK_LABEL}`;
+    check('answers', "an earlier tab's answer line switches to that tab and opens its answer there, lit", opensThere, (await popup(page))?.title);
     await page.keyboard.press('Escape');
-    const earlier = page.locator('.turn').nth(1).locator('.line.answer');
-    const inert = await earlier.isDisabled();
-    await earlier.click({ force: true });
-    const untouched = isDeepStrictEqual(await litAnswers(page), ['answer']) && (await popup(page)) === null;
-    const inertName = "after a new run, an earlier run's ask lines are inert: they open nothing on the new panel";
-    check('answers', inertName, inert && untouched, `disabled ${inert}; lit ${await litAnswers(page)}`);
+    await clickNode(page, 'answer-0');
+    await page.keyboard.press('Escape');
+    await page.locator('.run-tab').nth(1).click();
+    await page.locator('.turn[data-tab="1"]').nth(1).locator('.marker').click();
+    const marked = (await shownTab(page)) === 0 && isDeepStrictEqual(await litAnswers(page), ['answer-1']);
+    check('answers', "a turn's tab marker switches to its tab and lights the answer it asked for", marked, `tab ${await shownTab(page)}; lit ${await litAnswers(page)}`);
   });
 }
 
@@ -1081,14 +1149,14 @@ async function answersAfterFiles(asks) {
     check('answers', 'after a run, the file-added line says a new run would cover the files and ask stays on this run', added === FILE_ADDED_AFTER_RUN, added);
     await send(page, asks[0].question);
     const pending = await count(page, '.node.pending');
-    const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-0')));
+    const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-1')));
     const fromRun = pending === 1 && into.length === SAMPLE_ANSWER_INPUTS && into.every((key) => /^(r2|parsed)-\d>/.test(key));
     const recorded = (await page.evaluate(lastTurnLines)).some((text) => text.startsWith(RECORDED_ASK));
     check('answers', "an ask after a file is added still answers over the run's documents", fromRun && recorded, into.join(' '));
     await send(page, NEW_QUESTION, 'Control+Enter');
     const status = await page.textContent('#run-status');
     const ids = await answerIds(page);
-    const ran = isDeepStrictEqual(ids, ['answer']) && status === `● done · simulated run · ${DEFAULT_MODEL} · nothing was sent`;
+    const ran = isDeepStrictEqual(ids, ['answer-0']) && status === `● done · simulated run · ${DEFAULT_MODEL} · nothing was sent`;
     const newRunName = 'Ctrl+Enter starts a new run over the files now loaded, instead of asking';
     check('answers', newRunName, ran && (await count(page, '.node.pending')) === 0, `${status}; ${ids.join(' ')}`);
   });
@@ -1105,11 +1173,11 @@ async function answersInView(asks) {
     check('answers', "a run whose model has a long name is fitted with its answer's whole label in view", outside.length === 0, outside.join(' ') || 'all in view');
   });
   await withPage('answers', {}, async (page) => {
-    await dragNode(page, 'answer', 60, 50);
-    const moved = await positionOf(page, 'answer');
+    await dragNode(page, 'answer-0', 60, 50);
+    const moved = await positionOf(page, 'answer-0');
     await pickModel(page, LONG_MODEL);
     await send(page, asks[0].question);
-    const placed = await positionOf(page, 'answer-0');
+    const placed = await positionOf(page, 'answer-1');
     const aroundIt = placed.x === moved.x && placed.y === moved.y + ROW_GAP;
     check('answers', 'an ask stacks around the first answer where it is now, after a drag', aroundIt, `${moved.x},${moved.y} → ${placed.x},${placed.y}`);
     const frame = await page.evaluate(panelBox);
@@ -1119,7 +1187,7 @@ async function answersInView(asks) {
   await withPage('answers', {}, async (page) => {
     await send(page, asks[0].question);
     const zoom = await page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
-    await dragNode(page, 'answer', 0, -ROW_GAP * zoom);
+    await dragNode(page, 'answer-0', 0, -ROW_GAP * zoom);
     for (const question of [NEW_QUESTION, 'Who manages Eastfield?']) await send(page, question);
     const placed = await page.evaluate(answerNodes);
     const apart = placed.length === 4 && placed.every((a, i) => placed.slice(i + 1).every((b) => !overlap(a.box, b.box)));
@@ -1146,6 +1214,201 @@ async function answersWhileReplaying() {
     const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
     const goingName = 'while a run is still going, the file-added line says ask stays on that run, as Enter will';
     check('answers', goingName, added === FILE_ADDED_AFTER_RUN, added);
+    const offered = await page.evaluate(composer);
+    await page.click('#run-btn');
+    const clickWaits = (await count(page, '.turn')) === 1 && (await page.inputValue('#question')) === NEW_QUESTION;
+    await page.$eval('#new-run-btn', (button) => button.click());
+    const opened = (await page.evaluate(tabRow)).map((tab) => tab.selected);
+    const offerName = "while the prototype's run replays, the composer offers ask ⏎, which waits as Enter does, and new run, which opens a tab of its own";
+    check('answers', offerName, offered.primary === 'ask ⏎' && offered.newRun && clickWaits && isDeepStrictEqual(opened, [false, true]), JSON.stringify(offered));
+  });
+}
+
+// ---------- tabs: one per run ----------
+
+// Counts the document nodes added to the panel from now on, in window.docNodesAdded.
+function countDocNodes() {
+  window.docNodesAdded = 0;
+  const added = (records) => records.flatMap((record) => [...record.addedNodes]).filter((el) => el.matches?.('.node.doc')).length;
+  new MutationObserver((records) => (window.docNodesAdded += added(records))).observe(document.getElementById('world'), { childList: true, subtree: true });
+}
+
+// The second tab's × enables once its run has ended.
+function secondTabEnded() {
+  return !document.querySelectorAll('.tab-close')[1].disabled;
+}
+
+async function tabs() {
+  const asks = recordedAsks();
+  await withPage('tabs', {}, async (page) => {
+    const one = await page.evaluate(tabRow);
+    const firstName = 'the first run opens the first tab, named by its number, question and model; the last tab offers no × and no Delete';
+    check('tabs', firstName, one.length === 1 && one[0].label === TAB_LABEL && !one[0].hasClose && one[0].keys === null, JSON.stringify(one));
+    await send(page, asks[0].question);
+    await dragNode(page, 'r2-1', 60, 40);
+    const frame = await page.evaluate(panelBox);
+    await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, -200);
+    const left = await page.evaluate(panelSnapshot);
+    await page.evaluate(countDocNodes);
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    const other = await page.evaluate(panelSnapshot);
+    const added = await page.evaluate(() => window.docNodesAdded);
+    check('tabs', 'a new run draws each of its document nodes once', added === SAMPLE_DOCS, `${added} drawn`);
+    await page.locator('.run-tab').first().click();
+    const back = await page.evaluate(panelSnapshot);
+    const restoreName = 'switching back to the first tab restores its nodes and lines after a drag, its zoom, its lit answer and its status';
+    check('tabs', restoreName, !isDeepStrictEqual(other, left) && isDeepStrictEqual(back, left), `${back.nodes.length} nodes; ${back.view}`);
+
+    const row = await page.evaluate(tabRow);
+    const pattern = await page.evaluate(() => {
+      const panel = document.getElementById('panel');
+      return { list: document.getElementById('run-tabs').getAttribute('role'), panel: panel.getAttribute('role'), labelledBy: panel.getAttribute('aria-labelledby') };
+    });
+    const owned = (await page.locator('#run-tabs').ariaSnapshot()).split('\n').slice(1);
+    const selected = row.filter((tab) => tab.selected);
+    const tabsOk = row.every((tab) => tab.role === 'tab' && tab.focusable === tab.selected && tab.keys === 'Delete' && tab.closeForMouseOnly);
+    const ariaOk =
+      pattern.list === 'tablist' && pattern.panel === 'tabpanel' && selected.length === 1 && pattern.labelledBy === selected[0].id &&
+      tabsOk && owned.length === row.length && owned.every((entry) => entry.trim().startsWith('- tab '));
+    const ariaName = 'the tab row is an ARIA tablist that owns only tabs, each closing with Delete; × is for the mouse alone';
+    check('tabs', ariaName, ariaOk, JSON.stringify({ pattern, owned }));
+    await page.locator('.run-tab').first().focus();
+    await page.keyboard.press('ArrowRight');
+    const right = [await shownTab(page), await focusedId(page)];
+    await page.keyboard.press('ArrowLeft');
+    const leftAgain = [await shownTab(page), await focusedId(page)];
+    const keysMove = isDeepStrictEqual(right, [1, row[1].id]) && isDeepStrictEqual(leftAgain, [0, row[0].id]);
+    check('tabs', 'arrow keys move between tabs, showing each and keeping the focus on it', keysMove, `${right} → ${leftAgain}`);
+    check('tabs', '1440 light: with two tabs the page has no horizontal scroll', await page.evaluate(noHorizontalScroll));
+
+    await page.locator('.tab-close').nth(1).click();
+    const kept = await page.evaluate(panelSnapshot);
+    const closedTurns = await page.$$eval('.turn[data-tab="2"]', (turns) =>
+      turns.map((turn) => {
+        const marker = turn.querySelector('.marker');
+        return [marker.textContent, marker.getAttribute('aria-label'), [...turn.querySelectorAll('button')].every((b) => b.disabled)];
+      }),
+    );
+    const remaining = await page.evaluate(tabRow);
+    const closesOne = isDeepStrictEqual(kept, left) && remaining.length === 1 && !remaining[0].hasClose && isDeepStrictEqual(closedTurns, [['tab 2 · closed', null, true]]);
+    const closesName = 'closing a tab leaves the others as they were; its turns stay, inert and named closed, and the last tab has no ×';
+    check('tabs', closesName, closesOne, JSON.stringify(closedTurns));
+    await page.$$eval('.turn[data-tab="2"] button', (buttons) => {
+      for (const button of buttons) {
+        button.disabled = false;
+        button.click();
+      }
+    });
+    const reachNothing = isDeepStrictEqual(await page.evaluate(panelSnapshot), left) && (await page.evaluate(tabRow)).length === 1;
+    check('tabs', "a closed tab's links reach nothing of it, even enabled again", reachNothing);
+
+    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question, 'Control+Enter');
+    const fourth = await page.evaluate(panelSnapshot);
+    await page.locator('.run-tab').nth(1).click();
+    await page.locator('.tab-close').nth(1).click();
+    const two = await page.evaluate(tabRow);
+    const focused = await focusedId(page);
+    const showsNext = isDeepStrictEqual(two.map((tab) => [tab.id, tab.selected]), [['run-tab-1', false], ['run-tab-4', true]]) && focused === 'run-tab-4' && isDeepStrictEqual(await page.evaluate(panelSnapshot), fourth);
+    check('tabs', 'closing the shown middle tab of three shows the one after it, with the focus on it', showsNext, `${two.map((tab) => tab.id)}; focus on #${focused}`);
+    await page.keyboard.press('Delete');
+    const afterDelete = (await page.evaluate(tabRow)).map((tab) => tab.id);
+    await page.keyboard.press('Delete');
+    const lastKept = (await page.evaluate(tabRow)).map((tab) => tab.id);
+    const deletes = isDeepStrictEqual(afterDelete, ['run-tab-1']) && isDeepStrictEqual(lastKept, ['run-tab-1']);
+    check('tabs', 'Delete closes the focused tab, but not the last one', deletes, `${afterDelete} then ${lastKept}`);
+  });
+
+  // With motion on, a replay takes seconds, so a tab can still be running while another is shown.
+  await withPage('tabs', {}, async (page) => {
+    const first = await page.evaluate(panelSnapshot);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    const starting = await page.textContent('#run-status');
+    check('tabs', "a new tab's status line is its own from the start, not the last tab's", starting === STARTING, starting);
+    const going = await page.evaluate(tabRow);
+    await page.locator('.tab-close').nth(1).click({ force: true });
+    const stays = (await page.evaluate(tabRow)).length === 2;
+    const busyName = "a tab whose run is going can't be closed: its × is disabled while the other tab's isn't";
+    check('tabs', busyName, isDeepStrictEqual(going.map((tab) => tab.closable), [true, false]) && stays, JSON.stringify(going.map((tab) => tab.closable)));
+    await page.evaluate(recordStatuses);
+    await page.locator('.run-tab').nth(1).focus();
+    await page.keyboard.press('Delete');
+    const said = await page.evaluate(() => window.statuses);
+    const keeps = (await page.evaluate(tabRow)).length === 2 && said.includes('tab 2 is still going; close it once it has finished');
+    const whyName = 'Delete is offered only on a tab it closes; on a tab whose run is going it keeps the tab, and the status says why';
+    check('tabs', whyName, isDeepStrictEqual(going.map((tab) => tab.keys), ['Delete', null]) && keeps, `${JSON.stringify(going.map((tab) => tab.keys))}; ${said.join(' | ')}`);
+    await page.locator('.run-tab').first().click();
+    const ended = await becomes(page, secondTabEnded, null, REPLAY_MS);
+    await page.waitForTimeout(LIT_DELAY_MS);
+    const untouched = ended && isDeepStrictEqual(await page.evaluate(panelSnapshot), first);
+    check('tabs', 'a replay going on in another tab never draws on the shown one, nor changes its status line', untouched, `ended ${ended}`);
+    await page.locator('.run-tab').nth(1).click();
+    const pending = await count(page, '#world .enter, #world .draw, #world .fade');
+    const still = await page.evaluate(panelStill);
+    check('tabs', 'a tab drawn in the background has no node or line animations to play when first shown', pending === 0 && still, `${pending} pending`);
+
+    await page.locator('.run-tab').first().click();
+    await page.click('#replay-btn');
+    const replaying = (await page.evaluate(tabRow)).map((tab) => [tab.selected, tab.closable]);
+    const status = await page.textContent('#run-status');
+    const replaysShown = isDeepStrictEqual(replaying, [[true, false], [false, true]]) && status === STARTING;
+    check('tabs', 'replay replays the shown tab alone: its status starts over and its × disables, while the other tab stays idle', replaysShown, `${JSON.stringify(replaying)}; ${status}`);
+  });
+
+  // With motion on, nodes and lines animate in and arrange slides, so a switch can come while either is going.
+  await withPage('tabs', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    await waitLit(page, REPLAY_MS);
+    await becomes(page, panelStill);
+    await send(page, asks[0].question);
+    const replayed = await page.evaluate(linesReplayed, 'answer-1');
+    check('tabs', 'lighting a new answer moves lines between layers without playing how they were drawn again', replayed === 0, `${replayed} replayed`);
+
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    await page.waitForSelector('#world .edge.draw', { state: 'attached' });
+    await page.locator('.run-tab').first().click();
+    await becomes(page, secondTabEnded, null, REPLAY_MS);
+    await page.waitForTimeout(LIT_DELAY_MS);
+    await page.locator('.run-tab').nth(1).click();
+    check('tabs', 'a tab left mid-replay and shown again plays none of the animations it cut off', await page.evaluate(panelStill));
+    await page.locator('.run-tab').first().click();
+
+    const frame = await page.evaluate(panelBox);
+    await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, -200);
+    const zoomed = await page.evaluate(panelSnapshot);
+    await page.locator('.run-tab').nth(1).click();
+    await dragNode(page, 'r2-1', 60, 40);
+    await page.click('#arrange-btn');
+    await page.locator('.run-tab').first().click();
+    await page.waitForTimeout(2 * ARRANGE_MS);
+    const leftAlone = isDeepStrictEqual(await page.evaluate(panelSnapshot), zoomed);
+    check('tabs', "an arrange still sliding when its tab is switched away from leaves the tab then shown as it was", leftAlone);
+
+    await dragNode(page, 'r2-1', 60, 40);
+    await page.click('#arrange-btn');
+    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    await page.locator('.run-tab').first().click();
+    const snapped = await page.evaluate(panelSnapshot);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.click('#arrange-btn');
+    const final = await page.evaluate(panelSnapshot);
+    const atFinal = isDeepStrictEqual([snapped.nodes, snapped.edges], [final.nodes, final.edges]);
+    check('tabs', "an arrange still sliding when a new run starts leaves the old tab's nodes and lines at their final spots", atFinal);
+  });
+
+  await withPage('tabs', { layout: LAYOUTS.phone }, async (page) => {
+    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question, 'Control+Enter');
+    const inView = inside(await rect(page, '.run-tab[aria-selected="true"]'), await rect(page, '#run-tabs'));
+    check('tabs', "400 dark: the shown tab's button is scrolled into view in the tab row", inView);
+    const rowScrolls = await page.evaluate(() => {
+      const row = document.getElementById('run-tabs');
+      row.scrollLeft = 0;
+      row.scrollLeft = row.scrollWidth;
+      return row.scrollLeft > 0;
+    });
+    const noScroll = await page.evaluate(noHorizontalScroll);
+    check('tabs', '400 dark: with three tabs the tab row scrolls within itself, and the page has no horizontal scroll', rowScrolls && noScroll, `row scrolls ${rowScrolls}`);
   });
 }
 
@@ -1316,12 +1579,12 @@ async function liveAnswers(url) {
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, 'Which memo is the registry?');
-    const landed = await becomes(page, landedNode, 'answer-0', LIVE_RUN_MS);
+    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
     const docIds = await docIdsOf(page);
-    const expected = lineage(SCRIPTED_CITES, docIds, 'answer-0', SCRIPTED_CITES.answer.provenance);
+    const expected = lineage(SCRIPTED_CITES, docIds, 'answer-1', SCRIPTED_CITES.answer.provenance);
     const lit = await litEdges(page);
-    const ownPath = landed && isDeepStrictEqual(lit, expected) && isDeepStrictEqual(await litAnswers(page), ['answer-0']);
-    const beforeEnd = await inspect(page, 'answer-0');
+    const ownPath = landed && isDeepStrictEqual(lit, expected) && isDeepStrictEqual(await litAnswers(page), ['answer-1']);
+    const beforeEnd = await inspect(page, 'answer-1');
     const live = beforeEnd.includes(`${LIVE_ASK} · ${DEFAULT_MODEL}`);
     const askName = 'an ask adds an answer node, lit along its own path, and its popup says it is live';
     check('live', askName, ownPath && live, `${lit.length} lit, ${expected.length} expected`);
@@ -1335,14 +1598,65 @@ async function liveAnswers(url) {
     await page.fill('#question', 'Which memo is the registry, once more?');
     await page.focus('#new-run-btn');
     await page.keyboard.press('Enter');
-    const ended = (source) => !document.querySelector('.node[data-id="answer-0"]') && new RegExp(source).test(document.getElementById('run-status').textContent);
-    const replaced = await becomes(page, ended, LIVE_DONE.source, LIVE_RUN_MS);
+    const opened = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     const runs = posts.filter((path) => path === '/api/runs').length;
     const nodes = await count(page, '.node');
-    const newRunName = 'after an ask, new run is offered and starts a run that replaces the panel';
-    check('live', newRunName, offered && replaced && runs === 2 && nodes === SAMPLE_COUNTS.nodes, `${runs} runs, ${nodes} nodes`);
-    const focused = await page.evaluate(() => document.activeElement.id);
-    check('live', 'new run from the keyboard keeps the focus, in the question box', focused === 'question', `focus on #${focused}`);
+    const inTab = (await shownTab(page)) === 1;
+    const newRunName = "after an ask, new run is offered and opens its run's own tab";
+    check('live', newRunName, offered && opened && inTab && runs === 2 && nodes === SAMPLE_COUNTS.nodes, `${runs} runs, ${nodes} nodes`);
+    const focused = await focusedId(page);
+    check('live', 'new run from the keyboard keeps the focus on new run, still offered while that run goes', focused === 'new-run-btn', `focus on #${focused}`);
+    await page.fill('#question', `Which memo is the registry? ${FAILS}`);
+    await page.focus('#new-run-btn');
+    await page.keyboard.press('Enter');
+    const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
+    const refocused = await focusedId(page);
+    const hidden = !(await page.evaluate(composer)).newRun;
+    const failName = 'a new run from the keyboard that fails hides new run, and the focus moves to the question box';
+    check('live', failName, failed && hidden && refocused === 'question', `${await page.textContent('#run-status')}; focus on #${refocused}`);
+  });
+}
+
+// Holds the second run's answer back until the first tab is shown.
+async function liveTabs(url) {
+  const before = (page) => page.addInitScript(holdFrom, 'reasoning_finished');
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    const posts = postsOf(page);
+    await page.evaluate(() => (window.release = true));
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const first = await page.evaluate(panelSnapshot);
+    const firstStatus = await page.textContent('#run-status');
+    await page.evaluate(() => (window.release = false));
+    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    const held = await becomes(page, answerWorking, null, LIVE_RUN_MS);
+    await page.locator('.run-tab').first().click();
+    await page.evaluate(() => (window.release = true));
+    const ended = await becomes(page, lastTurnSays, [`${DEFAULT_MODEL} · `], LIVE_RUN_MS);
+    const untouched = isDeepStrictEqual(await page.evaluate(panelSnapshot), first) && (await page.textContent('#run-status')) === firstStatus;
+    const awayName = "a run's events land in its own tab: the tab shown meanwhile is left as it was";
+    check('live', awayName, held && ended && untouched, `held ${held}; ended ${ended}`);
+    await page.locator('.run-tab').nth(1).click();
+    const nodes = await count(page, '.node');
+    const working = await count(page, '.node.working');
+    const lit = await litEdges(page);
+    const drawn = nodes === SAMPLE_COUNTS.nodes && working === 0 && isDeepStrictEqual(lit, lineage(SCRIPTED_CITES, await docIdsOf(page)));
+    const status = await page.textContent('#run-status');
+    const backName = "switching to that tab shows all it drew in the background: every node, its lit answer and its cost";
+    check('live', backName, drawn && LIVE_DONE.test(status), `${nodes} nodes, ${working} working; ${status}`);
+
+    await page.evaluate(() => (window.release = false));
+    await send(page, 'Which memo is the registry, a third time?', 'Control+Enter');
+    await becomes(page, answerWorking, null, LIVE_RUN_MS);
+    await page.locator('.run-tab').first().click();
+    const asked = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/asks'), { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await send(page, 'Which memo mentions the storm?');
+    await asked;
+    const sent = posts.filter((path) => path.endsWith('/asks')).length;
+    await page.evaluate(() => (window.release = true));
+    const answered = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const askName = "while another tab's run is going, an ask over a finished tab goes ahead, and lands there";
+    check('live', askName, sent === 1 && answered && (await shownTab(page)) === 0, `${sent} asks sent`);
   });
 }
 
@@ -1351,28 +1665,32 @@ async function liveAskAfterFailed(url) {
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, `Which memo is the registry? ${FAILS}`);
-    const failed = await becomes(page, () => document.querySelector('.node[data-id="answer-0"]')?.classList.contains('failed'), null, LIVE_RUN_MS);
-    await clickNode(page, 'answer-0');
+    const failed = await becomes(page, () => document.querySelector('.node[data-id="answer-1"]')?.classList.contains('failed'), null, LIVE_RUN_MS);
+    await clickNode(page, 'answer-1');
     await send(page, 'Which memo is the registry?');
-    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const landed = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
     const lit = await litAnswers(page);
     const openOn = (await popup(page))?.title;
     const litName = 'a landing ask is lit while the open popup is an answer that never landed';
-    check('live', litName, failed && landed && isDeepStrictEqual(lit, ['answer-1']), `lit ${lit}; popup ${openOn}`);
+    check('live', litName, failed && landed && isDeepStrictEqual(lit, ['answer-2']), `lit ${lit}; popup ${openOn}`);
   });
 }
 
-async function liveRunEnd(url) {
+// Holds the run's end back, so its answer has landed while it is still going.
+async function liveWhileGoing(url) {
   const before = (page) => page.addInitScript(holdFrom, 'run_finished');
   await withPage('live', { url, sample: false, before }, async (page) => {
     await page.click('#run-btn');
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
-    const whileOpen = await page.textContent('#run-btn');
-    await page.evaluate(() => (window.release = true));
-    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-    const once = await page.textContent('#run-btn');
-    const endName = 'the button offers to ask only once the run has ended, not when its answer lands';
-    check('live', endName, answered && done && whileOpen === 'run ⏎' && once === 'ask ⏎', `${whileOpen} → ${once}`);
+    const offered = await page.evaluate(composer);
+    await page.fill('#question', 'Which memo is the registry?');
+    await page.click('#run-btn');
+    const refused = await page.textContent('#run-status');
+    const started = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/runs'), { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await page.$eval('#new-run-btn', (button) => button.click());
+    const second = (await started) !== null && (await shownTab(page)) === 1;
+    const goingName = "while a run is going, even with its answer landed, the composer offers ask ⏎, which waits for its end as Enter does, and new run, which starts a second run";
+    check('live', goingName, answered && offered.primary === 'ask ⏎' && offered.newRun && refused === ASK_WHEN_DONE && second, `${JSON.stringify(offered)}; ${refused}`);
   });
 }
 
@@ -1385,15 +1703,15 @@ async function liveAskGoing(url) {
     await page.fill('#question', `Which site is quietest? ${HANGS}`);
     await page.click('#run-btn');
     const asking = await becomes(page, lastTurnSays, [`asking · ${DEFAULT_MODEL}`]);
-    await page.setInputFiles('#file-input', memo('06_extra.txt', 'An extra memo.\n'));
-    await page.waitForSelector('.node.pending');
-    await page.fill('#question', 'Which memo is the extra one?');
+    await page.fill('#question', 'Which memo is the registry, once more?');
     await page.click('#new-run-btn');
-    const refused = await page.textContent('#run-status');
-    const sent = posts.filter((path) => path === '/api/runs').length;
-    const stillAsking = await page.evaluate(lastTurnLines);
-    const askName = "while an ask is going, a new run is refused: it can't be stopped yet";
-    check('live', askName, asking && refused === ASK_STILL_GOING && sent === 1 && stillAsking.includes(`asking · ${DEFAULT_MODEL}`), `${refused}; ${sent} runs`);
+    const ended = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
+    const runs = posts.filter((path) => path === '/api/runs').length;
+    const row = (await page.evaluate(tabRow)).map((tab) => [tab.selected, tab.closable]);
+    const askTurn = await page.$$eval('.turn[data-tab="1"]', (turns) => [...turns.at(-1).querySelectorAll('.line .t')].map((el) => el.textContent));
+    const stillAsking = askTurn.includes(`asking · ${DEFAULT_MODEL}`);
+    const askName = "while an ask is going, a new run goes ahead in a tab of its own, and the asking tab can't be closed";
+    check('live', askName, asking && ended && runs === 2 && isDeepStrictEqual(row, [[false, false], [true, true]]) && stillAsking, `${runs} runs; ${JSON.stringify(row)}`);
   });
 }
 
@@ -1508,12 +1826,15 @@ async function liveGoingThenLost(url, server) {
     const asked = [await page.textContent('#run-status'), await page.inputValue('#question')];
     const askName = 'while a run is going, a question stays in the box, unsent, and the status says to ask once it has finished';
     check('live', askName, held && isDeepStrictEqual(asked, [ASK_WHEN_DONE, question]) && posts.length === 1, asked[0]);
-    await page.setInputFiles('#file-input', memo('06_extra.txt', 'An extra memo.\n'));
-    await page.waitForSelector('.node.pending');
     await page.press('#question', 'Control+Enter');
-    const refused = await page.textContent('#run-status');
-    const runName = "while a run is going, a new run is refused: it can't be stopped yet";
-    check('live', runName, refused === RUN_STILL_GOING && isDeepStrictEqual(posts, ['/api/runs']), `${refused}; ${posts.join(' ')}`);
+    const ended = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const second = [await shownTab(page), await count(page, '.node'), await count(page, '.node.working')];
+    await page.locator('.run-tab').first().click();
+    const status = await page.textContent('#run-status');
+    const first = [await count(page, '.node.r1.working'), await count(page, '.node.answer')];
+    const apart = ended && isDeepStrictEqual(second, [1, SAMPLE_COUNTS.nodes, 0]) && status.startsWith('running · ') && first[0] > 0 && first[1] === 0;
+    const runName = "while a run is going, a new run opens a tab of its own, and each run's events land in its own tab";
+    check('live', runName, apart && isDeepStrictEqual(posts, ['/api/runs', '/api/runs']), `${posts.join(' ')}; second ${second}; first ${status}, ${first}`);
 
     await server.stop();
     const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
@@ -1545,7 +1866,8 @@ async function live() {
     await liveCutStream(url);
     await liveAnswers(url);
     await liveAskAfterFailed(url);
-    await liveRunEnd(url);
+    await liveTabs(url);
+    await liveWhileGoing(url);
     await liveParts(url);
     await liveFailure(url);
     await liveUnreadable(url);
@@ -1557,7 +1879,7 @@ async function live() {
 
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, tabs, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

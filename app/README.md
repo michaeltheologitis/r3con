@@ -1,6 +1,6 @@
 # r3con app
 
-The app's run panel. Served by the local server below, it runs r3con for real: keys go to the server, and a run streams its events into the panel. Once a run has ended, ask (Enter) answers a question over what it built, as another answer node with its own lit path, and new run (⌘/Ctrl+Enter) builds again. Opened as a file (`src/r3con_app/index.html`), it is the prototype: it replays one recorded run on the quickstart's five memos, or simulates one, and answers a few recorded asks over that run; any other ask is simulated. The design notes are on the project's Notion page, under App: the run panel.
+The app's run panel. Served by the local server below, it runs r3con for real: keys go to the server, and a run streams its events into the panel. Once a run has ended, ask (Enter) answers a question over what it built, as another answer node with its own lit path; new run (⌘/Ctrl+Enter), even while another run is going, builds again in a tab of its own. Opened as a file (`src/r3con_app/index.html`), it is the prototype: it replays one recorded run on the quickstart's five memos, or simulates one, and answers a few recorded asks over that run; any other ask is simulated. The design notes are on the project's Notion page, under App: the run panel.
 
 `node checks/check.mjs` checks the page in headless Chromium with Playwright: one line per check, and a non-zero exit if any fails. Its live area serves the page with `checks/fake_server.py`, a scripted model behind the real server, so it needs `uv`.
 
