@@ -1,17 +1,19 @@
+import contextlib
 import json
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx2
 import litellm
 import pytest
 from litellm.exceptions import RateLimitError
-from r3con_app.server import ServerState, create_app, serve
+from r3con_app.server import ServerState, _server, create_app, serve
 from starlette.testclient import TestClient
+from starlette.types import ASGIApp
 
 litellm.suppress_debug_info = True
 
@@ -22,6 +24,9 @@ BASE_URL = f"http://127.0.0.1:{PORT}"
 MEMOS = Path(__file__).resolve().parents[2] / "examples" / "memos"
 GATE_TIMEOUT_SECONDS = 10
 LONG_RETRY_AFTER_SECONDS = 60
+# Far below GATE_TIMEOUT_SECONDS, which ends a held call by itself.
+STILL_WAITING_SECONDS = 0.5
+FORCED_EXIT_SECONDS = 5
 QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 OPENAI_KEY = "sk-stored-openai-key-1234"
@@ -199,14 +204,9 @@ def transport(llm: FakeModel) -> list[dict[str, str]]:
     ]
 
 
-def join_workers(job_id: str = "") -> list[threading.Thread]:
-    """The worker threads the server started, for ``job_id`` alone when it is given,
-    once each has ended."""
-    name = f"r3con-app-{job_id}"
-    workers = [t for t in threading.enumerate() if t.name.startswith(name)]
-    for worker in workers:
-        worker.join(GATE_TIMEOUT_SECONDS)
-    return workers
+def worker_of(job_id: str) -> threading.Thread:
+    """The thread the server started for the job ``job_id``, while it runs."""
+    return next(t for t in threading.enumerate() if t.name == f"r3con-app-{job_id}")
 
 
 def rate_limited(**request: Any) -> Any:
@@ -229,6 +229,27 @@ def http_client(url: str) -> httpx2.Client:
         timeout=GATE_TIMEOUT_SECONDS,
         trust_env=False,
     )
+
+
+def shut_down_with_a_stream_open(
+    url: str, model: FakeModel, shut_down: Callable[[], None]
+) -> tuple[str, dict[str, Any]]:
+    """Over a real connection: start a run and read its stream's first event; once
+    ``model`` holds its first call, call ``shut_down``, and read on until the server's
+    shutdown closes the stream, after its grace. Returns the run's id and that first
+    event."""
+    with http_client(url) as http:
+        run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        with http.stream("GET", f"/api/runs/{run_id}/events") as response:
+            lines = response.iter_lines()
+            first = next(line for line in lines if line.startswith("data: "))
+            assert model.called.wait(GATE_TIMEOUT_SECONDS)
+            shut_down()
+            # Cut short, so without the end of its body.
+            with contextlib.suppress(httpx2.RemoteProtocolError):
+                for _ in lines:
+                    pass
+    return run_id, json.loads(first.removeprefix("data: "))
 
 
 def first_event_then_the_rest(
@@ -609,10 +630,11 @@ def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_fail
     ):
         run_id = start_run(client)
         assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        worker = worker_of(run_id)
         response = client.post(f"/api/runs/{run_id}/cancel")
         held_llm.gate.set()
         last = run_events(client, run_id)[-1]
-        join_workers(run_id)
+        worker.join(GATE_TIMEOUT_SECONDS)
     assert response.status_code == 202
     assert len(held_llm.requests) == 1
     assert (last["type"], last["stage"]) == ("run_failed", "relevance")
@@ -664,7 +686,29 @@ def test_serve_streams_a_runs_events_as_they_happen_and_stops(
 
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
-def test_a_run_the_server_stops_under_ends_without_an_unhandled_error(
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_stop_waits_for_a_run_on_a_held_call_and_returns_once_it_has_ended(
+    held_llm: FakeModel, logs_dir: Path
+):
+    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
+    stopping = threading.Thread(target=stop)
+    run_id, started = shut_down_with_a_stream_open(url, held_llm, stopping.start)
+    worker = worker_of(run_id)
+    stopping.join(STILL_WAITING_SECONDS)
+    assert stopping.is_alive()
+    held_llm.gate.set()
+    stopping.join(GATE_TIMEOUT_SECONDS)
+    assert not stopping.is_alive()
+    assert not worker.is_alive()
+    assert len(held_llm.requests) == 1
+    error = Path(started["run_dir"]) / "relevance" / "error.txt"
+    assert "Cancelled" in error.read_text()
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly(
     held_llm: FakeModel,
     logs_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -672,36 +716,52 @@ def test_a_run_the_server_stops_under_ends_without_an_unhandled_error(
 ):
     unhandled: list[threading.ExceptHookArgs] = []
     monkeypatch.setattr(threading, "excepthook", unhandled.append)
-    held_llm.fail_on = "RelevanceSummary"
-    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
-    with http_client(url) as http:
-        assert http.post("/api/runs", json=run_body()).status_code == 202
-    assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
-    stop()
+    server, listener, url = _server(0, logs_dir, held_llm)
+    serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    serving.start()
+
+    def ctrl_c() -> None:
+        server.should_exit = True
+
+    run_id, _ = shut_down_with_a_stream_open(url, held_llm, ctrl_c)
+    worker = worker_of(run_id)
+    server.force_exit = True  # as a second Ctrl-C sets it
+    serving.join(FORCED_EXIT_SECONDS)
+    assert not serving.is_alive()
+    assert worker.is_alive()
     held_llm.gate.set()
-    workers = join_workers()
-    assert workers
-    assert not any(worker.is_alive() for worker in workers)
+    worker.join(GATE_TIMEOUT_SECONDS)
+    assert not worker.is_alive()
     assert unhandled == []
     assert not [r for r in caplog.records if "on_event raised" in r.getMessage()]
 
 
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
-@pytest.mark.usefixtures("one_call_at_a_time")
-def test_stopping_the_server_cancels_its_runs_so_they_send_no_further_call(
-    held_llm: FakeModel, logs_dir: Path
+def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
+    llm: FakeModel, logs_dir: Path
 ):
-    url, stop = serve(logs_dir=logs_dir, completion=held_llm)
-    with http_client(url) as http:
-        assert http.post("/api/runs", json=run_body()).status_code == 202
-    assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
-    stop()
-    held_llm.gate.set()
-    workers = join_workers()
-    assert workers
-    assert not any(worker.is_alive() for worker in workers)
-    assert len(held_llm.requests) == 1
+    server, listener, url = _server(0, logs_dir, llm)
+    serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
+    serving.start()
+    server.should_exit = True
+    serving.join(GATE_TIMEOUT_SECONDS)
+    # A request the server was still handling as its shutdown began.
+    base_url, token = url.split("/#token=")
+    client = TestClient(
+        cast(ASGIApp, server.config.app),
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    response = client.post("/api/runs", json=run_body())
+    assert response.status_code == 503
+    assert response.json() == {"error": "The server is stopping."}
+    assert (server.app_state.jobs, server.app_state.workers) == (
+        {"run": {}, "ask": {}},
+        [],
+    )
+    assert not logs_dir.exists()
+    assert llm.requests == []
 
 
 @pytest.mark.enable_socket
@@ -713,13 +773,13 @@ def test_a_shutdown_with_a_stream_open_cancels_its_run_before_closing_the_stream
     url, stop = serve(logs_dir=logs_dir)
     with http_client(url) as http:
         run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        worker = worker_of(run_id)
         with http.stream("GET", f"/api/runs/{run_id}/events") as response:
             lines = response.iter_lines()
             first = next(line for line in lines if line.startswith("data: "))
             stop()
             rest = events_in("\n".join(lines))
-    workers = join_workers(run_id)
-    assert not any(worker.is_alive() for worker in workers)
+    assert not worker.is_alive()
     last = rest[-1]
     assert (last["type"], last["stage"]) == ("run_failed", "relevance")
     assert last["error"].startswith("Cancelled: ")

@@ -97,10 +97,9 @@ print(other)
 
 To stop a run from another thread, pass `cancel=threading.Event()` and set it: no new
 model call is sent and the run raises `r3con.Cancelled`, leaving what it did so far in
-its folder, while what is under way runs its course (a call already sent, so a run
-whose last call is in flight finishes normally; the resends of a `completion=` such as
-a Router's, or of `num_retries`, `max_retries` or `retry_policy` in `params`; a sandbox
-step, to its end or its timeout). `r3con.ask` takes `cancel` too.
+its folder. What is already under way runs its course: a call already sent (so a run on
+its last call finishes normally), resends r3con doesn't make itself (a `completion=`, or
+retry settings in `params`), and a sandbox step. `r3con.ask` takes `cancel` too.
 
 ## Notebooks
 
