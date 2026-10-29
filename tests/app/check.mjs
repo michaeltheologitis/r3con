@@ -1,4 +1,4 @@
-// Checks the run panel in src/r3con/app/index.html in headless Chromium: node tests/app/check.mjs
+// Checks the run panel in src/r3con/app/ (index.html, app.css, app.js) in headless Chromium: node tests/app/check.mjs
 // The live area serves it with tests/app/fake_server.py, through uv.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -6,14 +6,16 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 
 // An ESM import ignores NODE_PATH, where a global Playwright is found; require honours it.
 const require = createRequire(import.meta.url);
 
-const PAGE_FILE = fileURLToPath(new URL('../../src/r3con/app/index.html', import.meta.url));
-const PAGE_URL = pathToFileURL(PAGE_FILE).href;
+const APP_DIR = new URL('../../src/r3con/app/', import.meta.url);
+const PAGE_URL = new URL('index.html', APP_DIR).href;
+const SCRIPT_FILE = fileURLToPath(new URL('app.js', APP_DIR));
+const PAGE_FILES = { '/': 'index.html', '/app.css': 'app.css', '/app.js': 'app.js' };
 const LAYOUTS = {
   desktop: { name: '1440 light', options: { viewport: { width: 1440, height: 900 }, colorScheme: 'light' } },
   phone: {
@@ -279,12 +281,12 @@ function popup(page) {
 }
 
 function recordedSample() {
-  const match = readFileSync(PAGE_FILE, 'utf8').match(/const SAMPLE = (\{[\s\S]*?\n\});/);
+  const match = readFileSync(SCRIPT_FILE, 'utf8').match(/const SAMPLE = (\{[\s\S]*?\n\});/);
   return match ? JSON.parse(match[1]) : null;
 }
 
 function recordedAsks() {
-  const match = readFileSync(PAGE_FILE, 'utf8').match(/const RECORDED_ASKS = (\[[\s\S]*?\n\]);/);
+  const match = readFileSync(SCRIPT_FILE, 'utf8').match(/const RECORDED_ASKS = (\[[\s\S]*?\n\]);/);
   return match ? JSON.parse(match[1]) : [];
 }
 
@@ -2284,7 +2286,10 @@ async function liveElsewhere() {
   const calls = [];
   const before = (page) => {
     page.on('request', (request) => request.url().includes('/api/') && calls.push(request.url()));
-    return page.route(`${elsewhere}**`, (route) => route.fulfill({ contentType: 'text/html', body: readFileSync(PAGE_FILE, 'utf8') }));
+    return page.route(`${elsewhere}**`, (route) => {
+      const name = PAGE_FILES[new URL(route.request().url()).pathname];
+      return route.fulfill(name ? { path: fileURLToPath(new URL(name, APP_DIR)) } : { status: 404 });
+    });
   };
   await withPage('live', { url: `${elsewhere}#token=from-elsewhere`, sample: false, before }, async (page) => {
     const status = await page.textContent('#run-status');

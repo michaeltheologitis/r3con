@@ -24,6 +24,7 @@ TOKEN = "the-launch-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MEMOS = Path(__file__).resolve().parents[2] / "examples" / "memos"
+APP_DIR = Path(__file__).resolve().parents[2] / "src" / "r3con" / "app"
 GATE_TIMEOUT_SECONDS = 10
 LONG_RETRY_AFTER_SECONDS = 60
 # Far below GATE_TIMEOUT_SECONDS, which ends a held call by itself.
@@ -282,6 +283,32 @@ def test_the_page_is_served_without_the_token(client: TestClient):
 
 
 @pytest.mark.parametrize(
+    ("name", "content_type"),
+    [("app.css", "text/css"), ("app.js", "text/javascript")],
+)
+def test_the_pages_stylesheet_and_script_are_served_without_the_token(
+    client: TestClient, name: str, content_type: str
+):
+    del client.headers["Authorization"]
+    response = client.get(f"/{name}")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == f"{content_type}; charset=utf-8"
+    assert response.content == (APP_DIR / name).read_bytes()
+
+
+@pytest.mark.parametrize("name", ["app.css", "app.js"])
+def test_the_page_links_its_stylesheet_and_script(client: TestClient, name: str):
+    assert f'"{name}"' in client.get("/").text
+
+
+@pytest.mark.parametrize("path", ["/", "/app.css", "/app.js"])
+def test_the_page_and_its_files_are_revalidated_on_every_load(
+    client: TestClient, path: str
+):
+    assert client.get(path).headers["cache-control"] == "no-cache"
+
+
+@pytest.mark.parametrize(
     "authorization",
     [None, "Bearer wrong-token", "the-launch-token", "Basic the-launch-token"],
 )
@@ -299,7 +326,7 @@ def test_an_api_call_with_this_launchs_token_is_answered(client: TestClient):
     assert client.get("/api/keys").status_code == 200
 
 
-@pytest.mark.parametrize("path", ["/", "/api/keys"])
+@pytest.mark.parametrize("path", ["/", "/app.css", "/app.js", "/api/keys"])
 @pytest.mark.parametrize(
     "host", ["evil.example", f"evil.example:{PORT}", f"127.0.0.1:{PORT + 1}"]
 )
@@ -309,12 +336,14 @@ def test_a_request_that_names_another_host_is_refused(
     assert client.get(path, headers={"Host": host}).status_code == 403
 
 
+@pytest.mark.parametrize("path", ["/", "/app.css", "/app.js", "/api/keys"])
 @pytest.mark.parametrize(
     "origin", ["http://evil.example", "null", f"http://127.0.0.1:{PORT + 1}"]
 )
-def test_a_request_from_another_origin_is_refused(client: TestClient, origin: str):
-    response = client.post("/api/runs", headers={"Origin": origin}, json={})
-    assert response.status_code == 403
+def test_a_request_from_another_origin_is_refused(
+    client: TestClient, path: str, origin: str
+):
+    assert client.get(path, headers={"Origin": origin}).status_code == 403
 
 
 @pytest.mark.parametrize("host", [f"127.0.0.1:{PORT}", f"localhost:{PORT}"])
