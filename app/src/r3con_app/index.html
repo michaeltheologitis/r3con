@@ -207,6 +207,8 @@ p { margin: 0; }
 .node.working .spin { display: block; }
 .node.working .icon { color: var(--dim); }
 .node.void { opacity: 0.45; }
+.node.failed .icon, .node.failed .label { color: var(--err); }
+.node.failed .icon { opacity: 0.6; }
 .node:hover .label, .node.selected .label { color: var(--fg); }
 .node.selected .name { font-weight: 600; }
 .node.answer .icon {
@@ -521,7 +523,7 @@ p { margin: 0; }
       </div>
       <div class="keys" id="keys"></div>
       <p class="k" id="other-hint">Other is a self-hosted or OpenAI-compatible server, such as vLLM: pick other model… under the question and type its model.</p>
-      <p class="k" id="keys-note">Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.</p>
+      <p class="k" id="keys-note"></p>
       <div class="field-row">
         <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
         <button class="btn" id="keys-show" type="button">show keys</button>
@@ -588,7 +590,7 @@ p { margin: 0; }
         <div class="files file-view" id="file-view" hidden></div>
       </section>
 
-      <p class="note" id="mode-note">prototype · replays one recorded run</p>
+      <p class="note" id="mode-note"></p>
       <div class="drop-overlay" aria-hidden="true">drop to add files</div>
     </aside>
   </div>
@@ -955,14 +957,22 @@ p { margin: 0; }
   const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
   const ROUNDS = 2;
+  const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con-app';
+  const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+  const RUN_STILL_GOING = "a run is still going; it can't be stopped yet";
+  const TYPE_A_MODEL = 'type a model to run';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const LIVE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
   const LIVE_MODE_NOTE = 'live · r3con-app on this computer';
   const LIVE_INTRO = 'The 5 sample memos are loaded, with a question about them. Press run to run r3con on them, or add your own files.';
+  const PROTOTYPE_KEYS_NOTE =
+    "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
+  const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
+  const PROTOTYPE_INTRO = 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1006,10 +1016,11 @@ p { margin: 0; }
   const questionEl = $('question');
   const side = $('side');
 
-  // Served by r3con-app the page runs for real; opened as a file it is the prototype. The launch
-  // token lives only in this closure: it leaves the address bar at once and never reaches storage.
-  const live = location.protocol !== 'file:';
-  const token = takeToken();
+  // Served by r3con-app on this computer the page runs r3con; anywhere else it is the prototype,
+  // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
+  // once and never reaches storage.
+  const live = ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
+  const token = live ? takeToken() : null;
 
   function takeToken() {
     const found = new URLSearchParams(location.hash.slice(1)).get('token');
@@ -1033,7 +1044,9 @@ p { margin: 0; }
     filesDirty: true,
     run: null,
     runTurn: null,
-    stream: null,
+    // Aborts every stream of the run on the panel: its events and its asks.
+    streams: new AbortController(),
+    running: false,
     nodes: new Map(),
     edges: new Map(),
     timers: [],
@@ -1046,7 +1059,7 @@ p { margin: 0; }
   const view = { x: 0, y: 0, k: 1 };
 
   const filesAreSample = () => state.files === SAMPLE_FILES;
-  const replaysRecording = (question) => !live && filesAreSample() && question === SAMPLE.question;
+  const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
   const isPending = (file) => Boolean(state.run) && !state.run.docs.includes(file);
 
@@ -1153,13 +1166,22 @@ p { margin: 0; }
   // An error whose message is for the user: r3con-app's own words, or what went wrong reaching it.
   class ServerError extends Error {}
 
-  let tokenRefused = false;
+  // A stale token or a lost connection, kept for the status until a call to r3con-app succeeds.
+  let connectionProblem = null;
 
   // What to tell the user about `error`; one that is not the server's is a bug, so it also goes to the console.
-  function explain(error, fallback, consoleText) {
+  function explain(error, fallback, consoleText = fallback) {
     if (error instanceof ServerError) return error.message;
     console.error(consoleText, error);
     return fallback;
+  }
+
+  // A fetch or a read that failed, or with no error a stream that ended early: aborted on purpose,
+  // or r3con-app is out of reach.
+  function lost(error) {
+    if (error?.name === 'AbortError') return error;
+    connectionProblem = LOST_CONNECTION;
+    return new ServerError(LOST_CONNECTION);
   }
 
   async function api(path, { method = 'GET', body, signal } = {}) {
@@ -1172,13 +1194,14 @@ p { margin: 0; }
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (error) {
-      throw error.name === 'AbortError' ? error : new ServerError(LOST_CONNECTION);
+      throw lost(error);
     }
-    if (response.ok) return response;
     if (response.status === UNAUTHORIZED) {
-      tokenRefused = true;
+      connectionProblem = STALE_TOKEN;
       throw new ServerError(STALE_TOKEN);
     }
+    connectionProblem = null;
+    if (response.ok) return response;
     const reply = await response.json().catch(() => null);
     throw new ServerError(reply?.error ?? `r3con-app answered ${response.status} ${response.statusText}`.trim());
   }
@@ -1193,14 +1216,20 @@ p { margin: 0; }
   async function* serverEvents(body) {
     const reader = body.pipeThrough(new TextDecoderStream()).getReader();
     let buffer = '';
-    for (;;) {
-      const { value, done } = await reader.read().catch((error) => {
-        throw error.name === 'AbortError' ? error : new ServerError(LOST_CONNECTION);
-      });
-      if (done) return;
-      const frames = (buffer + value).split(/\r?\n\r?\n/);
-      buffer = frames.pop();
-      for (const data of frames.map(frameData).filter(Boolean)) yield JSON.parse(data);
+    try {
+      for (;;) {
+        const { value, done } = await reader.read().catch((error) => {
+          throw lost(error);
+        });
+        if (done) return;
+        const frames = (buffer + value).split(/\r?\n\r?\n/);
+        buffer = frames.pop();
+        for (const data of frames.map(frameData).filter(Boolean)) yield JSON.parse(data);
+      }
+    } finally {
+      // Closes the response when drawing an event throws; a stream that already failed rejects with
+      // the error the read threw.
+      reader.cancel().catch(() => {});
     }
   }
 
@@ -1212,7 +1241,7 @@ p { margin: 0; }
       last = event;
       onEvent(event);
     }
-    if (!ENDINGS.has(last?.type)) throw new ServerError(LOST_CONNECTION);
+    if (!ENDINGS.has(last?.type)) throw lost();
   }
 
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
@@ -1223,6 +1252,9 @@ p { margin: 0; }
   function provenanceOf(run, { summary_ids, parse_ids }) {
     return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids) };
   }
+
+  const totalsOf = (event) => ({ tokens: event.tokens?.total, usd: event.usd });
+  const keyedProviders = (status) => Object.keys(PROVIDERS).filter((provider) => status[provider]);
 
   // ---------- spinner ----------
 
@@ -1250,6 +1282,7 @@ p { margin: 0; }
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       model: SAMPLE.model,
+      source: 'recorded run',
       order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
   }
@@ -1295,12 +1328,12 @@ p { margin: 0; }
   // Filled in by r3con-app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
   function liveRun(question, model) {
     const empty = { r1: [], r2: [], schema: null, parsed: [], answer: null, calls: null, totals: null };
-    return { live: true, simulated: false, id: null, ids: [], question, model, docs: state.files, ...empty };
+    return { simulated: false, id: null, ids: [], question, model, docs: state.files, ...empty };
   }
 
   function runSummary(run) {
     if (run.simulated) return `simulated run · ${run.model} · nothing was sent`;
-    return [run.live ? null : 'recorded run', run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
+    return [run.source, run.model, ...spent(run.totals)].filter(Boolean).join(' · ');
   }
 
   function cites(run, id) {
@@ -1450,8 +1483,9 @@ p { margin: 0; }
   }
 
   function ariaName(node) {
-    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}`;
-    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}`;
+    const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
+    if (!node.file) return `${nodeName(node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
     return `${node.file.name}, ${isPending(node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
   }
 
@@ -1581,14 +1615,17 @@ p { margin: 0; }
     state.nodes.get(id).el.classList.add('working');
   }
 
-  function settleNode(id, { empty = false } = {}) {
+  // A node is settled when its call finished, empty or not, or failed when the run stopped first.
+  function settleNode(id, { empty = false, failed = false } = {}) {
     const node = state.nodes.get(id);
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
+    node.el.classList.toggle('failed', failed);
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = '✻';
     });
-    if (node.kind === 'parsed' && !empty) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    node.el.setAttribute('aria-label', ariaName(node));
     if (state.selected === id) renderInspector();
   }
 
@@ -1673,6 +1710,7 @@ p { margin: 0; }
   }
 
   function lightPath(run) {
+    if (!cites(run, 'answer').length) return;
     const path = answerLineage(run);
     panel.classList.add('is-lit');
     for (const [id, n] of state.nodes) n.el.classList.toggle('on-path', path.nodes.has(id));
@@ -1889,20 +1927,34 @@ p { margin: 0; }
     );
   }
 
+  let scrollQueued = false;
+
+  // Once a frame at most: reading scrollHeight lays the page out.
   function scrollTranscript() {
-    transcript.scrollTop = transcript.scrollHeight;
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      transcript.scrollTop = transcript.scrollHeight;
+    });
   }
 
   function narrator(body, { status = true } = {}) {
     let spinner = null;
+    const named = new Map();
+    const say = (kind, text, opts) => {
+      const el = line(kind, text, opts);
+      body.insertBefore(el, spinner);
+      scrollTranscript();
+      return el;
+    };
     return {
-      // Each stage's first line, by kind, for one that is rewritten once the stage ends.
-      heads: {},
-      say(kind, text, opts) {
-        const el = line(kind, text, opts);
-        body.insertBefore(el, spinner);
-        scrollTranscript();
-        return el;
+      say,
+      // Says a line once under `name`; saying it again rewrites it in place.
+      sayAs(name, kind, text, opts) {
+        const said = named.get(name);
+        if (said) said.querySelector('.t').textContent = text;
+        else named.set(name, say(kind, text, opts));
       },
       phase(text) {
         if (!spinner) {
@@ -1935,25 +1987,23 @@ p { margin: 0; }
   }
 
   const errorStatus = (text) => setStatus(h('span', { class: 'err' }, '● '), text);
+  const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
 
   function doneStatus(run) {
     setStatus(h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`);
   }
 
-  function nextRunLabel(question) {
-    const model = pickedModel() || 'type a model';
-    if (live) return model;
-    return replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${model}`;
-  }
-
   function readyStatus() {
     if (state.run) return;
-    if (tokenRefused) return errorStatus(STALE_TOKEN);
-    setStatus(`${plural(state.files.length, 'document')} ready · ${nextRunLabel(questionEl.value.trim())}`);
+    if (connectionProblem) return errorStatus(connectionProblem);
+    setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
+  // A question asks over the run on the panel once it has an answer, until the files change.
+  const canAsk = () => Boolean(state.run?.answer) && !state.filesDirty;
+
   function updateRunLabel() {
-    $('run-btn').textContent = state.run && !state.filesDirty ? 'send ⏎' : 'run ⏎';
+    $('run-btn').textContent = canAsk() ? 'send ⏎' : 'run ⏎';
   }
 
   function updateHint() {
@@ -1970,15 +2020,17 @@ p { margin: 0; }
       questionEl.focus();
       return;
     }
-    const asks = state.run && !state.filesDirty;
+    const asks = canAsk();
+    const refused = state.files.length ? refusal(question, asks) : null;
+    if (refused) {
+      setStatus(refused);
+      if (refused === TYPE_A_MODEL) $('model-other').focus();
+      return;
+    }
     if (!state.files.length) {
       narrator(addTurn(question).body, { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
-    } else if (!pickedModel() && (live || (!asks && !replaysRecording(question)))) {
-      setStatus('type a model to run');
-      $('model-other').focus();
-      return;
     } else if (asks) {
-      followUp(question);
+      mode.followUp(question);
     } else {
       startRun(question);
     }
@@ -1986,8 +2038,14 @@ p { margin: 0; }
     updateRunLabel();
   }
 
-  function followUp(question) {
-    if (state.run.live) return askOver(state.run, question, pickedModel());
+  // Why the question can't be sent yet, if it can't; it then stays in the box.
+  function refusal(question, asks) {
+    if (state.running) return state.filesDirty ? RUN_STILL_GOING : ASK_WHEN_DONE;
+    if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
+    return asks ? null : mode.refuseFiles(state.files);
+  }
+
+  function simulatedFollowUp(question) {
     const narr = narrator(addTurn(question).body, { status: false });
     const reply = () => {
       narr.done();
@@ -2067,6 +2125,8 @@ p { margin: 0; }
 
   const hasNodes = (kind) => [...state.nodes.values()].some((n) => n.kind === kind);
   const settledCount = (kind) => [...state.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
+  // Round 2's first line, rewritten once every document is through it.
+  const ROUND_TWO_HEAD = 'round 2 head';
 
   function stageProgress(kind, n) {
     return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(kind)} of ${n}`;
@@ -2077,10 +2137,11 @@ p { margin: 0; }
     const heads = {
       r1: 'round 1 · one summary per document',
       r2: 'round 2 · each document beside the other summaries',
-      schema: 'proposing a structure',
+      schema: STAGE_PHASE.schema,
       parsed: `parsing ${plural(n, 'document')}`,
     };
-    if (heads[kind]) narr.heads[kind] = narr.say('main', heads[kind]);
+    if (kind === 'r2') narr.sayAs(ROUND_TWO_HEAD, 'main', heads.r2);
+    else if (heads[kind]) narr.say('main', heads[kind]);
     narr.phase(stageProgress(kind, n));
   }
 
@@ -2106,16 +2167,17 @@ p { margin: 0; }
     return schemaClasses(run.schema.code).join(', ') || 'structure ready';
   }
 
+  // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
   function settle(run, narr, id) {
     const [kind] = splitId(id);
     const n = run.docs.length;
     settleNode(id, { empty: isVoid(run, id) });
     showCites(run, id);
-    narr.say('sub', settledLine(run, id), { node: id });
+    narr.sayAs(id, 'sub', settledLine(run, id), { node: id });
     narr.phase(stageProgress(kind, n));
     if (kind !== 'r2' || settledCount('r2') < n) return;
     const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
-    narr.heads.r2.querySelector('.t').textContent = `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`;
+    narr.sayAs(ROUND_TWO_HEAD, 'main', `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`);
   }
 
   function sayAnswer(run, narr, answer, node = null) {
@@ -2131,25 +2193,23 @@ p { margin: 0; }
     narr.done();
     if (run.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
     sayAnswer(run, narr, run.answer, 'answer');
+    updateRunLabel();
   }
 
   function finishRun(run, narr) {
     narr.say('sub', runSummary(run));
     doneStatus(run);
+    if (state.selected === 'answer') renderInspector();
   }
 
-  // The next question starts a new run, rather than asking over one that may not have built anything.
-  function failRun(run, narr, text) {
+  // Marks every node still working as stopped; with no answer, the next question starts a new run.
+  function failRun(narr, text) {
     narr.done();
     for (const node of state.nodes.values()) {
-      if (!node.el.classList.contains('working')) continue;
-      node.el.classList.add('failed');
-      settleNode(node.id, { empty: true });
+      if (node.el.classList.contains('working')) settleNode(node.id, { failed: true });
     }
-    narr.say('main', h('span', { class: 'err' }, text));
+    sayError(narr, text);
     errorStatus(text);
-    state.filesDirty = true;
-    updateRunLabel();
   }
 
   function buildTimeline(run, narr) {
@@ -2202,13 +2262,23 @@ p { margin: 0; }
       finishRun(run, narr);
     });
     t += TIMING.litDelay;
-    if (cites(run, 'answer').length) at(t, () => lightPath(run));
+    at(t, () => lightPath(run));
     return steps;
+  }
+
+  function playTimeline(run, narr) {
+    $('replay-btn').hidden = false;
+    const steps = buildTimeline(run, narr);
+    if (reduceMotion()) {
+      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
+      return;
+    }
+    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
   }
 
   // ---------- live ----------
 
-  // Fills in `run` from one of its events and draws it; a document read in parts finishes once per part.
+  // Fills in `run` from one of its events and draws it.
   function drawEvent(run, narr, event) {
     if (run !== state.run) return;
     const doc = (id) => docIndices(run, [id])[0];
@@ -2249,39 +2319,40 @@ p { margin: 0; }
         showAnswer(run, narr);
         break;
       case 'run_finished':
-        run.totals = { tokens: event.tokens?.total, usd: event.usd };
+        run.totals = totalsOf(event);
         finishRun(run, narr);
-        if (cites(run, 'answer').length) lightPath(run);
+        lightPath(run);
         break;
       case 'run_failed':
-        failRun(run, narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
+        failRun(narr, [event.stage ? `failed in ${event.stage}` : 'failed', event.error].join(' · '));
         break;
     }
   }
 
+  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them.
   function addSnippet(run, narr, id, summary, provenance) {
     const [kind, i] = splitId(id);
-    const earlier = run[kind][i];
-    if (!earlier) {
-      run[kind][i] = { summary, provenance };
-      return settle(run, narr, id);
-    }
-    run[kind][i] = { summary: [earlier.summary, summary].filter(Boolean).join('\n\n'), provenance: [...new Set([...earlier.provenance, ...provenance])] };
-    settleNode(id, { empty: isVoid(run, id) });
-    showCites(run, id);
+    const earlier = run[kind][i] ?? { summary: '', provenance: [] };
+    run[kind][i] = {
+      summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
+      provenance: [...new Set([...earlier.provenance, ...provenance])],
+    };
+    settle(run, narr, id);
   }
 
   async function streamRun(run, narr) {
-    const stream = new AbortController();
-    state.stream = stream;
+    const { signal } = state.streams;
+    state.running = true;
     narr.phase('starting');
     try {
       const body = { question: run.question, model: run.model, documents: run.docs.map((f) => f.text) };
-      const started = await api('/api/runs', { method: 'POST', body, signal: stream.signal });
+      const started = await api('/api/runs', { method: 'POST', body, signal });
       run.id = (await started.json()).run_id;
-      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event), stream.signal);
+      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(run, narr, event), signal);
     } catch (error) {
-      if (error.name !== 'AbortError') failRun(run, narr, explain(error, error.message, 'the live run stopped'));
+      if (error.name !== 'AbortError') failRun(narr, explain(error, error.message, 'the live run stopped'));
+    } finally {
+      state.running = false;
     }
   }
 
@@ -2289,56 +2360,49 @@ p { margin: 0; }
   async function askOver(run, question, model) {
     const narr = narrator(addTurn(question).body, { status: false });
     const how = `an ask over this run · ${model}`;
+    const { signal } = state.streams;
     const failed = (text) => {
       narr.done();
-      narr.say('main', h('span', { class: 'err' }, text));
+      sayError(narr, text);
     };
+    // Once another run is on the panel, this ask's citations would point at its nodes.
     const onEvent = (event) => {
+      if (run !== state.run) return;
       if (event.type === 'reasoning_finished') {
         narr.done();
         sayAnswer(run, narr, { text: event.answer, provenance: provenanceOf(run, event.provenance) });
       }
-      if (event.type === 'ask_finished') narr.say('sub', [how, ...spent({ tokens: event.tokens?.total, usd: event.usd })].join(' · '));
+      if (event.type === 'ask_finished') narr.say('sub', [how, ...spent(totalsOf(event))].join(' · '));
       if (event.type === 'ask_failed') failed(`${how} · failed · ${event.error}`);
     };
     narr.phase(`asking · ${model}`);
     try {
-      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
-      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent);
+      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model }, signal });
+      await follow(`/api/asks/${(await asked.json()).ask_id}/events`, onEvent, signal);
     } catch (error) {
-      failed(explain(error, error.message, 'the ask stopped'));
+      if (error.name !== 'AbortError') return failed(explain(error, error.message, 'the ask stopped'));
+      narr.done();
+      narr.say('main', 'stopped when a new run started', { dim: true });
     }
   }
 
   function playRun(run) {
     cancelTimers();
-    state.stream?.abort();
+    state.streams.abort();
+    state.streams = new AbortController();
     const docPositions = new Map([...state.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
     clearPanel();
     state.run = run;
     // Each call is shown about one input per document, so faint lines grow as n²; fading them keeps the grey steady.
     panel.style.setProperty('--context-fade', Math.min(1, FAINT_FADE_FROM_DOCS / run.docs.length));
     state.runTurn.body.replaceChildren();
-    $('replay-btn').hidden = Boolean(run.live);
     state.userMoved = false;
     syncDocNodes({ at: docPositions, animate: true, replan: true });
-    const narr = narrator(state.runTurn.body);
-    if (run.live) return streamRun(run, narr);
-    const steps = buildTimeline(run, narr);
-    if (reduceMotion()) {
-      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
-      return;
-    }
-    for (const s of steps) state.timers.push(setTimeout(s.run, s.at));
-  }
-
-  function newRun(question) {
-    if (live) return liveRun(question, pickedModel());
-    return replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel());
+    mode.play(run, narrator(state.runTurn.body));
   }
 
   function startRun(question) {
-    const run = newRun(question);
+    const run = mode.newRun(question);
     state.filesDirty = false;
     state.runTurn = addTurn(question);
     playRun(run);
@@ -2391,8 +2455,7 @@ p { margin: 0; }
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result));
       reader.onerror = () => resolve('');
-      // A live run is sent the whole file; the page shows only its start.
-      reader.readAsText(live ? file : file.slice(0, READ_BYTES));
+      reader.readAsText(file);
     });
   }
 
@@ -2473,29 +2536,19 @@ p { margin: 0; }
 
   // ---------- keys ----------
 
-  // Served by r3con-app, the server keeps each key; opened as a file, the page only notes that one was entered.
+  // The prototype only notes which providers were given a key; r3con-app keeps the keys themselves.
   const keyed = new Set();
 
-  async function saveKey(provider, key, endpoint) {
-    if (!live) return keyed.add(provider);
-    const body = provider !== OTHER ? { provider, key } : key ? { provider, endpoint, key } : { provider, endpoint };
-    await api('/api/keys', { method: 'POST', body });
-  }
-
-  // A provider whose variable is set where r3con-app runs counts as having a key.
-  async function providersWithKeys() {
-    if (!live) return [...keyed];
-    const status = await (await api('/api/keys')).json();
-    return Object.keys(PROVIDERS).filter((provider) => status[provider]);
-  }
-
-  async function refreshKeys() {
-    const providers = await providersWithKeys();
+  function renderKeys(providers) {
     for (const provider of Object.keys(PROVIDERS)) {
       $(`state-${provider}`).textContent = providers.includes(provider) ? 'set' : '';
     }
     renderPicker(providers);
     readyStatus();
+  }
+
+  async function refreshKeys() {
+    renderKeys(await mode.providersWithKeys());
   }
 
   // ---------- model picker ----------
@@ -2621,20 +2674,22 @@ p { margin: 0; }
     $('settings-saved').textContent = text;
   }
 
-  // Other is entered once it has an endpoint; on failure the fields keep what was typed until they close.
+  // Other is entered once it has an endpoint. Keys are saved one at a time, the markers following
+  // each answer; on a failure the save stops there, and the fields keep what was typed until they close.
   async function saveSettings() {
     const endpoint = $('endpoint-other').value;
     const entered = Object.keys(PROVIDERS)
       .map((provider) => [provider, $(`key-${provider}`).value.trim()])
       .filter(([provider, key]) => (provider === OTHER ? endpoint : key));
     if (!entered.length) return showSaveResult('nothing to save');
-    await Promise.all(entered.map(([provider, key]) => saveKey(provider, key, provider === OTHER ? endpoint : undefined)));
-    clearSettings();
-    try {
-      await refreshKeys();
-    } catch (error) {
-      return showSaveResult(`saved · ${explain(error, "couldn't refresh", "couldn't read which providers have keys")}`);
+    for (const [provider, key] of entered) {
+      try {
+        renderKeys(await mode.saveKey(provider, key, provider === OTHER ? endpoint : undefined));
+      } catch (error) {
+        return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't save", "couldn't save the keys")}`);
+      }
     }
+    clearSettings();
     showSaveResult('saved');
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
@@ -2825,13 +2880,9 @@ p { margin: 0; }
       e.preventDefault();
       $('settings-form').requestSubmit();
     });
-    $('settings-form').addEventListener('submit', async (e) => {
+    $('settings-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      try {
-        await saveSettings();
-      } catch (error) {
-        showSaveResult(explain(error, "couldn't save", "couldn't save the keys"));
-      }
+      saveSettings();
     });
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.run && playRun(state.run));
@@ -2893,6 +2944,49 @@ p { margin: 0; }
     }).observe(panel);
   }
 
+  // ---------- modes ----------
+  // What differs between the page served by r3con-app and the prototype, decided once at load.
+
+  const prototypeMode = {
+    intro: PROTOTYPE_INTRO,
+    note: PROTOTYPE_MODE_NOTE,
+    keysNote: PROTOTYPE_KEYS_NOTE,
+    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
+    needsModel: (question, asks) => !asks && !replaysRecording(question),
+    refuseFiles: () => null,
+    newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
+    play: playTimeline,
+    followUp: simulatedFollowUp,
+    saveKey: async (provider) => [...keyed.add(provider)],
+    providersWithKeys: async () => [...keyed],
+  };
+
+  // A provider whose variable is set where r3con-app runs counts as having a key.
+  const liveMode = {
+    intro: LIVE_INTRO,
+    note: LIVE_MODE_NOTE,
+    keysNote: LIVE_KEYS_NOTE,
+    nextRun: () => pickedModel() || 'type a model',
+    needsModel: () => true,
+    refuseFiles: unreadableFiles,
+    newRun: (question) => liveRun(question, pickedModel()),
+    play: streamRun,
+    followUp: (question) => askOver(state.run, question, pickedModel()),
+    async saveKey(provider, key, endpoint) {
+      const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
+      return keyedProviders(await saved.json());
+    },
+    providersWithKeys: async () => keyedProviders(await (await api('/api/keys')).json()),
+  };
+
+  // r3con refuses a blank document, so a run with one is not sent.
+  function unreadableFiles(files) {
+    const names = files.filter((f) => !f.text.trim()).map((f) => f.name);
+    return names.length ? `no readable text in ${names.join(', ')}; nothing was sent` : null;
+  }
+
+  const mode = live ? liveMode : prototypeMode;
+
   function init() {
     restoreTheme();
     removeStored(RETIRED_SETTINGS_KEY);
@@ -2902,13 +2996,10 @@ p { margin: 0; }
     updateRunLabel();
     renderPicker([]);
     readyStatus();
-    refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys", "couldn't read which providers have keys")));
-    if (live) {
-      $('keys-note').textContent = LIVE_KEYS_NOTE;
-      $('mode-note').textContent = LIVE_MODE_NOTE;
-    }
-    const intro = live ? LIVE_INTRO : 'The 5 sample memos are loaded, with the question this run answered. Press run to watch it.';
-    transcript.append(line('main', intro, { dim: true }));
+    refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
+    $('keys-note').textContent = mode.keysNote;
+    $('mode-note').textContent = mode.note;
+    transcript.append(line('main', mode.intro, { dim: true }));
     applyView();
     syncDocNodes();
     wire();
