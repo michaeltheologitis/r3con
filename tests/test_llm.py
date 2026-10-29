@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
+    _ERROR_CHARS,
     _RETRY_AFTER_JITTER_SECONDS,
     litellm_chat_completion,
     litellm_chat_completion_full,
@@ -69,6 +70,10 @@ TOO_LONG = (400, VLLM_TOO_LONG)
 CALLER_RETRY_SETTINGS = {"num_retries", "max_retries", "retry_policy"}
 LONGEST_FIRST_BACKOFF = 1
 NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
+PRICED = "openai/priced"
+USD_IN, USD_OUT = 1.0, 10.0
+KEY = "sk-not-a-real-key-0123456789"
+BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 
 
 class Flat(BaseModel):
@@ -109,6 +114,18 @@ def loud_litellm(monkeypatch):
 
 
 @pytest.fixture
+def priced(monkeypatch):
+    """litellm's price map with PRICED at USD_IN an input token, USD_OUT an output one."""
+    entry = {
+        "input_cost_per_token": USD_IN,
+        "output_cost_per_token": USD_OUT,
+        "litellm_provider": "openai",
+        "mode": "chat",
+    }
+    monkeypatch.setitem(litellm.model_cost, PRICED, entry)
+
+
+@pytest.fixture
 def top_draws(monkeypatch):
     """Every random draw at the top of its range: the longest backoff and jitter."""
     monkeypatch.setattr(random, "uniform", lambda low, high: high)
@@ -118,9 +135,9 @@ def litellm_settings():
     return litellm.suppress_debug_info, logging.getLogger("LiteLLM").level
 
 
-def ask(llm, **kwargs):
+def ask(llm, model=MODEL, **kwargs):
     return litellm_chat_completion(
-        system_prompt="s", user_prompt="u", model=MODEL, completion=llm, **kwargs
+        system_prompt="s", user_prompt="u", model=model, completion=llm, **kwargs
     )
 
 
@@ -490,28 +507,20 @@ def test_a_callers_own_retry_setting_replaces_r3cons_resends(
     assert len(httpserver.log) == requests
 
 
-def test_a_recorded_call_carries_litellms_price_for_it(llm, monkeypatch, tmp_path):
-    usd_in, usd_out = 1.0, 10.0
-    entry = {
-        "input_cost_per_token": usd_in,
-        "output_cost_per_token": usd_out,
-        "litellm_provider": "openai",
-        "mode": "chat",
-    }
-    monkeypatch.setitem(litellm.model_cost, "openai/priced", entry)
+def test_a_recorded_call_carries_litellms_price_for_it(llm, priced, tmp_path):
     run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
 
     litellm_chat_completion(
         system_prompt="s",
         user_prompt="u",
-        model="openai/priced",
+        model=PRICED,
         completion=llm.replies("ok"),
         run=run,
     )
 
     [step] = run.steps
     assert (
-        step.usd == step.tokens["prompt"] * usd_in + step.tokens["completion"] * usd_out
+        step.usd == step.tokens["prompt"] * USD_IN + step.tokens["completion"] * USD_OUT
     )
 
 
@@ -563,6 +572,98 @@ def test_a_call_r3con_did_not_resend_itself_records_no_sends_or_wait(llm, tmp_pa
 
     [step] = run.steps
     assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+def test_a_call_that_gives_up_resending_is_recorded_and_its_error_raised_as_it_was(
+    llm, monkeypatch, tmp_path, top_draws
+):
+    monkeypatch.setattr(settings, "LLM_TEMPORARY_ERROR_RETRIES", 2)
+    errors = [slowed_down(retry_after="1.004") for _ in range(3)]
+    monkeypatch.setattr(litellm, "completion", llm.replies(*errors))
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    with pytest.raises(litellm.RateLimitError) as raised:
+        litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model=MODEL, run=run
+        )
+
+    assert raised.value is errors[-1]
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (3, 4.01)
+    assert step.error == "RateLimitError: litellm.RateLimitError: slow down"
+    assert (step.response, step.tokens, step.usd) == ({}, None, 0.0)
+
+
+def test_a_refusal_is_recorded_as_sent_once_with_its_error(llm, monkeypatch, tmp_path):
+    refused = litellm.BadRequestError(
+        message="unknown parameter: tone", llm_provider="openai", model=MODEL
+    )
+    monkeypatch.setattr(litellm, "completion", llm.replies(refused))
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    with pytest.raises(litellm.BadRequestError):
+        litellm_chat_completion(
+            system_prompt="s", user_prompt="u", model=MODEL, run=run
+        )
+
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (1, 0)
+    assert step.error == f"{BAD_REQUEST}unknown parameter: tone"
+
+
+def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(
+    llm, tmp_path
+):
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    with pytest.raises(litellm.RateLimitError):
+        ask(llm.replies(slowed_down(retry_after="1")), run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.resend_wait_seconds) == (None, None)
+    assert step.error == "RateLimitError: litellm.RateLimitError: slow down"
+
+
+def test_a_failed_call_costs_nothing_so_the_stages_cost_stays_a_number(
+    llm, priced, tmp_path
+):
+    refused = litellm.BadRequestError(message="no", llm_provider="openai", model=MODEL)
+    llm.replies("ok", refused)
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    ask(llm, model=PRICED, run=run)
+    with pytest.raises(litellm.BadRequestError):
+        ask(llm, model=PRICED, run=run)
+
+    answered, failed = run.steps
+    totals = run.compute_totals()
+    assert (failed.usd, failed.tokens) == (0.0, None)
+    assert (totals["n_steps"], totals["tokens"]) == (2, answered.tokens)
+    assert totals["usd"] == answered.usd > 0
+
+
+@pytest.mark.parametrize(
+    ("message", "recorded"),
+    [
+        ("refused\nTraceback (most recent call last):", "refused"),
+        ("x" * _ERROR_CHARS, "x" * (_ERROR_CHARS - len(BAD_REQUEST))),
+        (f"bad key Bearer {KEY}", "bad key Bearer <api_key>"),
+    ],
+    ids=["first-line", "cut-short", "key-masked"],
+)
+def test_a_recorded_error_is_its_first_line_cut_short_without_the_key(
+    llm, tmp_path, message, recorded
+):
+    refused = litellm.BadRequestError(
+        message=message, llm_provider="openai", model=MODEL
+    )
+    run = StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+    with pytest.raises(litellm.BadRequestError):
+        ask(llm.replies(refused), run=run, api_key=KEY)
+
+    [step] = run.steps
+    assert step.error == BAD_REQUEST + recorded
 
 
 def test_litellm_reads_its_bundled_price_map():

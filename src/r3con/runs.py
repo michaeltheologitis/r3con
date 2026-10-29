@@ -56,8 +56,8 @@ Layout per ``logs/<run-folder>/``:
   above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
-call that completed, plus ``transcript.yaml`` where the stage writes one) and
-``error.txt``, the traceback.
+call it made, one that failed included, plus ``transcript.yaml`` where the stage writes
+one) and ``error.txt``, the traceback.
 
 Two layers in code:
 
@@ -67,14 +67,17 @@ Two layers in code:
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
   writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, usd, sends, resend_wait_seconds, finish_reason, prompt, output}``, where
-  ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's price
-  for the call, or ``null`` when it cannot price it, ``sends`` is the times the request
-  was sent, more than 1 when a temporary error made r3con resend it, and
+  tokens, usd, sends, resend_wait_seconds, finish_reason, error, prompt, output}``,
+  where ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's
+  price for the call, or ``null`` when it cannot price it, ``sends`` is the times the
+  request was sent, more than 1 when a temporary error made r3con resend it, and
   ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
-  ``null`` when r3con did not resend it itself) and, unless skipped, ``transcript.yaml``
-  (the readable message thread). Aggregate token and cost totals are available via
-  ``compute_totals()`` so callers fold them into the stage's ``result.json``.
+  ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
+  call that raised, the error's class and the first line of its message: such a call
+  has ``tokens``, ``finish_reason`` and ``output`` ``null`` and ``usd`` 0, as it got no
+  reply to bill) and, unless skipped, ``transcript.yaml`` (the readable message thread).
+  Aggregate token and cost totals are available via ``compute_totals()`` so callers
+  fold them into the stage's ``result.json``.
 """
 
 from __future__ import annotations
@@ -345,6 +348,7 @@ class StepRecord:
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
+    error: str | None = None
 
 
 def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
@@ -403,6 +407,7 @@ class StageRun:
         usd: float | None = None,
         sends: int | None = None,
         resend_wait_seconds: float | None = None,
+        error: str | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
         completion order; each call's ``kind`` carries its own identity."""
@@ -417,6 +422,7 @@ class StageRun:
                 usd=usd,
                 sends=sends,
                 resend_wait_seconds=resend_wait_seconds,
+                error=error,
             )
             self.steps.append(step)
         return step
@@ -461,6 +467,7 @@ class StageRun:
                     "sends": s.sends,
                     "resend_wait_seconds": s.resend_wait_seconds,
                     "finish_reason": resp.get("finish_reason"),
+                    "error": s.error,
                     "prompt": s.messages,
                     "output": resp.get("content"),
                 }
@@ -478,14 +485,16 @@ class StageRun:
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
         """The readable conversation = the final step's full message thread + its
-        response. For a multi-turn loop (codeact) the last step's ``messages`` already
-        contain the whole grown conversation; for a retry loop (the schema proposal)
-        they are the final (successful) attempt — earlier attempts live in ``calls.json``. Empty
-        run → ``[]``. (Stages with many parallel calls flush with
-        ``write_transcript=False`` and never reach here.)"""
-        if not self.steps:
+        response, among the steps that did not raise. For a multi-turn loop (codeact)
+        the last step's ``messages`` already contain the whole grown conversation; for a
+        retry loop (the schema proposal) they are the final (successful) attempt —
+        earlier attempts, and calls that raised, live in ``calls.json``. No such step →
+        ``[]``. (Stages with many parallel calls flush with ``write_transcript=False``
+        and never reach here.)"""
+        replied = [step for step in self.steps if step.error is None]
+        if not replied:
             return []
-        last = self.steps[-1]
+        last = replied[-1]
         thread = list(last.messages)
         if last.response.get("content"):
             thread.append(last.response)

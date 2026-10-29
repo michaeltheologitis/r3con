@@ -21,6 +21,7 @@ from r3con.settings import settings_snapshot
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+DOWN = "APIConnectionError: litellm.APIConnectionError: provider down"
 
 
 class Sample(BaseModel):
@@ -203,6 +204,29 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
     calls = json.loads((run.dir / "calls.json").read_text())
     recorded = [(call["sends"], call["resend_wait_seconds"]) for call in calls]
     assert recorded == [(3, 2.5), (None, None)]
+
+
+def test_each_call_records_its_error_and_one_that_raised_no_output(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    run.add_step(messages=[], response=reply("a"))
+    run.add_step(messages=[], response={}, usd=0.0, error=DOWN)
+    run.flush(write_transcript=False)
+    calls = json.loads((run.dir / "calls.json").read_text())
+    recorded = [
+        (call["error"], call["finish_reason"], call["output"]) for call in calls
+    ]
+    assert recorded == [(None, "stop", "a"), (DOWN, None, None)]
+
+
+def test_a_transcript_leaves_out_a_call_that_raised(logger):
+    run = StageRun(stage="reasoning", task_logger=logger)
+    first = [{"role": "system", "content": "S"}, {"role": "user", "content": "U1"}]
+    run.add_step(kind="turn-1", messages=first, response=reply("A1"))
+    second = [*first, {"role": "assistant", "content": "A1"}]
+    second.append({"role": "user", "content": "<observation>obs</observation>"})
+    run.add_step(kind="turn-2", messages=second, response={}, usd=0.0, error=DOWN)
+    contents = [m["content"] for m in flushed_transcript(run)["messages"]]
+    assert contents == ["S", "U1", "A1"]
 
 
 def test_a_multi_turn_transcript_is_the_last_turns_whole_thread(logger):

@@ -53,7 +53,9 @@ caller's own ``num_retries``, ``max_retries`` or ``retry_policy`` goes to
 called as it is, once per request, and owns its retrying: a ``litellm.Router`` resends by
 the same status rule, with its own cooldowns and fallbacks. A recorded call's ``sends``
 and ``resend_wait_seconds`` come from tenacity, and are ``None`` for a call r3con did not
-resend itself.
+resend itself. A call that raises, once r3con stops resending it, is recorded too, with
+its error's class and first line, its ``api_key`` masked, and then the error is raised
+as it was.
 """
 
 from __future__ import annotations
@@ -88,6 +90,8 @@ _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
 _WAIT_DIGITS = 2
+_ERROR_CHARS = 300
+_MASKED_KEY = "<api_key>"
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
@@ -189,7 +193,8 @@ def litellm_chat_completion_full(
     If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
     to it with the request messages, response content, tokens, cost in USD, and
     ``kind`` label. Pass ``kind="retry"`` (or another custom label) on retry attempts
-    so the transcript renders them as a labeled block.
+    so the transcript renders them as a labeled block. A call that raises is recorded
+    with its error, no reply and a cost of 0, and the error is raised unchanged.
     """
 
     if messages is not None:
@@ -227,11 +232,24 @@ def litellm_chat_completion_full(
             },
         }
 
-    sends = resend_wait_seconds = None
-    if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
-        response, sends, resend_wait_seconds = _resend_temporary_errors(request)
-    else:
-        response = (completion or litellm.completion)(**request)
+    attempts: list[tenacity.RetryCallState] = []
+    try:
+        if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
+            response = _resend_temporary_errors(request, attempts)
+        else:
+            response = (completion or litellm.completion)(**request)
+    except Exception as error:
+        if run is not None:
+            run.add_step(
+                kind=kind,
+                messages=request_messages,
+                response={},
+                schema=request.get("response_format"),
+                usd=0.0,
+                error=_in_brief(error, api_key),
+                **_resends(attempts),
+            )
+        raise
 
     if run is not None:
         run.add_step(
@@ -241,8 +259,7 @@ def litellm_chat_completion_full(
             schema=request.get("response_format"),
             tokens=_extract_tokens(response),
             usd=_extract_usd(response),
-            sends=sends,
-            resend_wait_seconds=resend_wait_seconds,
+            **_resends(attempts),
         )
 
     return response
@@ -403,23 +420,44 @@ def quiet_litellm() -> Iterator[None]:
             logger.setLevel(level)
 
 
-def _resend_temporary_errors(request: dict[str, Any]) -> tuple[Any, int, float]:
-    """The response to ``request``, the times it was sent, and the seconds waited
-    between those sends, to hundredths."""
-    # tenacity hands each hook the one RetryCallState it updates on every send.
-    states: list[tenacity.RetryCallState] = []
+def _resend_temporary_errors(
+    request: dict[str, Any], attempts: list[tenacity.RetryCallState]
+) -> Any:
+    """The response to ``request``. Each send appends tenacity's state to
+    ``attempts``, for :func:`_resends` to read whether the last send answered or
+    raised."""
     resending = tenacity.Retrying(
         sleep=_sleep,
         retry=tenacity.retry_if_exception(is_temporary),
         stop=_give_up,
         wait=_wait_before_resending,
-        before=states.append,
+        before=attempts.append,
         before_sleep=tenacity.before_sleep_log(_log, logging.WARNING),
         reraise=True,
     )
-    response = resending(litellm.completion, **request, num_retries=0)
-    state = states[-1]
-    return response, state.attempt_number, round(state.idle_for, _WAIT_DIGITS)
+    return resending(litellm.completion, **request, num_retries=0)
+
+
+def _resends(attempts: list[tenacity.RetryCallState]) -> dict[str, Any]:
+    """The times a request was sent and the seconds waited between those sends, to
+    hundredths, or ``None`` both when r3con did not resend it itself."""
+    if not attempts:
+        return {"sends": None, "resend_wait_seconds": None}
+    # tenacity hands each hook the one RetryCallState it updates on every send.
+    state = attempts[-1]
+    return {
+        "sends": state.attempt_number,
+        "resend_wait_seconds": round(state.idle_for, _WAIT_DIGITS),
+    }
+
+
+def _in_brief(error: Exception, api_key: str | None) -> str:
+    """``error``'s class and the first line of its message, ``api_key`` masked, cut to
+    :data:`_ERROR_CHARS`. A provider may echo the key back, and litellm passes it on."""
+    first_line = next(iter(str(error).splitlines()), "")
+    if api_key:
+        first_line = first_line.replace(api_key, _MASKED_KEY)
+    return f"{type(error).__name__}: {first_line}"[:_ERROR_CHARS]
 
 
 def is_temporary(error: BaseException) -> bool:

@@ -534,7 +534,12 @@ def test_a_fallback_that_fails_after_a_turn_leaves_that_turn_in_its_transcript(
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(litellm.APIConnectionError):
         answer(llm, logger)
-    assert [call["kind"] for call in read_json(logger, "reasoning/calls")] == ["turn-1"]
+    calls = read_json(logger, "reasoning/calls")
+    assert [(call["kind"], call["error"] is None) for call in calls] == [
+        ("direct", False),
+        ("turn-1", True),
+        ("turn-2", False),
+    ]
     assert (logger.dir / "reasoning" / "error.txt").is_file()
     transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
     assert transcript["messages"][-1]["content"] == NEVER_COMMITS
@@ -706,9 +711,12 @@ def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(
     with pytest.raises(litellm.APIConnectionError):
         answer(answering_llm.answers(relevance=["one", "two", down, down]), logger)
     calls = read_json(logger, "relevance/calls")
-    assert sorted(call["kind"] for call in calls) == [
-        "relevance-r1-d0",
-        "relevance-r1-d1",
+    down_in_brief = "APIConnectionError: litellm.APIConnectionError: provider down"
+    assert sorted((call["kind"], call["error"]) for call in calls) == [
+        ("relevance-r1-d0", None),
+        ("relevance-r1-d1", None),
+        ("relevance-r2-d0", down_in_brief),
+        ("relevance-r2-d1", down_in_brief),
     ]
 
 
@@ -939,8 +947,9 @@ def test_a_later_stage_splits_further_without_renumbering(
     assert summary_headings(llm) == as_ids(
         result.document_ids, ["1", "2", "3", "4.1", "4.2", "5"]
     )
-    kinds = [call["kind"] for call in read_json(logger, "structuring/parsing/calls")]
-    assert sorted(kind for kind in kinds if "-d3" in kind) == [
+    calls = read_json(logger, "structuring/parsing/calls")
+    replied = [call["kind"] for call in calls if call["error"] is None]
+    assert sorted(kind for kind in replied if "-d3" in kind) == [
         f"parse-d3c{k}" for k in range(4)
     ]
     assert len(llm.requests_for("relevance")) == (12 if measured else 13)
