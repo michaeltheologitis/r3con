@@ -42,6 +42,7 @@ jobs:
       - run: uv run --locked ruff check
       - run: uv run --locked ruff format --check
       - run: uv run --locked pyright
+      - run: npx --yes --package typescript@7.0.2 tsc -p tsconfig.json
 
   test:
     runs-on: ubuntu-latest
