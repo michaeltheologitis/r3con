@@ -473,12 +473,12 @@ p { margin: 0; }
 }
 .file-list { list-style: none; margin: 0; padding: 0; }
 .file-list li { display: flex; align-items: baseline; gap: 2ch; }
+.file-list button { min-height: 24px; }
 .file {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 2ch;
   flex: 1;
-  min-width: 0;
   padding: 0.05em 0;
   font: inherit;
   color: var(--fg);
@@ -598,7 +598,10 @@ p { margin: 0; }
 
       <section class="pane" id="files-pane" role="tabpanel" aria-labelledby="tab-files" hidden>
         <div class="files" id="file-list-view">
-          <div class="dim" id="files-head"></div>
+          <div>
+            <div class="dim" id="files-head"></div>
+            <p class="dim" id="files-said" aria-live="polite"></p>
+          </div>
           <ul class="file-list" id="file-list"></ul>
           <div class="file-actions">
             <input class="vh" id="file-input" type="file" multiple>
@@ -1180,6 +1183,7 @@ p { margin: 0; }
     inspectorDroppedAt: null,
   };
 
+  // The whole sample set, which the recorded replay needs.
   const filesAreSample = () => state.files === SAMPLE_FILES;
   const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
   // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
@@ -2309,12 +2313,10 @@ p { margin: 0; }
   // A job the page asked to stop ends as stopped; any other failure gives its error.
   const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
 
-  const readyLine = () => `${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`;
-
   function readyStatus() {
     if (state.tabs.length) return;
     if (connectionProblem) return errorStatus(connectionProblem);
-    setStatus(readyLine());
+    setStatus(`${plural(state.files.length, 'document')} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
   // A question can ask over the shown tab's run once its answer has landed and the run has ended.
@@ -2330,15 +2332,17 @@ p { margin: 0; }
     button.disabled = !enabled;
   }
 
+  const newRunCovers = () => `a new run would cover ${plural(state.files.length, 'document')}`;
+
   // How the files differ from the tab's run, and so what a new run would cover; nothing while they match.
   function coverNote(tab) {
     const added = pendingFiles(tab).length;
     const left = tab.run.docs.filter((f) => !state.files.includes(f)).length;
     if (!added && !left) return '';
     const parts = [
-      added && `${plural(added, 'new document')} ${added === 1 ? "isn't" : "aren't"} in this run`,
-      left && `${plural(left, 'document')} of this run ${left === 1 ? "isn't" : "aren't"} in the files now`,
-      `a new run would cover ${plural(state.files.length, 'document')}`,
+      added && `${plural(added, "new document isn't", "new documents aren't")} in this run`,
+      left && `${plural(left, "document of this run isn't", "documents of this run aren't")} in the files now`,
+      newRunCovers(),
     ];
     return parts.filter(Boolean).join(' · ');
   }
@@ -2941,7 +2945,8 @@ p { margin: 0; }
   }
 
   function renderFiles() {
-    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(totalBytes(state.files))} · ${filesAreSample() ? 'sample memos' : 'your files'}`;
+    const sampleOnly = state.files.length > 0 && state.files.every((f) => f.sample);
+    $('files-head').textContent = `${plural(state.files.length, 'document')} · ${fmtBytes(totalBytes(state.files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
     $('file-list').replaceChildren(
       ...state.files.map((f) =>
         h(
@@ -2998,25 +3003,22 @@ p { margin: 0; }
     error.hidden = true;
     const read = await Promise.all(picked.map(async (f) => withUid({ name: f.name, size: f.size, text: await readText(f), sample: false })));
     read.sort((a, b) => a.name.localeCompare(b.name));
-    state.files = filesAreSample() ? read : [...state.files, ...read].slice(0, MAX_FILES);
-    filesChanged(`${plural(read.length, 'file')} added. ${nextRunLine()}`);
+    // Files added over the sample memos take the place of any that are left.
+    state.files = [...state.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
+    filesChanged(`${plural(read.length, 'file')} added: ${nextRunLine()}.`);
   }
 
   function nextRunLine() {
-    const docs = plural(state.files.length, 'document');
-    return primaryAction() === 'ask' ? `A new run would cover ${docs}; ask stays on this run.` : `Your next question runs over ${docs}.`;
+    return primaryAction() === 'ask' ? `${newRunCovers()}, and ask stays on this run` : `your next question runs over ${plural(state.files.length, 'document')}`;
   }
 
-  // A run keeps its own documents, so removing one changes only what a new run would cover. The focus goes
-  // to the next file's remove button, or the previous one's, or to adding files once none are left.
+  // The re-render drops the clicked button, and the focus with it.
   function removeFile(file) {
     const i = state.files.indexOf(file);
     state.files = state.files.filter((f) => f !== file);
-    filesChanged(`Removed ${file.name}. ${nextRunLine()}`);
+    filesChanged(`Removed ${file.name}: ${nextRunLine()}.`);
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
-    const next = state.tabs.length ? `a new run would cover ${plural(state.files.length, 'document')}` : readyLine();
-    setStatus(`removed ${file.name} · ${next}`);
   }
 
   function useSample() {
@@ -3031,6 +3033,8 @@ p { margin: 0; }
     updateComposer();
     syncDocNodes(state.shown);
     readyStatus();
+    // The chat is hidden while the files tab is shown, so the files pane says it too.
+    $('files-said').textContent = message;
     transcript.append(line('main', message, { dim: true }));
     scrollTranscript();
   }
