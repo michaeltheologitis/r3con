@@ -1,9 +1,14 @@
 import json
 import re
+import socket
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
 import litellm
+import platformdirs
 import pytest
 
 from r3con import settings
@@ -15,6 +20,13 @@ MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+APP_MODULES = ("starlette", "uvicorn", "platformdirs")
+# Far longer than the app takes to print its two lines, which it does before serving.
+LAUNCH_SECONDS = 30
+NO_APP_EXTRA = (
+    'r3con: the app needs its extra: uv tool install "r3context[app]" '
+    '(or pip install "r3context[app]")\n'
+)
 
 
 def r3con(*argv: str) -> int:
@@ -351,3 +363,83 @@ def test_a_refused_setting_that_quotes_a_key_shows_it_masked(
     assert capsys.readouterr().err == (
         "r3con: R3CON_DOC_WORKERS must be an integer >= 1, got 'REDACTED'.\n"
     )
+
+
+def test_r3con_and_its_cli_import_none_of_the_apps_dependencies():
+    imports = (
+        "import sys, r3con, r3con.cli; r3con.cli.build_parser(); "
+        f"print(sorted(set({APP_MODULES!r}) & set(sys.modules)))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", imports], capture_output=True, text=True, check=True
+    )
+    assert loaded.stdout == "[]\n"
+
+
+def unimportable(monkeypatch: pytest.MonkeyPatch, *packages: str) -> None:
+    """As if ``packages`` were not installed and ``r3con.app`` not yet imported: no
+    module of theirs imports, cached or not."""
+    for name in [*packages, *sys.modules]:
+        if any(name == p or name.startswith(f"{p}.") for p in packages):
+            monkeypatch.setitem(sys.modules, name, None)
+    for name in ("r3con.app", "r3con.app.server"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+
+def test_the_app_without_its_extra_says_how_to_get_it_and_exits_1(monkeypatch, capsys):
+    unimportable(monkeypatch, *APP_MODULES)
+    assert r3con("app", "--no-browser") == 1
+    assert capsys.readouterr().err == NO_APP_EXTRA
+
+
+def test_a_missing_module_of_r3cons_own_is_raised_not_blamed_on_the_extra(
+    monkeypatch, capsys
+):
+    unimportable(monkeypatch, "r3con.runs")
+    with pytest.raises(ModuleNotFoundError, match="r3con.runs"):
+        r3con("app", "--no-browser")
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_the_app_on_a_busy_port_says_so_in_one_line_and_exits_2(capsys):
+    with socket.create_server(("127.0.0.1", 0)) as taken:
+        port = taken.getsockname()[1]
+        assert r3con("app", "--no-browser", "--port", str(port)) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"r3con: can't listen on port {port}: ")
+    assert "Address already in use" in err
+    assert err.count("\n") == 1
+
+
+@pytest.mark.parametrize(
+    ("variable", "flag", "runs"),
+    [
+        (None, None, platformdirs.user_data_path("r3con") / "runs"),
+        ("from-variable", None, "from-variable"),
+        ("from-variable", "from-flag", "from-flag"),
+    ],
+    ids=["user-data", "r3con-logs-dir", "logs-dir-flag"],
+)
+def test_the_app_says_where_its_runs_go(monkeypatch, variable, flag, runs):
+    if variable is not None:
+        monkeypatch.setenv("R3CON_LOGS_DIR", variable)
+    flags = [] if flag is None else ["--logs-dir", flag]
+    app = subprocess.Popen(
+        [sys.executable, "-m", "r3con.cli", "app", "--no-browser", *flags],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    # A line it never prints then reads as the end of its output, not as a hang.
+    watchdog = threading.Timer(LAUNCH_SECONDS, app.kill)
+    watchdog.start()
+    try:
+        url, where = app.stdout.readline(), app.stdout.readline()
+    finally:
+        watchdog.cancel()
+        app.kill()
+        app.wait()
+    assert url.startswith("r3con app: http://127.0.0.1:")
+    assert where == f"r3con app: runs go to {runs}\n"

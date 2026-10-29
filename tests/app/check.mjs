@@ -1,5 +1,5 @@
-// Checks the run panel in app/src/r3con_app/index.html in headless Chromium: node app/checks/check.mjs
-// The live area serves it with app/checks/fake_server.py, through uv.
+// Checks the run panel in src/r3con/app/index.html in headless Chromium: node tests/app/check.mjs
+// The live area serves it with tests/app/fake_server.py, through uv.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -12,7 +12,7 @@ import { isDeepStrictEqual } from 'node:util';
 // An ESM import ignores NODE_PATH, where a global Playwright is found; require honours it.
 const require = createRequire(import.meta.url);
 
-const PAGE_FILE = fileURLToPath(new URL('../src/r3con_app/index.html', import.meta.url));
+const PAGE_FILE = fileURLToPath(new URL('../../src/r3con/app/index.html', import.meta.url));
 const PAGE_URL = pathToFileURL(PAGE_FILE).href;
 const LAYOUTS = {
   desktop: { name: '1440 light', options: { viewport: { width: 1440, height: 900 }, colorScheme: 'light' } },
@@ -104,9 +104,9 @@ const STARTING = 'running · starting';
 const LONG_MODEL = 'hosted_vllm/qwen3-32b-instruct-awq';
 
 const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
-const FAKE_SERVER = ['run', '--project', 'app', 'python', 'app/checks/fake_server.py'];
+const FAKE_SERVER = ['run', 'python', 'tests/app/fake_server.py'];
 const KEY_VARIABLES = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'];
-// A first uv run may have to build the app's environment.
+// A first uv run may have to build the environment.
 const SERVER_START_MS = 120_000;
 const LIVE_RUN_MS = 30_000;
 // What fake_server.py's model does: the markers it obeys, its answer, and what it cites.
@@ -126,8 +126,8 @@ const SCRIPTED_CITES = {
 };
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
 const LIVE_FAILED = "● failed in relevance · RuntimeError: the check's model is down";
-const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
-const LOST_CONNECTION = '● lost the connection to r3con-app';
+const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
+const LOST_CONNECTION = '● lost the connection to r3con app';
 const UNAUTHORIZED_LOG = 'Failed to load resource: the server responded with a status of 401';
 const CUT_STREAM_LOG = 'Failed to load resource: net::ERR_INCOMPLETE_CHUNKED_ENCODING';
 const REFUSED_LOG = 'Failed to load resource: the server responded with a status of 422';
@@ -1665,7 +1665,7 @@ async function stopArea() {
   });
 }
 
-// ---------- live: served by r3con-app, with a scripted model ----------
+// ---------- live: served by r3con app, with a scripted model ----------
 
 // Starts fake_server.py with no provider key in its environment, in a process group of its own.
 function startFakeServer() {
@@ -2058,7 +2058,7 @@ async function liveLoadProblem(url) {
     await page.keyboard.press('Escape');
     const status = await page.textContent('#run-status');
     const cleared = saved && status === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;
-    const problemName = 'a connection lost at load stays in the status, through typing and a 500, until a call to r3con-app succeeds';
+    const problemName = 'a connection lost at load stays in the status, through typing and a 500, until a call to r3con app succeeds';
     check('live', problemName, atLoad && typing && unwell && cleared, `typing ${typing}; 500 ${unwell}; then ${status}`);
   });
 }

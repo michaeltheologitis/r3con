@@ -37,7 +37,7 @@ cancels every one still going, before it waits for open connections such as the 
 event stream. Once they have closed, it waits up to ``WORKERS_EXIT_SECONDS`` for those
 runs and asks to end, so each finishes its call in flight and writes its run folder,
 with ``run_failed`` in its ``events.jsonl``; a page whose stream has already closed does
-not see it. A second Ctrl-C ends that wait at once, and ``r3con-app`` quits there and
+not see it. A second Ctrl-C ends that wait at once, and ``r3con app`` quits there and
 then, leaving those runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
@@ -47,7 +47,6 @@ stream with a failure event whose ``stage`` is ``null``.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import hmac
@@ -531,21 +530,21 @@ class _Server(uvicorn.Server):
             await asyncio.sleep(WORKER_POLL_SECONDS)
 
 
+def listen(port: int) -> socket.socket:
+    """A socket listening on 127.0.0.1 at ``port``, 0 for a free one."""
+    return socket.create_server((HOST, port))
+
+
 def _server(
-    port: int, logs_dir: Path, completion: Callable[..., Any] | None
-) -> tuple[_Server, socket.socket, str]:
-    """A server for a socket already listening on ``port`` (0 for a free one), and the
-    URL that opens its page."""
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind((HOST, port))
-    listener.listen()
+    listener: socket.socket, logs_dir: Path, completion: Callable[..., Any] | None
+) -> tuple[_Server, str]:
+    """A server for ``listener``, and the URL that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
     state = ServerState(logs_dir=logs_dir, completion=completion)
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
-    return _Server(config, state), listener, f"http://{HOST}:{port}/#token={token}"
+    return _Server(config, state), f"http://{HOST}:{port}/#token={token}"
 
 
 def serve(
@@ -558,7 +557,8 @@ def serve(
     with this launch's token, and a function that stops the server, returning once its
     runs and asks have ended, at most ``WORKERS_EXIT_SECONDS`` after its connections
     have closed."""
-    server, listener, url = _server(port, logs_dir, completion)
+    listener = listen(port)
+    server, url = _server(listener, logs_dir, completion)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
@@ -571,30 +571,15 @@ def serve(
     return url, stop
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        prog="r3con-app", description="Serve r3con's app on 127.0.0.1."
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=0,
-        help="the port to listen on (default: a free one)",
-    )
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        default=LOGS_DIR,
-        help="where run folders go (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--no-browser", action="store_true", help="print the URL, but don't open it"
-    )
-    args = parser.parse_args(argv)
+def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
+    """Serve the app on ``listener`` until stopped, as ``r3con app`` does: print the
+    URL that opens the page, with this launch's token, and where its run folders go,
+    and with ``browser``, open the page."""
     configure_logging()
-    server, listener, url = _server(args.port, args.logs_dir, None)
+    server, url = _server(listener, logs_dir, None)
     print(f"r3con app: {url}", flush=True)
-    if not args.no_browser:
+    print(f"r3con app: runs go to {logs_dir}", flush=True)
+    if browser:
         webbrowser.open(url)
     # uvicorn shuts down on Ctrl-C, then raises it again, as its own run() expects.
     with contextlib.suppress(KeyboardInterrupt):

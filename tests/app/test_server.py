@@ -11,9 +11,10 @@ import httpx2
 import litellm
 import pytest
 from litellm.exceptions import RateLimitError
-from r3con_app.server import ServerState, _server, create_app, serve
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp
+
+from r3con.app.server import ServerState, _server, create_app, listen, serve
 
 litellm.suppress_debug_info = True
 
@@ -29,6 +30,8 @@ STILL_WAITING_SECONDS = 0.5
 FORCED_EXIT_SECONDS = 5
 QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
+# A bare OpenAI name that litellm's model map places from its floor, 1.103, on.
+BARE_OPENAI_MODEL = "gpt-5"
 OPENAI_KEY = "sk-stored-openai-key-1234"
 OTHER_KEY = "other-endpoint-key-5678"
 ENVIRONMENT_KEY = "key-from-the-environment-9012"
@@ -356,11 +359,11 @@ def test_keys_say_which_providers_have_one_and_never_what_it_is(
     ("stored", "model_name", "sent"),
     [
         (STORED_OPENAI, MODEL, {"api_key": OPENAI_KEY}),
-        (STORED_OPENAI, "gpt-6-luna", {"api_key": OPENAI_KEY}),
+        (STORED_OPENAI, BARE_OPENAI_MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, "anthropic/claude-sonnet-5-5", {}),
         (OTHER, "hosted_vllm/qwen", {"api_key": OTHER_KEY, "api_base": ENDPOINT}),
         (KEYLESS_OTHER, "hosted_vllm/qwen", {"api_base": ENDPOINT}),
-        (OTHER, "gpt-6-luna", {}),
+        (OTHER, BARE_OPENAI_MODEL, {}),
         (OTHER, "claude-sonnet-5-5", {}),
         (OTHER, "gemini-2.5-pro", {}),
         (OTHER, "azure/x", {}),
@@ -424,7 +427,7 @@ def test_with_a_keyless_other_a_bare_openai_model_never_reaches_its_endpoint(
 ):
     monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
     client.post("/api/keys", json=KEYLESS_OTHER)
-    finished_run(client, "gpt-6-luna")
+    finished_run(client, BARE_OPENAI_MODEL)
     assert llm.requests
     assert all("api_base" not in call for call in llm.requests)
 
@@ -716,7 +719,8 @@ def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly
 ):
     unhandled: list[threading.ExceptHookArgs] = []
     monkeypatch.setattr(threading, "excepthook", unhandled.append)
-    server, listener, url = _server(0, logs_dir, held_llm)
+    listener = listen(0)
+    server, url = _server(listener, logs_dir, held_llm)
     serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
     serving.start()
 
@@ -741,7 +745,8 @@ def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly
 def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
     llm: FakeModel, logs_dir: Path
 ):
-    server, listener, url = _server(0, logs_dir, llm)
+    listener = listen(0)
+    server, url = _server(listener, logs_dir, llm)
     serving = threading.Thread(target=server.run, kwargs={"sockets": [listener]})
     serving.start()
     server.should_exit = True

@@ -32,14 +32,24 @@ dependencies = [
     "pypdf>=6.19.0",
 ]
 
+[project.optional-dependencies]
+# The app's page and its local server, `r3con app` (r3con.app).
+app = [
+    "platformdirs>=4.0",
+    "starlette>=1.10",
+    "uvicorn>=0.54",
+]
+
 # Local development only — NOT part of the published package (PEP 735 dependency groups
 # never reach the wheel). uv installs the `dev` group by default, so a plain `uv sync`
 # gives you an environment that can run examples/quickstart.ipynb as a notebook: pick
 # .venv as the kernel and go. `pip` is here because editors shell out to it when they
 # offer to fix a kernel themselves, and a uv-made venv has none. The rest are the
-# checks and the test runner, the same ones CI runs.
+# checks and the test runner, the same ones CI runs, and the app extra, for its tests.
 [dependency-groups]
 dev = [
+    "r3context[app]",
+    "httpx2>=2.16",
     "ipykernel>=6.29",
     "pip>=24.0",
     "pyright>=1.1.414",
@@ -68,7 +78,8 @@ module-root = "src"
 extend-exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pyright]
-include = ["src", "evals"]
+# tests/app keeps the type checks it had as the app's own project.
+include = ["src", "evals", "tests/app"]
 exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pytest.ini_options]

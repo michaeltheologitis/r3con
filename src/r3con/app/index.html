@@ -1057,8 +1057,8 @@ p { margin: 0; }
   const ROUNDS = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
-  const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con-app terminal";
-  const LOST_CONNECTION = 'lost the connection to r3con-app';
+  const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
+  const LOST_CONNECTION = 'lost the connection to r3con app';
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
   const TYPE_A_MODEL = 'type a model first';
@@ -1068,8 +1068,8 @@ p { margin: 0; }
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
   const LIVE_KEYS_NOTE =
-    "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con-app. A saved key stays in r3con-app's memory on this computer until it stops; it is never written to disk.";
-  const LIVE_MODE_NOTE = 'live · r3con-app on this computer';
+    "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con app. A saved key stays in r3con app's memory on this computer until it stops; it is never written to disk.";
+  const LIVE_MODE_NOTE = 'live · r3con app on this computer';
   const LIVE_INTRO = 'The 5 sample memos are loaded, with a question about them. Press run to run r3con on them, or add your own files.';
   const PROTOTYPE_KEYS_NOTE =
     "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
@@ -1116,7 +1116,7 @@ p { margin: 0; }
   const questionEl = $('question');
   const side = $('side');
 
-  // Served by r3con-app on this computer the page runs r3con; anywhere else it is the prototype,
+  // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
   // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
   // once and never reaches storage.
   const live = ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
@@ -1175,7 +1175,7 @@ p { margin: 0; }
     tabs: [],
     shown: newTab(),
     nextTab: 1,
-    // The streams open on r3con-app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
+    // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
     streams: new Set(),
     selected: null,
@@ -1289,12 +1289,12 @@ p { margin: 0; }
   // A recorded or simulated parse holds its records; a live one, only how many there were.
   const recordCount = (parse) => parse.records?.length ?? parse.n_records;
 
-  // ---------- r3con-app ----------
+  // ---------- r3con app ----------
 
-  // An error whose message is for the user: r3con-app's own words, or what went wrong reaching it.
+  // An error whose message is for the user: r3con app's own words, or what went wrong reaching it.
   class ServerError extends Error {}
 
-  // A stale token or r3con-app out of reach, kept for the status until a call to it succeeds.
+  // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
   let connectionProblem = null;
 
   // What to tell the user about `error`; one that is not the server's is a bug, so it also goes to the console.
@@ -1327,7 +1327,7 @@ p { margin: 0; }
       return response;
     }
     const reply = await response.json().catch(() => null);
-    throw new ServerError(reply?.error ?? `r3con-app answered ${response.status} ${response.statusText}`.trim());
+    throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim());
   }
 
   function frameData(frame) {
@@ -1493,7 +1493,7 @@ p { margin: 0; }
     return { ...run, answers: [{ question, model, ...madeUpAnswer(run, question, 0) }] };
   }
 
-  // Filled in by r3con-app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
+  // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
   function liveRun(question, model) {
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
     return { simulated: false, id: null, ids: [], docs: state.files, answers: [{ question, model, text: null, provenance: null }], ...empty };
@@ -2644,7 +2644,7 @@ p { margin: 0; }
     const doc = (id) => docIndices(run, [id])[0];
     switch (event.type) {
       case 'run_started':
-        if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con-app is set to ${event.rounds}`);
+        if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
         run.ids = event.document_ids;
         narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(totalBytes(run.docs))}`);
         break;
@@ -3089,7 +3089,7 @@ p { margin: 0; }
 
   // ---------- keys ----------
 
-  // The prototype only notes which providers were given a key; r3con-app keeps the keys themselves.
+  // The prototype only notes which providers were given a key; r3con app keeps the keys themselves.
   const keyed = new Set();
 
   function renderKeys(providers) {
@@ -3534,7 +3534,7 @@ p { margin: 0; }
   }
 
   // ---------- modes ----------
-  // What differs between the page served by r3con-app and the prototype, decided once at load.
+  // What differs between the page served by r3con app and the prototype, decided once at load.
 
   const prototypeMode = {
     intro: PROTOTYPE_INTRO,
@@ -3559,7 +3559,7 @@ p { margin: 0; }
     providersWithKeys: async () => [...keyed],
   };
 
-  // A provider whose variable is set where r3con-app runs counts as having a key.
+  // A provider whose variable is set where r3con app runs counts as having a key.
   const liveMode = {
     intro: LIVE_INTRO,
     note: LIVE_MODE_NOTE,
