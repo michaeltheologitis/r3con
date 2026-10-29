@@ -1,4 +1,4 @@
-// Checks the run panel in app/web/index.html in headless Chromium: node app/checks/check.mjs
+// Checks the run panel in app/src/r3con_app/index.html in headless Chromium: node app/checks/check.mjs
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -7,7 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 // An ESM import ignores NODE_PATH, where a global Playwright is found; require honours it.
 const require = createRequire(import.meta.url);
 
-const PAGE_FILE = fileURLToPath(new URL('../web/index.html', import.meta.url));
+const PAGE_FILE = fileURLToPath(new URL('../src/r3con_app/index.html', import.meta.url));
 const PAGE_URL = pathToFileURL(PAGE_FILE).href;
 const LAYOUTS = {
   desktop: { name: '1440 light', options: { viewport: { width: 1440, height: 900 }, colorScheme: 'light' } },
