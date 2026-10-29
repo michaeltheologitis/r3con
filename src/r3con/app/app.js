@@ -522,7 +522,7 @@
 
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
-  const READ_BYTES = 20000;
+  const PREVIEW_CHARS = 20000;
   const MAX_FILES = 40;
   const PDF_SUFFIX = '.pdf';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
@@ -1732,13 +1732,13 @@
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
     if (isPending(state.shown, file)) meta.push('not run yet');
-    if (file.text.length > READ_BYTES) meta.push(`first ${fmtBytes(READ_BYTES)} shown`);
+    if (file.text.length > PREVIEW_CHARS) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
     return meta.join(' · ');
   }
 
   /** @param {LoadedFile} file */
   function fileText(file) {
-    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, READ_BYTES)) : h('p', { class: 'k' }, 'This file has no readable text.');
+    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, PREVIEW_CHARS)) : h('p', { class: 'k' }, 'This file has no readable text.');
   }
 
   /** @param {LoadedFile} file @param {string} label */
@@ -2800,28 +2800,41 @@
     return looksLikeText(start) ? { text: await readText(file) } : { why: NOT_TEXT };
   }
 
-  // Each batch is read at once, but applied after the batches before it, so that each one's lines stand.
+  // Batches are read and added one after another, so that each one's lines in the files pane stand.
   let adding = Promise.resolve();
 
   /** @param {Iterable<File | null>} list */
   function addFiles(list) {
-    const picked = [...list].filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
-    picked.sort((a, b) => a.name.localeCompare(b.name));
-    if (picked.length) $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
-    const reads = Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
-    adding = adding.then(async () => applyFiles(await reads)).catch(failedToAdd);
+    // Copied now: a file input's list empties once its value is reset.
+    const files = [...list];
+    adding = adding.then(() => addBatch(files)).catch(failedToAdd);
+  }
+
+  // Shown before it is filled, so that the alert is announced.
+  /** @param {string} text */
+  function showFilesError(text) {
+    const error = $('files-error');
+    error.hidden = false;
+    error.textContent = text;
   }
 
   /** @param {unknown} error */
   function failedToAdd(error) {
     $('files-said').textContent = '';
-    const shown = $('files-error');
-    shown.hidden = false;
-    shown.textContent = `Couldn't add the files: ${explain(error, /** @type {Error} */ (error).message, "couldn't add files")}.`;
+    showFilesError(explain(error, "Couldn't add those files.", "couldn't add files"));
   }
 
-  /** @param {({ file: File } & FileRead)[]} reads */
-  function applyFiles(reads) {
+  /** @param {(File | null)[]} files */
+  async function addBatch(files) {
+    const picked = files.filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    picked.sort((a, b) => a.name.localeCompare(b.name));
+    if (!picked.length) {
+      showFilesError('No files found there. Try picking the files themselves.');
+      return;
+    }
+    $('files-error').hidden = true;
+    $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
+    const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
     /** @type {LoadedFile[]} */
     const read = [];
     /** @type {Map<string, string[]>} */
@@ -2830,12 +2843,7 @@
       if ('why' in r) refused.set(r.why, [...(refused.get(r.why) ?? []), r.file.name]);
       else read.push(loaded({ name: r.file.name, size: r.file.size, text: r.text, sample: false }));
     }
-    const notAdded = [...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' ');
-    const said = reads.length ? notAdded : 'No files found there. Try picking the files themselves.';
-    const error = $('files-error');
-    // Shown before it is filled, so that the alert is announced.
-    error.hidden = !said;
-    error.textContent = said;
+    if (refused.size) showFilesError([...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' '));
     if (!read.length) {
       $('files-said').textContent = '';
       return;
