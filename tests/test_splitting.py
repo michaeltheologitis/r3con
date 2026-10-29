@@ -4,9 +4,12 @@ from pathlib import Path
 
 import litellm
 import pytest
+from pydantic import BaseModel
 
 from r3con.runs import TaskLogger
+from r3con.runtime.llm import litellm_chat_completion_full
 from r3con.splitting import Splits, halve
+from r3con.stages.relevance import provenance_schema
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -58,10 +61,17 @@ def record(logger: TaskLogger) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def read(document, send, *, model=QWEN, rest=REST, task_logger=None):
+def read(document, send, *, model=QWEN, rest=REST, schema=None, task_logger=None):
     """``document`` read as the only document of a run, in one ``parse`` call."""
     splits = Splits([document], model=model, task_logger=task_logger)
-    return splits, splits.read_in_parts(0, call="parse", rest=rest, send=send)
+    return splits, splits.read_in_parts(
+        0, call="parse", rest=rest, schema=schema, send=send
+    )
+
+
+def citing(n_ids: int) -> type[BaseModel]:
+    """A reply's schema whose ``provenance_ids`` cite from among ``n_ids`` shown ids."""
+    return provenance_schema("Reply", BaseModel, [f"S{i}" for i in range(n_ids)])
 
 
 HALVES = {
@@ -361,6 +371,33 @@ def test_a_request_over_the_line_in_bytes_is_counted(window, encodes, document, 
     read(document, provider, model=window(1_000), rest="s")
     assert document in encodes
     assert provider.kinds == kinds
+
+
+@pytest.mark.parametrize("n_ids", [1_000, 1_001])
+def test_the_schema_is_counted_as_it_is_sent(window, encodes, llm, n_ids):
+    model, schema = window(10_000), citing(n_ids)
+
+    def send(part, kind):
+        return litellm_chat_completion_full(
+            system_prompt=REST,
+            user_prompt=part,
+            model=model,
+            schema=schema,
+            completion=llm.replies("{}"),
+        )
+
+    # Over the line in bytes, so it is counted, but under it in tokens: sent whole.
+    read(" the" * 3_000, send, model=model, schema=schema)
+    [request] = llm.requests
+    sent = request["response_format"]["json_schema"]["schema"]
+    assert REST + json.dumps(sent) in encodes
+    assert ("enum" in sent["properties"]["provenance_ids"]["items"]) == (n_ids == 1_000)
+
+
+def test_a_document_is_not_split_for_ids_whose_enum_is_not_sent(window):
+    provider = Provider()
+    read(PARAGRAPHS, provider, model=window(5_000), schema=citing(1_001))
+    assert provider.kinds == ["parse-d0"]
 
 
 def test_another_error_passes_through_and_never_splits(logger):

@@ -139,6 +139,14 @@ def _drop_refused_constraints(schema: Any) -> Any:
     return schema
 
 
+def schema_as_sent(schema: type[BaseModel]) -> dict[str, Any]:
+    """``schema``'s JSON schema as a structured request sends it, built afresh on each
+    call: strict, without what OpenAI refuses."""
+    return _drop_refused_constraints(
+        _enforce_strict_objects(schema.model_json_schema())
+    )
+
+
 def litellm_chat_completion_full(
     *,
     system_prompt: str | None = None,
@@ -205,9 +213,7 @@ def litellm_chat_completion_full(
             "type": "json_schema",
             "json_schema": {
                 "name": schema.__name__,
-                "schema": _drop_refused_constraints(
-                    _enforce_strict_objects(schema.model_json_schema())
-                ),
+                "schema": schema_as_sent(schema),
                 "strict": True,
             },
         }

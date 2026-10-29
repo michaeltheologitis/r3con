@@ -53,7 +53,7 @@ from r3con.runtime.codeact import (
     CodeActTurn,
     run_codeact,
 )
-from r3con.runtime.llm import count_tokens, send_until_valid
+from r3con.runtime.llm import count_tokens, schema_as_sent, send_until_valid
 from r3con.splitting import Splits
 from r3con.stages.relevance import (
     Snippet,
@@ -405,7 +405,7 @@ def _reason_directly(
     the ``fallback`` of a :class:`ReasoningResult`."""
     system_prompt = render(parse_block=parse_json)
     schema = _reply_schema(citable)
-    schema_json = json.dumps(schema.model_json_schema())
+    schema_json = json.dumps(schema_as_sent(schema))
     if estimate := splits.over_line(system_prompt, user_message, schema_json):
         _log.info(
             "reasoning's direct prompt would take about %s tokens, over the %s-token "

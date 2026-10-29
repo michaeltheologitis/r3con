@@ -685,12 +685,12 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     result = ask(llm, citing("coding"), model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "estimate", "estimate": 4_126, "line": 3_400}
+    assert result.fallback == {"cause": "estimate", "estimate": 4_155, "line": 3_400}
     [request] = llm.requests
     assert SAMPLE in request["messages"][0]["content"]
     assert caplog.messages == [
         (
-            "reasoning's direct prompt would take about 4,126 tokens, over the "
+            "reasoning's direct prompt would take about 4,155 tokens, over the "
             "3,400-token line; reasoning with code instead"
         )
     ]
