@@ -2,12 +2,15 @@
 
     r3con run "Which supplier missed the most delivery windows?" ./reports
     r3con ask ./logs/<run> "Which supplier delivered on time most often?"
+    r3con app
 
 Everything the pipeline did is left in a run folder under ``./logs`` — the relevance
 snippets, the proposed schema, the parse, and the reasoning transcript — because the
 answer alone rarely tells you whether to trust it.
 
 ``r3con ask`` reruns only reasoning over a finished run's folder (:func:`r3con.ask`).
+``r3con app`` serves the app's page on 127.0.0.1 (:mod:`r3con.app`), when the ``app``
+extra is installed.
 """
 
 from __future__ import annotations
@@ -154,6 +157,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="How reasoning answers (default: the run's).",
     )
+
+    app_cmd = sub.add_parser(
+        "app",
+        help="Serve the app's page on 127.0.0.1.",
+        description=(
+            "Serve the app's page on 127.0.0.1 and open it, with this launch's token "
+            'in its URL. Needs the app extra: pip install "r3context[app]".'
+        ),
+    )
+    app_cmd.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help="The port to listen on (default: a free one).",
+    )
+    app_cmd.add_argument(
+        "--logs-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Where run folders go (default: runs/ in r3con's user data directory).",
+    )
+    app_cmd.add_argument(
+        "--no-browser", action="store_true", help="Print the URL, but don't open it."
+    )
     return p
 
 
@@ -231,6 +259,21 @@ def _ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _app(args: argparse.Namespace) -> int:
+    # Imported here: its dependencies are the app extra, which run and ask don't need.
+    try:
+        from r3con.app import server
+    except ModuleNotFoundError:
+        _error('the app needs its extra: pip install "r3context[app]"')
+        return 1
+    server.launch(
+        port=args.port,
+        logs_dir=args.logs_dir or server.LOGS_DIR,
+        browser=not args.no_browser,
+    )
+    return 0
+
+
 def _failed(error: Exception) -> int:
     """Report ``error`` and its notes, such as where its artifacts are."""
     notes = getattr(error, "__notes__", ())
@@ -249,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     # directory rather than from this file, which lives in site-packages.
     load_dotenv(find_dotenv(usecwd=True))
     args = build_parser().parse_args(argv)
-    command = {"run": _run, "ask": _ask}[args.command]
+    command = {"run": _run, "ask": _ask, "app": _app}[args.command]
     try:
         return command(args)
     except KeyboardInterrupt:

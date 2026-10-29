@@ -11,11 +11,24 @@ task-specific representation of that context, then reasons over it to produce an
 
 ![How r3con works](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/r3con.png)
 
-## Install
+## App
+
+Run r3con in your browser:
+
+```bash
+uv tool install "r3context[app]"
+r3con app
+```
+
+## Library
+
+### Install
 
 ```bash
 pip install r3context
 ```
+
+Or `uv add r3context`.
 
 Set the API key(s) for the provider(s) you use:
 
@@ -25,8 +38,6 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 You can also put them in a `.env` file in your working directory.
-
-## Usage
 
 ### Command line
 
@@ -87,19 +98,16 @@ result = r3con.run(
 
 `documents` is simply a list of strings, one per document.
 
-To ask a new question over the same run, `r3con.ask` reuses what the run built and runs
-only the reasoning step, at a fraction of a run's cost:
+To ask another question over the same run, `r3con.ask` runs only the reasoning step
+again:
 
 ```python
 other = r3con.ask(result, "Which supplier delivered on time most often?")
 print(other)
 ```
 
-To stop a run from another thread, pass `cancel=threading.Event()` and set it: no new
-model call is sent and the run raises `r3con.Cancelled`, leaving what it did so far in
-its folder. What is already under way runs its course: a call already sent (so a run on
-its last call finishes normally), resends r3con doesn't make itself (a `completion=`, or
-retry settings in `params`), and a sandbox step. `r3con.ask` takes `cancel` too.
+Pass `cancel=threading.Event()` and set it to stop a run; it raises `r3con.Cancelled` and
+keeps what it did. A call already sent finishes first.
 
 ## Notebooks
 
@@ -132,10 +140,7 @@ r3con also records provenance, how the answer, each summary and each parse came 
 
 Every run writes each stage's output and model calls, failed ones included, with their
 tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
-An API key that a provider's error echoes is masked before r3con writes or logs it:
-the keys r3con sends, a `litellm.Router`'s included, and the environment's. A
-`completion=` wrapper that adds a key of its own must register it with
-`r3con.masking.register_key(key)`.
+API keys are masked in anything r3con writes or logs.
 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir

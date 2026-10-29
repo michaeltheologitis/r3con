@@ -80,23 +80,12 @@ jobs:
           enable-cache: true
       - run: uv build
       - run: uv sync --locked --no-install-project
-      - run: uv pip install dist/*.whl
+      - run: uv pip install "$(echo dist/*.whl)[app]"
       - name: The suite, against the installed wheel
         working-directory: ${{ runner.temp }}
         run: |
           "$GITHUB_WORKSPACE/.venv/bin/python" -c "import r3con, sys; sys.exit(0 if '/site-packages/' in r3con.__file__ else f'testing {r3con.__file__}, not the wheel')"
           "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest "$GITHUB_WORKSPACE/tests"
-
-  app:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-      - run: uv run --project app --locked pyright -p app
-      - run: uv run --project app --locked pytest app/tests
 
   live:
     if: inputs.live

@@ -28,7 +28,8 @@ from typing import Any
 
 import litellm
 from litellm.exceptions import ContextWindowExceededError
-from r3con_app import serve
+
+from r3con.app import serve
 
 litellm.suppress_debug_info = True
 

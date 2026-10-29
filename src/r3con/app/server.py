@@ -37,7 +37,7 @@ cancels every one still going, before it waits for open connections such as the 
 event stream. Once they have closed, it waits up to ``WORKERS_EXIT_SECONDS`` for those
 runs and asks to end, so each finishes its call in flight and writes its run folder,
 with ``run_failed`` in its ``events.jsonl``; a page whose stream has already closed does
-not see it. A second Ctrl-C ends that wait at once, and ``r3con-app`` quits there and
+not see it. A second Ctrl-C ends that wait at once, and ``r3con app`` quits there and
 then, leaving those runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
@@ -47,7 +47,6 @@ stream with a failure event whose ``stage`` is ``null``.
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import contextlib
 import hmac
@@ -571,30 +570,13 @@ def serve(
     return url, stop
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
-        prog="r3con-app", description="Serve r3con's app on 127.0.0.1."
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=0,
-        help="the port to listen on (default: a free one)",
-    )
-    parser.add_argument(
-        "--logs-dir",
-        type=Path,
-        default=LOGS_DIR,
-        help="where run folders go (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--no-browser", action="store_true", help="print the URL, but don't open it"
-    )
-    args = parser.parse_args(argv)
+def launch(*, port: int, logs_dir: Path, browser: bool) -> None:
+    """Serve the app until stopped, as ``r3con app`` does: print the URL that opens
+    the page, with this launch's token, and with ``browser``, open it."""
     configure_logging()
-    server, listener, url = _server(args.port, args.logs_dir, None)
+    server, listener, url = _server(port, logs_dir, None)
     print(f"r3con app: {url}", flush=True)
-    if not args.no_browser:
+    if browser:
         webbrowser.open(url)
     # uvicorn shuts down on Ctrl-C, then raises it again, as its own run() expects.
     with contextlib.suppress(KeyboardInterrupt):

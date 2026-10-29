@@ -1,5 +1,7 @@
 import json
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +17,8 @@ MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+APP_MODULES = ("starlette", "uvicorn", "platformdirs")
+NO_APP_EXTRA = 'r3con: the app needs its extra: pip install "r3context[app]"\n'
 
 
 def r3con(*argv: str) -> int:
@@ -351,3 +355,25 @@ def test_a_refused_setting_that_quotes_a_key_shows_it_masked(
     assert capsys.readouterr().err == (
         "r3con: R3CON_DOC_WORKERS must be an integer >= 1, got 'REDACTED'.\n"
     )
+
+
+def test_r3con_and_its_cli_import_none_of_the_apps_dependencies():
+    imports = (
+        "import sys, r3con, r3con.cli; r3con.cli.build_parser(); "
+        f"print(sorted(set({APP_MODULES!r}) & set(sys.modules)))"
+    )
+    loaded = subprocess.run(
+        [sys.executable, "-c", imports], capture_output=True, text=True, check=True
+    )
+    assert loaded.stdout == "[]\n"
+
+
+def test_the_app_without_its_extra_says_how_to_get_it_and_exits_1(monkeypatch, capsys):
+    # As if the extra were not installed: none of its modules imports, cached or not.
+    for name in [*APP_MODULES, *sys.modules]:
+        if name.partition(".")[0] in APP_MODULES:
+            monkeypatch.setitem(sys.modules, name, None)
+    for loaded in ("r3con.app", "r3con.app.server"):
+        monkeypatch.delitem(sys.modules, loaded, raising=False)
+    assert r3con("app", "--no-browser") == 1
+    assert capsys.readouterr().err == NO_APP_EXTRA
