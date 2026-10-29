@@ -159,8 +159,8 @@ def test_calls_keep_non_ascii_as_text(logger):
     [
         (
             [
-                (TOKENS, 0.25),
-                ({"prompt": 25, "completion": 6, "total": 31}, 0.5),
+                (TOKENS, 0.25, None),
+                ({"prompt": 25, "completion": 6, "total": 31}, 0.5, None),
             ],
             {
                 "n_steps": 2,
@@ -169,30 +169,27 @@ def test_calls_keep_non_ascii_as_text(logger):
             },
         ),
         (
-            [(TOKENS, 0.25), (None, None)],
+            [(TOKENS, 0.25, None), (None, None, None)],
             {
                 "n_steps": 2,
                 "tokens": TOKENS,
                 "usd": None,
             },
         ),
+        (
+            [(TOKENS, 0.25, None), (None, 0.0, ERROR_LINE)],
+            {"n_steps": 1, "tokens": TOKENS, "usd": 0.25},
+        ),
         ([], {"n_steps": 0, "tokens": None, "usd": 0.0}),
     ],
-    ids=["priced", "one-unpriced", "none"],
+    ids=["priced", "one-unpriced", "one-failed", "none"],
 )
 def test_a_stage_totals_its_steps_tokens_and_cost(logger, calls, totals):
     run = StageRun(stage="reasoning", task_logger=logger)
-    for tokens, usd in calls:
-        run.add_step(messages=[], response=reply(), tokens=tokens, usd=usd)
+    for tokens, usd, error in calls:
+        run.add_step(messages=[], response=reply(), tokens=tokens, usd=usd, error=error)
     assert run.compute_totals() == totals
     assert type(run.compute_totals()["usd"]) is type(totals["usd"])
-
-
-def test_a_stage_counts_only_the_calls_that_answered(logger):
-    run = StageRun(stage="relevance", task_logger=logger)
-    run.add_step(messages=[], response=reply(), tokens=TOKENS, usd=0.25)
-    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE)
-    assert run.compute_totals() == {"n_steps": 1, "tokens": TOKENS, "usd": 0.25}
 
 
 def test_each_call_records_what_it_cost(logger):
