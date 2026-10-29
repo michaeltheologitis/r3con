@@ -123,10 +123,16 @@ def logs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
+def client_for(model: FakeModel, logs_dir: Path, **options: Any) -> TestClient:
+    app = create_app(
+        token=TOKEN, port=PORT, logs_dir=logs_dir, completion=model, **options
+    )
+    return TestClient(app, base_url=BASE_URL, headers=AUTH)
+
+
 @pytest.fixture
 def client(llm: FakeModel, logs_dir: Path) -> Iterator[TestClient]:
-    app = create_app(token=TOKEN, port=PORT, logs_dir=logs_dir, completion=llm)
-    with TestClient(app, base_url=BASE_URL, headers=AUTH) as client:
+    with client_for(llm, logs_dir) as client:
         yield client
 
 
@@ -174,6 +180,14 @@ def finished_run(client: TestClient, model: str = MODEL) -> str:
     last = run_events(client, run_id)[-1]
     assert last["type"] == "run_finished", last
     return run_id
+
+
+def transport(llm: FakeModel) -> list[dict[str, str]]:
+    """The key and endpoint each request was sent with."""
+    return [
+        {name: call[name] for name in ("api_key", "api_base") if name in call}
+        for call in llm.requests
+    ]
 
 
 def http_client(url: str) -> httpx2.Client:
@@ -297,6 +311,9 @@ def test_keys_say_which_providers_have_one_and_never_what_it_is(
         (KEYLESS_OTHER, "hosted_vllm/qwen", {"api_base": ENDPOINT}),
         (OTHER, "gpt-6-luna", {}),
         (OTHER, "claude-sonnet-5-5", {}),
+        (OTHER, "gemini-2.5-pro", {}),
+        (OTHER, "azure/x", {}),
+        (OTHER, "ollama_chat/llama3", {"api_key": OTHER_KEY, "api_base": ENDPOINT}),
     ],
 )
 def test_a_stored_key_reaches_every_call_for_its_providers_model(
@@ -308,11 +325,47 @@ def test_a_stored_key_reaches_every_call_for_its_providers_model(
 ):
     client.post("/api/keys", json=stored)
     finished_run(client, model_name)
-    transport = [
-        {name: call[name] for name in ("api_key", "api_base") if name in call}
-        for call in llm.requests
-    ]
-    assert transport == [sent] * len(llm.requests)
+    assert transport(llm) == [sent] * len(llm.requests)
+
+
+def test_a_name_litellm_cannot_place_is_sent_to_other_which_litellm_then_refuses(
+    client: TestClient, llm: FakeModel
+):
+    client.post("/api/keys", json=OTHER)
+    last = run_events(client, start_run(client, "qwen3-32b"))[-1]
+    assert llm.requests
+    assert transport(llm) == [{"api_key": OTHER_KEY, "api_base": ENDPOINT}] * len(
+        llm.requests
+    )
+    assert last["type"] == "run_failed"
+    assert "LLM Provider NOT provided" in last["error"]
+
+
+def test_a_pasted_key_and_endpoint_are_used_and_masked_without_their_whitespace(
+    client: TestClient, llm: FakeModel
+):
+    client.post("/api/keys", json={"provider": "openai", "key": f"{OPENAI_KEY}\n"})
+    client.post("/api/keys", json={**OTHER, "endpoint": f" {ENDPOINT}\n"})
+    assert client.get("/api/keys").json()["other"]["endpoint"] == ENDPOINT
+    llm.fail_on = "ReasoningAnswer"
+    llm.error = RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}.")
+    last = run_events(client, start_run(client))[-1]
+    assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
+    assert last["error"] == "RuntimeError: Incorrect API key provided: [key]."
+    llm.fail_on = None
+    llm.requests.clear()
+    finished_run(client, "hosted_vllm/qwen")
+    assert {call["api_base"] for call in llm.requests} == {ENDPOINT}
+
+
+def test_a_placeholder_key_too_short_to_be_a_secret_is_not_masked(
+    client: TestClient, llm: FakeModel
+):
+    client.post("/api/keys", json={**OTHER, "key": "EMPTY"})
+    llm.fail_on = "RelevanceSummary"
+    llm.error = RuntimeError("The model sent an EMPTY reply.")
+    last = run_events(client, start_run(client, "hosted_vllm/qwen"))[-1]
+    assert last["error"] == "RuntimeError: The model sent an EMPTY reply."
 
 
 def test_with_a_keyless_other_a_bare_openai_model_never_reaches_its_endpoint(
@@ -376,6 +429,19 @@ def test_an_ask_over_a_finished_run_streams_its_own_events(client: TestClient):
     assert Path(events[-1]["ask_dir"]).parent == run_dir / "asks"
 
 
+def test_an_ask_over_a_run_still_running_is_refused(
+    held_llm: FakeModel, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.post(f"/api/runs/{run_id}/asks", json=ASK)
+        held_llm.gate.set()
+        assert run_events(client, run_id)[-1]["type"] == "run_finished"
+    assert response.status_code == 409
+    assert "still running" in response.json()["error"]
+
+
 def test_an_ask_over_a_run_that_failed_in_reasoning_is_answered(
     client: TestClient, llm: FakeModel
 ):
@@ -415,7 +481,7 @@ def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_aske
     assert llm.requests == []
     response = client.post(f"/api/runs/{run_id}/asks", json=ASK)
     assert response.status_code == 409
-    assert "has not started" in response.json()["error"]
+    assert "never started" in response.json()["error"]
 
 
 @pytest.mark.parametrize(
@@ -447,11 +513,8 @@ def test_a_body_that_is_not_json_is_refused(client: TestClient):
 
 
 def test_a_body_over_the_limit_is_refused(llm: FakeModel, logs_dir: Path):
-    app = create_app(
-        token=TOKEN, port=PORT, logs_dir=logs_dir, completion=llm, max_body_bytes=1_000
-    )
     body = {"question": QUESTION, "model": MODEL, "documents": ["x" * 1_001]}
-    with TestClient(app, base_url=BASE_URL, headers=AUTH) as client:
+    with client_for(llm, logs_dir, max_body_bytes=1_000) as client:
         response = client.post("/api/runs", json=body)
     assert response.status_code == 413
     assert llm.requests == []

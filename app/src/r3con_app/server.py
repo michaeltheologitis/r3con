@@ -8,15 +8,21 @@ opened URL's fragment, ``#token=...``.
 
 - ``GET /api/keys``: which providers have a key, stored here or in the environment.
   ``POST`` stores one (``{provider, key}``, or ``{provider: "other", endpoint, key?}``),
-  ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. Keys stay in
-  this process's memory: the server never sends, logs or writes one, and masks any it
-  finds in an error before passing the error on.
+  ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. OpenAI's,
+  Anthropic's and Gemini's go to their own models; Other's endpoint and key go to the
+  self-hosted providers in ``SELF_HOSTED`` and to names litellm can't place, and any
+  other provider gets litellm's own setup from the environment.
+- Keys stay in this process's memory, and the server never sends, logs or writes one.
+  It masks them (the stored keys, Other's, and the three providers' variables) in the
+  ``error`` of each event it relays and in its own log line. r3con, in the same
+  process, still writes the raw error to ``events.jsonl`` and ``error.txt`` in the logs
+  dir, and its resend warnings to stderr, until a follow-up masks those.
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
   ``run_failed``.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model}``) starts ``r3con.ask`` over a
-  run that has started and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events``
+  run that has ended and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events``
   streams its events until ``ask_finished`` or ``ask_failed``.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
@@ -52,6 +58,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SecretStr,
+    StringConstraints,
     TypeAdapter,
     ValidationError,
 )
@@ -86,6 +93,11 @@ KEY_VARIABLES: dict[Provider, str] = {
     "gemini": "GEMINI_API_KEY",
 }
 KEY_MASK = "[key]"
+# A shorter key, such as vLLM's "EMPTY", is a placeholder, not a secret.
+MIN_MASKED_KEY_CHARS = 8
+SELF_HOSTED = frozenset(
+    {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
+)
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 PUBLIC_PATHS = frozenset({"/"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
@@ -100,13 +112,12 @@ def _not_blank(text: str) -> str:
     return text
 
 
-def _secret_not_blank(secret: SecretStr) -> SecretStr:
-    _not_blank(secret.get_secret_value())
-    return secret
+def _stripped_secret(secret: SecretStr) -> SecretStr:
+    return SecretStr(_not_blank(secret.get_secret_value()).strip())
 
 
 Text = Annotated[str, AfterValidator(_not_blank)]
-Secret = Annotated[SecretStr, AfterValidator(_secret_not_blank)]
+Secret = Annotated[SecretStr, AfterValidator(_stripped_secret)]
 
 
 class RunRequest(BaseModel):
@@ -131,7 +142,9 @@ class ProviderKey(BaseModel):
 class OtherEndpoint(BaseModel):
     model_config = FORBID_EXTRA
     provider: Literal["other"]
-    endpoint: Annotated[str, Field(pattern=r"^https?://\S+$")]
+    endpoint: Annotated[
+        str, StringConstraints(strip_whitespace=True, pattern=r"^https?://\S+$")
+    ]
     key: Secret | None = None
 
 
@@ -198,15 +211,15 @@ def _key_status(state: ServerState) -> dict[str, Any]:
 
 
 def _held_keys(state: ServerState) -> tuple[str, ...]:
-    """Every key this server could send, stored here or in its environment, longest
-    first, so that a key inside another is masked whole."""
+    """Every key this server could send, stored here or in its environment, that is long
+    enough to be a secret, longest first, so that a key inside another is masked whole."""
     stored = list(state.keys.values())
     if state.other is not None and state.other.key is not None:
         stored.append(state.other.key)
-    environment = (os.environ.get(variable, "") for variable in KEY_VARIABLES.values())
     keys = {key.get_secret_value() for key in stored}
-    keys.update(key for key in environment if key.strip())
-    return tuple(sorted(keys, key=len, reverse=True))
+    keys.update(os.environ.get(variable, "") for variable in KEY_VARIABLES.values())
+    long_enough = (key for key in keys if len(key.strip()) >= MIN_MASKED_KEY_CHARS)
+    return tuple(sorted(long_enough, key=len, reverse=True))
 
 
 def _masked(text: str, keys: Iterable[str]) -> str:
@@ -215,23 +228,24 @@ def _masked(text: str, keys: Iterable[str]) -> str:
     return text
 
 
-def _provider(model: str) -> str:
-    """``model``'s provider as litellm places it, or ``"other"`` if it can't."""
+def _provider(model: str) -> str | None:
+    """``model``'s provider as litellm places it, or ``None`` if it can't."""
     try:
         with quiet_litellm():
             return litellm.get_llm_provider(model)[1]
     except BadRequestError:
-        return "other"
+        return None
 
 
 def _model_options(state: ServerState, model: str) -> dict[str, Any]:
-    """What r3con is called with for ``model``: the key stored for its provider, or for
-    any other provider the Other endpoint and its key. A key not stored here is passed
-    as ``None``, so that litellm reads the environment."""
+    """What r3con is called with for ``model``: the key stored for its provider; for a
+    self-hosted provider, or a name litellm can't place, the Other endpoint and its key.
+    Anything not stored here is passed as ``None``, so that litellm reads the
+    environment."""
     provider, other = _provider(model), state.other
     if provider in KEY_VARIABLES:
         key, base = state.keys.get(provider), None
-    elif other is not None:
+    elif other is not None and (provider is None or provider in SELF_HOSTED):
         key, base = other.key, other.endpoint
     else:
         key, base = None, None
@@ -369,11 +383,11 @@ async def start_ask(request: Request) -> Response:
     state = _state(request)
     run = _job(state.jobs["run"], request.path_params["run_id"], "run")
     body = await _read(request, AskRequest.model_validate_json)
-    started = run.events[0] if run.events else {}
-    if started.get("type") != "run_started":
-        raise HTTPException(
-            409, "This run has not started, so it has no folder to ask over."
-        )
+    if not _ended(run):
+        raise HTTPException(409, "This run is still running; ask once it has ended.")
+    started = run.events[0]
+    if started["type"] != "run_started":
+        raise HTTPException(409, "This run never started, so it has no folder to ask.")
     ask = partial(
         r3con.ask,
         started["run_dir"],
