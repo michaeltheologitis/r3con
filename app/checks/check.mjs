@@ -1,7 +1,7 @@
 // Checks the run panel in app/src/r3con_app/index.html in headless Chromium: node app/checks/check.mjs
 // The live area serves it with app/checks/fake_server.py, through uv.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -104,6 +104,10 @@ const LIVE_RUN_MS = 30_000;
 // What fake_server.py's model does: the markers it obeys, its answer, and what it cites.
 const FAILS = '(the model is down)';
 const HANGS = '(the model hangs)';
+const STALLS = '(the model stalls)';
+const OFF_SCHEMA = '(the model answers off schema)';
+// fake_server.py's RELEASE: once it is in the logs dir, stalled calls answer.
+const RELEASE_FILE = 'release';
 const QUIET = '(nothing relevant here)';
 const SPLIT_MEMO = '06_split_memo';
 const SCRIPTED_ANSWER = "The check's scripted model answers this.";
@@ -122,6 +126,16 @@ const REFUSED_LOG = 'Failed to load resource: the server responded with a status
 const ABORTED_LOG = 'Failed to load resource: net::ERR_FAILED';
 const SERVER_ERROR_LOG = 'Failed to load resource: the server responded with a status of 500';
 const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+const STOPPING = 'stopping · the call in flight finishes first';
+const STOPPED_IN_RELEVANCE = '● stopped in relevance';
+const STOPPED_IN_PARSING = '● stopped in parsing';
+const STOPPED_WHILE_READING = '● stopped while reading';
+const STOPPED_ASK = '● ask stopped in reasoning';
+const STOPPED = '● stopped';
+// How a stopped ask's line in the chat ends.
+const STOPPED_ASK_TAIL = '· stopped in reasoning';
+const CANCEL_REFUSED = 'no run with that id';
+const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a status of 404';
 const LIVE_ASK = 'live ask over this run';
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
@@ -470,6 +484,7 @@ function composer() {
   const note = document.getElementById('ask-note');
   return {
     primary: document.getElementById('run-btn').textContent,
+    stop: !document.getElementById('stop-btn').hidden,
     newRun: !document.getElementById('new-run-btn').hidden,
     note: note.hidden ? null : note.textContent,
   };
@@ -535,6 +550,10 @@ function answerWorking() {
   return document.querySelector('#world .node.answer.working') !== null;
 }
 
+function roundOneWorking() {
+  return document.querySelector('#world .node.r1.working') !== null;
+}
+
 // The shown tab's run has ended with its status matching `source`, and it has no asks: a new run's tab.
 function newRunDone(source) {
   return !document.querySelector('.node[data-id="answer-1"]') && new RegExp(source).test(document.getElementById('run-status').textContent);
@@ -548,6 +567,10 @@ function recordStatuses() {
   window.statuses = [];
   const status = document.getElementById('run-status');
   new MutationObserver(() => window.statuses.push(status.textContent)).observe(status, { childList: true, characterData: true, subtree: true });
+}
+
+function failedNode(id) {
+  return Boolean(document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('failed'));
 }
 
 function landedNode(id) {
@@ -595,8 +618,8 @@ async function beforeRun() {
     const named = status === ready('recorded run', RECORDED_MODEL);
     check('before a run', "the status names a recorded run and the recording's model", named, status);
     const offered = await page.evaluate(composer);
-    const onlyRun = isDeepStrictEqual(offered, { primary: 'run ⏎', newRun: false, note: null });
-    check('before a run', 'only run is offered: no new run, and no footer note', onlyRun, JSON.stringify(offered));
+    const onlyRun = isDeepStrictEqual(offered, { primary: 'run ⏎', stop: false, newRun: false, note: null });
+    check('before a run', 'only run is offered: no stop, no new run, and no footer note', onlyRun, JSON.stringify(offered));
     await page.evaluate(countStatusWrites);
     await page.focus('#question');
     await page.keyboard.type(' today');
@@ -995,8 +1018,8 @@ async function answersOnTheRun(sample, asks) {
     const runPath = lineage(sample, docIds);
     const askPath = (k) => lineage(sample, docIds, `answer-${k + 1}`, asks[k].provenance);
     const offered = await page.evaluate(composer);
-    const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', newRun: true, note: null });
-    check('answers', 'after a run the composer offers ask ⏎ and new run', offersBoth, JSON.stringify(offered));
+    const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: true, note: null });
+    check('answers', 'after a run the composer offers ask ⏎ and new run, and no stop', offersBoth, JSON.stringify(offered));
 
     const first = await positionOf(page, 'answer-0');
     const nodes = await count(page, '.node');
@@ -1143,7 +1166,7 @@ async function answersAfterFiles(asks) {
     await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
     await page.waitForSelector('.node.pending');
     const footer = await page.evaluate(composer);
-    const says = isDeepStrictEqual(footer, { primary: 'ask ⏎', newRun: true, note: NOT_IN_RUN });
+    const says = isDeepStrictEqual(footer, { primary: 'ask ⏎', stop: false, newRun: true, note: NOT_IN_RUN });
     check('answers', "after a file is added, the footer says it isn't in this run, and ask stays", says, JSON.stringify(footer));
     const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
     check('answers', 'after a run, the file-added line says a new run would cover the files and ask stays on this run', added === FILE_ADDED_AFTER_RUN, added);
@@ -1233,9 +1256,9 @@ function countDocNodes() {
   new MutationObserver((records) => (window.docNodesAdded += added(records))).observe(document.getElementById('world'), { childList: true, subtree: true });
 }
 
-// The second tab's × enables once its run has ended.
-function secondTabEnded() {
-  return !document.querySelectorAll('.tab-close')[1].disabled;
+// Tab i's × enables once its run has ended.
+function tabEnded(i) {
+  return !document.querySelectorAll('.tab-close')[i].disabled;
 }
 
 async function tabs() {
@@ -1338,7 +1361,7 @@ async function tabs() {
     const whyName = 'Delete is offered only on a tab it closes; on a tab whose run is going it keeps the tab, and the status says why';
     check('tabs', whyName, isDeepStrictEqual(going.map((tab) => tab.keys), ['Delete', null]) && keeps, `${JSON.stringify(going.map((tab) => tab.keys))}; ${said.join(' | ')}`);
     await page.locator('.run-tab').first().click();
-    const ended = await becomes(page, secondTabEnded, null, REPLAY_MS);
+    const ended = await becomes(page, tabEnded, 1, REPLAY_MS);
     await page.waitForTimeout(LIT_DELAY_MS);
     const untouched = ended && isDeepStrictEqual(await page.evaluate(panelSnapshot), first);
     check('tabs', 'a replay going on in another tab never draws on the shown one, nor changes its status line', untouched, `ended ${ended}`);
@@ -1368,7 +1391,7 @@ async function tabs() {
     await send(page, NEW_QUESTION, 'Control+Enter');
     await page.waitForSelector('#world .edge.draw', { state: 'attached' });
     await page.locator('.run-tab').first().click();
-    await becomes(page, secondTabEnded, null, REPLAY_MS);
+    await becomes(page, tabEnded, 1, REPLAY_MS);
     await page.waitForTimeout(LIT_DELAY_MS);
     await page.locator('.run-tab').nth(1).click();
     check('tabs', 'a tab left mid-replay and shown again plays none of the animations it cut off', await page.evaluate(panelStill));
@@ -1412,6 +1435,98 @@ async function tabs() {
   });
 }
 
+// ---------- stop: the shown tab's run, in the prototype ----------
+
+// Some node reads as stopped, and every failed node does.
+function nodesStopped() {
+  const names = [...document.querySelectorAll('#world .node.failed')].map((el) => el.getAttribute('aria-label'));
+  return names.length > 0 && names.every((name) => name.endsWith(', stopped'));
+}
+
+// A select ellipsizes its text without scrolling, so the picker's text is measured beside it.
+function pickerFits() {
+  const pick = document.getElementById('model-pick');
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position: absolute; visibility: hidden; white-space: pre';
+  probe.textContent = pick.selectedOptions[0].textContent;
+  pick.parentElement.append(probe);
+  const room = pick.clientWidth - parseFloat(getComputedStyle(pick).paddingRight);
+  const fits = probe.getBoundingClientRect().width <= room + 0.5;
+  probe.remove();
+  return fits;
+}
+
+function statusStarts(start) {
+  return document.getElementById('run-status').textContent.startsWith(start);
+}
+
+const drawnAs = ({ nodes, edges, isLit, status }) => ({ nodes, edges, isLit, status });
+
+async function pressStop(page, { keyboard = false } = {}) {
+  if (!keyboard) return page.$eval('#stop-btn', (button) => button.click());
+  await page.focus('#stop-btn');
+  await page.keyboard.press('Enter');
+}
+
+// With motion on, a replay takes seconds, so it can be stopped partway.
+async function stopArea() {
+  await withPage('stop', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const question = await page.inputValue('#question');
+    await page.click('#run-btn');
+    await page.waitForSelector('#world .node.r1', { state: 'attached' });
+    const offered = (await page.evaluate(composer)).stop;
+    check('stop', "1440 light: with stop offered, the model picker shows the default model's whole name", offered && (await page.evaluate(pickerFits)));
+    await pressStop(page, { keyboard: true });
+    const stopped = await page.evaluate(nodesStopped);
+    const after = { composer: await page.evaluate(composer), focus: await focusedId(page), working: await count(page, '#world .node.working') };
+    // What was animating in as it stopped plays out first, and its class comes off.
+    await becomes(page, panelStill);
+    const frozen = await page.evaluate(panelSnapshot);
+    const offersRun = isDeepStrictEqual(after, { composer: { primary: 'run ⏎', stop: false, newRun: false, note: null }, focus: 'question', working: 0 });
+    const stopName = "stop, pressed from the keyboard during a replay, ends it where it is: its working nodes read as stopped, the status says where, and the composer offers run, its focus in the question box";
+    check('stop', stopName, offered && stopped && frozen.status === STOPPED_IN_RELEVANCE && offersRun, `${frozen.status}; ${JSON.stringify(after)}`);
+
+    await send(page, question);
+    const ended = await becomes(page, statusIs, SAMPLE_STATUS, REPLAY_MS);
+    await page.locator('.run-tab').first().click();
+    const still = isDeepStrictEqual(drawnAs(await page.evaluate(panelSnapshot)), drawnAs(frozen));
+    check('stop', 'a stopped replay draws nothing more: once the same replay has ended in another tab, the stopped one is as it was', ended && still, `ended ${ended}`);
+  });
+
+  await withPage('stop', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const question = await page.inputValue('#question');
+    await page.click('#run-btn');
+    await page.waitForSelector('#world .node.doc.working', { state: 'attached' });
+    await pressStop(page);
+    const docs = await count(page, '#world .node.doc.working, #world .node.doc.failed');
+    const reading = await page.textContent('#run-status');
+    const readName = 'stop while a replay reads its documents leaves them read, not stopped, and the status says it stopped while reading';
+    check('stop', readName, docs === 0 && reading === STOPPED_WHILE_READING, `${docs} documents working or stopped; ${reading}`);
+
+    await send(page, question);
+    await becomes(page, lastTurnSays, [`read ${SAMPLE_DOCS} files`], REPLAY_MS);
+    await pressStop(page);
+    const between = await page.textContent('#run-status');
+    check('stop', 'stop between reading and round 1 says only that it stopped', between === STOPPED, between);
+
+    await send(page, question);
+    await becomes(page, statusStarts, 'running · parsing', REPLAY_MS);
+    await pressStop(page);
+    const parsing = await page.textContent('#run-status');
+    check('stop', 'stop right after parsing begins says it stopped in parsing', parsing === STOPPED_IN_PARSING, parsing);
+  });
+
+  await withPage('stop', { layout: LAYOUTS.phone, sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    await page.waitForSelector('#world .node.r1', { state: 'attached' });
+    const fits = (await page.evaluate(composer)).stop && (await page.evaluate(noHorizontalScroll)) && (await page.evaluate(pickerFits));
+    check('stop', "400 dark: with stop offered, the page has no horizontal scroll, and the picker shows the default model's whole name", fits);
+  });
+}
+
 // ---------- live: served by r3con-app, with a scripted model ----------
 
 // Starts fake_server.py with no provider key in its environment, in a process group of its own.
@@ -1441,7 +1556,8 @@ function startFakeServer() {
     await exited;
     rmSync(logsDir, { recursive: true, force: true });
   };
-  return { url, stop };
+  const release = () => writeFileSync(join(logsDir, RELEASE_FILE), '');
+  return { url, stop, release };
 }
 
 async function withFakeServer(body) {
@@ -1665,7 +1781,7 @@ async function liveAskAfterFailed(url) {
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, `Which memo is the registry? ${FAILS}`);
-    const failed = await becomes(page, () => document.querySelector('.node[data-id="answer-1"]')?.classList.contains('failed'), null, LIVE_RUN_MS);
+    const failed = await becomes(page, failedNode, 'answer-1', LIVE_RUN_MS);
     await clickNode(page, 'answer-1');
     await send(page, 'Which memo is the registry?');
     const landed = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
@@ -1819,7 +1935,7 @@ async function liveGoingThenLost(url, server) {
     const posts = postsOf(page);
     await page.fill('#question', `Which site logged the most incidents? ${HANGS}`);
     await page.click('#run-btn');
-    const held = await becomes(page, () => document.querySelector('.node.r1.working') !== null, null, LIVE_RUN_MS);
+    const held = await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
     const question = 'Which site logged the fewest?';
     await page.fill('#question', question);
     await page.click('#run-btn');
@@ -1840,6 +1956,162 @@ async function liveGoingThenLost(url, server) {
     const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
     const lostName = 'a run whose server goes away mid-stream says the connection was lost';
     check('live', lostName, lost, await page.textContent('#run-status'));
+  });
+}
+
+const isCancel = (request) => request.method() === 'POST' && request.url().endsWith('/cancel');
+const cancelsIn = (posts) => posts.filter((path) => path.endsWith('/cancel'));
+const startedJob = (page, path) => page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith(path));
+
+// Stalls both tabs' runs on its server until it releases them, after the second is stopped.
+async function liveStop(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    const absentBefore = !(await page.evaluate(composer)).stop;
+    await send(page, `Which site logged the most incidents? ${STALLS}`);
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    const started = startedJob(page, '/api/runs');
+    await send(page, `Which memo is the registry? ${STALLS}`, 'Control+Enter');
+    const runId = (await (await started).json()).run_id;
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    check('live', 'stop is absent before a run, and offered while one goes', absentBefore && (await page.evaluate(composer)).stop);
+    const sent = page.waitForRequest(isCancel);
+    await pressStop(page);
+    await (await sent).response();
+    const stoppingSaid = await page.textContent('#run-status');
+    const disabled = await page.$eval('#stop-btn', (button) => button.disabled);
+    await pressStop(page);
+    check('live', 'while a stopped run finishes its call in flight, the status says it is stopping, and stop is disabled', stoppingSaid === STOPPING && disabled, stoppingSaid);
+
+    server.release();
+    const ended = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+    const stopped = await page.evaluate(nodesStopped);
+    const closable = (await page.evaluate(tabRow))[1].closable;
+    const after = await page.evaluate(composer);
+    const cancels = cancelsIn(posts);
+    const runName = "stop sends one cancel, for the shown tab's run, even when pressed twice; the run ends stopped where it was, its × enabled, and stop gives way to run";
+    check('live', runName, isDeepStrictEqual(cancels, [`/api/runs/${runId}/cancel`]) && ended && stopped && closable && !after.stop && after.primary === 'run ⏎', `${cancels.join(' ')}; ${JSON.stringify(after)}`);
+
+    const firstEnded = await becomes(page, tabEnded, 0, LIVE_RUN_MS);
+    await page.locator('.run-tab').first().click();
+    const first = { nodes: await count(page, '.node'), working: await count(page, '.node.working'), stop: (await page.evaluate(composer)).stop };
+    const status = await page.textContent('#run-status');
+    const goesOn = firstEnded && isDeepStrictEqual(first, { nodes: SAMPLE_COUNTS.nodes, working: 0, stop: false }) && LIVE_DONE.test(status);
+    check('live', "stop in one tab leaves another tab's run going: its events still land there, and once it is done stop is gone", goesOn, `${JSON.stringify(first)}; ${status}`);
+  });
+}
+
+// Holds the run's POST back until stop has been pressed, so the cancel has to wait for the run's id.
+async function liveStopEarly(url, server) {
+  let letThrough;
+  const posted = new Promise((resolve) => (letThrough = resolve));
+  const before = (page) => page.route('**/api/runs', async (route) => {
+    await posted;
+    await route.continue();
+  });
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    const posts = postsOf(page);
+    await send(page, `Which site logged the most incidents? ${STALLS}`);
+    await becomes(page, () => !document.getElementById('stop-btn').hidden);
+    await pressStop(page);
+    const beforeId = cancelsIn(posts).length;
+    const sent = page.waitForRequest(isCancel, { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    letThrough();
+    await sent;
+    server.release();
+    const ended = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+    const name = "stop pressed before the run's id has come back sends its cancel once it does, and the run ends stopped";
+    check('live', name, beforeId === 0 && cancelsIn(posts).length === 1 && ended, await page.textContent('#run-status'));
+  });
+}
+
+// Stalls two asks' calls until it releases them; their replies then miss their schema, so r3con would send again.
+async function liveStopAsk(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ask = async (question) => {
+      const started = startedJob(page, '/asks');
+      await send(page, `${question} ${STALLS} ${OFF_SCHEMA}`);
+      return (await (await started).json()).ask_id;
+    };
+    const first = await ask('Which site is quietest?');
+    const sentFirst = page.waitForRequest(isCancel);
+    await pressStop(page);
+    await sentFirst;
+    const second = await ask('Which site is loudest?');
+    const offered = await page.$eval('#stop-btn', (button) => !button.hidden && !button.disabled);
+    const sentSecond = page.waitForRequest(isCancel, { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    await pressStop(page);
+    await sentSecond;
+    const spent = await page.$eval('#stop-btn', (button) => button.disabled);
+    const cancels = cancelsIn(posts);
+    const laterName = 'a later ask can be stopped while an earlier one is still stopping: stop is offered again, and cancels only the later one';
+    check('live', laterName, offered && spent && isDeepStrictEqual(cancels, [`/api/asks/${first}/cancel`, `/api/asks/${second}/cancel`]), cancels.join(' '));
+
+    server.release();
+    const ended = (await becomes(page, failedNode, 'answer-1', LIVE_RUN_MS)) && (await becomes(page, failedNode, 'answer-2', LIVE_RUN_MS));
+    const names = await page.$$eval('.node.answer.failed', (els) => els.map((el) => el.getAttribute('aria-label')));
+    const said = await page.evaluate(lastTurnLines);
+    const status = await page.textContent('#run-status');
+    const chatSays = said.some((text) => text.endsWith(STOPPED_ASK_TAIL));
+    const stoppedAsks = ended && names.length === 2 && names.every((name) => name.endsWith(', stopped')) && chatSays && status === STOPPED_ASK && !(await page.evaluate(composer)).stop;
+    const askName = 'stop during an ask over a finished tab cancels that ask; its answer node, its chat and the status say it stopped';
+    check('live', askName, stoppedAsks, `${names.length} stopped; ${status}`);
+
+    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
+    await page.locator('.run-tab').first().click();
+    const back = await page.textContent('#run-status');
+    check('live', "after a stopped ask, the tab's own run line is back once the tab is shown again", LIVE_DONE.test(back), back);
+  });
+}
+
+// Its cancel is answered 404, so the run, held at its answer, goes on to the end.
+async function liveStopRefused(url) {
+  const before = async (page) => {
+    await page.addInitScript(holdFrom, 'reasoning_finished');
+    await page.route('**/cancel', (route) => route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: CANCEL_REFUSED }) }));
+  };
+  await withPage('live', { url, sample: false, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
+    await page.click('#run-btn');
+    await becomes(page, answerWorking, null, LIVE_RUN_MS);
+    await page.evaluate(recordStatuses);
+    await pressStop(page);
+    const refusal = `● couldn't stop · ${CANCEL_REFUSED}`;
+    const refused = await becomes(page, statusIs, refusal);
+    const again = await page.$eval('#stop-btn', (button) => !button.hidden && !button.disabled);
+    await page.evaluate(() => (window.release = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const said = await page.evaluate(() => window.statuses);
+    const goesOn = refused && again && done && !said.slice(said.indexOf(refusal)).includes(STOPPING);
+    check('live', 'a refused cancel says so in the status, offers stop again, and the run goes on to the end, no longer stopping', goesOn, said.join(' | '));
+  });
+}
+
+// Holds the cancel until its run has ended on its own, then refuses it.
+async function liveStopLate(url) {
+  let refuse;
+  const ran = new Promise((resolve) => (refuse = resolve));
+  const before = async (page) => {
+    await page.addInitScript(holdFrom, 'reasoning_finished');
+    await page.route('**/cancel', async (route) => {
+      await ran;
+      await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: CANCEL_REFUSED }) });
+    });
+  };
+  await withPage('live', { url, sample: false, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
+    await page.click('#run-btn');
+    await becomes(page, answerWorking, null, LIVE_RUN_MS);
+    await pressStop(page);
+    await page.evaluate(() => (window.release = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const finished = page.waitForEvent('requestfinished', isCancel);
+    refuse();
+    await finished;
+    const overwritten = await becomes(page, (source) => !new RegExp(source).test(document.getElementById('run-status').textContent), LIVE_DONE.source);
+    check('live', 'a cancel refused once its run has ended leaves the done status alone', done && !overwritten, await page.textContent('#run-status'));
   });
 }
 
@@ -1872,14 +2144,17 @@ async function live() {
     await liveFailure(url);
     await liveUnreadable(url);
     await liveStaleToken(url);
+    await liveStopRefused(url);
+    await liveStopLate(url);
   });
-  for (const stateful of [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost]) await withFakeServer(stateful);
+  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
+  for (const body of stateful) await withFakeServer(body);
   await liveElsewhere();
 }
 
 try {
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, tabs, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, files, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
