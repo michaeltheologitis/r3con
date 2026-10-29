@@ -20,8 +20,10 @@ when its reply does not fit the schema.
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
-:func:`_drop_refused_constraints` removes what it refuses: an enum past its limit, and a
-pattern with a lookaround.
+:func:`_drop_refused_constraints` removes what it refuses: enums, the largest first, until
+those left hold no more than 1,000 values together, and a pattern with a lookaround.
+:func:`schema_as_sent` builds the schema as sent, for the request and for the token
+budgets.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -108,35 +110,50 @@ def _enforce_strict_objects(schema: Any) -> Any:
     ``anyOf: [..., {"type": "null"}]``), so optionality is preserved at the
     value level; only the *key* is forced to appear.
     """
-    if isinstance(schema, dict):
-        if schema.get("type") == "object" and "properties" in schema:
-            schema.setdefault("additionalProperties", False)
-            schema["required"] = list(schema["properties"].keys())
-        for v in schema.values():
-            _enforce_strict_objects(v)
-    elif isinstance(schema, list):
-        for item in schema:
-            _enforce_strict_objects(item)
+    for node in _dicts_in(schema):
+        if node.get("type") == "object" and "properties" in node:
+            node.setdefault("additionalProperties", False)
+            node["required"] = list(node["properties"].keys())
     return schema
 
 
 def _drop_refused_constraints(schema: Any) -> Any:
-    """Remove from ``schema`` what OpenAI refuses: every ``enum`` of more than
-    :data:`_MAX_ENUM_VALUES` values, and every ``pattern`` with a lookaround, such as the
-    one Pydantic writes for a ``Decimal``. The field keeps its type, so the caller checks
-    the values once the reply is in."""
-    if isinstance(schema, dict):
-        if len(schema.get("enum") or []) > _MAX_ENUM_VALUES:
-            del schema["enum"]
-        pattern = schema.get("pattern")
+    """Remove from ``schema`` what OpenAI refuses: ``enum`` lists, the largest first,
+    until those left hold no more than :data:`_MAX_ENUM_VALUES` values together, and
+    every ``pattern`` with a lookaround, such as the one Pydantic writes for a
+    ``Decimal``. A field keeps its type, so the caller checks the values once the reply
+    is in."""
+    nodes = list(_dicts_in(schema))
+    enums = sorted(
+        (node for node in nodes if isinstance(node.get("enum"), list)),
+        key=lambda node: len(node["enum"]),
+    )
+    values = sum(len(node["enum"]) for node in enums)
+    while values > _MAX_ENUM_VALUES:
+        values -= len(enums.pop().pop("enum"))
+    for node in nodes:
+        pattern = node.get("pattern")
         if isinstance(pattern, str) and _LOOKAROUND.search(pattern):
-            del schema["pattern"]
-        for v in schema.values():
-            _drop_refused_constraints(v)
-    elif isinstance(schema, list):
-        for item in schema:
-            _drop_refused_constraints(item)
+            del node["pattern"]
     return schema
+
+
+def _dicts_in(schema: Any) -> Iterator[dict[str, Any]]:
+    """``schema``, if it is a dict, and every dict nested in it."""
+    if isinstance(schema, dict):
+        yield schema
+        schema = list(schema.values())
+    if isinstance(schema, list):
+        for item in schema:
+            yield from _dicts_in(item)
+
+
+def schema_as_sent(schema: type[BaseModel]) -> dict[str, Any]:
+    """``schema``'s JSON schema as a structured request sends it, built afresh on each
+    call: strict, without what OpenAI refuses."""
+    return _drop_refused_constraints(
+        _enforce_strict_objects(schema.model_json_schema())
+    )
 
 
 def litellm_chat_completion_full(
@@ -205,9 +222,7 @@ def litellm_chat_completion_full(
             "type": "json_schema",
             "json_schema": {
                 "name": schema.__name__,
-                "schema": _drop_refused_constraints(
-                    _enforce_strict_objects(schema.model_json_schema())
-                ),
+                "schema": schema_as_sent(schema),
                 "strict": True,
             },
         }

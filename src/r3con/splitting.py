@@ -36,7 +36,7 @@ from pydantic import BaseModel
 from r3con import settings
 from r3con.logging_setup import get_logger
 from r3con.runs import TaskLogger
-from r3con.runtime.llm import count_tokens, quiet_litellm
+from r3con.runtime.llm import count_tokens, quiet_litellm, schema_as_sent
 
 _log = get_logger("splitting")
 
@@ -129,7 +129,8 @@ class Splits:
         ``call`` names the call (``"relevance-r2"``, ``"parse"``); a part's ``kind`` is
         ``{call}-d{doc}`` while the document is whole and ``{call}-d{doc}c{k}`` once it
         is split. ``rest`` is the text sent beside a part, and ``schema`` the reply's
-        structured-output schema, if any, whose JSON counts as part of the rest.
+        structured-output schema, if any, whose JSON as sent
+        (:func:`~r3con.runtime.llm.schema_as_sent`) counts as part of the rest.
         ``send`` raises ``litellm.ContextWindowExceededError`` when the provider refuses
         a part; any other exception passes through untouched.
 
@@ -145,7 +146,7 @@ class Splits:
                 one character still does not fit.
         """
         if schema is not None:
-            rest += json.dumps(schema.model_json_schema())
+            rest += json.dumps(schema_as_sent(schema))
         # The rest's tokens: counted once, and only when its size in bytes cannot settle
         # whether a request fits.
         count_rest = functools.cache(functools.partial(count_tokens, rest))

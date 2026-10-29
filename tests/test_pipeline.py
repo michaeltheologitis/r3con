@@ -998,7 +998,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "estimate",
-        "estimate": 10_669,
+        "estimate": 10_698,
         "line": LINE_8192,
     }
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()
