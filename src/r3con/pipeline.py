@@ -163,12 +163,14 @@ class Answer:
 class Representation:
     """What a run built for its question, read back from its folder by
     :func:`read_representation`, for :func:`ask_pipeline` to reason over: the
-    manifest's ``config`` block, the document ids, the final round of relevance
-    snippets, the schema, and the parse as the folder holds it, with its
-    ``source_docs`` and ``provenance``."""
+    manifest's ``config`` block, the model string the run called litellm with (the
+    ``config`` block's bare name for a run recorded before ``litellm_model`` was), the
+    document ids, the final round of relevance snippets, the schema, and the parse as
+    the folder holds it, with its ``source_docs`` and ``provenance``."""
 
     run_dir: Path
     config: dict[str, Any]
+    model: str
     document_ids: list[str]
     relevance: RelevantContext
     schema_code: str
@@ -434,9 +436,11 @@ def read_representation(run_dir: Path) -> Representation:
         final_round[document].append(SnippetRecord(**snippet))
     parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
     schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
+    manifest = _read_json(run_dir / "manifest.json")
     return Representation(
         run_dir=run_dir,
-        config=_read_json(run_dir / "manifest.json")["config"],
+        config=manifest["config"],
+        model=manifest.get("litellm_model") or manifest["config"]["model"],
         document_ids=sorted(ids, key=ids.__getitem__),
         relevance=RelevantContext(records=[final_round] if rounds else []),
         schema_code=schema["schema_code"],
@@ -460,9 +464,9 @@ def ask_pipeline(
     """Answer ``task`` over ``built`` by running reasoning alone, as
     :func:`run_pipeline` runs it, under the run's reasoning prompt pins.
 
-    ``model``, ``path`` and ``params`` default to the run's; the model as the manifest
-    records it, without its provider prefix. ``api_base``, ``api_key`` and
-    ``completion`` are transport, as in :func:`run_pipeline`.
+    ``model``, ``path`` and ``params`` default to the run's, the model being
+    ``built.model``. ``api_base``, ``api_key`` and ``completion`` are transport, as in
+    :func:`run_pipeline`.
 
     The ask is written to a new ``<run_dir>/asks/<NNN>-<model>/``: ``ask.json`` first,
     then ``reasoning/`` as a run writes it, or, if reasoning raises, its completed calls
@@ -474,7 +478,7 @@ def ask_pipeline(
         Each of these is raised before any request and before the ask's folder exists.
     """
     config = built.config
-    model = str(config["model"]) if model is None else model
+    model = built.model if model is None else model
     path = check_reasoning(config["reasoning"] if path is None else path, "ask")
     prompts = {stage: config["prompts"][stage] for stage in _REASONING_PROMPTS}
     for stage, version in prompts.items():

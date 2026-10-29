@@ -359,9 +359,8 @@ def ask(
         source: an :class:`Answer` from :func:`run`, whose ``run_dir`` is read, or the
             path of a run folder.
         question: the question to answer; it may be the run's own.
-        model: a litellm model string. Defaults to the run's, as its manifest records
-            it: without the provider prefix, which litellm infers for names such as
-            ``gpt-6-luna``; pass the full string otherwise (``hosted_vllm/…``).
+        model: a litellm model string. Defaults to the one the run called; for a run
+            recorded before r3con kept that string, its bare name (``gpt-6-luna``).
         reasoning: ``"direct"`` or ``"coding"``, as in :func:`run`. Defaults to the
             run's.
         params: as in :func:`run`. Defaults to the run's.

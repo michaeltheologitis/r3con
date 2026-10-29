@@ -15,6 +15,7 @@ PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding":
 DOCS = ["Halloran memo", "Merrow memo", "Calder memo"]
 JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+GPT_4O = "openai/gpt-4o"
 # The fields an ask's Answer takes from the run's.
 FROM_THE_RUN = (
     "relevant_context",
@@ -387,22 +388,34 @@ def test_each_ask_takes_the_next_numbered_folder_and_the_runs_files_stay_as_they
 @pytest.mark.parametrize(
     ("options", "model", "temperature"),
     [
-        ({}, "gpt-4o", 0.3),
-        ({"model": QWEN, "params": {"temperature": 0.9}}, QWEN, 0.9),
+        ({}, QWEN, 0.3),
+        ({"model": GPT_4O, "params": {"temperature": 0.9}}, GPT_4O, 0.9),
     ],
     ids=["the-runs", "given"],
 )
 def test_an_ask_reasons_with_the_runs_model_and_params_unless_given_its_own(
     answering_llm, tmp_path, options, model, temperature
 ):
-    run_params = {"temperature": 0.3}
     built = finished_run(
-        answering_llm, tmp_path, model="openai/gpt-4o", params=run_params
+        answering_llm, tmp_path, model=QWEN, params={"temperature": 0.3}
     )
     ask(built, "Who else?", completion=answering_llm, **options)
     ran, asked = answering_llm.requests_for("reasoning")
-    assert ran["model"] == "openai/gpt-4o"
+    assert ran["model"] == QWEN
     assert (asked["model"], asked["temperature"]) == (model, temperature)
+
+
+def test_an_ask_over_a_run_recorded_without_its_litellm_model_uses_the_bare_name(
+    answering_llm, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path)
+    manifest_path = built.run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    del manifest["litellm_model"]
+    manifest_path.write_text(json.dumps(manifest))
+    ask(built, "Who else?", completion=answering_llm)
+    ran, asked = answering_llm.requests_for("reasoning")
+    assert (ran["model"], asked["model"]) == ("openai/gpt-6-luna", "gpt-6-luna")
 
 
 def test_an_ask_reasons_on_the_path_given_instead_of_the_runs(answering_llm, tmp_path):

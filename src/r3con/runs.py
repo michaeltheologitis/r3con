@@ -11,8 +11,9 @@ fact by reading each manifest (e.g. by the config's run label,
 Layout per ``logs/<run-folder>/``:
 
 - ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
-  snapshot — the task, a ``config`` block (the resolved
-  :class:`RunConfig` — model, relevance_rounds, prompts, params, …), and a
+  snapshot — the task, a ``config`` block (the resolved :class:`RunConfig` — model,
+  relevance_rounds, prompts, params, …), ``litellm_model`` (the model string exactly as
+  litellm was called with it, where ``config`` keeps only the bare name), and a
   ``settings`` block (the runtime knobs). Written first, so a crashed task is still
   discoverable. The run label is **not** stored — it is recomputed from the ``config``
   block (:meth:`r3con.config.RunConfig.label`).
@@ -178,8 +179,9 @@ def write_manifest(
 
     The folder name is opaque **by design**, so this file is the only thing that says
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
-    runtime caps it ran under (``settings``, else
-    :func:`r3con.settings.settings_snapshot` taken now), and the package version.
+    model string litellm is called with (``litellm_model``), the runtime caps it ran
+    under (``settings``, else :func:`r3con.settings.settings_snapshot` taken now), and
+    the package version.
     Written before the first stage, so even a crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
@@ -195,6 +197,7 @@ def write_manifest(
     config_block = (
         config.model_dump() if hasattr(config, "model_dump") else dict(config)
     )
+    litellm_model = config_block.get("model")
     if "model" in config_block:
         config_block["model"] = normalize_model_name(config_block["model"])
     overrides = config_block.get("overrides") or {}
@@ -210,6 +213,9 @@ def write_manifest(
             "run_folder": task_logger.folder,
             # --- what shapes the output (the run's identity) ---
             "config": config_block,
+            # The bare name in `config` is what labels and grouping compare; the full
+            # string is what litellm routes by, so r3con.ask can call the same model.
+            "litellm_model": litellm_model,
             # --- where the config and each prompt actually came from ---
             # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
             # overlaid file is invisible in the run label — so record the winning path.
