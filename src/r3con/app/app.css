@@ -21,6 +21,7 @@
   --icon-size: 28px;
   --doc-icon-size: 46px;
   --trash-size: 32px;
+  --trash-icon-size: 24px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -256,8 +257,9 @@ p { margin: 0; }
   color: var(--dim);
   border: 1px dashed transparent;
   border-radius: 6px;
+  pointer-events: none;
 }
-.trash svg { width: 24px; height: 24px; }
+.trash svg { width: var(--trash-icon-size); height: var(--trash-icon-size); }
 .trash.over { color: var(--accent); background: var(--bg); border-color: var(--accent); }
 .panel-hint {
   position: absolute;

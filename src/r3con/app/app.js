@@ -2893,7 +2893,7 @@
     filesChanged(tab, replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added);
   }
 
-  // The re-render drops the clicked button, and the focus with it. A drop on the can clicked none, so it leaves the focus out of the list.
+  // The re-render drops the clicked button, and the focus with it.
   /** @param {LoadedFile} file @param {{ refocus?: boolean }} [options] */
   function removeFile(file, { refocus = true } = {}) {
     const tab = state.shown;
@@ -3183,6 +3183,7 @@
 
   function startPinch() {
     const { view } = state.shown;
+    trash.classList.remove('over');
     const [a, b] = [...gesture.pointers.values()];
     gesture.mode = 'pinch';
     gesture.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2), view: { ...view } };
@@ -3203,10 +3204,12 @@
     applyView();
   }
 
-  // A document node released over the can, in a tab that hasn't run, has its file removed.
+  // A document node of the shown tab, released over the can while it shows, has its file removed.
   /** @param {PointerEvent} e */
   function overTrash(e) {
-    if (gesture.mode !== 'drag' || !gesture.moved || gesture.node.kind !== 'doc' || state.shown.run) return false;
+    const { node } = gesture;
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc' && state.shown.nodes.get(node.id) === node;
+    if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
   }
@@ -3237,7 +3240,6 @@
     if (e.pointerType === 'mouse' && !e.buttons) return onPointerEnd(e);
     p.x = e.clientX;
     p.y = e.clientY;
-    trash.classList.toggle('over', overTrash(e));
     if (gesture.mode === 'pinch') return updatePinch();
     if (!gesture.mode) return;
     const dx = e.clientX - gesture.origin.x;
@@ -3251,6 +3253,7 @@
       placeNode(gesture.node);
       redrawEdges(state.shown);
       if (state.selected === gesture.node.id) positionInspector();
+      trash.classList.toggle('over', overTrash(e));
     } else {
       panel.classList.add('panning');
       view.x = gesture.from.x + dx;
@@ -3273,7 +3276,10 @@
     gesture.mode = null;
     gesture.node = null;
     panel.classList.remove('panning');
-    if (trashed) removeFile(trashed, { refocus: false });
+    if (!trashed) return;
+    removeFile(trashed, { refocus: false });
+    // The dragged node held the focus, and went with its file.
+    if (document.activeElement === document.body) panel.focus({ preventScroll: true });
   }
 
   /** @param {WheelEvent} e */
