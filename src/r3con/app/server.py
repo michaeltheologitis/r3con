@@ -23,6 +23,17 @@ opened URL's fragment, ``#token=...``.
   ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
   scan, a file with no text or one that can't be read, as the server's log then says.
   The page sends each PDF and Word file it is given here, and reads other files itself.
+- ``POST /api/documents/zip?name=<file name>&limit=<n>``, with a zip's bytes as the
+  body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
+  the entries ``r3con.read_documents``' folder walk would read, by suffix and with no
+  Office lock file, less, by the app's own rule, anything hidden or under
+  ``__MACOSX/``. They are read in the walk's order, as that walk reads a file, until
+  ``limit`` of them have text; each is named by its path in the zip less a top folder
+  they all share, and one with no text comes back with ``""`` and doesn't count.
+  ``skipped`` counts the files left out by their suffix, nested zips among them,
+  which are never opened; ``unread``, the documents not read. A zip that is corrupt,
+  encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
+  unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -58,6 +69,7 @@ import contextlib
 import hmac
 import io
 import json
+import lzma
 import os
 import secrets
 import signal
@@ -65,6 +77,8 @@ import socket
 import threading
 import time
 import webbrowser
+import zipfile
+import zlib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -120,6 +134,27 @@ LOGS_DIR = platformdirs.user_data_path("r3con") / "runs"
 TOKEN_BYTES = 32
 ID_BYTES = 8
 MAX_BODY_BYTES = 64 * 1024 * 1024
+# A dropped zip is outside input: these bound what unpacking one can cost.
+MAX_ZIP_ENTRIES = 1_000
+MAX_ZIP_MEGABYTES = 100
+MAX_ZIP_BYTES = MAX_ZIP_MEGABYTES * 1024 * 1024
+# Where macOS's Finder puts each file's metadata in a zip it makes.
+MACOS_METADATA_FOLDER = "__MACOSX"
+ZIP_ENCRYPTED_FLAG = 0x1
+# What zipfile raises, opening a zip or reading an entry, for a zip it can't read.
+UNREADABLE_ZIP_ERRORS = (
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+    OSError,
+    EOFError,
+    ValueError,
+    NotImplementedError,
+)
+UNREADABLE_ZIP = "it's corrupt, or not a zip"
+ENCRYPTED_ZIP = "it's encrypted"
+TOO_MANY_ENTRIES = f"it holds more than {MAX_ZIP_ENTRIES:,} entries"
+TOO_MANY_BYTES = f"its documents unzip to more than {MAX_ZIP_MEGABYTES} MB"
 SHUTDOWN_GRACE_SECONDS = 1
 WORKERS_EXIT_SECONDS = 60
 WORKER_POLL_SECONDS = 0.1
@@ -137,6 +172,7 @@ FORBID_EXTRA = ConfigDict(extra="forbid")
 
 logger = get_logger("app")
 Parsed = TypeVar("Parsed")
+Result = TypeVar("Result")
 
 
 def _not_blank(text: str) -> str:
@@ -163,6 +199,12 @@ class RunRequest(BaseModel):
 class DocumentQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Text
+
+
+class ZipQuery(BaseModel):
+    model_config = FORBID_EXTRA
+    name: Text
+    limit: int = Field(MAX_ZIP_ENTRIES, ge=1)
 
 
 class AskRequest(BaseModel):
@@ -403,6 +445,89 @@ async def document_text(request: Request) -> Response:
     return JSONResponse({"text": text})
 
 
+def _left_out_unsaid(entry: zipfile.ZipInfo) -> bool:
+    """Whether the app leaves ``entry`` out without counting it: Office's lock file, as
+    ``r3con run`` does, and, by the app's own rule, which ``r3con run`` doesn't follow,
+    a hidden file, or one under a hidden folder or ``__MACOSX``."""
+    parts = entry.filename.split("/")
+    return (
+        parts[-1].startswith(r3con._LOCK_FILE_PREFIX)
+        or MACOS_METADATA_FOLDER in parts
+        or any(part.startswith(".") for part in parts)
+    )
+
+
+def _below_shared_folder(paths: list[str]) -> list[str]:
+    """``paths``, less the one folder at the top that they all share, if they do."""
+    tops = {path.split("/", 1)[0] for path in paths}
+    if len(tops) != 1 or not all("/" in path for path in paths):
+        return paths
+    return [path.split("/", 1)[1] for path in paths]
+
+
+def _refused_if_unreadable(name: str, call: Callable[[], Result]) -> Result:
+    """``call()``; a 422, logged, if zipfile can't read the zip called ``name``."""
+    try:
+        return call()
+    except UNREADABLE_ZIP_ERRORS as error:
+        logger.warning("%s: not a readable zip (%s)", name, type(error).__name__)
+        raise HTTPException(422, UNREADABLE_ZIP) from None
+
+
+def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
+    """What ``POST /api/documents/zip`` answers for the zip ``body``, called ``name``.
+    Only zipfile's own errors make it unreadable: an extractor gives ``""`` for a
+    document it can't read."""
+    archive = _refused_if_unreadable(name, lambda: zipfile.ZipFile(io.BytesIO(body)))
+    with archive:
+        entries = archive.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            raise HTTPException(422, TOO_MANY_ENTRIES)
+        files = [e for e in entries if not e.is_dir() and not _left_out_unsaid(e)]
+        documents = sorted(
+            (e for e in files if r3con._walk_reads(e.filename.rsplit("/", 1)[-1])),
+            key=lambda entry: entry.filename.split("/"),
+        )
+        unzipped = _read_until(archive, name, documents, limit)
+    return {
+        "files": unzipped,
+        "skipped": len(files) - len(documents),
+        "unread": len(documents) - len(unzipped),
+    }
+
+
+def _read_until(
+    archive: zipfile.ZipFile, name: str, documents: list[zipfile.ZipInfo], limit: int
+) -> list[dict[str, Any]]:
+    """``documents``, read in order until ``limit`` of them have text; each is checked
+    before it is read, and those with no text come back too, for the page to refuse."""
+    names = _below_shared_folder([entry.filename for entry in documents])
+    unzipped: list[dict[str, Any]] = []
+    with_text = unzipped_bytes = 0
+    for entry, shown in zip(documents, names, strict=True):
+        if with_text == limit:
+            break
+        if entry.flag_bits & ZIP_ENCRYPTED_FLAG:
+            raise HTTPException(422, ENCRYPTED_ZIP)
+        unzipped_bytes += entry.file_size
+        if unzipped_bytes > MAX_ZIP_BYTES:
+            raise HTTPException(422, TOO_MANY_BYTES)
+        # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
+        data = _refused_if_unreadable(name, partial(archive.read, entry))
+        text = r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data))
+        with_text += bool(text.strip())
+        unzipped.append({"name": shown, "size": len(data), "text": text})
+    return unzipped
+
+
+async def document_zip(request: Request) -> Response:
+    query = _valid(ZipQuery.model_validate, dict(request.query_params))
+    body = await request.body()
+    # As in document_text: on the event loop, it would hold up every other request.
+    unzipped = await run_in_threadpool(_unzipped, query.name, body, query.limit)
+    return JSONResponse(unzipped)
+
+
 async def start_run(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, RunRequest.model_validate_json)
@@ -519,6 +644,7 @@ def create_app(
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
             Route("/api/documents/text", document_text, methods=["POST"]),
+            Route("/api/documents/zip", document_zip, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(

@@ -1,6 +1,6 @@
 import base64
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -137,8 +137,17 @@ def write_docx(
             docx.writestr("word/media/image1.png", PNG)
 
 
+def write_zip(path: Path, entries: Mapping[str, str | bytes]) -> None:
+    """A zip holding each of ``entries`` at its path; a path ending in ``/`` is a
+    folder's entry."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+
+
 # What check.mjs writes each document with, by suffix.
 WRITERS: dict[str, Callable[..., None]] = {
     ".pdf": write_pdf,
     ".docx": write_docx,
+    ".zip": write_zip,
 }
