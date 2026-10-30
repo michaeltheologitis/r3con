@@ -110,7 +110,9 @@ const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
 // The page's intro, live and in the prototype, for n documents.
 const loadedLine = (n) => (n === 1 ? 'Loaded 1 document.' : `Loaded ${n} documents.`);
-const INTRO = '#transcript > .line:first-child .t';
+// The shown tab's chat: each tab has its own, and the others are hidden.
+const CHAT = '.transcript:not([hidden])';
+const INTRO = `${CHAT} > .line:first-child .t`;
 const ASKS_HEADER = 'recorded asks over this run · any other question or model is simulated';
 // Fewer memos than the shipped sample has, for a page shipped with another sample: one, to be counted in the singular.
 const FEWER_MEMOS = 1;
@@ -572,22 +574,23 @@ function statusMatches(source) {
   return new RegExp(source).test(document.getElementById('run-status').textContent);
 }
 
+// The shown tab's last turn's lines.
 function lastTurnLines() {
-  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
   return turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
 }
 
 function lastTurnSays(starts) {
-  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
   const lines = turn ? [...turn.querySelectorAll('.line .t')].map((el) => el.textContent) : [];
   return starts.every((start) => lines.some((text) => text.startsWith(start)));
 }
 
-// The last turn's log: its button's name, from what labels it, whether the button controls it and has it open, its
-// folded line and the mark before it, each step in view with the lines nested under it and the nodes they link to,
-// and the lines in view outside the log.
+// The shown tab's last turn's log: its button's name, from what labels it, whether the button controls it and has it
+// open, its folded line and the mark before it, each step in view with the lines nested under it and the nodes they
+// link to, and the lines in view outside the log.
 function logOf() {
-  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
   const log = turn.querySelector('.log');
   const toggle = log.querySelector('.log-toggle');
   const lines = log.querySelector('.log-lines');
@@ -855,7 +858,8 @@ function recordViews([tab, ms, timeout]) {
     const frame = (now) => {
       const { a, e, f } = new DOMMatrix(getComputedStyle(world).transform);
       views.push([a, e, f]);
-      if (opened === null && document.querySelector(`.turn[data-tab="${tab}"]`)) opened = now;
+      const started = document.getElementById(`run-tab-${tab}`)?.getAttribute('aria-selected') === 'true' && document.querySelector('.transcript:not([hidden]) .turn');
+      if (opened === null && started) opened = now;
       if (now < (opened === null ? start + timeout : opened + ms)) requestAnimationFrame(frame);
       else resolve({ views, opened: opened !== null });
     };
@@ -993,7 +997,7 @@ async function chatLog() {
       await page.press('#question', 'Enter');
     }
     await send(page, NEW_QUESTION);
-    const said = await page.textContent('#transcript');
+    const said = await page.textContent(CHAT);
     const commentary = COMMENTARY.filter((text) => said.includes(text));
     check('chat log', "no chat line only describes the method, and none gives an answer's citations or source", commentary.length === 0, commentary.join(', '));
     const names = await page.evaluate(logNames);
@@ -1001,15 +1005,6 @@ async function chatLog() {
     for (const name of names) found.push(await page.getByRole('button', { name, exact: true }).count());
     const distinct = names.length === 4 && new Set(names).size === names.length && found.every((n) => n === 1);
     check('chat log', 'each log button has a name of its own, even for one question asked of two models', distinct, names.join(' | '));
-
-    await page.fill('#question', sample.question);
-    await page.click('#new-run-btn');
-    await page.locator('.tab-close').first().click();
-    const closed = page.locator('.turn[data-tab="1"]').first();
-    await closed.locator('.log-toggle').click();
-    const shown = await closed.locator('.log-lines').evaluate((el) => el.checkVisibility());
-    const linksOff = await closed.locator('button[data-tab]').evaluateAll((els) => els.length > 0 && els.every((el) => el.disabled));
-    check('chat log', "a closed tab's log still opens, while what leads to that tab is disabled", shown && linksOff, `open ${shown}; links off ${linksOff}`);
   });
 
   await withPage('chat log', { sample: false }, async (page) => {
@@ -1042,19 +1037,20 @@ async function chatLog() {
     check('chat log', 'the prototype keeps its note under the composer, since its runs are replays', place.note === PROTOTYPE_NOTE, JSON.stringify(place));
   });
 
+  // Two asks under the run make its chat long enough to scroll while the run replays.
   await withPage('chat log', {}, async (page) => {
     await page.setViewportSize(SHORT_DESKTOP);
+    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await page.fill('#question', recordedSample().question);
-    await page.click('#new-run-btn');
+    await page.click('#replay-btn');
     await becomes(page, statusStarts, 'running · reading', REPLAY_MS);
-    const top = () => document.getElementById('transcript').scrollTop;
-    await page.$eval('#transcript', (el) => (el.scrollTop = 0));
+    await scrollChatTo(page, 0);
     await becomes(page, statusStarts, 'running · parsing', REPLAY_MS);
-    const stayed = (await page.evaluate(top)) === 0;
+    const { top, scrolls } = await page.$eval(CHAT, (el) => ({ top: el.scrollTop, scrolls: el.scrollHeight > el.clientHeight }));
+    const stayed = scrolls && top === 0;
     await becomes(page, statusIs, SAMPLE_STATUS, REPLAY_MS);
-    const landed = await becomes(page, () => document.getElementById('transcript').scrollTop > 0);
-    check('chat log', 'steps logged into a folded log leave the chat where it was scrolled, and the answer still scrolls it', stayed && landed, `stayed ${stayed}; scrolled on the answer ${landed}`);
+    const landed = await becomes(page, (selector) => document.querySelector(selector).scrollTop > 0, CHAT);
+    check('chat log', 'steps logged into a folded log leave the chat where it was scrolled, and the answer still scrolls it', stayed && landed, `scrolls ${scrolls}; stayed ${stayed}; scrolled on the answer ${landed}`);
   });
 }
 
@@ -1250,7 +1246,7 @@ async function removeArea() {
     await removeButton(page, '06_extra_memo.txt').waitFor();
     const listed = await removeNames(page);
     const head = await page.textContent('#files-head');
-    const said = [await page.textContent('#files-said'), await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent)];
+    const said = [await page.textContent('#files-said'), await lastChatLine(page)];
     const inPlace = `1 file added, in place of the ${left.length} sample memos`;
     const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
     const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && saysSo;
@@ -1347,7 +1343,7 @@ async function trashArea() {
         count: String(left.length),
         tab: `1 new · ${left.length} files`,
         said: `Removed ${names[1]}.`,
-        chat: `Removed ${names[1]}: tab 1's next question runs over ${left.length} documents.`,
+        chat: `Removed ${names[1]}: the next question runs over ${left.length} documents.`,
         status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
         unlit: true,
         // A press by mouse focuses the node it grabs, and the focus goes to the panel with it; a touch moves none.
@@ -1388,10 +1384,10 @@ async function trashArea() {
     const firstKept = isDeepStrictEqual(first, { tab: FIRST_TAB_BEFORE_RUN, pane: names });
     check('trash', plusName, isDeepStrictEqual(plus, expected) && firstKept, JSON.stringify({ ...plus, first }));
 
-    const chatBefore = await lastChatLine(page);
+    const chatBefore = await count(page, '.transcript .line');
     const switchTab = () => page.evaluate(() => document.querySelectorAll('.run-tab')[1].click());
     await drag(page, await centre(page, await docNodeId(page, names[1])), spot, { whileHeld: switchTab });
-    const switched = { shown: await shownTab(page), pane: (await page.evaluate(filesPane)).names, chat: await lastChatLine(page) };
+    const switched = { shown: await shownTab(page), pane: (await page.evaluate(filesPane)).names, chat: await count(page, '.transcript .line') };
     await showRunTab(page, 0);
     const firstAfter = (await page.evaluate(filesPane)).names;
     const switchName = "a node of tab 1 released over the can after a switch to tab 2 mid-drag removes nothing, in either tab, and says nothing";
@@ -1849,22 +1845,17 @@ async function answersOnTheRun(sample, asks) {
     check('answers', openedName, fresh && opened && (await page.textContent('#run-status')) === SAMPLE_STATUS, JSON.stringify(after));
 
     const offerOf = page.getByRole('button', { name: offerLabel(asks[0]), exact: true });
-    await offerOf.first().click();
-    const backOnFirst = (await shownTab(page)) === 0 && (await page.inputValue('#question')) === asks[0].question;
-    const offersName = "each recorded tab's turn offers the recorded asks, and an offer shows its own tab";
-    check('answers', offersName, (await offerOf.count()) === 2 && backOnFirst, `${await offerOf.count()} offers of the first ask`);
+    const inSecond = await offerOf.count();
+    await offerOf.click();
+    const fills = (await shownTab(page)) === 1 && (await page.inputValue('#question')) === asks[0].question;
+    await showRunTab(page, 0);
+    const inFirst = await offerOf.count();
+    const offersName = "each recorded tab's chat offers the recorded asks, and an offer fills the question in the tab shown";
+    check('answers', offersName, inSecond === 1 && inFirst === 1 && fills, `${inSecond} offers of the first ask in tab 2, ${inFirst} in tab 1`);
 
-    await page.locator('.run-tab').nth(1).click();
-    await page.locator('.turn[data-tab="1"]').nth(1).locator('.line.answer').click();
+    await page.locator(CHAT).locator('.turn').nth(1).locator('.line.answer').click();
     const opensThere = (await shownTab(page)) === 0 && isDeepStrictEqual(await litAnswers(page), ['answer-1']) && (await popup(page))?.title === `● ${ASK_LABEL}`;
-    check('answers', "an earlier tab's answer line switches to that tab and opens its answer there, lit", opensThere, (await popup(page))?.title);
-    await page.keyboard.press('Escape');
-    await clickNode(page, 'answer-0');
-    await page.keyboard.press('Escape');
-    await page.locator('.run-tab').nth(1).click();
-    await page.locator('.turn[data-tab="1"]').nth(1).locator('.marker').click();
-    const marked = (await shownTab(page)) === 0 && isDeepStrictEqual(await litAnswers(page), ['answer-1']);
-    check('answers', "a turn's tab marker switches to its tab and lights the answer it asked for", marked, `tab ${await shownTab(page)}; lit ${await litAnswers(page)}`);
+    check('answers', "back on tab 1, its ask's answer line opens that answer there, lit", opensThere, (await popup(page))?.title);
   });
 }
 
@@ -1939,6 +1930,29 @@ function countDocNodes() {
   new MutationObserver((records) => (window.docNodesAdded += added(records))).observe(document.getElementById('world'), { childList: true, subtree: true });
 }
 
+// The text of each line in tab i's chat, shown or hidden.
+const chatLines = (page, i) => page.locator('.transcript').nth(i).locator('.line .t').allTextContents();
+
+// Scrolls the shown chat `share` of the way down in the next frame, after any scroll the page has queued, and returns
+// where it then is.
+function scrollChatTo(page, share) {
+  const scroll = ([selector, part]) => new Promise((resolve) => requestAnimationFrame(() => {
+    const el = document.querySelector(selector);
+    el.scrollTop = Math.round((el.scrollHeight - el.clientHeight) * part);
+    resolve(el.scrollTop);
+  }));
+  return page.evaluate(scroll, [CHAT, share]);
+}
+
+// The shown chat's scroll position and how far it can scroll, in the next frame, once the page has scrolled it.
+function chatState(page) {
+  const read = (selector) => new Promise((resolve) => requestAnimationFrame(() => {
+    const el = document.querySelector(selector);
+    resolve({ top: el.scrollTop, end: el.scrollHeight - el.clientHeight });
+  }));
+  return page.evaluate(read, CHAT);
+}
+
 // Tab i's × enables once its run has ended.
 function tabEnded(i) {
   return !document.querySelectorAll('.tab-close')[i].disabled;
@@ -1987,26 +2001,14 @@ async function tabs() {
     check('tabs', 'arrow keys move between tabs, showing each and keeping the focus on it', keysMove, `${right} → ${leftAgain}`);
     check('tabs', '1440 light: with two tabs the page has no horizontal scroll', await page.evaluate(noHorizontalScroll));
 
+    const firstChat = await chatLines(page, 0);
     await page.locator('.tab-close').nth(1).click();
     const kept = await page.evaluate(panelSnapshot);
-    const closedTurns = await page.$$eval('.turn[data-tab="2"]', (turns) =>
-      turns.map((turn) => {
-        const marker = turn.querySelector('.marker');
-        return [marker.textContent, marker.getAttribute('aria-label'), [...turn.querySelectorAll('button[data-tab]')].every((b) => b.disabled)];
-      }),
-    );
+    const chats = { count: await count(page, '.transcript'), first: await chatLines(page, 0) };
     const remaining = await page.evaluate(tabRow);
-    const closesOne = isDeepStrictEqual(kept, left) && remaining.length === 1 && !remaining[0].hasClose && isDeepStrictEqual(closedTurns, [['tab 2 · closed', null, true]]);
-    const closesName = 'closing a tab leaves the others as they were; its turns stay, named closed, their links inert, and the last tab has no ×';
-    check('tabs', closesName, closesOne, JSON.stringify(closedTurns));
-    await page.$$eval('.turn[data-tab="2"] button', (buttons) => {
-      for (const button of buttons) {
-        button.disabled = false;
-        button.click();
-      }
-    });
-    const reachNothing = isDeepStrictEqual(await page.evaluate(panelSnapshot), left) && (await page.evaluate(tabRow)).length === 1;
-    check('tabs', "a closed tab's links reach nothing of it, even enabled again", reachNothing);
+    const closesOne = isDeepStrictEqual(kept, left) && remaining.length === 1 && !remaining[0].hasClose && isDeepStrictEqual(chats, { count: 1, first: firstChat });
+    const closesName = 'closing a tab removes its chat with it, and leaves the other tabs as they were, their chats too; the last tab has no ×';
+    check('tabs', closesName, closesOne, `${chats.count} chats`);
 
     for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question, 'Control+Enter');
     const fourth = await page.evaluate(panelSnapshot);
@@ -2022,6 +2024,58 @@ async function tabs() {
     const lastKept = (await page.evaluate(tabRow)).map((tab) => tab.id);
     const deletes = isDeepStrictEqual(afterDelete, ['run-tab-1']) && isDeepStrictEqual(lastKept, ['run-tab-1']);
     check('tabs', 'Delete closes the focused tab, but not the last one', deletes, `${afterDelete} then ${lastKept}`);
+  });
+
+  // Each tab has a chat of its own. The page is short enough that tab 1's, after its run and two asks, scrolls.
+  await withPage('tabs', {}, async (page) => {
+    await page.setViewportSize(SHORT_DESKTOP);
+    for (const question of [asks[0].question, NEW_QUESTION]) await send(page, question);
+    const firstChat = await chatLines(page, 0);
+    const left = await scrollChatTo(page, 1 / 2);
+    await page.click('#new-tab-btn');
+    await page.click('#tab-chat');
+    const plus = { lines: await chatLines(page, 1), shown: await page.$$eval('.transcript', (els) => els.map((el) => el.checkVisibility())) };
+    const plusName = "a + tab's chat starts empty, and tab 1's is hidden: none of its lines are in the + tab";
+    check('tabs', plusName, isDeepStrictEqual(plus, { lines: [], shown: [false, true] }), JSON.stringify(plus));
+
+    await showRunTab(page, 0);
+    const back = { lines: await chatLines(page, 0), ...(await chatState(page)) };
+    const backName = 'switching back to tab 1 shows its chat as it was, scrolled where it was left';
+    check('tabs', backName, left > 0 && isDeepStrictEqual(back.lines, firstChat) && back.top === left, `left at ${left}, back at ${back.top}`);
+    const live = await page.$$eval('.transcript', (els) => els.map((el) => el.getAttribute('aria-live')));
+    check('tabs', "every tab's chat is a polite live region, shown or hidden", isDeepStrictEqual(live, ['polite', 'polite']), JSON.stringify(live));
+
+    const question = 'Which memo is longest?';
+    await send(page, question, 'Control+Enter');
+    const opened = { shown: await shownTab(page), parts: await page.$$eval(`${CHAT} > *`, (els) => els.map((el) => el.className)), first: (await chatLines(page, 2)).slice(0, 2) };
+    const openedName = `a new run's tab starts its chat with "${loadedLine(SAMPLE_DOCS)}" for the files it copied, then its own run, and nothing else`;
+    check('tabs', openedName, isDeepStrictEqual(opened, { shown: 2, parts: ['line main dim', 'turn'], first: [loadedLine(SAMPLE_DOCS), question] }), JSON.stringify(opened));
+    await page.locator('.tab-close').nth(2).click();
+    const closed = await page.$$eval('.transcript', (els, asked) => [els.length, els.some((el) => el.textContent.includes(asked))], question);
+    check('tabs', 'closing the shown tab removes its chat too', isDeepStrictEqual(closed, [2, false]), JSON.stringify(closed));
+  });
+
+  // The files pane hides the chat. Short enough that tab 1's chat scrolls once its run has ended.
+  await withPage('tabs', { sample: false }, async (page) => {
+    await page.setViewportSize(SHORT_DESKTOP);
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    await page.click('#tab-files');
+    const ended = await becomes(page, statusIs, SAMPLE_STATUS, REPLAY_MS);
+    await page.click('#tab-chat');
+    const landed = await chatState(page);
+    const landedName = 'a run that ends while the files pane is shown leaves its chat at its newest line once the chat is shown';
+    check('tabs', landedName, ended && landed.end > 0 && landed.top === landed.end, `ended ${ended}; at ${landed.top} of ${landed.end}`);
+
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const left = await scrollChatTo(page, 1 / 2);
+    await page.click('#tab-files');
+    await page.click('#new-tab-btn');
+    await page.click('#tab-chat');
+    await showRunTab(page, 0);
+    const back = (await chatState(page)).top;
+    const backName = "switching tabs while the files pane is shown leaves tab 1's chat where it was scrolled, back in the chat";
+    check('tabs', backName, left > 0 && back === left, `left at ${left}, back at ${back}`);
   });
 
   // With motion on, a replay takes seconds, so a tab can still be running while another is shown.
@@ -2053,10 +2107,15 @@ async function tabs() {
     await page.waitForTimeout(LIT_DELAY_MS);
     const untouched = ended && isDeepStrictEqual(await page.evaluate(panelSnapshot), first);
     check('tabs', 'a replay going on in another tab never draws on the shown one, nor changes its status line', untouched, `ended ${ended}`);
+    // Short enough that tab 2's chat scrolls.
+    await page.setViewportSize(SHORT_DESKTOP);
     await page.locator('.run-tab').nth(1).click();
     const pending = await count(page, '#world .enter, #world .draw, #world .fade');
     const still = await page.evaluate(panelStill);
     check('tabs', 'a tab drawn in the background has no node or line animations to play when first shown', pending === 0 && still, `${pending} pending`);
+    const shown = await chatState(page);
+    const endName = "a line that would scroll a hidden tab's chat, as its answer does, takes the chat to its newest line once the tab is shown";
+    check('tabs', endName, shown.end > 0 && shown.top === shown.end, `at ${shown.top} of ${shown.end}`);
 
     await page.locator('.run-tab').first().click();
     await page.click('#replay-btn');
@@ -2190,7 +2249,7 @@ function dropFiles(files) {
 }
 
 const tabLabels = async (page) => (await page.evaluate(tabRow)).map((tab) => [tab.label, tab.selected]);
-const lastChatLine = (page) => page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
+const lastChatLine = (page) => page.$eval(`${CHAT} > .line:last-child .t`, (el) => el.textContent);
 const showRunTab = (page, i) => page.locator('.run-tab').nth(i).click();
 
 async function paneOf(page) {
@@ -2246,7 +2305,7 @@ async function tabFiles() {
     await showRunTab(page, 0);
     const firstAgain = (await page.evaluate(filesPane)).names;
     const apart =
-      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new · 2 files', true]], chat: "2 files added: tab 2's next question runs over 2 documents." }) &&
+      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new · 2 files', true]], chat: '2 files added: the next question runs over 2 documents.' }) &&
       isDeepStrictEqual(inFirst, { names, docs: names }) &&
       isDeepStrictEqual(secondAgain, second) &&
       isDeepStrictEqual(firstAgain, names.slice(1));
@@ -2263,7 +2322,7 @@ async function tabFiles() {
     const ran = {
       tabs: (await tabLabels(page)).map(([label, selected]) => [label.split(' ')[0], selected]),
       label: (await page.evaluate(tabRow))[1].label,
-      turns: await count(page, '.turn[data-tab="2"]'),
+      turns: await count(page, `${CHAT} .turn`),
       status: await page.textContent('#run-status'),
       docs: await docNames(page),
     };
@@ -2485,7 +2544,7 @@ async function dropArea() {
     const expected = {
       names: ['panel_memo.txt', '01_summary.txt', 'loose.py', 'q3/02_incidents.md', 'q4/02_incidents.md'],
       said: '4 files added; 1 skipped.',
-      chat: "4 files added; 1 skipped: tab 2's next question runs over 5 documents.",
+      chat: '4 files added; 1 skipped: the next question runs over 5 documents.',
       error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}`,
     };
     const folderName =
@@ -2905,15 +2964,22 @@ async function liveTabs(url) {
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const first = await page.evaluate(panelSnapshot);
     const firstStatus = await page.textContent('#run-status');
+    const firstChat = await chatLines(page, 0);
     await page.evaluate(() => (window.release = false));
-    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    const question = 'Which memo is the registry?';
+    await send(page, question, 'Control+Enter');
     const held = await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
     await page.evaluate(() => (window.release = true));
-    const ended = await becomes(page, lastTurnSays, [`ready · ${DEFAULT_MODEL} · `], LIVE_RUN_MS);
+    const ended = await becomes(page, tabEnded, 1, LIVE_RUN_MS);
     const untouched = isDeepStrictEqual(await page.evaluate(panelSnapshot), first) && (await page.textContent('#run-status')) === firstStatus;
     const awayName = "a run's events land in its own tab: the tab shown meanwhile is left as it was";
     check('live', awayName, held && ended && untouched, `held ${held}; ended ${ended}`);
+    const [firstAfter, second] = [await chatLines(page, 0), await chatLines(page, 1)];
+    const ownChat =
+      isDeepStrictEqual(firstAfter, firstChat) && isDeepStrictEqual(second.slice(0, 2), [loadedLine(SAMPLE_DOCS), question]) && LIVE_READY.test(second[2]) && second.at(-1) === SCRIPTED_ANSWER;
+    const ownName = "a run in tab 2 writes into tab 2's chat alone, its answer and its end too, which land while tab 1 is shown";
+    check('live', ownName, ownChat, `tab 1 ${firstAfter.length} lines, was ${firstChat.length}; tab 2: ${second.slice(0, 3).join(' | ')} … ${second.at(-1)}`);
     await page.locator('.run-tab').nth(1).click();
     const nodes = await count(page, '.node');
     const working = await count(page, '.node.working');
@@ -2986,7 +3052,7 @@ async function liveAskGoing(url) {
     const ended = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     const runs = posts.filter((path) => path === '/api/runs').length;
     const row = (await page.evaluate(tabRow)).map((tab) => [tab.selected, tab.closable]);
-    const askTurn = await page.$$eval('.turn[data-tab="1"]', (turns) => [...turns.at(-1).querySelectorAll('.line .t')].map((el) => el.textContent));
+    const askTurn = await page.locator('.transcript').first().locator('.turn').last().locator('.line .t').allTextContents();
     const stillAsking = askTurn.includes(`asking · ${DEFAULT_MODEL}`);
     const askName = "while an ask is going, a new run goes ahead in a tab of its own, and the asking tab can't be closed";
     check('live', askName, asking && ended && runs === 2 && isDeepStrictEqual(row, [[false, false], [true, true]]) && stillAsking, `${runs} runs; ${JSON.stringify(row)}`);
@@ -3501,6 +3567,7 @@ async function liveGoingThenLost(url, server) {
     const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
     const lostName = 'a run whose server goes away mid-stream says the connection was lost';
     check('live', lostName, lost, await page.textContent('#run-status'));
+    await page.locator('.run-tab').nth(1).click();
     const cut = await page.evaluate(logOf);
     const cutName = "an ask whose stream ends with no last event ends its log on failed, not spinning on asking, and says why below it";
     check('live', cutName, asking && cut.folded === 'failed' && cut.mark === 'err' && isDeepStrictEqual(cut.after, [LOST_CONNECTION.slice(2)]), `${cut.folded}; ${cut.after.join(' | ')}`);

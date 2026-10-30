@@ -93,6 +93,8 @@
    * @property {HTMLButtonElement | null} button
    * @property {HTMLButtonElement | null} close
    * @property {Run | null} run
+   * @property {HTMLElement} chat
+   * @property {boolean} chatToEnd
    * @property {HTMLElement | null} turn
    * @property {(string | Node)[]} status
    * @property {HTMLElement} drawing
@@ -124,7 +126,7 @@
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
    * } ServerEvent
    */
-  /** @typedef {{ node?: string | null, tab?: Tab | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
   /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
@@ -614,7 +616,6 @@
   // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
-  const INTRO = `Loaded ${plural(SAMPLE.docs.length, 'document')}.`;
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
@@ -686,7 +687,6 @@
   const panel = $('panel');
   const world = $('world');
   const inspector = $('inspector');
-  const transcript = $('transcript');
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelOther = $('model-other', HTMLInputElement);
@@ -739,6 +739,9 @@
       button: null,
       close: null,
       run: null,
+      // A chat shown again isn't read out: a live region announces what changes in it, not what it holds.
+      chat: h('div', { class: 'transcript', 'aria-live': 'polite', hidden: true }),
+      chatToEnd: false,
       turn: null,
       status: [],
       drawing: h('div', { class: 'drawing' }, edges, nodesEl),
@@ -821,7 +824,6 @@
   const fmtUsd = (n) => `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(2)}`;
   /** @param {number} n */
   const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
-  // A declaration, so that the intro above can use it.
   /** @param {number} n @param {string} one */
   function plural(n, one, many = `${one}s`) {
     return `${n} ${n === 1 ? one : many}`;
@@ -1928,41 +1930,52 @@
   // ---------- chat ----------
 
   /** @param {string} kind @param {Child} text @param {LineOptions} [options] */
-  function line(kind, text, { node = null, tab = null, glyph = null, dim = false } = {}) {
+  function line(kind, text, { node = null, glyph = null, dim = false } = {}) {
     const g = glyph ?? { sub: '⎿', user: '›' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
     return h(
       node ? 'button' : 'div',
-      { class: classes, type: node ? 'button' : null, 'data-tab': node ? tab.id : null, 'data-node': node },
+      { class: classes, type: node ? 'button' : null, 'data-node': node },
       h('span', { class: 'g', 'aria-hidden': 'true' }, g),
       h('span', { class: 't' }, text),
     );
   }
 
-  let scrollQueued = false;
-
-  // Once a frame at most: reading scrollHeight lays the page out.
-  function scrollTranscript() {
-    if (scrollQueued) return;
-    scrollQueued = true;
-    requestAnimationFrame(() => {
-      scrollQueued = false;
-      transcript.scrollTop = transcript.scrollHeight;
-    });
+  // A chat goes to its newest line in the next frame it can be seen in.
+  /** @param {Tab} tab */
+  function scrollChat(tab) {
+    if (tab.chatToEnd) return;
+    tab.chatToEnd = true;
+    requestAnimationFrame(() => toNewestLine(tab));
   }
 
-  // Node ids repeat across tabs, so a link from the chat names its tab as well as what it opens. A closed
-  // tab is no longer listed, so its links do nothing and nothing in the chat keeps it alive.
+  /** @param {Tab} tab */
+  function toNewestLine(tab) {
+    if (!tab.chatToEnd || !tab.chat.checkVisibility()) return;
+    tab.chat.scrollTop = tab.chat.scrollHeight;
+    tab.chatToEnd = false;
+  }
+
+  // In the next frame, as the status line and the composer can still change the pane's height.
+  /** @param {Tab} tab */
+  function revealChat(tab) {
+    if (tab.chatToEnd) requestAnimationFrame(() => toNewestLine(tab));
+  }
+
+  /** @param {Tab} tab @param {string} text */
+  function tellChat(tab, text) {
+    tab.chat.append(line('main', text, { dim: true }));
+    scrollChat(tab);
+  }
+
+  // Only the shown tab's chat is in view, so its links are to the shown tab's nodes.
   /** @param {MouseEvent} e */
-  function onTranscriptClick(e) {
+  function onChatClick(e) {
     /** @type {HTMLElement | null} */
-    const link = targetOf(e).closest('button[data-tab]');
-    const tab = state.tabs.find((t) => String(t.id) === link?.dataset.tab);
-    if (!tab) return;
-    const { node, answer, offer } = link.dataset;
-    switchTab(tab);
+    const link = targetOf(e).closest('button[data-node], button[data-offer]');
+    if (!link) return;
+    const { node, offer } = link.dataset;
     if (node) jumpTo(node);
-    if (answer && landed(tab, answer)) lightAnswer(tab, answer);
     if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
   }
 
@@ -1987,9 +2000,9 @@
     const named = new Map();
     /** @param {HTMLElement} parent @param {string} kind @param {Child} text @param {LineOptions} [opts] */
     const add = (parent, kind, text, opts) => {
-      const el = line(kind, text, { ...opts, tab });
+      const el = line(kind, text, opts);
       parent.append(el);
-      if (!parent.hidden) scrollTranscript();
+      if (!parent.hidden) scrollChat(tab);
       return el;
     };
     /** @param {string} kind @param {string} text @param {LineOptions} [opts] */
@@ -2020,13 +2033,11 @@
     };
   }
 
-  /** @param {Tab | null} tab @param {string} question @param {string} [answer] */
-  function addTurn(tab, question, answer) {
+  /** @param {Tab} tab @param {string} question */
+  function addTurn(tab, question) {
     const body = h('div', { class: 'turn-body' });
-    const user = line('user', question);
-    if (tab) user.append(h('button', { class: 'btn marker', type: 'button', 'aria-label': `show tab ${tab.id}`, 'data-tab': tab.id, 'data-answer': answer }, `tab ${tab.id}`));
-    transcript.append(h('div', { class: 'turn', 'data-tab': tab?.id }, user, body));
-    scrollTranscript();
+    tab.chat.append(h('div', { class: 'turn' }, line('user', question), body));
+    scrollChat(tab);
     return body;
   }
 
@@ -2139,7 +2150,7 @@
     if (asks) {
       mode.ask(question);
     } else if (!state.shown.files.length) {
-      addTurn(null, question).append(line('main', 'Add files in the files tab first, then ask again.', { dim: true }));
+      addTurn(state.shown, question).append(line('main', 'Add files in the files tab first, then ask again.', { dim: true }));
     } else {
       startRun(question);
     }
@@ -2367,7 +2378,7 @@
       showAnswer(tab, narr);
       finishRun(tab, narr);
       for (let k = 1; k < run.answers.length; k += 1) redrawAsk(tab, answerId(k));
-      if (!run.simulated) offerRecordedAsks(tab, narr);
+      if (!run.simulated) offerRecordedAsks(narr);
     });
     t += TIMING.litDelay;
     at(t, () => lightRun(tab));
@@ -2478,7 +2489,7 @@
     /** @type {Answer} */
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
-    const narr = askTurn(tab, question, model, id);
+    const narr = askTurn(tab, question, model);
     const stream = openStream('ask', tab, ask);
     // An ask leaves the status alone, but its stop was asked for there: once that has ended, the status
     // says so until it next changes, and the tab keeps its run's own line.
@@ -2544,7 +2555,7 @@
     const at = docPositions(from);
     const tab = from.run ? openTab(newTab(from.files, from.view)) : from;
     tab.run = { ...mode.newRun(question, tab.files), lit: null };
-    tab.turn = addTurn(tab, question, RUN_ANSWER);
+    tab.turn = addTurn(tab, question);
     if (tab === from) renderFiles();
     else showTabContents(tab);
     playRun(tab, at);
@@ -2554,9 +2565,9 @@
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
 
-  /** @param {Tab} tab @param {string} question @param {string} model @param {string} id */
-  function askTurn(tab, question, model, id) {
-    const narr = narrator(tab, addTurn(tab, question, id));
+  /** @param {Tab} tab @param {string} question @param {string} model */
+  function askTurn(tab, question, model) {
+    const narr = narrator(tab, addTurn(tab, question));
     narr.log('main', `asking · ${model}`);
     return narr;
   }
@@ -2591,18 +2602,18 @@
     /** @type {Answer} */
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
-    const narr = askTurn(tab, question, model, id);
+    const narr = askTurn(tab, question, model);
     showAnswer(tab, narr, id);
     sayReady(narr, model, ask.source === 'simulated', ask.totals);
     lightLanded(tab, id);
   }
 
   // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
-  /** @param {Tab} tab @param {Narrator} narr */
-  function offerRecordedAsks(tab, narr) {
+  /** @param {Narrator} narr */
+  function offerRecordedAsks(narr) {
     if (!RECORDED_ASKS.length) return;
     /** @param {RecordedAsk} ask @param {number} i */
-    const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
+    const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
     narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
     RECORDED_ASKS.forEach((ask, i) => narr.say('sub', offer(ask, i)));
   }
@@ -2640,6 +2651,8 @@
     tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
     tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
     $('run-tabs').append(tab.button, tab.close);
+    $('ask-form').before(tab.chat);
+    if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab)}.`);
     return tab;
   }
 
@@ -2669,8 +2682,11 @@
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
     state.hovered = null;
+    state.shown.chat.hidden = true;
     state.shown = tab;
     world.replaceChildren(tab.drawing);
+    tab.chat.hidden = false;
+    revealChat(tab);
     applyView();
     refreshHighlight();
     closeFile();
@@ -2709,14 +2725,7 @@
     state.tabs.splice(i, 1);
     tab.button.remove();
     tab.close.remove();
-    for (const turn of transcript.querySelectorAll(`.turn[data-tab="${tab.id}"]`)) {
-      // Only what leads to the closed tab: its logs can still be read.
-      const links = /** @type {NodeListOf<HTMLButtonElement>} */ (turn.querySelectorAll('button[data-tab]'));
-      for (const button of links) button.disabled = true;
-      const marker = turn.querySelector('.marker');
-      marker.removeAttribute('aria-label');
-      marker.textContent = `tab ${tab.id} · closed`;
-    }
+    tab.chat.remove();
     if (tab === state.shown) switchTab(state.tabs[Math.min(i, state.tabs.length - 1)]);
     else updateTabs();
     state.shown.button.focus();
@@ -2746,6 +2755,7 @@
       $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
       $(`${tab}-pane`).hidden = tab !== name;
     }
+    revealChat(state.shown);
   }
 
   function renderFiles() {
@@ -2980,8 +2990,7 @@
     syncDocNodes(tab);
     readyStatus();
     tellFiles(tab, { filesSaid: `${what}.` });
-    transcript.append(line('main', `${what}: tab ${tab.id}'s next question runs over ${fileCount(tab)}.`, { dim: true }));
-    scrollTranscript();
+    tellChat(tab, `${what}: the next question runs over ${fileCount(tab)}.`);
   }
 
   // How a file in a dropped or picked folder is taken, by its path below that folder, mirroring r3con's folder walk:
@@ -3502,7 +3511,7 @@
       showTab('files');
       tab.button.focus();
     });
-    transcript.addEventListener('click', onTranscriptClick);
+    $('chat-pane').addEventListener('click', onChatClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
 
@@ -3682,7 +3691,6 @@
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
     $('mode-note').hidden = !mode.note;
-    transcript.append(line('main', INTRO, { dim: true }));
     wire();
   }
 
