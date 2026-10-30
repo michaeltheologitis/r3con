@@ -115,9 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--reasoning",
         choices=REASONING_PATHS,
         default=None,
-        help="Override how reasoning answers (direct = one call over the summaries and "
-        "the whole parse; coding = an agent that reads the parse with code, which a "
-        "direct run also uses when its prompt does not fit the model's window).",
+        help="Override how reasoning answers (direct = one call over the relevance "
+        "snippets and the whole parse; coding = an agent that reads the parse with "
+        "code, which a direct run also uses when its prompt does not fit the model's "
+        "window).",
     )
     # --- runtime ---
     run_cmd.add_argument(
