@@ -47,7 +47,7 @@ const COUNTED = {
 const SAMPLE_COUNTS = { nodes: 22, edges: 79, lit: 26, dotted: 10, faint: 45, cited: 14, flow: 10, onPath: 17 };
 const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 29,490 tokens · $0.0038';
 const POPUP_ROWS = {
-  'doc-0': ['summary'],
+  'doc-0': ['relevance snippet'],
   'r1-0': ['read'],
   'r2-3': ['read', 'provenance'],
   schema: ['why', 'fills'],
@@ -77,6 +77,10 @@ const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 // The page's GRID.rowGap: answer nodes stack this far apart.
 const ROW_GAP = 112;
 const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
+// A simulated run's note, from the page's SUMMARY_CHARS.
+const SIMULATED_NOTE = "simulated · each relevance snippet is the file's first 140 characters, and the citations are made up";
+// A relevance round's line for a document with a snippet.
+const SNIPPET_READY = 'snippet ready';
 const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SAMPLE_READY = 'ready · gpt-6-luna · $0.0038';
@@ -968,6 +972,10 @@ async function chatLog() {
     const opened = await page.evaluate(logOf);
     const openName = "its chevron opens the log: each step in turn, each document's line under its own step and linked to its node, and no line repeats ready";
     check('chat log', openName, opened.open && isDeepStrictEqual(stepsOf(opened), REPLAY_STEPS), JSON.stringify(stepsOf(opened)));
+    const stem = (i) => sample.docs[i].name.replace(/\.txt$/, '');
+    const roundLines = opened.steps.slice(1, 1 + ROUNDS).flatMap(({ nested }) => nested).sort();
+    const settled = ['r1', 'r2'].flatMap((kind) => sample[kind].map(({ summary }, i) => `${stem(i)} — ${summary ? SNIPPET_READY : 'nothing relevant'}`)).sort();
+    check('chat log', "each round's line says its document's snippet is ready, or that nothing was relevant", isDeepStrictEqual(roundLines, settled), roundLines[0]);
     await page.click('.log-lines .line[data-node="r2-3"]');
     const title = (await popup(page))?.title;
     check('chat log', 'a nested line still opens its node on the panel', title === '● 04_contractor_registry · round 2', title);
@@ -1028,6 +1036,7 @@ async function chatLog() {
     const flags = simulated.after.filter((text) => text.startsWith('simulated'));
     const flagged = !simulated.open && flags.length === 2 && simulated.mark === 'flag' && simulated.folded === `ready · ${DEFAULT_MODEL} · nothing was sent`;
     check('chat log', "400 dark: a simulated run's two warnings stay in view with its log folded, which says nothing was sent", flagged, flags.join(' | '));
+    check('chat log', "a simulated run's note says each relevance snippet is the file's start and the citations are made up", flags[0] === SIMULATED_NOTE, flags[0]);
     const target = await rect(page, '.log-toggle');
     const fits = target.width >= MIN_TARGET_PX && target.height >= MIN_TARGET_PX && (await page.evaluate(noHorizontalScroll));
     check('chat log', `400 dark: the chevron is a ${MIN_TARGET_PX}px target, and the page has no horizontal scroll`, fits, `${target.width}×${target.height}`);
@@ -1558,6 +1567,9 @@ async function popupArea() {
     const sample = recordedSample();
     const { summary_ids, parse_ids } = sample.answer.provenance;
     const stem = (i) => sample.docs[i].name.replace(/\.txt$/, '');
+    const roundNames = (await page.$$eval('.node.r1, .node.r2', (els) => els.map((el) => el.getAttribute('aria-label')))).sort();
+    const snippetNames = [1, 2].flatMap((round) => sample.docs.map((_, i) => `${stem(i)}, round ${round} relevance snippet`)).sort();
+    check('popup', "each round's node is named for its document and its relevance snippet", isDeepStrictEqual(roundNames, snippetNames), roundNames[0]);
     const cited = [...summary_ids.map((i) => `${stem(i)} · round 2`), ...parse_ids.map((i) => `${stem(i)} · parsed`)];
     await inspect(page, 'answer-0');
     const listed = await page.$$eval('#inspector .row', (rows) => {
@@ -2802,7 +2814,7 @@ async function liveParts(url) {
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const lines = await page.evaluate(lastTurnLines);
-    const ready = lines.filter((text) => text === `${SPLIT_MEMO} — summary ready`).length;
+    const ready = lines.filter((text) => text === `${SPLIT_MEMO} — ${SNIPPET_READY}`).length;
     const parsed = lines.includes(`${SPLIT_MEMO} — 2 records`);
     const cited = (await count(page, `.edge.cite[data-key="r1-0>r2-${SAMPLE_DOCS}"]`)) === 1;
     const partsName = 'a document read in two parts, the first with nothing relevant, is drawn and logged from both: ready in both rounds, its round-2 citation kept, both parts parsed';

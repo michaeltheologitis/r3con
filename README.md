@@ -120,7 +120,7 @@ answer:
 
 - [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
 - [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — tracing an answer back to the documents and
-  summaries it came from.
+  relevance snippets it came from.
 - [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
   path, generation parameters, run configuration, custom connections, and artifact paths.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
@@ -137,8 +137,8 @@ result.structured_context  # dict      — structured representation
 result.run_dir  # Path      — directory containing run artifacts
 ```
 
-r3con also records provenance, how the answer, each summary and each parse came to be; see
-[`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
+r3con also records provenance, how the answer, each relevance snippet and each parse came
+to be; see [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
 
 ## Run artifacts
 
