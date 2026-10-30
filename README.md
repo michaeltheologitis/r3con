@@ -4,10 +4,10 @@
 ![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE)
 
-**Context representation for large-scale reasoning.**
+**Context representation for large-scale reasoning with smaller, cheaper models.**
 
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
-task-specific representation of that context, then reasons over it to produce an answer.
+task-specific representation of the context, then reasons over it to produce an answer.
 
 ![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
