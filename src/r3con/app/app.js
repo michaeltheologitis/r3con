@@ -591,7 +591,7 @@
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
-  const ARIA_KIND = { doc: 'document', r1: 'round 1 summary', r2: 'round 2 summary', parsed: 'parsed records', schema: 'proposed schema' };
+  const ARIA_KIND = { doc: 'document', r1: 'round 1 relevance snippet', r2: 'round 2 relevance snippet', parsed: 'parsed records', schema: 'proposed schema' };
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
@@ -1785,7 +1785,7 @@
     return [
       h('div', { class: 'k' }, fileMeta(node.file)),
       fileText(node.file),
-      index >= 0 && nodes.has(`r1-${index}`) ? row('summary', refs([`r1-${index}`])) : null,
+      index >= 0 && nodes.has(`r1-${index}`) ? row('relevance snippet', refs([`r1-${index}`])) : null,
       openFileButton(node.file, 'open in files ›'),
     ];
   }
@@ -2256,7 +2256,7 @@
   /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'summary ready' : 'nothing relevant'}`;
+    if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'snippet ready' : 'nothing relevant'}`;
     if (kind === 'schema') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
     const count = recordCount(run.parsed[i]);
     return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}`;
@@ -2324,7 +2324,7 @@
       narr.stage = READING;
       narr.log('main', `reading ${plural(n, 'document')}`);
       if (run.simulated) {
-        narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
+        narr.say('sub', h('span', { class: 'flag' }, `simulated · each relevance snippet is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
       }
       tabStatus(tab, `running · reading · 0 of ${n}`);
     });
