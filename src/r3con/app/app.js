@@ -131,7 +131,6 @@
   /**
    * What differs between the page served by r3con app and the prototype.
    * @typedef {object} Mode
-   * @property {string} intro
    * @property {string} note
    * @property {string} keysNote
    * @property {(question: string) => string} nextRun
@@ -615,10 +614,9 @@
   // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
-  const LIVE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with a question about them. Press run to run r3con on them, or add your own files.`;
+  const INTRO = `Loaded ${plural(SAMPLE.docs.length, 'document')}.`;
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
-  const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
   const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
   const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} skipped` : ''}.`;
@@ -823,7 +821,7 @@
   const fmtUsd = (n) => `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(2)}`;
   /** @param {number} n */
   const fmtBytes = (n) => (n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`);
-  // A declaration, so that the intros above can use it.
+  // A declaration, so that the intro above can use it.
   /** @param {number} n @param {string} one */
   function plural(n, one, many = `${one}s`) {
     return `${n} ${n === 1 ? one : many}`;
@@ -3595,7 +3593,6 @@
 
   /** @type {Mode} */
   const prototypeMode = {
-    intro: PROTOTYPE_INTRO,
     note: PROTOTYPE_MODE_NOTE,
     keysNote: PROTOTYPE_KEYS_NOTE,
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
@@ -3620,7 +3617,6 @@
   // A provider whose variable is set where r3con app runs counts as having a key.
   /** @type {Mode} */
   const liveMode = {
-    intro: LIVE_INTRO,
     note: '',
     keysNote: '',
     nextRun: () => pickedModel() || 'type a model',
@@ -3686,7 +3682,7 @@
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
     $('mode-note').hidden = !mode.note;
-    transcript.append(line('main', mode.intro, { dim: true }));
+    transcript.append(line('main', INTRO, { dim: true }));
     wire();
   }
 
