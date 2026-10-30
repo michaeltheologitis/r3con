@@ -67,7 +67,10 @@ r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"
 r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md
 ```
 
-Quote glob patterns so your shell passes them to `r3con` unchanged.
+Quote glob patterns so your shell passes them to `r3con` unchanged. A directory or a
+quoted glob reads only files inside that directory, or the glob's part before its first
+wildcard, and logs and skips a link that points outside it; a file you name is read as
+named.
 
 ### Python
 

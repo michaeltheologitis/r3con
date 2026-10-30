@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterable, Sequence
+from itertools import takewhile
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -72,6 +73,7 @@ from r3con.settings import active_logs_dir, settings_snapshot
 _log = get_logger("documents")
 # Office's lock file for a document someone has open: ~$report.docx.
 _LOCK_FILE_PREFIX = "~$"
+_GLOB_WILDCARDS = frozenset("*?[")
 
 
 def _read_one(path: Path) -> str:
@@ -203,6 +205,14 @@ def _extractor(name: str) -> Callable[[str, BinaryIO], str] | None:
     )
 
 
+def _resolves_inside(path: Path, root: Path) -> bool:
+    """Whether ``path`` resolves inside ``root``, itself resolved; logs it if not."""
+    if path.resolve().is_relative_to(root):
+        return True
+    _log.warning("%s: resolves outside %s; skipping it", path, root)
+    return False
+
+
 def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     """Read documents off the filesystem into the list of strings :func:`run` wants.
 
@@ -215,7 +225,11 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
     name**, so that a ``.log``, a ``.py`` or an extensionless file is yours to pass; the
     flip side is that a glob aimed at binaries will happily turn them into garbage
-    documents. A walk and a glob both skip Office's lock files (``~$report.docx``).
+    documents. A walk and a glob both skip Office's lock files (``~$report.docx``), and
+    read only files that resolve inside the folder you named, or the glob's part before
+    its first wildcard: a file that a link or a ``..`` takes outside it is logged and
+    skipped, so a folder you received can't point r3con at files elsewhere. What you
+    name, a file or that folder, is taken as named, link or not.
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
     is logged and then dropped; OCR is outside this package. A Word file is converted to
@@ -236,17 +250,20 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     for src in sources:
         path = Path(src)
         if path.is_dir():
+            root = path.resolve()
             files = sorted(
                 p
                 for p in path.rglob("*")
                 if p.is_file()
                 and p.name.lower().endswith(tuple(TEXT_SUFFIXES))
                 and not p.name.startswith(_LOCK_FILE_PREFIX)
+                and _resolves_inside(p, root)
             )
         elif path.is_file():
             files = [path]
         else:  # treat it as a glob, anchored if it is absolute
             pattern, anchor = str(src), Path(src).anchor
+            root = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts)).resolve()
             files = sorted(
                 p
                 for p in (
@@ -254,7 +271,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
                     if anchor
                     else Path().glob(pattern)
                 )
-                if p.is_file() and not p.name.startswith(_LOCK_FILE_PREFIX)
+                if p.is_file()
+                and not p.name.startswith(_LOCK_FILE_PREFIX)
+                and _resolves_inside(p, root)
             )
         if not files:
             raise FileNotFoundError(f"No documents found at {src!r}.")
