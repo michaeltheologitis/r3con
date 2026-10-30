@@ -18,10 +18,11 @@ opened URL's fragment, ``#token=...``.
   and masks in every event's ``error``, in what it writes to the logs dir and in what
   it logs (:mod:`r3con.masking`), the environment's keys too; the server's own log
   line of a failure goes through the same masking.
-- ``POST /api/documents/text?name=<file name>``, with a PDF's bytes as the body,
-  answers ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""``
-  for a scan or a file pypdf can't read, as the server's log then says. The page sends
-  each PDF it is given here, and reads other files itself.
+- ``POST /api/documents/text?name=<file name>``, with a PDF's or a Word file's bytes as
+  the body, chosen by the name's ``.pdf`` or ``.docx`` (422 for any other), answers
+  ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
+  scan, a file with no text or one that can't be read, as the server's log then says.
+  The page sends each PDF and Word file it is given here, and reads other files itself.
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -392,9 +393,13 @@ async def forget_key(request: Request) -> Response:
 
 async def document_text(request: Request) -> Response:
     query = _valid(DocumentQuery.model_validate, dict(request.query_params))
-    pdf = io.BytesIO(await request.body())
-    # pypdf is CPU-bound: on the event loop, it would hold up every other request.
-    text = await run_in_threadpool(r3con._pdf_text, query.name, pdf)
+    extract = r3con._extractor(query.name)
+    if extract is None:
+        suffixes = ", ".join(r3con._EXTRACTORS)
+        raise HTTPException(422, f"name: must end in one of {suffixes}")
+    file = io.BytesIO(await request.body())
+    # Extracting is CPU-bound: on the event loop, it would hold up every other request.
+    text = await run_in_threadpool(extract, query.name, file)
     return JSONResponse({"text": text})
 
 

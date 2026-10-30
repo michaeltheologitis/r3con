@@ -30,6 +30,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "tenacity>=8.0",
     "pypdf>=6.19.0",
+    # 1.12.2 fixes a denial of service a crafted document could cause.
+    "mammoth>=1.12.2",
+    # The first with table_infer_header.
+    "markdownify>=1.0.0",
 ]
 
 [project.optional-dependencies]

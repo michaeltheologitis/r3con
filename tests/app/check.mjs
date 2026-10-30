@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -168,25 +168,35 @@ const PREVIEW_CHARS = 20000;
 const PREVIEW_NOTE = 'first 20,000 characters shown';
 // A stream this long, which no page uses, makes a PDF of more bytes than its preview has characters.
 const PDF_PADDING = PREVIEW_CHARS + 5000;
-// Every PDF the checks add, by name: write_pdf's arguments for it, in tests/pdfs.py, so that the checks
-// and the tests make their PDFs one way. No text makes a scan.
-const PDF_SPECS = {
+// The Markdown r3con makes of report.docx below.
+const WORD_TEXT = 'Incidents by site:\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |\n| Merrow | 3 |';
+// Every document the checks add, by name: the arguments its writer in tests/documents.py takes for it, so
+// that the checks and the tests make them one way. A PDF with no text makes a scan.
+const DOCUMENT_SPECS = {
   '01_memo.pdf': { text: PDF_TEXT },
   '02_scan.pdf': {},
   '03_padded.pdf': { text: PADDED_TEXT, padding: PDF_PADDING },
+  'empty.docx': {},
+  'report.docx': { blocks: ['Incidents by site:', [['Site', 'Incidents'], ['Halloran', '7'], ['Merrow', '3']]] },
+};
+const MIME_TYPES = {
+  '.pdf': 'application/pdf',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF32LE_BOM = [0xff, 0xfe, 0x00, 0x00];
 // More bytes in UTF-16 than PREVIEW_CHARS, but fewer characters.
 const LONG_UTF16_CHARS = PREVIEW_CHARS * 0.75;
-const WRITE_PDFS =
-  'import json, sys; from pathlib import Path; from tests.pdfs import write_pdf\n' +
-  'for name, spec in json.loads(sys.argv[2]).items(): write_pdf(Path(sys.argv[1], name), **spec)';
-// A .docx is a ZIP, whose first header's version field holds a NUL byte.
-const DOCX_START = [0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0x08, 0x00];
-const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
-const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
+const WRITE_DOCUMENTS =
+  'import json, sys; from pathlib import Path; from tests.documents import WRITERS\n' +
+  'for name, spec in json.loads(sys.argv[2]).items(): WRITERS[Path(name).suffix](Path(sys.argv[1], name), **spec)';
+// An old Office file is an OLE2 compound file, whose header holds NUL bytes.
+const OLE2_START = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00];
+const NOT_TEXT = 'r3con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
+const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
+const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -194,7 +204,7 @@ const scriptedSummary = (text) => text.split('\n').find((line) => line.trim() &&
 
 let browser;
 let failures = 0;
-let pdfs;
+let documents;
 
 function check(area, name, pass, detail = '') {
   if (!pass) failures += 1;
@@ -854,36 +864,35 @@ async function files() {
   });
 }
 
-// Writes every PDF in `specs` with one uv run, and returns each by name, as setInputFiles takes it.
-function writePdfs(specs) {
-  const dir = mkdtempSync(join(tmpdir(), 'r3con-pdfs-'));
+// Writes every document in `specs` with one uv run, and returns each by name, as setInputFiles takes it.
+function writeDocuments(specs) {
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-documents-'));
   try {
-    execFileSync('uv', ['run', 'python', '-c', WRITE_PDFS, dir, JSON.stringify(specs)], { cwd: REPO_DIR });
-    return Object.fromEntries(Object.keys(specs).map((name) => [name, { name, mimeType: 'application/pdf', buffer: readFileSync(join(dir, name)) }]));
+    execFileSync('uv', ['run', 'python', '-c', WRITE_DOCUMENTS, dir, JSON.stringify(specs)], { cwd: REPO_DIR });
+    const written = (name) => ({ name, mimeType: MIME_TYPES[extname(name)], buffer: readFileSync(join(dir, name)) });
+    return Object.fromEntries(Object.keys(specs).map((name) => [name, written(name)]));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-const docx = () => ({
-  name: 'report.docx',
-  mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  buffer: Buffer.from([...DOCX_START, ...Buffer.from('word/document.xml')]),
-});
+const oldWord = () => ({ name: 'old.doc', mimeType: 'application/msword', buffer: Buffer.from(OLE2_START) });
+const oldPowerPoint = () => ({ name: 'old.ppt', mimeType: 'application/vnd.ms-powerpoint', buffer: Buffer.from(OLE2_START) });
 const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? null : el.textContent));
 
-// The prototype has no r3con app to extract a PDF's text.
+// The prototype has no r3con app to extract a PDF's or a Word file's text.
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
     const longUtf16 = utf16('utf16_long.txt', 'A Notepad note, saved as Unicode. '.repeat(LONG_UTF16_CHARS).slice(0, LONG_UTF16_CHARS), UTF16LE_BOM);
     const longText = memo('long.txt', 'A long memo. '.repeat(PREVIEW_CHARS).slice(0, PREVIEW_CHARS + 1));
-    await page.setInputFiles('#file-input', [pdfs['01_memo.pdf'], docx(), memo('notes.log', 'A log line.\n'), longUtf16, longText]);
+    const texts = [memo('notes.log', 'A log line.\n'), longUtf16, longText];
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], oldWord(), ...texts]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
-    const expected = `Not added: 01_memo.pdf. ${PDFS_NEED_APP} Not added: report.docx. ${NOT_TEXT}`;
-    const name = 'the prototype refuses a PDF, saying PDFs need r3con app, and a .docx, saying to save it as PDF or text, and adds a .log';
+    const expected = `Not added: 01_memo.pdf, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
+    const name = 'the prototype refuses a PDF and a .docx, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
     const added = isDeepStrictEqual(listed, ['remove long.txt', 'remove notes.log', 'remove utf16_long.txt']);
     check('files', name, added && error === expected, `${listed.join(', ')}; ${error}`);
 
@@ -2192,15 +2201,17 @@ const openFileView = async (page, name) => {
 };
 
 const fmtKb = (n) => `${(n / 1024).toFixed(1)} KB`;
+// As the page writes a file's size.
+const fmtSize = (n) => (n < 1024 ? `${n} B` : fmtKb(n));
 const runPosted = (page) =>
   page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
 
 async function livePdf(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = postsOf(page);
-    const memoPdf = pdfs['01_memo.pdf'];
-    const padded = pdfs['03_padded.pdf'];
-    await page.setInputFiles('#file-input', [memoPdf, pdfs['02_scan.pdf'], padded]);
+    const memoPdf = documents['01_memo.pdf'];
+    const padded = documents['03_padded.pdf'];
+    await page.setInputFiles('#file-input', [memoPdf, documents['02_scan.pdf'], padded]);
     const two = await becomes(page, () => document.querySelectorAll('.node.doc').length === 2);
     await page.click('#tab-files');
     const listed = await removeNames(page);
@@ -2248,15 +2259,44 @@ async function liveBatches(url) {
       window.saidLines = [];
       new MutationObserver(() => window.saidLines.push(said.textContent)).observe(said, { childList: true });
     });
-    await page.setInputFiles('#file-input', pdfs['01_memo.pdf']);
-    await page.setInputFiles('#file-input', [docx(), pdfs['03_padded.pdf']]);
+    await page.setInputFiles('#file-input', documents['01_memo.pdf']);
+    await page.setInputFiles('#file-input', [oldWord(), documents['03_padded.pdf']]);
     release();
     const lines = ['Reading 1 file…', '1 file added, in place of the 5 sample memos.', 'Reading 2 files…', '1 file added.'];
     const inOrder = await becomes(page, (expected) => JSON.stringify(window.saidLines) === JSON.stringify(expected), lines);
-    const refused = (await filesError(page)) === `Not added: report.docx. ${NOT_TEXT}`;
+    const refused = (await filesError(page)) === `Not added: old.doc. ${OLD_WORD}`;
     const docs = await count(page, '.node.doc');
     const name = "a batch added while a PDF is still being read waits its turn, then each batch's lines come in order, and the second's refusal stands";
     check('live', name, inOrder && refused && docs === 2, `${(await page.evaluate(() => window.saidLines)).join(' | ')}; ${await filesError(page)}; ${docs} documents`);
+  });
+}
+
+async function liveWord(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    const report = documents['report.docx'];
+    // Word's lock file for report.docx, which is not added or sent.
+    const lockFile = { name: '~$report.docx', mimeType: 'application/octet-stream', buffer: Buffer.from('\x07Michael') };
+    await page.setInputFiles('#file-input', [documents['empty.docx'], report, lockFile]);
+    const one = await becomes(page, () => document.querySelectorAll('.node.doc').length === 1);
+    await page.click('#tab-files');
+    const listed = await removeNames(page);
+    const error = await filesError(page);
+    const sentToApp = isDeepStrictEqual(posts, Array(2).fill('/api/documents/text'));
+    const emptyRefused = error === `Not added: empty.docx. ${NO_TEXT}` && isDeepStrictEqual(listed, ['remove report.docx']);
+    const emptyName =
+      "each Word file added goes to r3con app for its text, one with none is refused as it is added, named, saying why, and Word's lock file is left out";
+    check('live', emptyName, one && sentToApp && emptyRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
+
+    const shown = await openFileView(page, 'report.docx');
+    const extracted = isDeepStrictEqual(shown, { meta: `${fmtSize(report.buffer.length)} · your file`, text: WORD_TEXT });
+    check('live', "the files tab shows a Word file's text as Markdown, its table and all, and its file's size", extracted, JSON.stringify(shown));
+
+    await page.click('#tab-chat');
+    const started = runPosted(page);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', "a run is sent the Word file's Markdown", isDeepStrictEqual(sent, [WORD_TEXT]), JSON.stringify(sent));
   });
 }
 
@@ -2269,9 +2309,11 @@ async function liveNotText(url) {
     const posts = postsOf(page);
     const binary = { name: 'data.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('a header\0with a NUL byte') };
     const files = [
-      docx(),
+      oldWord(),
+      oldPowerPoint(),
       binary,
       memo('notes.log', 'A log line.\n'),
+      memo('page.html', '<p>An HTML note.</p>\n'),
       memo('README', 'An extensionless note.\n'),
       utf16('utf16_bom.txt', 'A Notepad note.\n', UTF16LE_BOM),
       utf16('utf16_no_bom.txt', 'No byte-order mark.\n'),
@@ -2279,21 +2321,21 @@ async function liveNotText(url) {
       { name: 'ff_fe.bin', mimeType: 'application/octet-stream', buffer: Buffer.from([...UTF16LE_BOM, 0x13, 0x37, 0x00, 0x00, 0x2a]) },
     ];
     await page.setInputFiles('#file-input', files);
-    const three = await becomes(page, () => document.querySelectorAll('.node.doc').length === 3);
+    const four = await becomes(page, () => document.querySelectorAll('.node.doc').length === 4);
     await page.click('#tab-files');
     const listed = await removeNames(page);
     const error = await filesError(page);
     const refused =
-      error === `Not added: data.bin, ff_fe.bin, report.docx, utf16_no_bom.txt, utf32.txt. ${NOT_TEXT}` &&
-      isDeepStrictEqual(listed, ['remove notes.log', 'remove README', 'remove utf16_bom.txt']);
+      error === `Not added: data.bin, ff_fe.bin, old.ppt, utf16_no_bom.txt, utf32.txt. ${NOT_TEXT} Not added: old.doc. ${OLD_WORD}` &&
+      isDeepStrictEqual(listed, ['remove notes.log', 'remove page.html', 'remove README', 'remove utf16_bom.txt']);
     const name =
-      'a .docx, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an extensionless file and UTF-16 with a byte-order mark are added';
-    check('live', name, three && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
+      'an old .doc and .ppt, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an .html, an extensionless file and UTF-16 with a byte-order mark are added as text';
+    check('live', name, four && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
     await page.click('#tab-chat');
     const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
-    const texts = ['A log line.\n', 'An extensionless note.\n', 'A Notepad note.\n'];
+    const texts = ['A log line.\n', '<p>An HTML note.</p>\n', 'An extensionless note.\n', 'A Notepad note.\n'];
     check('live', 'a run is sent only the text files, the UTF-16 one decoded', isDeepStrictEqual(sent, texts), JSON.stringify(sent));
   });
 }
@@ -2623,6 +2665,7 @@ async function live() {
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);
+    await liveWord(url);
     await liveBatches(url);
     await liveNotText(url);
     await liveStaleToken(url);
@@ -2636,7 +2679,7 @@ async function live() {
 }
 
 try {
-  pdfs = writePdfs(PDF_SPECS);
+  documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
   const areas = [load, beforeRun, sampleReplay, arrange, runView, files, filesNotText, filesAddFails, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();

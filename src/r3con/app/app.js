@@ -121,7 +121,7 @@
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
-   * @property {(file: File) => Promise<FileRead>} readPdf
+   * @property {(file: File, noText: string) => Promise<FileRead>} extract
    * @property {(question: string) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
@@ -525,6 +525,11 @@
   const PREVIEW_CHARS = 20000;
   const MAX_FILES = 40;
   const PDF_SUFFIX = '.pdf';
+  // Office's lock file for a document someone has open: ~$report.docx.
+  const LOCK_FILE_PREFIX = '~$';
+  // What r3con app extracts the text of: r3con's own list, which tests/app/test_server.py holds this to.
+  const EXTRACTED_SUFFIXES = ['.pdf', '.docx'];
+  const OLD_WORD_SUFFIX = '.doc';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
   const SNIFF_BYTES = 8000;
   const UTF16_BOMS = [
@@ -576,7 +581,8 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
-  const NOT_TEXT = 'r3con reads text and PDF files: save as PDF or text, then add again.';
+  const NOT_TEXT = 'r3con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+  const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
@@ -594,8 +600,9 @@
     "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
-  const PDFS_NEED_APP = 'PDFs need r3con app; this prototype reads only text files.';
+  const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
+  const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -799,8 +806,8 @@
   const shortLabel = (s) => (s.length > LABEL_MAX ? `${s.slice(0, LABEL_MAX - 1)}…` : s);
   /** @param {LoadedFile} file */
   const fileLabel = (file) => shortLabel(stripExt(file.name));
-  /** @param {{ name: string }} file */
-  const isPdf = (file) => file.name.toLowerCase().endsWith(PDF_SUFFIX);
+  /** @param {{ name: string }} file @param {string} suffix */
+  const hasSuffix = (file, suffix) => file.name.toLowerCase().endsWith(suffix);
   /** @param {string} model */
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
@@ -2798,10 +2805,12 @@
 
   /** @param {File} file @returns {Promise<FileRead>} */
   async function readFile(file) {
-    if (isPdf(file)) return mode.readPdf(file);
+    if (hasSuffix(file, PDF_SUFFIX)) return mode.extract(file, NO_TEXT_LAYER);
+    if (EXTRACTED_SUFFIXES.some((suffix) => hasSuffix(file, suffix))) return mode.extract(file, NO_TEXT);
     // A file that can't be read goes on to readText, which reads it as no text.
     const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
-    return looksLikeText(start) ? { text: await readText(file) } : { why: NOT_TEXT };
+    if (looksLikeText(start)) return { text: await readText(file) };
+    return { why: hasSuffix(file, OLD_WORD_SUFFIX) ? OLD_WORD : NOT_TEXT };
   }
 
   // Batches are read and added one after another, so that each one's lines in the files pane stand.
@@ -2830,7 +2839,7 @@
 
   /** @param {(File | null)[]} files */
   async function addBatch(files) {
-    const picked = files.filter((f) => f && !f.name.startsWith('.')).slice(0, MAX_FILES);
+    const picked = files.filter((f) => f && !f.name.startsWith('.') && !f.name.startsWith(LOCK_FILE_PREFIX)).slice(0, MAX_FILES);
     picked.sort((a, b) => a.name.localeCompare(b.name));
     if (!picked.length) {
       showFilesError('No files found there. Try picking the files themselves.');
@@ -3422,7 +3431,7 @@
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
-    readPdf: async () => ({ why: PDFS_NEED_APP }),
+    extract: async () => ({ why: NEEDS_APP }),
     newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
@@ -3446,13 +3455,13 @@
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
-    async readPdf(file) {
+    async extract(file, noText) {
       try {
         const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
         const { text } = await extracted.json();
-        return text.trim() ? { text } : { why: NO_TEXT_LAYER };
+        return text.trim() ? { text } : { why: noText };
       } catch (error) {
-        return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a PDF's text")}.` };
+        return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a file's text")}.` };
       }
     },
     newRun: (question) => liveRun(question, pickedModel()),
