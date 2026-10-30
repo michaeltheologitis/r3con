@@ -108,10 +108,8 @@ const MIN_TEXT_CONTRAST = 4.5;
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
-// The page's intros, for a sample of n memos.
-const memosLoaded = (n) => (n === 1 ? 'The 1 sample memo is loaded' : `The ${n} sample memos are loaded`);
-const prototypeIntro = (n) => `${memosLoaded(n)}, with the question this run answered. Press run to watch it.`;
-const liveIntro = (n) => `${memosLoaded(n)}, with a question about them. Press run to run r3con on them, or add your own files.`;
+// The page's intro, live and in the prototype, for n documents.
+const loadedLine = (n) => (n === 1 ? 'Loaded 1 document.' : `Loaded ${n} documents.`);
 const INTRO = '#transcript > .line:first-child .t';
 const ASKS_HEADER = 'recorded asks over this run · any other question or model is simulated';
 // Fewer memos than the shipped sample has, for a page shipped with another sample: one, to be counted in the singular.
@@ -432,10 +430,10 @@ async function shippedAndEdited(area, options, edit, read) {
   return found;
 }
 
-async function introCounts(area, options, intro) {
+async function introCounts(area, options) {
   const intros = await shippedAndEdited(area, options, withFewerMemos, (page) => page.textContent(INTRO));
   const name = `the intro counts the sample memos: ${SAMPLE_DOCS} as shipped, ${FEWER_MEMOS} in a page shipped with ${FEWER_MEMOS}`;
-  check(area, name, isDeepStrictEqual(intros, [SAMPLE_DOCS, FEWER_MEMOS].map(intro)), intros.join(' | '));
+  check(area, name, isDeepStrictEqual(intros, [SAMPLE_DOCS, FEWER_MEMOS].map(loadedLine)), intros.join(' | '));
 }
 
 // The edges an answer's lit path holds: the run's own answer by default, or `answerId` with `provenance`.
@@ -898,7 +896,7 @@ async function beforeRun() {
     const once = writes === 1 && (await page.textContent('#run-status')) === ready('simulated run', DEFAULT_MODEL);
     check('before a run', 'typing a question rewrites the status once, not on every key', once, `${writes} writes`);
   });
-  await introCounts('before a run', { sample: false }, prototypeIntro);
+  await introCounts('before a run', { sample: false });
 }
 
 async function sampleReplay() {
@@ -3695,7 +3693,7 @@ async function liveElsewhere() {
 // A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
-    await introCounts('live', { url, sample: false }, liveIntro);
+    await introCounts('live', { url, sample: false });
     await liveCutStream(url);
     await liveAnswers(url);
     await liveLog(url);
