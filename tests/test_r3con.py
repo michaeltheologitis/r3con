@@ -498,6 +498,98 @@ def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
     ]
 
 
+FOLDER_DOCUMENTS = ["a received memo", "a memo stored as a blob"]
+HUB_DOCUMENTS = ["the first memo in the hub", "the second memo in the hub"]
+
+
+def write_folder_with_links(root: Path) -> None:
+    for folder in ["folder/blobs", "outside_dir", "hub/blobs", "hub/snapshot"]:
+        (root / folder).mkdir(parents=True)
+    texts = {
+        "secret.txt": "a secret outside the folder",
+        "outside_dir/b.txt": "outside the folder",
+        "folder/a.txt": "a received memo",
+        "folder/blobs/7f3c": "a memo stored as a blob",
+        "hub/blobs/1a2b": "the first memo in the hub",
+        "hub/blobs/3c4d": "the second memo in the hub",
+    }
+    for name, text in texts.items():
+        (root / name).write_text(text, encoding="utf-8")
+    links = {
+        "folder/link.txt": "../secret.txt",
+        "folder/linked.txt": "blobs/7f3c",
+        "folder/linkdir": "../outside_dir",
+        "alias": "folder",
+        "hub/snapshot/first.txt": "../blobs/1a2b",
+        "hub/snapshot/second.txt": "../blobs/3c4d",
+    }
+    for name, target in links.items():
+        (root / name).symlink_to(target)
+
+
+@pytest.mark.parametrize(
+    ("source", "documents"),
+    [
+        (lambda root: "folder", FOLDER_DOCUMENTS),
+        (lambda root: "folder/*.txt", FOLDER_DOCUMENTS),
+        (lambda root: "folder/**/*.txt", FOLDER_DOCUMENTS),
+        (lambda root: str(root / "folder" / "*.txt"), FOLDER_DOCUMENTS),
+        (lambda root: "alias", FOLDER_DOCUMENTS),
+        (lambda root: "hub", HUB_DOCUMENTS),
+    ],
+    ids=[
+        "walk",
+        "glob",
+        "recursive-glob",
+        "absolute-glob",
+        "folder-named-through-a-link",
+        "folder-of-links-inside-it",
+    ],
+)
+def test_a_walk_or_a_glob_reads_every_file_inside_the_folder_and_none_outside(
+    tmp_path, source: Callable[[Path], str], documents: list[str]
+):
+    write_folder_with_links(tmp_path)
+    assert read_documents(source(tmp_path)) == documents
+
+
+def test_a_walk_logs_each_file_that_resolves_outside_the_folder(tmp_path, caplog):
+    write_folder_with_links(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents("folder")
+    assert documents == FOLDER_DOCUMENTS
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"folder/link.txt: resolves outside {tmp_path / 'folder'}; skipping it"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "skipped"),
+    [
+        ("folder/*/*.txt", "folder/linkdir/b.txt"),
+        ("folder/*/../../secret.txt", "folder/blobs/../../secret.txt"),
+    ],
+    ids=["through-a-linked-folder", "climbing-out-after-a-wildcard"],
+)
+def test_a_glob_that_leaves_its_folder_finds_nothing_and_logs_why(
+    tmp_path, caplog, pattern: str, skipped: str
+):
+    write_folder_with_links(tmp_path)
+    with (
+        caplog.at_level(logging.WARNING, logger="r3con.documents"),
+        pytest.raises(FileNotFoundError, match="No documents found at"),
+    ):
+        read_documents(pattern)
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{skipped}: resolves outside {tmp_path / 'folder'}; skipping it"
+    ]
+
+
+def test_a_file_named_directly_is_read_even_through_a_link(tmp_path):
+    write_folder_with_links(tmp_path)
+    assert read_documents("folder/link.txt") == ["a secret outside the folder"]
+
+
 def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_on(
     answering_llm, tmp_path
 ):
