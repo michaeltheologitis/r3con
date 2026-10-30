@@ -201,6 +201,7 @@ const RAN_FIRST = "The tab's run started first, so its files are locked.";
 const DROP_ADDS = 'drop to add files';
 const DROP_LOCKED = 'this tab has run · press + for a new tab';
 const FIRST_TAB_BEFORE_RUN = '1 new · 5 files';
+const DRAG_STEPS = 8;
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -291,16 +292,35 @@ function positionOf(page, id) {
   return page.$eval(nodeSel(id), (el) => ({ x: parseFloat(el.style.left), y: parseFloat(el.style.top) }));
 }
 
-async function centre(page, id) {
-  const r = await rect(page, `${nodeSel(id)} .icon`);
+async function boxCentre(page, selector) {
+  const r = await rect(page, selector);
   return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
 }
 
-async function drag(page, from, to) {
+function centre(page, id) {
+  return boxCentre(page, `${nodeSel(id)} .icon`);
+}
+
+// Presses at `from`, moves to `to` in `steps` and releases; returns what `whileHeld` reads just before the release.
+async function drag(page, from, to, { whileHeld, steps = DRAG_STEPS } = {}) {
   await page.mouse.move(from.x, from.y);
   await page.mouse.down();
-  await page.mouse.move(to.x, to.y, { steps: 8 });
+  await page.mouse.move(to.x, to.y, { steps });
+  const held = await whileHeld?.();
   await page.mouse.up();
+  return held;
+}
+
+// drag by touch, lifted with `end`: touchEnd, or touchCancel. Playwright's touchscreen only taps, so this goes through Chromium's own touch input.
+async function touchDrag(page, from, to, { whileHeld, end = 'touchEnd' } = {}) {
+  const cdp = await page.context().newCDPSession(page);
+  const touchAt = (type, p) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: p ? [p] : [] });
+  await touchAt('touchStart', from);
+  for (let i = 1; i <= DRAG_STEPS; i += 1) await touchAt('touchMove', { x: from.x + ((to.x - from.x) * i) / DRAG_STEPS, y: from.y + ((to.y - from.y) * i) / DRAG_STEPS });
+  const held = await whileHeld?.();
+  await touchAt(end);
+  await cdp.detach();
+  return held;
 }
 
 async function dragNode(page, id, dx, dy) {
@@ -1016,6 +1036,129 @@ async function removeArea() {
     await send(page, NEW_QUESTION);
     const said = await page.evaluate(lastTurnLines);
     check('remove', 'with every file removed, run refuses with the line it gives for no files', said.includes(ADD_FILES_FIRST) && (await count(page, '#world .node')) === 0, said.join(' | '));
+  });
+}
+
+// ---------- trash: a document node dropped on the panel's can has its file removed ----------
+
+const docNodeId = (page, name) => page.$eval(`#world .node.doc[aria-label^="${name},"]`, (el) => el.dataset.id);
+// Read after a frame: Chromium hands a touch move to the page with the next one.
+const canLit = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve(document.getElementById('trash').classList.contains('over')))));
+const canShown = (page) => page.isVisible('#trash');
+// Drags by mouse, or by touch, and returns whether the can was lit just before the release.
+function dragOver(page, from, to, { touch = false, ...options } = {}) {
+  const whileHeld = () => canLit(page);
+  return touch ? touchDrag(page, from, to, { whileHeld, ...options }) : drag(page, from, to, { whileHeld, ...options });
+}
+
+async function trashArea() {
+  const names = recordedSample().docs.map((d) => d.name);
+  const left = names.filter((_, i) => i !== 1);
+  for (const layout of Object.values(LAYOUTS)) {
+    const touch = layout === LAYOUTS.phone;
+    const by = touch ? 'by touch' : 'by mouse';
+    await withPage('trash', { layout, sample: false }, async (page) => {
+      const shown = await canShown(page);
+      const unspoken = (await page.getAttribute('#trash', 'aria-hidden')) === 'true';
+      const [box, hint, panel] = await Promise.all(['#trash', '#panel-hint', '#panel'].map((selector) => rect(page, selector)));
+      const corner = box.left - panel.left < box.width && box.top - panel.top < box.height;
+      const clear = box.right <= hint.left || box.bottom <= hint.top;
+      const placeName = `${layout.name}: before a run the panel has a can at its top left, hidden from assistive tech, clear of the hint beside it`;
+      check('trash', placeName, shown && unspoken && corner && clear, JSON.stringify({ shown, unspoken, box, hint }));
+
+      await page.click('#tab-files');
+      const id = await docNodeId(page, names[1]);
+      const was = await positionOf(page, id);
+      const litElsewhere = await dragOver(page, await centre(page, id), await boxCentre(page, '#panel'), { touch });
+      const kept = { docs: await docNames(page), pane: (await page.evaluate(filesPane)).names, moved: !isDeepStrictEqual(await positionOf(page, id), was) };
+      const keptName = `${layout.name}: a document node dropped ${by} anywhere but the can only moves there, and the can stays unlit`;
+      check('trash', keptName, !litElsewhere && isDeepStrictEqual(kept, { docs: names, pane: names, moved: true }), JSON.stringify({ litElsewhere, ...kept }));
+
+      if (touch) {
+        const litCancelled = await dragOver(page, await centre(page, await docNodeId(page, names[2])), await boxCentre(page, '#trash'), { touch, end: 'touchCancel' });
+        const cancelled = { lit: litCancelled, docs: await docNames(page), unlit: !(await canLit(page)) };
+        const cancelName = `${layout.name}: a touch drag cancelled over the lit can removes nothing, and unlights it`;
+        check('trash', cancelName, isDeepStrictEqual(cancelled, { lit: true, docs: names, unlit: true }), JSON.stringify(cancelled));
+      }
+
+      const focusBefore = await focusedId(page);
+      const lit = await dragOver(page, await centre(page, id), await boxCentre(page, '#trash'), { touch });
+      const after = {
+        lit,
+        docs: await docNames(page),
+        pane: (await page.evaluate(filesPane)).names,
+        count: await page.textContent('#files-count'),
+        tab: (await tabLabels(page))[0][0],
+        said: await page.textContent('#files-said'),
+        chat: await lastChatLine(page),
+        status: await page.textContent('#run-status'),
+        unlit: !(await canLit(page)),
+        focus: await focusedId(page),
+      };
+      const expected = {
+        lit: true,
+        docs: left,
+        pane: left,
+        count: String(left.length),
+        tab: `1 new · ${left.length} files`,
+        said: `Removed ${names[1]}.`,
+        chat: `Removed ${names[1]}: tab 1's next question runs over ${left.length} documents.`,
+        status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
+        unlit: true,
+        // A press by mouse focuses the node it grabs, and the focus goes to the panel with it; a touch moves none.
+        focus: touch ? focusBefore : 'panel',
+      };
+      const focusSays = touch ? 'the focus staying where it was' : 'the focus on the panel';
+      const dropName = `${layout.name}: a document node dragged ${by} onto the can lights it, and released there its file leaves the tab, the panel and the files pane, said as the files pane's remove says it, with ${focusSays}`;
+      check('trash', dropName, isDeepStrictEqual(after, expected), JSON.stringify(after));
+    });
+  }
+
+  await withPage('trash', { sample: false }, async (page) => {
+    const spot = await boxCentre(page, '#trash');
+    const id = await docNodeId(page, names[0]);
+    const node = await centre(page, id);
+    const panel = await rect(page, '#panel');
+    const blank = { x: panel.left + panel.width * 0.75, y: panel.top + panel.height / 2 };
+    await drag(page, blank, { x: blank.x + spot.x - node.x, y: blank.y + spot.y - node.y });
+    const view = await transform(page);
+    const was = await positionOf(page, id);
+    await drag(page, spot, await boxCentre(page, '#panel'));
+    const grabbed = { moved: !isDeepStrictEqual(await positionOf(page, id), was), panned: (await transform(page)) !== view, docs: await docNames(page) };
+    check('trash', 'a node panned under the can is still grabbed there, not the view', isDeepStrictEqual(grabbed, { moved: true, panned: false, docs: names }), JSON.stringify(grabbed));
+
+    await page.click('#new-tab-btn');
+    const empty = await canShown(page);
+    const second = ['a_memo.txt', 'b_memo.txt'];
+    await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
+    await removeButton(page, second[1]).waitFor();
+    const withFiles = await canShown(page);
+    const flicked = await dragOver(page, await centre(page, await docNodeId(page, second[0])), spot, { steps: 1 });
+    const plus = { empty, withFiles, flicked, docs: await docNames(page), pane: (await page.evaluate(filesPane)).names };
+    await showRunTab(page, 0);
+    const first = { tab: (await tabLabels(page))[0][0], pane: (await page.evaluate(filesPane)).names };
+    const plusName =
+      "a + tab shows the can once it has files, not before, and a node flicked onto it in one move lights it and is removed from that tab only: tab 1, not run, keeps all its files";
+    const expected = { empty: false, withFiles: true, flicked: true, docs: second.slice(1), pane: second.slice(1) };
+    const firstKept = isDeepStrictEqual(first, { tab: FIRST_TAB_BEFORE_RUN, pane: names });
+    check('trash', plusName, isDeepStrictEqual(plus, expected) && firstKept, JSON.stringify({ ...plus, first }));
+
+    const chatBefore = await lastChatLine(page);
+    const switchTab = () => page.evaluate(() => document.querySelectorAll('.run-tab')[1].click());
+    await drag(page, await centre(page, await docNodeId(page, names[1])), spot, { whileHeld: switchTab });
+    const switched = { shown: await shownTab(page), pane: (await page.evaluate(filesPane)).names, chat: await lastChatLine(page) };
+    await showRunTab(page, 0);
+    const firstAfter = (await page.evaluate(filesPane)).names;
+    const switchName = "a node of tab 1 released over the can after a switch to tab 2 mid-drag removes nothing, in either tab, and says nothing";
+    const unmoved = isDeepStrictEqual(switched, { shown: 1, pane: second.slice(1), chat: chatBefore }) && isDeepStrictEqual(firstAfter, names);
+    check('trash', switchName, unmoved, JSON.stringify({ ...switched, firstAfter }));
+
+    await page.click('#tab-chat');
+    await runSample(page);
+    const lit = await dragOver(page, await centre(page, await docNodeId(page, names[0])), spot);
+    const ran = { shown: await canShown(page), lit, docs: await docNames(page), pane: (await paneOf(page)).names };
+    const ranName = 'a tab that has run shows no can, and a document node dropped where it was keeps its file';
+    check('trash', ranName, isDeepStrictEqual(ran, { shown: false, lit: false, docs: names, pane: names }), JSON.stringify(ran));
   });
 }
 
@@ -2548,6 +2691,21 @@ async function liveTabFiles(url) {
   });
 }
 
+// A sample memo dropped on the can is left out of the next run.
+async function liveTrash(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const docs = recordedSample().docs;
+    const id = await docNodeId(page, docs[0].name);
+    await dragOver(page, await centre(page, id), await boxCentre(page, '#trash'));
+    const started = runPosted(page);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const expected = docs.slice(1).map((d) => d.text);
+    check('live', 'a memo dropped on the can before a run is not sent with the run', done && isDeepStrictEqual(sent, expected), JSON.stringify(sent?.length));
+  });
+}
+
 // Holds the first PDF's text at the server until the tab it was added in has started its run; three more
 // batches wait behind it, the last with only a hidden file.
 async function liveLockedWhileReading(url) {
@@ -2995,6 +3153,7 @@ async function live() {
     await liveStopLate(url);
     await liveRemoveKeepsProblem(url);
     await liveTabFiles(url);
+    await liveTrash(url);
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
     await liveRefusalWhileChatting(url);
@@ -3008,7 +3167,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, runView, filesNotText, filesAddFails, removeArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

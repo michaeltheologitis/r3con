@@ -667,6 +667,7 @@
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelOther = $('model-other', HTMLInputElement);
   const side = $('side');
+  const trash = $('trash');
 
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
   // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
@@ -2071,6 +2072,7 @@
     if (run) hint.textContent = '';
     else hint.textContent = files.length ? `${fileCount()} · ready to run` : ADD_FILES;
     hint.hidden = !hint.textContent;
+    trash.hidden = Boolean(run) || !files.length;
   }
 
   // `action` is ask, over the run on the panel, or run, a new one over the files.
@@ -2892,13 +2894,14 @@
   }
 
   // The re-render drops the clicked button, and the focus with it.
-  /** @param {LoadedFile} file */
-  function removeFile(file) {
+  /** @param {LoadedFile} file @param {{ refocus?: boolean }} [options] */
+  function removeFile(file, { refocus = true } = {}) {
     const tab = state.shown;
     const i = tab.files.indexOf(file);
     tab.files = tab.files.filter((f) => f !== file);
     tellFiles(tab, { filesError: '' });
     filesChanged(tab, `Removed ${file.name}`);
+    if (!refocus) return;
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
@@ -3180,6 +3183,7 @@
 
   function startPinch() {
     const { view } = state.shown;
+    trash.classList.remove('over');
     const [a, b] = [...gesture.pointers.values()];
     gesture.mode = 'pinch';
     gesture.pinch = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mid: panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2), view: { ...view } };
@@ -3198,6 +3202,16 @@
     view.y = mid.y - wy * k;
     state.shown.userMoved = true;
     applyView();
+  }
+
+  // A document node of the shown tab, released over the can while it shows, has its file removed.
+  /** @param {PointerEvent} e */
+  function overTrash(e) {
+    const { node } = gesture;
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc' && state.shown.nodes.get(node.id) === node;
+    if (!droppable) return false;
+    const r = trash.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
   }
 
   /** @param {PointerEvent} e */
@@ -3239,6 +3253,7 @@
       placeNode(gesture.node);
       redrawEdges(state.shown);
       if (state.selected === gesture.node.id) positionInspector();
+      trash.classList.toggle('over', overTrash(e));
     } else {
       panel.classList.add('panning');
       view.x = gesture.from.x + dx;
@@ -3251,6 +3266,8 @@
   /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
+    const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node.file : null;
+    trash.classList.remove('over');
     if (gesture.mode === 'pinch') {
       if (!gesture.pointers.size) gesture.mode = null;
       return;
@@ -3259,6 +3276,10 @@
     gesture.mode = null;
     gesture.node = null;
     panel.classList.remove('panning');
+    if (!trashed) return;
+    removeFile(trashed, { refocus: false });
+    // The dragged node held the focus, and went with its file.
+    if (document.activeElement === document.body) panel.focus({ preventScroll: true });
   }
 
   /** @param {WheelEvent} e */

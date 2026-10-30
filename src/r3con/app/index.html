@@ -42,8 +42,15 @@
         <div class="run-tabs" id="run-tabs" role="tablist" aria-label="tabs"></div>
         <button class="btn new-tab" id="new-tab-btn" type="button" aria-label="new tab" title="new tab">+</button>
       </div>
-      <div class="panel" id="panel">
+      <div class="panel" id="panel" tabindex="-1">
         <div class="world" id="world"></div>
+        <div class="trash" id="trash" aria-hidden="true" hidden>
+          <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M6.5 9h19M13 9V6.5A1.5 1.5 0 0 1 14.5 5h3A1.5 1.5 0 0 1 19 6.5V9"/>
+            <path d="M9 9l1.2 16.1a2 2 0 0 0 2 1.9h7.6a2 2 0 0 0 2-1.9L23 9"/>
+            <path d="M14 13.5v9M18 13.5v9"/>
+          </svg>
+        </div>
         <div class="panel-hint" id="panel-hint" hidden></div>
         <div class="panel-tools">
           <button class="btn" id="arrange-btn" type="button">arrange</button>
