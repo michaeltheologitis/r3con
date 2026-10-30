@@ -23,13 +23,16 @@ opened URL's fragment, ``#token=...``.
   ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
   scan, a file with no text or one that can't be read, as the server's log then says.
   The page sends each PDF and Word file it is given here, and reads other files itself.
-- ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body, answers
-  ``{files: [{name, size, text}], skipped}``: the entries a folder walk of
-  ``r3con.read_documents`` would read, each named by its path in the zip and read as
-  that walk reads a file, sorted by path, its text ``""`` if it has none; and how many
-  file entries it left out (hidden, under ``__MACOSX/``, Office lock files, other
-  suffixes, nested zips, which are not opened). A zip that is corrupt, encrypted, of
-  more than ``MAX_ZIP_ENTRIES`` entries, or whose documents unzip to more than
+- ``POST /api/documents/zip?name=<file name>&limit=<n>``, with a zip's bytes as the
+  body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
+  the entries ``r3con.read_documents``' folder walk would read, by suffix and with no
+  Office lock file, less, by the app's own rule, anything hidden or under
+  ``__MACOSX/``. The first ``limit`` of them, in the walk's order, are read as that
+  walk reads a file, each named by its path in the zip less a top folder they all
+  share, its text ``""`` if it has none. ``skipped`` counts the files left out by
+  their suffix, nested zips among them, which are never opened; ``unread``, the
+  documents past ``limit``. A zip that is corrupt, encrypted, of more than
+  ``MAX_ZIP_ENTRIES`` entries, or whose documents read would unzip to more than
   ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
@@ -138,7 +141,7 @@ MAX_ZIP_BYTES = MAX_ZIP_MEGABYTES * 1024 * 1024
 # Where macOS's Finder puts each file's metadata in a zip it makes.
 MACOS_METADATA_FOLDER = "__MACOSX"
 ZIP_ENCRYPTED_FLAG = 0x1
-# What zipfile raises, opening a zip or reading an entry, for one it can't read.
+# What zipfile raises, opening a zip or reading an entry, for a zip it can't read.
 UNREADABLE_ZIP_ERRORS = (
     zipfile.BadZipFile,
     zlib.error,
@@ -169,6 +172,7 @@ FORBID_EXTRA = ConfigDict(extra="forbid")
 
 logger = get_logger("app")
 Parsed = TypeVar("Parsed")
+Result = TypeVar("Result")
 
 
 def _not_blank(text: str) -> str:
@@ -195,6 +199,12 @@ class RunRequest(BaseModel):
 class DocumentQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Text
+
+
+class ZipQuery(BaseModel):
+    model_config = FORBID_EXTRA
+    name: Text
+    limit: int = Field(MAX_ZIP_ENTRIES, ge=1)
 
 
 class AskRequest(BaseModel):
@@ -435,74 +445,78 @@ async def document_text(request: Request) -> Response:
     return JSONResponse({"text": text})
 
 
-def _zip_reads(entry: zipfile.ZipInfo) -> bool:
-    """Whether a folder walk of ``r3con.read_documents`` would read ``entry``: a file,
-    with no hidden part in its path and none of ``__MACOSX``, not Office's lock file,
-    and with a suffix the walk reads, which a nested zip's is not."""
-    *folders, name = entry.filename.split("/")
+def _left_out_unsaid(entry: zipfile.ZipInfo) -> bool:
+    """Whether the app leaves ``entry`` out without counting it: Office's lock file, as
+    ``r3con run`` does, and, by the app's own rule, which ``r3con run`` doesn't follow,
+    a hidden file, or one under a hidden folder or ``__MACOSX``."""
+    parts = entry.filename.split("/")
     return (
-        not entry.is_dir()
-        and MACOS_METADATA_FOLDER not in folders
-        and not any(part.startswith(".") for part in [*folders, name])
-        and not name.startswith(r3con._LOCK_FILE_PREFIX)
-        and name.lower().endswith(tuple(r3con.TEXT_SUFFIXES))
+        parts[-1].startswith(r3con._LOCK_FILE_PREFIX)
+        or MACOS_METADATA_FOLDER in parts
+        or any(part.startswith(".") for part in parts)
     )
 
 
-def _entry_bytes(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, room: int) -> bytes:
-    """``entry``'s bytes, read no further than ``room`` whatever size the zip claims."""
-    with archive.open(entry) as file:
-        data = file.read(room + 1)
-    if len(data) > room:
-        raise HTTPException(422, TOO_MANY_BYTES)
-    return data
+def _below_shared_folder(paths: list[str]) -> list[str]:
+    """``paths``, less the one folder at the top that they all share, if they do."""
+    tops = {path.split("/", 1)[0] for path in paths}
+    if len(tops) != 1 or not all("/" in path for path in paths):
+        return paths
+    return [path.split("/", 1)[1] for path in paths]
 
 
-def _entry_text(name: str, data: bytes) -> str:
-    """The text of a file called ``name`` holding ``data``, as ``r3con.read_documents``
-    reads one: extracted, or read as UTF-8 replacing undecodable bytes."""
-    extract = r3con._extractor(name)
-    if extract is not None:
-        return extract(name, io.BytesIO(data))
-    return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="replace").read()
-
-
-def _unpack(name: str, body: bytes) -> dict[str, Any]:
-    with zipfile.ZipFile(io.BytesIO(body)) as archive:
-        entries = archive.infolist()
-        if len(entries) > MAX_ZIP_ENTRIES:
-            raise HTTPException(422, TOO_MANY_ENTRIES)
-        read = sorted(filter(_zip_reads, entries), key=lambda entry: entry.filename)
-        skipped = sum(not entry.is_dir() for entry in entries) - len(read)
-        if any(entry.flag_bits & ZIP_ENCRYPTED_FLAG for entry in read):
-            raise HTTPException(422, ENCRYPTED_ZIP)
-        # What the zip claims first; each read is then bounded, since a claim can lie.
-        if sum(entry.file_size for entry in read) > MAX_ZIP_BYTES:
-            raise HTTPException(422, TOO_MANY_BYTES)
-        files: list[dict[str, Any]] = []
-        room = MAX_ZIP_BYTES
-        for entry in read:
-            data = _entry_bytes(archive, entry, room)
-            room -= len(data)
-            text = _entry_text(f"{name}/{entry.filename}", data)
-            files.append({"name": entry.filename, "size": len(data), "text": text})
-    return {"files": files, "skipped": skipped}
-
-
-def _unzipped(name: str, body: bytes) -> dict[str, Any]:
-    """What ``POST /api/documents/zip`` answers for the zip ``body``, called ``name``."""
+def _refused_if_unreadable(name: str, call: Callable[[], Result]) -> Result:
+    """``call()``; a 422, logged, if zipfile can't read the zip called ``name``."""
     try:
-        return _unpack(name, body)
+        return call()
     except UNREADABLE_ZIP_ERRORS as error:
         logger.warning("%s: not a readable zip (%s)", name, type(error).__name__)
         raise HTTPException(422, UNREADABLE_ZIP) from None
 
 
+def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
+    """What ``POST /api/documents/zip`` answers for the zip ``body``, called ``name``.
+    Only zipfile's own errors make it unreadable: an extractor gives ``""`` for a
+    document it can't read."""
+    archive = _refused_if_unreadable(name, lambda: zipfile.ZipFile(io.BytesIO(body)))
+    with archive:
+        entries = archive.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            raise HTTPException(422, TOO_MANY_ENTRIES)
+        files = [e for e in entries if not e.is_dir() and not _left_out_unsaid(e)]
+        documents = sorted(
+            (e for e in files if r3con._walk_reads(e.filename.rsplit("/", 1)[-1])),
+            key=lambda entry: entry.filename.split("/"),
+        )
+        read = documents[:limit]
+        if any(entry.flag_bits & ZIP_ENCRYPTED_FLAG for entry in read):
+            raise HTTPException(422, ENCRYPTED_ZIP)
+        if sum(entry.file_size for entry in read) > MAX_ZIP_BYTES:
+            raise HTTPException(422, TOO_MANY_BYTES)
+        # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
+        contents = _refused_if_unreadable(name, lambda: list(map(archive.read, read)))
+    names = _below_shared_folder([entry.filename for entry in documents])
+    unzipped = [
+        {
+            "name": shown,
+            "size": len(data),
+            "text": r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data)),
+        }
+        for entry, shown, data in zip(read, names, contents, strict=False)
+    ]
+    return {
+        "files": unzipped,
+        "skipped": len(files) - len(documents),
+        "unread": len(documents) - len(read),
+    }
+
+
 async def document_zip(request: Request) -> Response:
-    query = _valid(DocumentQuery.model_validate, dict(request.query_params))
+    query = _valid(ZipQuery.model_validate, dict(request.query_params))
     body = await request.body()
     # As in document_text: on the event loop, it would hold up every other request.
-    return JSONResponse(await run_in_threadpool(_unzipped, query.name, body))
+    unzipped = await run_in_threadpool(_unzipped, query.name, body, query.limit)
+    return JSONResponse(unzipped)
 
 
 async def start_run(request: Request) -> Response:

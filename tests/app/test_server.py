@@ -23,6 +23,7 @@ from r3con.app.server import (
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
     UNREADABLE_ZIP,
+    ZIP_ENCRYPTED_FLAG,
     ServerState,
     _server,
     create_app,
@@ -70,8 +71,10 @@ DOCUMENT_ZIP = "/api/documents/zip"
 ZIP_NAME = "memos.zip"
 MEMO = "A memo.\n"
 LONG_MEMO = {"memo.txt": "A memo, long enough to compress. " * 20}
-# Where memo.txt's compressed bytes start: past its local header, 30 bytes, and name.
-LONG_MEMO_DATA_AT = 30 + len("memo.txt")
+# A zip entry's local header, before its name.
+LOCAL_HEADER_BYTES = 30
+# Where memo.txt's compressed bytes start: past its local header and its name.
+LONG_MEMO_DATA_AT = LOCAL_HEADER_BYTES + len("memo.txt")
 CENTRAL_DIRECTORY_ENTRY = b"PK\x01\x02"
 LOCAL_ENTRY = b"PK\x03\x04"
 # Where an entry's flags are in each of its two headers, and its claimed unzipped
@@ -79,7 +82,6 @@ LOCAL_ENTRY = b"PK\x03\x04"
 CENTRAL_FLAGS_AT = 8
 LOCAL_FLAGS_AT = 6
 CENTRAL_SIZE_AT = 24
-ENCRYPTED_FLAG = 0x1
 RUN_EVENTS = [
     "run_started",
     "relevance_started",
@@ -208,9 +210,13 @@ def zipped(tmp_path: Path, entries: Mapping[str, str | bytes]) -> Path:
     return path
 
 
-def unzip(client: TestClient, body: bytes) -> httpx2.Response:
+def unzip(client: TestClient, body: bytes, **params: str) -> httpx2.Response:
     """The server's answer for the zip ``body``, sent as it is."""
-    return client.post(DOCUMENT_ZIP, params={"name": ZIP_NAME}, content=body)
+    return client.post(DOCUMENT_ZIP, params={"name": ZIP_NAME, **params}, content=body)
+
+
+def unzipped_names(response: httpx2.Response) -> list[str]:
+    return [file["name"] for file in response.json()["files"]]
 
 
 def transport(llm: FakeLLM) -> list[dict[str, str]]:
@@ -782,10 +788,45 @@ def test_a_zips_documents_come_back_by_path_as_a_folder_walk_reads_them(
     assert [file["size"] for file in unzipped["files"]] == [
         path.stat().st_size for path in files
     ]
-    assert unzipped["skipped"] == 0
+    assert unzipped["skipped"] == unzipped["unread"] == 0
 
 
-def test_hidden_macos_lock_and_other_entries_are_skipped_and_counted_but_folders_not(
+def test_a_zips_documents_come_in_the_order_read_documents_walks_a_folder(
+    client: TestClient, tmp_path: Path
+):
+    folder = tmp_path / "memos"
+    for path in ["a-b/x.txt", "a/b.txt", "a.txt"]:
+        (folder / path).parent.mkdir(parents=True, exist_ok=True)
+        (folder / path).write_text(f"{path}\n")
+    archive = zipped(
+        tmp_path, {path: f"{path}\n" for path in ["a-b/x.txt", "a/b.txt", "a.txt"]}
+    )
+    response = unzip(client, archive.read_bytes())
+    assert unzipped_names(response) == ["a/b.txt", "a-b/x.txt", "a.txt"]
+    assert [f["text"] for f in response.json()["files"]] == read_documents(folder)
+
+
+@pytest.mark.parametrize(
+    ("paths", "names"),
+    [
+        (["memos/a.txt", "memos/q3/b.txt"], ["a.txt", "q3/b.txt"]),
+        (
+            ["memos/a.txt", "memos/q3/b.txt", "__MACOSX/memos/._a.txt"],
+            ["a.txt", "q3/b.txt"],
+        ),
+        (["a/notes.txt", "b/notes.txt"], ["a/notes.txt", "b/notes.txt"]),
+        (["memos/a.txt", "b.txt"], ["b.txt", "memos/a.txt"]),
+    ],
+    ids=["one-folder", "one-folder-from-finder", "two-folders", "a-file-at-the-top"],
+)
+def test_a_zips_documents_are_named_below_a_top_folder_they_all_share(
+    client: TestClient, tmp_path: Path, paths: list[str], names: list[str]
+):
+    archive = zipped(tmp_path, {path: MEMO for path in paths})
+    assert unzipped_names(unzip(client, archive.read_bytes())) == names
+
+
+def test_hidden_macos_and_lock_entries_are_left_out_uncounted_and_others_counted(
     client: TestClient, tmp_path: Path
 ):
     entries = {
@@ -797,11 +838,12 @@ def test_hidden_macos_lock_and_other_entries_are_skipped_and_counted_but_folders
         "__MACOSX/memos/02_memo.txt": "macOS's metadata, named like a memo.\n",
         "memos/~$report.docx": "x",
         "memos/notes.py": "print('not a document')\n",
+        "memos/photo.jpg": "x",
     }
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     assert response.status_code == 200
-    memo = {"name": "memos/01_memo.txt", "size": len(MEMO), "text": MEMO}
-    assert response.json() == {"files": [memo], "skipped": 6}
+    memo = {"name": "01_memo.txt", "size": len(MEMO), "text": MEMO}
+    assert response.json() == {"files": [memo], "skipped": 2, "unread": 0}
 
 
 def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path):
@@ -810,22 +852,33 @@ def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path
     entries = {"outer_memo.txt": MEMO, "inner.zip": inner.read_bytes()}
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     memo = {"name": "outer_memo.txt", "size": len(MEMO), "text": MEMO}
-    assert response.json() == {"files": [memo], "skipped": 1}
+    assert response.json() == {"files": [memo], "skipped": 1, "unread": 0}
 
 
-def test_a_zipped_document_with_no_text_comes_back_empty_for_the_page_to_refuse(
+def test_a_zip_read_to_a_limit_reads_its_first_documents_and_counts_the_rest(
+    client: TestClient, tmp_path: Path
+):
+    memos = {f"{i}.txt": f"Memo {i}.\n" for i in (3, 1, 2)}
+    response = unzip(client, zipped(tmp_path, memos).read_bytes(), limit="2")
+    assert unzipped_names(response) == ["1.txt", "2.txt"]
+    assert response.json()["unread"] == 1
+
+
+def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse(
     client: TestClient, tmp_path: Path
 ):
     scan = tmp_path / "scan.pdf"
     write_pdf(scan)
-    entries = {"scan.pdf": scan.read_bytes(), "blank.txt": ""}
+    entries = {"scan.pdf": scan.read_bytes(), "blank.txt": "", "bad.pdf": CORRUPT_PDF}
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     assert response.json() == {
         "files": [
+            {"name": "bad.pdf", "size": len(CORRUPT_PDF), "text": ""},
             {"name": "blank.txt", "size": 0, "text": ""},
             {"name": "scan.pdf", "size": scan.stat().st_size, "text": ""},
         ],
         "skipped": 0,
+        "unread": 0,
     }
 
 
@@ -859,10 +912,21 @@ def test_a_corrupt_zip_is_refused_saying_so_and_logged(
     assert logged.startswith(f"{ZIP_NAME}: not a readable zip (")
 
 
+def test_a_zip_whose_entry_holds_more_than_it_claims_is_refused_as_corrupt(
+    client: TestClient, tmp_path: Path
+):
+    body = bytearray(zipped(tmp_path, LONG_MEMO).read_bytes())
+    size_at = body.index(CENTRAL_DIRECTORY_ENTRY) + CENTRAL_SIZE_AT
+    body[size_at : size_at + 4] = (1).to_bytes(4, "little")
+    response = unzip(client, bytes(body))
+    assert response.status_code == 422
+    assert response.json() == {"error": UNREADABLE_ZIP}
+
+
 def test_an_encrypted_zip_is_refused_saying_so(client: TestClient, tmp_path: Path):
     body = bytearray(zipped(tmp_path, LONG_MEMO).read_bytes())
-    body[body.index(LOCAL_ENTRY) + LOCAL_FLAGS_AT] |= ENCRYPTED_FLAG
-    body[body.index(CENTRAL_DIRECTORY_ENTRY) + CENTRAL_FLAGS_AT] |= ENCRYPTED_FLAG
+    body[body.index(LOCAL_ENTRY) + LOCAL_FLAGS_AT] |= ZIP_ENCRYPTED_FLAG
+    body[body.index(CENTRAL_DIRECTORY_ENTRY) + CENTRAL_FLAGS_AT] |= ZIP_ENCRYPTED_FLAG
     response = unzip(client, bytes(body))
     assert response.status_code == 422
     assert response.json() == {"error": ENCRYPTED_ZIP}
@@ -881,26 +945,17 @@ def test_a_zip_of_more_entries_than_the_cap_is_refused(
         assert response.json() == {"error": TOO_MANY_ENTRIES}
 
 
-def test_a_zip_whose_documents_unzip_past_the_cap_is_refused(
-    client: TestClient, tmp_path: Path
+# A document past the limit is not read, so it counts for nothing against the cap.
+@pytest.mark.parametrize(("limit", "status"), [(None, 422), ("1", 200)])
+def test_a_zip_whose_documents_read_would_unzip_past_the_cap_is_refused(
+    client: TestClient, tmp_path: Path, limit: str | None, status: int
 ):
-    big = zipped(tmp_path, {"big.txt": b"a" * (MAX_ZIP_BYTES + 1)})
-    response = unzip(client, big.read_bytes())
-    assert response.status_code == 422
-    assert response.json() == {"error": TOO_MANY_BYTES}
-
-
-def test_a_zip_that_claims_less_than_it_unzips_to_is_refused(
-    client: TestClient, tmp_path: Path
-):
-    body = bytearray(
-        zipped(tmp_path, {"big.txt": b"a" * (MAX_ZIP_BYTES + 1)}).read_bytes()
-    )
-    size_at = body.index(CENTRAL_DIRECTORY_ENTRY) + CENTRAL_SIZE_AT
-    body[size_at : size_at + 4] = (1).to_bytes(4, "little")
-    response = unzip(client, bytes(body))
-    assert response.status_code == 422
-    assert response.json()["error"] in {UNREADABLE_ZIP, TOO_MANY_BYTES}
+    entries = {"a.txt": MEMO, "b.txt": b"a" * MAX_ZIP_BYTES}
+    body = zipped(tmp_path, entries).read_bytes()
+    response = unzip(client, body, **({} if limit is None else {"limit": limit}))
+    assert response.status_code == status
+    if status == 422:
+        assert response.json() == {"error": TOO_MANY_BYTES}
 
 
 @pytest.mark.parametrize(
@@ -909,6 +964,8 @@ def test_a_zip_that_claims_less_than_it_unzips_to_is_refused(
         ({}, "name: Field required"),
         ({"name": " "}, "name: must not be blank"),
         ({"name": ZIP_NAME, "pages": "1"}, "pages: Extra inputs are not permitted"),
+        ({"name": ZIP_NAME, "limit": "0"}, "limit: Input should be greater than"),
+        ({"name": ZIP_NAME, "limit": "all"}, "limit: Input should be a valid integer"),
     ],
 )
 def test_a_zip_without_a_valid_name_is_refused_with_what_is_wrong(
@@ -922,9 +979,13 @@ def test_a_zip_without_a_valid_name_is_refused_with_what_is_wrong(
 
 def test_the_page_walks_a_folder_for_the_suffixes_read_documents_walks_for():
     script = (APP_DIR / "app.js").read_text(encoding="utf-8")
-    listed = re.search(r"const FOLDER_SUFFIXES = \[(.*?)\];", script)
-    assert listed is not None
-    assert set(re.findall(r"'([^']+)'", listed[1])) == r3con.TEXT_SUFFIXES
+    plain = re.search(r"const PLAIN_TEXT_SUFFIXES = \[(.*?)\];", script)
+    assert plain is not None
+    walked = re.search(r"const FOLDER_SUFFIXES = (.*?);", script)
+    assert walked is not None
+    assert walked[1] == "[...PLAIN_TEXT_SUFFIXES, ...EXTRACTED_SUFFIXES]"
+    listed = set(re.findall(r"'([^']+)'", plain[1]))
+    assert listed == r3con.TEXT_SUFFIXES - set(r3con._EXTRACTORS)
 
 
 @pytest.mark.parametrize(

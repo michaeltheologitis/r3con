@@ -40,6 +40,7 @@ self-hosted endpoint.
 
 from __future__ import annotations
 
+import io
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from itertools import takewhile
@@ -77,23 +78,28 @@ _GLOB_WILDCARDS = frozenset("*?[")
 
 
 def _read_one(path: Path) -> str:
-    """One file's text.
-
-    A file whose suffix is in :data:`_EXTRACTORS` is extracted; everything else is read
-    as UTF-8, replacing undecodable bytes rather than failing — one bad byte in one
-    document should not sink a run. A file that can't be opened or read is logged, and
-    gives ``""``, which the caller then drops.
-    """
-    extract = _extractor(path.name)
+    """One file's text, as :func:`_read_stream` reads it. A file that can't be opened or
+    read is logged, and gives ``""``, which the caller then drops."""
     try:
-        if extract is None:
-            return path.read_text(encoding="utf-8", errors="replace")
-        file = path.open("rb")
+        with path.open("rb") as file:
+            return _read_stream(str(path), file)
     except OSError as e:
         _log.warning("%s: not readable (%s); skipping it", path, type(e).__name__)
         return ""
-    with file:
-        return extract(str(path), file)
+
+
+def _read_stream(name: str, file: BinaryIO) -> str:
+    """The text of a file called ``name``, from a stream of its bytes.
+
+    A file whose suffix is in :data:`_EXTRACTORS` is extracted, and an extractor gives
+    ``""`` for a file it can't read; everything else is read as UTF-8, replacing
+    undecodable bytes rather than failing — one bad byte in one document should not
+    sink a run.
+    """
+    extract = _extractor(name)
+    if extract is not None:
+        return extract(name, file)
+    return io.TextIOWrapper(file, encoding="utf-8", errors="replace").read()
 
 
 def _pdf_text(name: str, pdf: BinaryIO) -> str:
@@ -205,6 +211,14 @@ def _extractor(name: str) -> Callable[[str, BinaryIO], str] | None:
     )
 
 
+def _walk_reads(name: str) -> bool:
+    """Whether a folder walk reads the file called ``name``: one whose suffix is in
+    :data:`TEXT_SUFFIXES`, unless it is Office's lock file."""
+    return name.lower().endswith(tuple(TEXT_SUFFIXES)) and not name.startswith(
+        _LOCK_FILE_PREFIX
+    )
+
+
 def _resolves_inside(path: Path, root: Path) -> bool:
     """Whether ``path`` resolves inside ``root``, itself resolved; logs it if not."""
     if path.resolve().is_relative_to(root):
@@ -254,10 +268,7 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
             files = sorted(
                 p
                 for p in path.rglob("*")
-                if p.is_file()
-                and p.name.lower().endswith(tuple(TEXT_SUFFIXES))
-                and not p.name.startswith(_LOCK_FILE_PREFIX)
-                and _resolves_inside(p, root)
+                if p.is_file() and _walk_reads(p.name) and _resolves_inside(p, root)
             )
         elif path.is_file():
             files = [path]
