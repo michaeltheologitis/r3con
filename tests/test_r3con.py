@@ -420,10 +420,13 @@ def test_a_pipe_in_a_word_tables_cell_is_escaped_so_each_row_keeps_its_cells(
     assert cells == {len(["", "Name|Alias", "Value", ""])}
 
 
-def test_a_file_called_just_docx_is_a_word_file_to_a_walk_as_to_its_path(tmp_path):
+def test_a_file_called_just_docx_is_a_word_file_to_its_path_and_hidden_to_a_walk(
+    tmp_path,
+):
     write_docx(tmp_path / ".docx", ["Incidents this quarter: 7."])
-    assert read_documents(tmp_path) == read_documents(tmp_path / ".docx")
-    assert read_documents(tmp_path) == ["Incidents this quarter: 7."]
+    assert read_documents(tmp_path / ".docx") == ["Incidents this quarter: 7."]
+    with pytest.raises(FileNotFoundError, match="No documents found at"):
+        read_documents(tmp_path)
 
 
 def test_a_table_nested_in_a_word_table_keeps_its_text(tmp_path):
@@ -496,6 +499,82 @@ def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"{tmp_path / 'b_empty.docx'}: no extractable text; skipping it"
     ]
+
+
+def test_a_walk_skips_what_is_hidden_or_under_macosx_below_its_folder(tmp_path):
+    texts = {
+        "a_memo.md": "a memo",
+        ".notes.md": "a hidden note",
+        ".git/description.md": "a hidden folder's file",
+        "q3/.cache/b_memo.md": "a file in a hidden folder further down",
+        "__MACOSX/a_memo.md": "macOS's metadata, named like a memo",
+    }
+    for name, text in texts.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    assert read_documents(tmp_path) == ["a memo"]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "documents"),
+    [
+        ("d/*.md", ["a memo"]),
+        ("d/**/*.md", ["a memo", "a memo further down"]),
+        ("d/.*", ["a hidden memo"]),
+        ("**/.env.md", ["a hidden file further down"]),
+        ("d/*/.env.md", ["a hidden file further down"]),
+        ("d/*/../*.md", ["a memo"]),
+    ],
+    ids=[
+        "wildcard",
+        "recursive",
+        "dot-wildcard",
+        "recursive-to-a-dot-name",
+        "wildcard-to-a-dot-name",
+        "climbing-back-after-a-wildcard",
+    ],
+)
+def test_a_globs_wildcards_match_no_hidden_name_but_a_dot_in_the_pattern_does(
+    tmp_path, pattern: str, documents: list[str]
+):
+    texts = {
+        "d/a.md": "a memo",
+        "d/.x.md": "a hidden memo",
+        "d/q3/b.md": "a memo further down",
+        "d/q3/.env.md": "a hidden file further down",
+        "d/.git/.env.md": "a hidden folder's hidden file",
+    }
+    for name, text in texts.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    assert read_documents(pattern) == documents
+
+
+def test_a_recursive_glob_reads_a_file_once_past_a_link_to_its_own_folder(tmp_path):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "a.md").write_text("a memo", encoding="utf-8")
+    (tmp_path / "d" / "loop").symlink_to(".")
+    assert read_documents("d/**/*.md") == ["a memo"]
+
+
+@pytest.mark.parametrize(
+    ("source", "documents"),
+    [
+        (".env.md", ["a hidden file"]),
+        (".github/*.yml", ["a hidden folder's file"]),
+        (".github", ["a hidden folder's file"]),
+    ],
+    ids=["path", "glob-rooted-in-it", "walk-of-it"],
+)
+def test_a_hidden_file_or_folder_you_name_is_read(
+    tmp_path, source: str, documents: list[str]
+):
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "ci.yml").write_text(
+        "a hidden folder's file", encoding="utf-8"
+    )
+    (tmp_path / ".env.md").write_text("a hidden file", encoding="utf-8")
+    assert read_documents(source) == documents
 
 
 FOLDER_DOCUMENTS = ["a received memo", "a memo stored as a blob"]

@@ -2444,8 +2444,8 @@ function dragEndsOutside() {
 }
 
 // A folder of documents, two of one name in two folders; a .py, which r3con's folder walk leaves out by its suffix;
-// a hidden file, Word's lock file and a memo in a hidden folder, which the page leaves out unsaid; and a file the
-// browser can't read. It has more entries than one batch.
+// a hidden file, Word's lock file, a memo in a hidden folder and one under __MACOSX, which the page leaves out unsaid;
+// and a file the browser can't read. It has more entries than one batch.
 const DROPPED_FOLDER = [
   'reports',
   [
@@ -2454,6 +2454,7 @@ const DROPPED_FOLDER = [
     ['notes.py', "print('not a document')\n"],
     ['~$draft.docx', 'x'],
     ['q3', [['02_incidents.md', 'Incidents in Q3.\n'], ['.hidden', [['03_secret.txt', 'A memo in a hidden folder.\n']]]]],
+    ['__MACOSX', [['01_summary.txt', "macOS's metadata, named like a memo.\n"]]],
     ['q4', [['02_incidents.md', 'Incidents in Q4.\n']]],
     ['moved.txt', { fails: true }],
   ],
@@ -2490,7 +2491,7 @@ async function dropArea() {
       error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}`,
     };
     const folderName =
-      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it, and, by the page's own rule, nothing hidden; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
+      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it, and, as that walk does, nothing hidden or under __MACOSX; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
     check('drop', folderName, isDeepStrictEqual(folder, expected), JSON.stringify(folder));
 
     await page.evaluate(dropItems, { on: 'panel', items: [['scripts', [['a.py', 'x'], ['b.py', 'x'], ['.DS_Store', 'x']]]] });

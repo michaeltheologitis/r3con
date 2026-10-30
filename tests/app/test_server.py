@@ -779,7 +779,14 @@ def test_a_zips_documents_come_back_by_path_as_a_folder_walk_reads_them(
     write_pdf(folder / "reports" / "03_memo.pdf", PDF_TEXT)
     files = sorted(path for path in folder.rglob("*") if path.is_file())
     names = [path.relative_to(folder).as_posix() for path in files]
-    archive = zipped(tmp_path, {n: f.read_bytes() for n, f in zip(names, files)})
+    for hidden in [".notes.md", ".git/notes.txt", "__MACOSX/01_memo.txt"]:
+        (folder / hidden).parent.mkdir(exist_ok=True)
+        (folder / hidden).write_text("Left out of a folder walk, and of a zip.\n")
+    every = (path for path in folder.rglob("*") if path.is_file())
+    archive = zipped(
+        tmp_path,
+        {path.relative_to(folder).as_posix(): path.read_bytes() for path in every},
+    )
     response = unzip(client, archive.read_bytes())
     assert response.status_code == 200
     unzipped = response.json()
@@ -804,6 +811,23 @@ def test_a_zips_documents_come_in_the_order_read_documents_walks_a_folder(
     response = unzip(client, archive.read_bytes())
     assert unzipped_names(response) == ["a/b.txt", "a-b/x.txt", "a.txt"]
     assert [f["text"] for f in response.json()["files"]] == read_documents(folder)
+
+
+def test_a_zip_of_a_hidden_folder_reads_its_documents_as_a_walk_of_that_folder_does(
+    client: TestClient, tmp_path: Path
+):
+    entries = {
+        ".notes/a.txt": "A note.\n",
+        ".notes/.git/b.txt": "A hidden folder's note.\n",
+        "__MACOSX/.notes/._a.txt": "x",
+    }
+    for path, text in entries.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+    response = unzip(client, zipped(tmp_path, entries).read_bytes())
+    assert unzipped_names(response) == ["a.txt"]
+    texts = [file["text"] for file in response.json()["files"]]
+    assert texts == read_documents(tmp_path / ".notes")
 
 
 @pytest.mark.parametrize(

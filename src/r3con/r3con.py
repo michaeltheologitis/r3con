@@ -43,6 +43,7 @@ from __future__ import annotations
 import io
 import threading
 from collections.abc import Callable, Iterable, Sequence
+from fnmatch import fnmatch
 from itertools import takewhile
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -74,7 +75,10 @@ from r3con.settings import active_logs_dir, settings_snapshot
 _log = get_logger("documents")
 # Office's lock file for a document someone has open: ~$report.docx.
 _LOCK_FILE_PREFIX = "~$"
+# Where macOS's Finder puts each file's metadata in a zip it makes.
+_MACOS_METADATA_FOLDER = "__MACOSX"
 _GLOB_WILDCARDS = frozenset("*?[")
+_RECURSIVE_WILDCARD = "**"
 
 
 def _read_one(path: Path) -> str:
@@ -212,11 +216,38 @@ def _extractor(name: str) -> Callable[[str, BinaryIO], str] | None:
     )
 
 
+def _left_out_unsaid(parts: Sequence[str]) -> bool:
+    """Whether a folder walk leaves out, without a word, the file at ``parts`` below the
+    folder: Office's lock file, or one that is hidden or under a hidden folder or
+    ``__MACOSX``."""
+    return parts[-1].startswith(_LOCK_FILE_PREFIX) or any(
+        part.startswith(".") or part == _MACOS_METADATA_FOLDER for part in parts
+    )
+
+
 def _walk_reads(name: str) -> bool:
-    """Whether a folder walk reads the file called ``name``: one whose suffix is in
-    :data:`TEXT_SUFFIXES`, unless it is Office's lock file."""
-    return name.lower().endswith(tuple(TEXT_SUFFIXES)) and not name.startswith(
-        _LOCK_FILE_PREFIX
+    """Whether a folder walk reads a file called ``name`` by its suffix: one in
+    :data:`TEXT_SUFFIXES`."""
+    return name.lower().endswith(tuple(TEXT_SUFFIXES))
+
+
+def _shell_matches(pattern: Sequence[str], parts: Sequence[str]) -> bool:
+    """Whether the shell's glob matches the path ``parts`` to ``pattern``, part by part:
+    as pathlib's does, but ``**`` takes no hidden name, nor does any other part that
+    doesn't start with a dot."""
+    if not pattern:
+        return not parts
+    if pattern[0] == _RECURSIVE_WILDCARD:
+        return _shell_matches(pattern[1:], parts) or (
+            bool(parts)
+            and not parts[0].startswith(".")
+            and _shell_matches(pattern, parts[1:])
+        )
+    return (
+        bool(parts)
+        and fnmatch(parts[0], pattern[0])
+        and (pattern[0].startswith(".") or not parts[0].startswith("."))
+        and _shell_matches(pattern[1:], parts[1:])
     )
 
 
@@ -240,11 +271,14 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
     name**, so that a ``.log``, a ``.py`` or an extensionless file is yours to pass; the
     flip side is that a glob aimed at binaries will happily turn them into garbage
-    documents. A walk and a glob both skip Office's lock files (``~$report.docx``), and
-    read only files that resolve inside the folder you named, or the glob's part before
-    its first wildcard: a file that a link or a ``..`` takes outside it is logged and
-    skipped, so a folder you received can't point r3con at files elsewhere. What you
-    name, a file or that folder, is taken as named, link or not.
+    documents. A walk and a glob both skip Office's lock files (``~$report.docx``). A
+    walk skips anything hidden or under ``__MACOSX`` below the folder you named; a glob
+    follows the shell, where a wildcard matches no hidden name but a name in the pattern
+    that starts with a dot does (``"d/.*"``, ``"**/.env"``). Both read only files that
+    resolve inside the folder you named, or the glob's part before its first wildcard: a
+    file that a link or a ``..`` takes outside it is logged and skipped, so a folder you
+    received can't point r3con at files elsewhere. What you name, a file or that folder,
+    is taken as named, even if hidden or a link.
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
     is logged and then dropped; OCR is outside this package. A Word file is converted to
@@ -269,13 +303,17 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
             files = sorted(
                 p
                 for p in path.rglob("*")
-                if p.is_file() and _walk_reads(p.name) and _resolves_inside(p, root)
+                if not _left_out_unsaid(p.relative_to(path).parts)
+                and _walk_reads(p.name)
+                and p.is_file()
+                and _resolves_inside(p, root)
             )
         elif path.is_file():
             files = [path]
         else:  # treat it as a glob, anchored if it is absolute
             pattern, anchor = str(src), Path(src).anchor
-            root = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts)).resolve()
+            base = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts))
+            root, below = base.resolve(), len(base.parts)
             files = sorted(
                 p
                 for p in (
@@ -283,8 +321,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
                     if anchor
                     else Path().glob(pattern)
                 )
-                if p.is_file()
-                and not p.name.startswith(_LOCK_FILE_PREFIX)
+                if not p.name.startswith(_LOCK_FILE_PREFIX)
+                and _shell_matches(path.parts[below:], p.parts[below:])
+                and p.is_file()
                 and _resolves_inside(p, root)
             )
         if not files:
