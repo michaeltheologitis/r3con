@@ -80,15 +80,10 @@ const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SIMULATED_ASK = 'simulated ask over this run';
 const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
-// Files added over the sample memos take their place.
-const NOT_IN_RUN = "1 new document isn't in this run · 5 documents of this run aren't in the files now · a new run would cover 1 document";
-const REMOVED_FROM_RUN = "1 document of this run isn't in the files now · a new run would cover 4 documents";
 // WCAG 2.2's minimum target size.
 const MIN_TARGET_PX = 24;
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
-const ALL_LEFT_OUT = "5 documents of this run aren't in the files now · a new run would cover 0 documents";
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
-const FILE_ADDED_AFTER_RUN = '1 file added, in place of the 5 sample memos: a new run would cover 1 document, and ask stays on this run.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
 // The page's intros, for a sample of n memos.
 const memosLoaded = (n) => (n === 1 ? 'The 1 sample memo is loaded' : `The ${n} sample memos are loaded`);
@@ -197,6 +192,14 @@ const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, P
 const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
+const NEW_TAB = 'new tab';
+const FILES_LOCKED = "These are this run's files. Press + for a new tab; a new run copies them.";
+const ADD_FILES = 'no files yet · add them in the files tab';
+const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
+const RAN_FIRST = "The tab's run started first, so its files are locked.";
+const DROP_ADDS = 'drop to add files';
+const DROP_LOCKED = 'this tab has run · press + for a new tab';
+const FIRST_TAB_BEFORE_RUN = '1 new · 5 files';
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -568,12 +571,10 @@ function panelBox() {
 }
 
 function composer() {
-  const note = document.getElementById('ask-note');
   return {
     primary: document.getElementById('run-btn').textContent,
     stop: !document.getElementById('stop-btn').hidden,
     newRun: !document.getElementById('new-run-btn').hidden,
-    note: note.hidden ? null : note.textContent,
   };
 }
 
@@ -683,8 +684,8 @@ function fitOfRun() {
   return { outside, zoom: document.getElementById('zoom-level').textContent };
 }
 
-// Records the view as drawn, mid-glide included, as [zoom, x, y]: now, then every frame until tab `tab`
-// opens and for `ms` after, or for `timeout` if it never does.
+// Records the view as drawn, mid-glide included, as [zoom, x, y]: now, then every frame until tab `tab`'s
+// run starts and for `ms` after, or for `timeout` if it never does.
 function recordViews([tab, ms, timeout]) {
   const world = document.getElementById('world');
   const views = [];
@@ -694,7 +695,7 @@ function recordViews([tab, ms, timeout]) {
     const frame = (now) => {
       const { a, e, f } = new DOMMatrix(getComputedStyle(world).transform);
       views.push([a, e, f]);
-      if (opened === null && document.getElementById(`run-tab-${tab}`)) opened = now;
+      if (opened === null && document.querySelector(`.turn[data-tab="${tab}"]`)) opened = now;
       if (now < (opened === null ? start + timeout : opened + ms)) requestAnimationFrame(frame);
       else resolve({ views, opened: opened !== null });
     };
@@ -724,8 +725,8 @@ async function beforeRun() {
     const named = status === ready('recorded run', RECORDED_MODEL);
     check('before a run', "the status names a recorded run and the recording's model", named, status);
     const offered = await page.evaluate(composer);
-    const onlyRun = isDeepStrictEqual(offered, { primary: 'run ⏎', stop: false, newRun: false, note: null });
-    check('before a run', 'only run is offered: no stop, no new run, and no footer note', onlyRun, JSON.stringify(offered));
+    const onlyRun = isDeepStrictEqual(offered, { primary: 'run ⏎', stop: false, newRun: false });
+    check('before a run', 'only run is offered: no stop and no new run', onlyRun, JSON.stringify(offered));
     await page.evaluate(countStatusWrites);
     await page.focus('#question');
     await page.keyboard.type(' today');
@@ -809,7 +810,7 @@ async function arrange() {
   });
 }
 
-// Records the view while `start` starts the run of tab `tab`. It passes if that tab opened, the view moved, and
+// Records the view while `start` starts the run of tab `tab`. It passes if that run started, the view moved, and
 // every frame lies on a glide from where the view was to where it ends, none of them at a new tab's view.
 async function viewOnStart(page, tab, start) {
   await page.evaluate(recordViews, [tab, GLIDE_RECORD_MS, ACTION_TIMEOUT_MS]);
@@ -821,7 +822,7 @@ async function viewOnStart(page, tab, start) {
   const strays = views.filter((view) => !between(view));
   const snaps = near(from, NEW_TAB_VIEW) ? [] : views.filter((view) => near(view, NEW_TAB_VIEW));
   const shown = ([k, x, y]) => `${Math.round(k * 100)}% at ${Math.round(x)},${Math.round(y)}`;
-  const detail = `tab ${tab} ${opened ? 'opened' : 'never opened'}; ${shown(from)} → ${shown(to)} over ${views.length} frames; ${strays.length} off that glide, ${snaps.length} at 100% at 0,0`;
+  const detail = `tab ${tab} ${opened ? 'started' : 'never started'}; ${shown(from)} → ${shown(to)} over ${views.length} frames; ${strays.length} off that glide, ${snaps.length} at 100% at 0,0`;
   return { pass: opened && !near(from, to) && !strays.length && !snaps.length, detail };
 }
 
@@ -841,26 +842,6 @@ async function runView() {
     const second = await viewOnStart(page, 2, () => send(page, NEW_QUESTION, 'Control+Enter'));
     const secondName = "a new run, started once the first has finished and been zoomed out, glides likewise from that zoom to its own tab's fit";
     check('run view', secondName, second.pass, second.detail);
-  });
-}
-
-async function files() {
-  await withPage('files', {}, async (page) => {
-    const memo = { name: '06_extra_memo.txt', mimeType: 'text/plain', buffer: Buffer.from('An extra memo.\n') };
-    await page.setInputFiles('#file-input', memo);
-    await page.waitForSelector('.node.pending');
-    const labels = await page.$$eval('.node.pending .label', (els) => els.map((el) => el.textContent));
-    const docs = await count(page, '.node.doc');
-    const shown = isDeepStrictEqual(labels, ['06_extra_memo', 'not run']) && docs === SAMPLE_DOCS + 1;
-    check('files', 'a file added after a run shows as not run', shown, labels.join(' · '));
-    const hint = await page.textContent('#panel-hint');
-    check('files', 'the hint counts it as not run yet', hint === '1 new document · not run yet', hint);
-    await page.click('#tab-files');
-    await page.click('#sample-btn');
-    const removed = await becomes(page, () => !document.querySelector('.node.pending'));
-    const hintHidden = await page.$eval('#panel-hint', (el) => el.hidden);
-    const sampleOnly = removed && hintHidden && (await count(page, '.node.doc')) === SAMPLE_DOCS;
-    check('files', 'using the sample memos removes it', sampleOnly);
   });
 }
 
@@ -997,14 +978,6 @@ async function removeArea() {
     const offer = await page.$eval('#sample-btn', (button) => (button.hidden ? null : button.textContent));
     check('remove', 'with a sample memo removed, the sample button offers all of them back', offer === ALL_SAMPLE_MEMOS, offer);
 
-    await page.click('#tab-chat');
-    await page.click('#run-btn');
-    const simulated = await page.textContent('#run-status');
-    check('remove', 'with a sample memo removed, the next run is simulated, not the recording', simulated.startsWith('● done · simulated run'), simulated);
-    const stillSaid = await page.textContent('#files-said');
-    check('remove', "after a removal and then a run, the files pane's line says only what happened, nothing of the next run", stillSaid === `Removed ${names[1]}.`, stillSaid);
-
-    await page.click('#tab-files');
     await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
     await removeButton(page, '06_extra_memo.txt').waitFor();
     const listed = await removeNames(page);
@@ -1018,6 +991,14 @@ async function removeArea() {
     await page.click('#sample-btn');
     const back = { files: (await removeNames(page)).length, hidden: await page.$eval('#sample-btn', (button) => button.hidden) };
     check('remove', 'the sample button brings back all the sample memos, then hides', isDeepStrictEqual(back, { files: names.length, hidden: true }), JSON.stringify(back));
+
+    await removeButton(page, names[1]).click();
+    await page.click('#tab-chat');
+    await page.click('#run-btn');
+    const simulated = await page.textContent('#run-status');
+    check('remove', 'with a sample memo removed, the next run is simulated, not the recording', simulated.startsWith('● done · simulated run'), simulated);
+    const stillSaid = await page.textContent('#files-said');
+    check('remove', "after a removal and then a run, the files pane's line says only what happened, nothing of the next run", stillSaid === `Removed ${names[1]}.`, stillSaid);
   });
 
   await withPage('remove', { sample: false }, async (page) => {
@@ -1032,32 +1013,6 @@ async function removeArea() {
     await send(page, NEW_QUESTION);
     const said = await page.evaluate(lastTurnLines);
     check('remove', 'with every file removed, run refuses with the line it gives for no files', said.includes(ADD_FILES_FIRST) && (await count(page, '#world .node')) === 0, said.join(' | '));
-  });
-
-  const asks = recordedAsks();
-  await withPage('remove', {}, async (page) => {
-    await page.click('#tab-files');
-    await removeButton(page, names[1]).click();
-    const footer = await page.evaluate(composer);
-    const nodes = await count(page, '#world .node');
-    const status = await page.textContent('#run-status');
-    await page.click('#tab-chat');
-    await send(page, asks[0].question);
-    const answered = await becomes(page, landedNode, 'answer-1');
-    const docs = await count(page, '#world .node.doc');
-    const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-1')));
-    const overRun = answered && docs === SAMPLE_DOCS && into.length === SAMPLE_ANSWER_INPUTS && into.includes('r2-1>answer-1');
-    const kept = nodes === SAMPLE_COUNTS.nodes && footer.primary === 'ask ⏎' && footer.note === REMOVED_FROM_RUN && status === SAMPLE_STATUS;
-    const keptName = "after a run, removing one of its files keeps the run's nodes and done line, an ask still answers over the run, the removed file's summary too, and the footer says what a new run would cover";
-    check('remove', keptName, kept && overRun, `${nodes} nodes; ${footer.note}; ${status}; ${into.length} lines into answer-1`);
-
-    await page.click('#tab-files');
-    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
-    await page.waitForSelector('.node.pending');
-    await removeButton(page, '06_extra_memo.txt').click();
-    const note = (await page.evaluate(composer)).note;
-    const dropped = (await count(page, '.node.pending')) === 0 && note === ALL_LEFT_OUT;
-    check('remove', "after a run, removing a file added since drops its not-run node, and the footer's line for it", dropped, note);
   });
 }
 
@@ -1345,7 +1300,6 @@ async function answers() {
   const twoModels = asks.length === 3 && asks[0].question === asks[1].question && asks[0].model !== asks[1].model;
   check('answers', 'the page holds recorded asks: one question by two models, and another question', twoModels, `${asks.length} asks`);
   await answersOnTheRun(sample, asks);
-  await answersAfterFiles(asks);
   await answersInView(asks);
   await answersWhileReplaying();
   await withPage('answers', { layout: LAYOUTS.phone }, async (page) => {
@@ -1365,7 +1319,7 @@ async function answersOnTheRun(sample, asks) {
     const runPath = lineage(sample, docIds);
     const askPath = (k) => lineage(sample, docIds, `answer-${k + 1}`, asks[k].provenance);
     const offered = await page.evaluate(composer);
-    const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: true, note: null });
+    const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: true });
     check('answers', 'after a run the composer offers ask ⏎ and new run, and no stop', offersBoth, JSON.stringify(offered));
 
     const first = await positionOf(page, 'answer-0');
@@ -1508,30 +1462,6 @@ async function answersOnTheRun(sample, asks) {
   });
 }
 
-async function answersAfterFiles(asks) {
-  await withPage('answers', {}, async (page) => {
-    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
-    await page.waitForSelector('.node.pending');
-    const footer = await page.evaluate(composer);
-    const says = isDeepStrictEqual(footer, { primary: 'ask ⏎', stop: false, newRun: true, note: NOT_IN_RUN });
-    check('answers', "after a file is added, the footer says it isn't in this run, and ask stays", says, JSON.stringify(footer));
-    const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
-    check('answers', 'after a run, the file-added line says a new run would cover the files and ask stays on this run', added === FILE_ADDED_AFTER_RUN, added);
-    await send(page, asks[0].question);
-    const pending = await count(page, '.node.pending');
-    const into = await page.$$eval('.edge', (els) => els.map((e) => e.dataset.key).filter((key) => key.endsWith('>answer-1')));
-    const fromRun = pending === 1 && into.length === SAMPLE_ANSWER_INPUTS && into.every((key) => /^(r2|parsed)-\d>/.test(key));
-    const recorded = (await page.evaluate(lastTurnLines)).some((text) => text.startsWith(RECORDED_ASK));
-    check('answers', "an ask after a file is added still answers over the run's documents", fromRun && recorded, into.join(' '));
-    await send(page, NEW_QUESTION, 'Control+Enter');
-    const status = await page.textContent('#run-status');
-    const ids = await answerIds(page);
-    const ran = isDeepStrictEqual(ids, ['answer-0']) && status === `● done · simulated run · ${DEFAULT_MODEL} · nothing was sent`;
-    const newRunName = 'Ctrl+Enter starts a new run over the files now loaded, instead of asking';
-    check('answers', newRunName, ran && (await count(page, '.node.pending')) === 0, `${status}; ${ids.join(' ')}`);
-  });
-}
-
 async function answersInView(asks) {
   await withPage('answers', { sample: false }, async (page) => {
     await pickModel(page, LONG_MODEL);
@@ -1579,11 +1509,11 @@ async function answersWhileReplaying() {
     const waits = kept === NEW_QUESTION && turns === 1 && said.includes(ASK_WHEN_DONE);
     const waitsName = "a question while the prototype's run replays waits, as live does: ask once it has finished";
     check('answers', waitsName, waits, `${turns} turns; ${said.at(-1)}`);
-    await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
-    await page.waitForSelector('.node.pending');
-    const added = await page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
-    const goingName = 'while a run is still going, the file-added line says ask stays on that run, as Enter will';
-    check('answers', goingName, added === FILE_ADDED_AFTER_RUN, added);
+    await page.click('#tab-files');
+    const pane = await page.evaluate(filesPane);
+    await page.click('#tab-chat');
+    const lockedName = "a tab's files lock as its run starts: while it is still going, its files pane offers no add and no remove, and says why";
+    check('answers', lockedName, pane.removes === 0 && !pane.adds && pane.locked === FILES_LOCKED, JSON.stringify(pane));
     const offered = await page.evaluate(composer);
     await page.click('#run-btn');
     const clickWaits = (await count(page, '.turn')) === 1 && (await page.inputValue('#question')) === NEW_QUESTION;
@@ -1612,7 +1542,7 @@ async function tabs() {
   const asks = recordedAsks();
   await withPage('tabs', {}, async (page) => {
     const one = await page.evaluate(tabRow);
-    const firstName = 'the first run opens the first tab, named by its number, question and model; the last tab offers no × and no Delete';
+    const firstName = 'the first run runs in the first tab, which it names by its number, question and model; the last tab offers no × and no Delete';
     check('tabs', firstName, one.length === 1 && one[0].label === TAB_LABEL && !one[0].hasClose && one[0].keys === null, JSON.stringify(one));
     await send(page, asks[0].question);
     await dragNode(page, 'r2-1', 60, 40);
@@ -1782,6 +1712,190 @@ async function tabs() {
   });
 }
 
+// ---------- tab files: each tab's own, locked once it has run ----------
+
+// The shown tab's files as the files pane offers them: their names, how many remove buttons, whether files
+// can be added, the lock line if shown, and the count on the pane's tab.
+function filesPane() {
+  const shown = (id) => document.getElementById(id)?.hidden === false;
+  return {
+    names: [...document.querySelectorAll('#file-list .file .name')].map((el) => el.textContent),
+    removes: document.querySelectorAll('#file-list .remove').length,
+    adds: shown('file-actions') && shown('drop-hint'),
+    locked: shown('files-locked') ? document.getElementById('files-locked').textContent : null,
+    count: document.getElementById('files-count').textContent,
+  };
+}
+
+// Drops `files`, each [name, text], on the side column, and returns what its overlay said while they were over it.
+function dropFiles(files) {
+  const transfer = new DataTransfer();
+  for (const [name, text] of files) transfer.items.add(new File([text], name, { type: 'text/plain' }));
+  const side = document.getElementById('side');
+  const drag = (type) => side.dispatchEvent(new DragEvent(type, { dataTransfer: transfer, bubbles: true, cancelable: true }));
+  drag('dragover');
+  const overlay = document.getElementById('drop-overlay');
+  const said = getComputedStyle(overlay).display === 'none' ? null : overlay.textContent;
+  drag('drop');
+  return said;
+}
+
+const tabLabels = async (page) => (await page.evaluate(tabRow)).map((tab) => [tab.label, tab.selected]);
+const lastChatLine = (page) => page.$eval('#transcript > .line:last-child .t', (el) => el.textContent);
+const showRunTab = (page, i) => page.locator('.run-tab').nth(i).click();
+
+async function paneOf(page) {
+  await page.click('#tab-files');
+  return page.evaluate(filesPane);
+}
+
+async function tabFiles() {
+  const names = recordedSample().docs.map((d) => d.name);
+  const second = ['a_memo.txt', 'b_memo.txt'];
+  await withPage('tab files', { sample: false }, async (page) => {
+    const before = await tabLabels(page);
+    check('tab files', 'before any run, the first tab is listed, named by its number and its files', isDeepStrictEqual(before, [[FIRST_TAB_BEFORE_RUN, true]]), JSON.stringify(before));
+
+    const plus = page.getByRole('button', { name: NEW_TAB, exact: true });
+    const outside = (await plus.count()) === 1 && (await plus.evaluate((el) => el.id === 'new-tab-btn' && !el.closest('[role="tablist"]')));
+    await page.locator('.run-tab').first().focus();
+    await page.keyboard.press('Tab');
+    const reached = await focusedId(page);
+    await page.keyboard.press('Enter');
+    const opened = {
+      tabs: await tabLabels(page),
+      focus: await focusedId(page),
+      filesShown: await page.$eval('#files-pane', (el) => !el.hidden),
+      pane: await page.evaluate(filesPane),
+      nodes: await count(page, '#world .node'),
+      hint: await page.textContent('#panel-hint'),
+      status: await page.textContent('#run-status'),
+    };
+    const plusName = `+ is a button named ${NEW_TAB}, outside the tab list, the next stop after the shown tab, and Enter on it opens an empty tab, shows it with the focus on it, and shows its empty files pane`;
+    const expected = {
+      tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new', true]],
+      focus: 'run-tab-2',
+      filesShown: true,
+      pane: { names: [], removes: 0, adds: true, locked: null, count: '0' },
+      nodes: 0,
+      hint: ADD_FILES,
+      status: ADD_FILES,
+    };
+    check('tab files', plusName, outside && reached === 'new-tab-btn' && isDeepStrictEqual(opened, expected), `${reached}; ${JSON.stringify(opened)}`);
+
+    await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
+    await removeButton(page, second[1]).waitFor();
+    const inSecond = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), tabs: await tabLabels(page), chat: await lastChatLine(page) };
+    await showRunTab(page, 0);
+    const inFirst = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page) };
+    await removeButton(page, names[0]).click();
+    await showRunTab(page, 1);
+    const secondAgain = (await page.evaluate(filesPane)).names;
+    await showRunTab(page, 0);
+    const firstAgain = (await page.evaluate(filesPane)).names;
+    const apart =
+      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new · 2 files', true]], chat: "2 files added: tab 2's next question runs over 2 documents." }) &&
+      isDeepStrictEqual(inFirst, { names, docs: names }) &&
+      isDeepStrictEqual(secondAgain, second) &&
+      isDeepStrictEqual(firstAgain, names.slice(1));
+    const apartName = "files added in tab 2 are its own: tab 1 keeps the sample memos, and a memo removed in tab 1 stays in tab 2";
+    check('tab files', apartName, apart, JSON.stringify({ inSecond, inFirst, secondAgain, firstAgain }));
+
+    await showRunTab(page, 1);
+    await page.click('#tab-chat');
+    await send(page, NEW_QUESTION);
+    const ran = {
+      tabs: (await tabLabels(page)).map(([label, selected]) => [label.split(' ')[0], selected]),
+      label: (await page.evaluate(tabRow))[1].label,
+      turns: await count(page, '.turn[data-tab="2"]'),
+      status: await page.textContent('#run-status'),
+      docs: await docNames(page),
+    };
+    const inPlace =
+      isDeepStrictEqual(ran.tabs, [['1', false], ['2', true]]) && ran.label.startsWith('2 Which memo') && ran.label.endsWith(' · gpt-6-luna') &&
+      ran.turns === 1 && ran.status === `● done · simulated run · ${DEFAULT_MODEL} · nothing was sent` && isDeepStrictEqual(ran.docs, second);
+    check('tab files', "the first question in a + tab runs there, in place, over that tab's files: no third tab opens, and the tab takes its run's name", inPlace, JSON.stringify(ran));
+
+    const locked = await paneOf(page);
+    const lockedName = "once a tab has run its files are locked: the pane lists them with no remove, offers no add, and says why";
+    check('tab files', lockedName, isDeepStrictEqual(locked, { names: second, removes: 0, adds: false, locked: FILES_LOCKED, count: '2' }), JSON.stringify(locked));
+
+    await page.click('#tab-chat');
+    await send(page, 'Which memo is the registry?');
+    const asked = { tabs: (await page.evaluate(tabRow)).length, answers: await answerIds(page), status: await page.textContent('#run-status') };
+    check('tab files', 'Enter in a tab that has run asks over its run', isDeepStrictEqual(asked, { tabs: 2, answers: ['answer-0', 'answer-1'], status: ran.status }), JSON.stringify(asked));
+
+    await send(page, 'Which memo is longest?', 'Control+Enter');
+    const third = { shown: await shownTab(page), label: (await page.evaluate(tabRow))[2].label, answers: await answerIds(page), docs: await docNames(page), pane: await paneOf(page) };
+    await showRunTab(page, 1);
+    const kept = { answers: await answerIds(page), pane: await page.evaluate(filesPane) };
+    const copied =
+      third.shown === 2 && third.label.startsWith('3 Which memo is longest') && isDeepStrictEqual(third.answers, ['answer-0']) && isDeepStrictEqual(third.docs, second) &&
+      isDeepStrictEqual(third.pane, locked) && isDeepStrictEqual(kept, { answers: ['answer-0', 'answer-1'], pane: locked });
+    const copiedName = "new run opens a third tab with a copy of tab 2's files and runs there, its files locked too; tab 2 keeps its files and its asks";
+    check('tab files', copiedName, copied, JSON.stringify({ third, kept }));
+
+    const owned = (await page.locator('#run-tabs').ariaSnapshot()).split('\n').slice(1);
+    const onlyTabs = owned.length === 3 && owned.every((entry) => entry.trim().startsWith('- tab '));
+    check('tab files', 'with + beside it, the tab list still owns only tabs', onlyTabs, owned.join(' | '));
+
+    await showRunTab(page, 2);
+    const overLocked = await page.evaluate(dropFiles, [['dropped.pdf', '%PDF-1.7']]);
+    const firstRefusal = await filesError(page);
+    await page.evaluate(dropFiles, [['.DS_Store', 'x'], ['~$dropped.docx', 'x'], ['dropped.txt', 'A dropped memo.\n']]);
+    const secondRefusal = await filesError(page);
+    const unread = { tabs: (await page.evaluate(tabRow)).length, shown: await shownTab(page), names: (await page.evaluate(filesPane)).names, said: await page.textContent('#files-said') };
+    const refusedName =
+      "files dropped on a tab that has run are refused at once, as the overlay says while they are over it: none is read and no tab opens; a second drop's refusal takes the place of the first's, and names only what a pick would take";
+    const atOnce =
+      overLocked === DROP_LOCKED && firstRefusal === `Not added: dropped.pdf. ${LOCKED_DROP}` && secondRefusal === `Not added: dropped.txt. ${LOCKED_DROP}` &&
+      isDeepStrictEqual(unread, { tabs: 3, shown: 2, names: second, said: '' });
+    check('tab files', refusedName, atOnce, `${overLocked}; ${firstRefusal}; ${secondRefusal}; ${JSON.stringify(unread)}`);
+    await page.evaluate(dropFiles, [['.DS_Store', 'x']]);
+    const nothingLeft = await filesError(page);
+    check('tab files', 'a drop on a tab that has run of only files a pick leaves out clears the line and names none', nothingLeft === null, nothingLeft);
+
+    await page.click('#new-tab-btn');
+    const overOpen = await page.evaluate(dropFiles, [['dropped_too.txt', 'Another dropped memo.\n']]);
+    await removeButton(page, 'dropped_too.txt').waitFor();
+    const added = { tabs: (await page.evaluate(tabRow)).length, names: (await page.evaluate(filesPane)).names };
+    const addsName = 'files dropped on a tab that has not run are added to it, as the overlay says';
+    check('tab files', addsName, overOpen === DROP_ADDS && isDeepStrictEqual(added, { tabs: 4, names: ['dropped_too.txt'] }), `${overOpen}; ${JSON.stringify(added)}`);
+    check('tab files', '1440 light: with four tabs and + the page has no horizontal scroll', await page.evaluate(noHorizontalScroll));
+  });
+
+  await withPage('tab files', { sample: false }, async (page) => {
+    await page.click('#new-tab-btn');
+    await page.keyboard.press('Delete');
+    const closedEmpty = { tabs: await tabLabels(page), focus: await focusedId(page) };
+    await page.keyboard.press('Delete');
+    const lastKept = await tabLabels(page);
+    await page.click('#new-tab-btn');
+    await page.setInputFiles('#file-input', memo('c_memo.txt', 'A memo.\n'));
+    await removeButton(page, 'c_memo.txt').waitFor();
+    await page.locator('.tab-close').nth(1).click();
+    const closedWithFiles = await tabLabels(page);
+    const one = [[FIRST_TAB_BEFORE_RUN, true]];
+    const closes = isDeepStrictEqual(closedEmpty, { tabs: one, focus: 'run-tab-1' }) && isDeepStrictEqual(lastKept, one) && isDeepStrictEqual(closedWithFiles, one);
+    check('tab files', "a + tab closes, empty with Delete or with files by its ×, and the focus goes to the tab shown; the last tab doesn't close", closes, JSON.stringify({ closedEmpty, lastKept, closedWithFiles }));
+  });
+
+  await withPage('tab files', { layout: LAYOUTS.phone }, async (page) => {
+    for (let i = 0; i < 2; i += 1) await page.click('#new-tab-btn');
+    await page.setInputFiles('#file-input', memo('d_memo.txt', 'A memo that makes its tab named longer.\n'));
+    await removeButton(page, 'd_memo.txt').waitFor();
+    const plus = await rect(page, '#new-tab-btn');
+    const row = await rect(page, '.tab-row');
+    const viewport = LAYOUTS.phone.options.viewport;
+    const fits = plus.width >= MIN_TARGET_PX && plus.height >= MIN_TARGET_PX && plus.left >= row.left && plus.right <= row.right && plus.right <= viewport.width;
+    const shownInView = inside(await rect(page, '.run-tab[aria-selected="true"]'), await rect(page, '#run-tabs'));
+    const rowScrolls = await page.$eval('#run-tabs', (el) => el.scrollWidth > el.clientWidth);
+    const noScroll = await page.evaluate(noHorizontalScroll);
+    const phoneName = `400 dark: with three tabs the tab list scrolls within the row while + stays in view at its end, at least ${MIN_TARGET_PX} px each way, the new tab stays in view as its files lengthen its name, and the page has no horizontal scroll`;
+    check('tab files', phoneName, fits && shownInView && rowScrolls && noScroll, `+ ${Math.round(plus.width)}×${Math.round(plus.height)} at ${Math.round(plus.left)}–${Math.round(plus.right)}; row scrolls ${rowScrolls}`);
+  });
+}
+
 // ---------- stop: the shown tab's run, in the prototype ----------
 
 // Some node reads as stopped, and every failed node does.
@@ -1830,7 +1944,7 @@ async function stopArea() {
     // What was animating in as it stopped plays out first, and its class comes off.
     await becomes(page, panelStill);
     const frozen = await page.evaluate(panelSnapshot);
-    const offersRun = isDeepStrictEqual(after, { composer: { primary: 'run ⏎', stop: false, newRun: false, note: null }, focus: 'question', working: 0 });
+    const offersRun = isDeepStrictEqual(after, { composer: { primary: 'run ⏎', stop: false, newRun: false }, focus: 'question', working: 0 });
     const stopName = "stop, pressed from the keyboard during a replay, ends it where it is: its working nodes read as stopped, the status says where, and the composer offers run, its focus in the question box";
     check('stop', stopName, offered && stopped && frozen.status === STOPPED_IN_RELEVANCE && offersRun, `${frozen.status}; ${JSON.stringify(after)}`);
 
@@ -2359,6 +2473,172 @@ async function liveUnreadable(url) {
   });
 }
 
+// A + tab's run and ask are sent its own files, and tab 1 keeps the sample memos, not run.
+async function liveTabFiles(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    const text = 'A memo for the second tab.\n';
+    await page.click('#new-tab-btn');
+    await page.setInputFiles('#file-input', memo('07_second_tab.txt', text));
+    await removeButton(page, '07_second_tab.txt').waitFor();
+    await page.click('#tab-chat');
+    const first = runPosted(page);
+    await send(page, 'Which memo is the registry?');
+    const sent = (await first)?.postDataJSON().documents;
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const inPlace = done && isDeepStrictEqual(sent, [text]) && (await page.evaluate(tabRow)).length === 2 && (await shownTab(page)) === 1;
+    check('live', "the first question in a + tab runs in place, sent only that tab's files", inPlace, JSON.stringify(sent));
+
+    await send(page, 'Which memo mentions the storm?');
+    const asked = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const second = runPosted(page);
+    await send(page, 'Which memo is the registry, once more?', 'Control+Enter');
+    const copied = (await second)?.postDataJSON().documents;
+    const ended = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
+    const runs = posts.filter((path) => path === '/api/runs').length;
+    const asks = posts.filter((path) => path.endsWith('/asks')).length;
+    const newRun = asked && ended && isDeepStrictEqual(copied, [text]) && runs === 2 && asks === 1 && (await shownTab(page)) === 2;
+    check('live', "Enter then asks over the + tab's run, and new run opens a third tab, sent a copy of its files", newRun, `${runs} runs, ${asks} asks; ${JSON.stringify(copied)}`);
+
+    await showRunTab(page, 0);
+    const pane = await paneOf(page);
+    const label = (await page.evaluate(tabRow))[0].label;
+    const untouched = label === FIRST_TAB_BEFORE_RUN && pane.removes === SAMPLE_DOCS && pane.adds && pane.locked === null;
+    check('live', 'tab 1 keeps the sample memos, not run and not locked', untouched, `${label}; ${JSON.stringify(pane)}`);
+  });
+}
+
+// Holds the first PDF's text at the server until the tab it was added in has started its run; three more
+// batches wait behind it, the last with only a hidden file.
+async function liveLockedWhileReading(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    let extractions = 0;
+    await page.route('**/api/documents/text?*', async (route) => {
+      extractions += 1;
+      await held;
+      await route.continue();
+    });
+    await page.evaluate(() => {
+      const said = document.getElementById('files-said');
+      window.saidLines = [];
+      new MutationObserver(() => window.saidLines.push(said.textContent)).observe(said, { childList: true });
+    });
+    const started = runPosted(page);
+    const names = ['01_memo.pdf', '03_padded.pdf', 'report.docx'];
+    for (const name of names) await page.setInputFiles('#file-input', documents[name]);
+    await page.setInputFiles('#file-input', memo('.notes.txt', 'A hidden note.\n'));
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents.length;
+    release();
+    await page.click('#tab-files');
+    const refusal = [...names.map((name) => `Not added: ${name}. ${RAN_FIRST}`), RAN_FIRST].join(' ');
+    const refused = await becomes(page, (text) => document.getElementById('files-error').textContent === text, refusal, LIVE_RUN_MS);
+    const pane = await page.evaluate(filesPane);
+    const said = await page.evaluate(() => window.saidLines);
+    const name =
+      "files being read, or queued, when their tab's run starts are not added: a queued batch is never read and says no reading line, every file refused stays named, and a batch with none a pick would take says the tab ran first";
+    const kept = sent === SAMPLE_DOCS && refused && pane.names.length === SAMPLE_DOCS && extractions === 1 && isDeepStrictEqual(said, ['Reading 1 file…', '']);
+    check('live', name, kept, `${sent} sent; ${extractions} read; said ${said.join(' | ')}; ${await filesError(page)}`);
+  });
+}
+
+// Records each write to the files pane's two lines, and its live region's setting as it was written, in window.lineWrites.
+function recordFilesLines() {
+  window.lineWrites = [];
+  for (const id of ['files-said', 'files-error']) {
+    const el = document.getElementById(id);
+    new MutationObserver(() => window.lineWrites.push({ id, text: el.textContent, live: el.getAttribute('aria-live') })).observe(el, { childList: true });
+  }
+}
+
+const filesLines = async (page) => ({ said: await page.textContent('#files-said'), error: await filesError(page) });
+
+// Holds the PDFs' text at the server until released.
+async function holdExtraction(page) {
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await page.route('**/api/documents/text?*', async (route) => {
+    await held;
+    await route.continue();
+  });
+  return release;
+}
+
+// Holds tab 2's PDF text at the server while tab 1 is shown.
+async function liveBatchesPerTab(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const release = await holdExtraction(page);
+    await page.evaluate(recordFilesLines);
+    await page.click('#new-tab-btn');
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], oldWord()]);
+    await showRunTab(page, 0);
+    await page.evaluate(() => (window.lineWrites = []));
+    await page.setInputFiles('#file-input', memo('08_first_tab.txt', 'A memo for the first tab.\n'));
+    const ownQueue = await becomes(page, () => document.querySelector('[aria-label="remove 08_first_tab.txt"]') !== null);
+    check('live', "a tab's batch waits only for that tab's own: a text file is added to tab 1 while tab 2's PDF is still being read", ownQueue);
+    const own = await page.evaluate(() => window.lineWrites);
+    await showRunTab(page, 1);
+    const reading = await page.textContent('#files-said');
+    check('live', "a tab's reading line stays while its batch is read, through a switch away and back", reading === 'Reading 2 files…', reading);
+
+    await showRunTab(page, 0);
+    await page.evaluate(() => (window.lineWrites = []));
+    release();
+    const landed = await becomes(page, () => document.getElementById('run-tab-2').textContent === '2 new · 1 file', null, LIVE_RUN_MS);
+    const first = { names: (await page.evaluate(filesPane)).names, ...(await filesLines(page)) };
+    await showRunTab(page, 1);
+    const second = { names: (await page.evaluate(filesPane)).names, ...(await filesLines(page)) };
+    await showRunTab(page, 0);
+    await showRunTab(page, 1);
+    const again = { names: (await page.evaluate(filesPane)).names, ...(await filesLines(page)) };
+    const restored = await page.evaluate(() => window.lineWrites);
+    const firstOwn = { names: ['08_first_tab.txt'], said: '1 file added, in place of the 5 sample memos.', error: null };
+    const landsName = 'a batch that lands while another tab is shown goes to the tab it was added in, and the shown tab keeps its own files and lines';
+    check('live', landsName, landed && isDeepStrictEqual(first, firstOwn) && isDeepStrictEqual(second.names, ['01_memo.pdf']), JSON.stringify({ first, second }));
+    const toldName = "that tab's pane says what happened to the batch once the tab is shown, its refusal too, and still says it after a switch away and back";
+    const told = second.said === '1 file added.' && second.error === `Not added: old.doc. ${OLD_WORD}` && isDeepStrictEqual(again, second);
+    check('live', toldName, told, JSON.stringify({ second, again }));
+    const quietName = "a tab's lines are written with their live region on as they come while it is shown, and with it off when a switch restores them";
+    const quiet = own.length > 0 && own.every((write) => write.live !== 'off') && restored.length > 0 && restored.every((write) => write.live === 'off');
+    check('live', quietName, quiet, JSON.stringify({ own, restored }));
+  });
+}
+
+// Holds tab 1's PDF text at the server until the chat pane is shown.
+async function liveRefusalWhileChatting(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const release = await holdExtraction(page);
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], oldWord()]);
+    release();
+    await becomes(page, () => document.getElementById('run-tab-1').textContent === '1 new · 1 file', null, LIVE_RUN_MS);
+    await page.click('#new-tab-btn');
+    await showRunTab(page, 0);
+    const lines = await filesLines(page);
+    const expected = { said: '1 file added, in place of the 5 sample memos.', error: `Not added: old.doc. ${OLD_WORD}` };
+    const name = 'a refusal that lands while the chat pane is shown is in the files pane once it is opened, after a switch to another tab and back';
+    check('live', name, isDeepStrictEqual(lines, expected), JSON.stringify(lines));
+  });
+}
+
+// Holds a scan's text at the server while two batches queue behind it; the files list is taken out of the page, so
+// the last batch, which reads a file, fails to be added.
+async function liveRefusalsThenFailure(url) {
+  await withPage('live', { url, sample: false, expectedErrors: ["couldn't add files"] }, async (page) => {
+    const release = await holdExtraction(page);
+    await page.click('#tab-files');
+    await page.setInputFiles('#file-input', documents['02_scan.pdf']);
+    await page.setInputFiles('#file-input', oldWord());
+    await page.setInputFiles('#file-input', memo('first.txt', 'A first memo.\n'));
+    await page.evaluate(() => document.getElementById('file-list').remove());
+    release();
+    const expected = `Not added: 02_scan.pdf. ${NO_TEXT_LAYER} Not added: old.doc. ${OLD_WORD} Couldn't add those files.`;
+    const kept = await becomes(page, (text) => document.getElementById('files-error').textContent === text, expected, LIVE_RUN_MS);
+    check('live', "queued batches' refusals and a later failure to add all stay in the error line", kept, await filesError(page));
+  });
+}
+
 // Saves keys on its server.
 async function liveKeySaves(url) {
   const saves = [];
@@ -2495,10 +2775,12 @@ async function liveStop(url, server) {
     await pressStop(page);
     check('live', 'while a stopped run finishes its call in flight, the status says it is stopping, and stop is disabled', stoppingSaid === STOPPING && disabled, stoppingSaid);
     await page.click('#tab-files');
-    await page.locator('#file-list .remove').first().click();
-    const afterRemoval = await page.textContent('#run-status');
+    const pane = await page.evaluate(filesPane);
+    await page.click('#new-tab-btn');
+    await page.locator('.run-tab').nth(1).click();
+    const back = await page.textContent('#run-status');
     await page.click('#tab-chat');
-    check('live', 'removing a file while a run is stopping leaves the stopping line', afterRemoval === STOPPING, afterRemoval);
+    check('live', "a stopping run's files are locked, and its stopping line is back once a new tab has been shown and left", pane.removes === 0 && back === STOPPING, back);
 
     server.release();
     const ended = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
@@ -2672,6 +2954,11 @@ async function live() {
     await liveStopRefused(url);
     await liveStopLate(url);
     await liveRemoveKeepsProblem(url);
+    await liveTabFiles(url);
+    await liveLockedWhileReading(url);
+    await liveBatchesPerTab(url);
+    await liveRefusalWhileChatting(url);
+    await liveRefusalsThenFailure(url);
   });
   const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
   for (const body of stateful) await withFakeServer(body);
@@ -2681,7 +2968,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, runView, files, filesNotText, filesAddFails, removeArea, answers, tabs, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, arrange, runView, filesNotText, filesAddFails, removeArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

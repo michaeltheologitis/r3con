@@ -75,6 +75,10 @@
   /**
    * @typedef {object} Tab
    * @property {number | null} id
+   * @property {LoadedFile[]} files
+   * @property {string} filesSaid
+   * @property {string} filesError
+   * @property {Promise<void>} adding
    * @property {HTMLButtonElement | null} button
    * @property {HTMLButtonElement | null} close
    * @property {Run | null} run
@@ -122,7 +126,7 @@
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File, noText: string) => Promise<FileRead>} extract
-   * @property {(question: string) => Run} newRun
+   * @property {(question: string, files: LoadedFile[]) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
    * @property {(tab: Tab) => void} stop
@@ -603,6 +607,13 @@
   const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
   const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
+  const FILES_LOCKED = "These are this run's files. Press + for a new tab; a new run copies them.";
+  const NO_FILES = 'no files yet';
+  const ADD_FILES = `${NO_FILES} · add them in the files tab`;
+  const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
+  const RAN_FIRST = "The tab's run started first, so its files are locked.";
+  const DROP_ADDS = 'drop to add files';
+  const DROP_LOCKED = 'this tab has run · press + for a new tab';
 
   const ICONS = {
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -685,9 +696,9 @@
   /** @param {NodeKind} kind */
   const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
 
-  // A tab is one run and its own drawing, so a tab in the background keeps drawing its events.
-  /** @param {View} [view] @returns {Tab} */
-  function newTab(view = { x: 0, y: 0, k: 1 }) {
+  // A tab's files are only ever reassigned, never changed in place, so tabs can share a list.
+  /** @param {LoadedFile[]} files @param {View} [view] @returns {Tab} */
+  function newTab(files, view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
     const layers = { base: group(), mid: group(), lit: group() };
     const edges = document.createElementNS(SVG_NS, 'svg');
@@ -697,6 +708,10 @@
     const nodesEl = h('div');
     return {
       id: null,
+      files,
+      filesSaid: '',
+      filesError: '',
+      adding: Promise.resolve(),
       button: null,
       close: null,
       run: null,
@@ -717,14 +732,13 @@
   }
 
   /**
-   * @type {{ files: LoadedFile[], tabs: Tab[], shown: Tab, nextTab: number, streams: Set<Stream>,
+   * @type {{ tabs: Tab[], shown: Tab, nextTab: number, streams: Set<Stream>,
    *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
    */
   const state = {
-    files: SAMPLE_FILES,
-    // The tabs with a run, in order; before the first run the panel shows a tab with none, never listed.
+    // Every tab, in order; init lists the first, the shown tab, with the sample memos.
     tabs: [],
-    shown: newTab(),
+    shown: newTab(SAMPLE_FILES),
     nextTab: 1,
     // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
@@ -734,22 +748,10 @@
     inspectorDroppedAt: null,
   };
 
-  // The whole sample set, which the recorded replay needs.
-  const filesAreSample = () => state.files === SAMPLE_FILES;
-  /** @param {string} question */
-  const replaysRecording = (question) => filesAreSample() && question === SAMPLE.question;
-  // state.files is only ever reassigned and a run keeps its own docs, so pending can be derived.
-  /** @param {Tab} tab @param {LoadedFile} file */
-  const isPending = (tab, file) => Boolean(tab.run) && !tab.run.docs.includes(file);
-  /** @param {Tab} tab */
-  const pendingFiles = (tab) => state.files.filter((f) => isPending(tab, f));
-  const fileCount = () => plural(state.files.length, 'document');
-
-  /** @param {Tab} tab */
-  function panelFiles(tab) {
-    const runDocs = tab.run?.docs ?? [];
-    return [...runDocs, ...state.files.filter((f) => !runDocs.includes(f))];
-  }
+  // The recorded replay needs the whole sample set.
+  /** @param {string} question @param {LoadedFile[]} [files] */
+  const replaysRecording = (question, files = state.shown.files) => files === SAMPLE_FILES && question === SAMPLE.question;
+  const fileCount = (tab = state.shown) => plural(tab.files.length, 'document');
 
   // ---------- small helpers ----------
 
@@ -1064,7 +1066,7 @@
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
     return {
       simulated: false,
-      docs: state.files,
+      docs: SAMPLE_FILES,
       r1: SAMPLE.r1,
       r2: SAMPLE.r2,
       schema: SAMPLE.schema,
@@ -1127,11 +1129,11 @@
   }
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
-  /** @param {string} question @param {string} model @returns {Run} */
-  function liveRun(question, model) {
+  /** @param {string} question @param {string} model @param {LoadedFile[]} docs @returns {Run} */
+  function liveRun(question, model, docs) {
     /** @type {Pick<Run, 'r1' | 'r2' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
-    return { simulated: false, id: null, ids: [], docs: state.files, answers: [{ question, model, text: null, provenance: null }], ...empty };
+    return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
   /** @param {Run} run */
@@ -1284,10 +1286,8 @@
 
   /** @param {Tab} tab @param {Origin} origin */
   function plan(tab, origin) {
-    const files = tab.run?.docs ?? state.files;
-    const layout = gridLayout(files, origin);
+    const layout = gridLayout(tab.files, origin);
     if (!tab.run) return layout;
-    pendingFiles(tab).forEach((f, j) => layout.set(docId(f), origin(files.length + j, f)));
     const first = layout.get(RUN_ANSWER);
     tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
@@ -1295,7 +1295,7 @@
 
   /** @param {Tab} tab */
   function contentBounds(tab) {
-    const widest = Math.max('structure'.length, ...panelFiles(tab).map((f) => fileLabel(f).length));
+    const widest = Math.max('structure'.length, ...tab.files.map((f) => fileLabel(f).length));
     // Once there is a run, an answer's label is its question and model, often wider than any file's.
     /** @param {string} id */
     const width = (id) => (tab.run && splitId(id)[0] === 'answer' ? nodeName(tab, id).length : widest) * charPx + NODE_PAD_PX;
@@ -1354,8 +1354,7 @@
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {LoadedFile | null} file */
   function nodeLabels(tab, id, kind, file) {
     if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
-    if (kind === 'doc') return [fileLabel(file), isPending(tab, file) ? 'not run' : null];
-    return kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
+    return kind === 'doc' || kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
   /** @param {Tab} tab @param {PanelNode} node */
@@ -1367,19 +1366,18 @@
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
-    return `${node.file.name}, ${isPending(tab, node.file) ? 'document, not run yet' : ARIA_KIND.doc}`;
+    return `${node.file.name}, ${ARIA_KIND.doc}`;
   }
 
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {Point} pos @param {{ working?: boolean, file?: LoadedFile | null, enter?: boolean }} [options] */
   function createNode(tab, id, kind, pos, { working = false, file = null, enter = true } = {}) {
-    const pending = kind === 'doc' && isPending(tab, file);
-    const classes = ['node', kind, working && 'working', pending && 'pending', enter && animates(tab) && 'enter'].filter(Boolean).join(' ');
+    const classes = ['node', kind, working && 'working', enter && animates(tab) && 'enter'].filter(Boolean).join(' ');
     const el = h(
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id, 'aria-pressed': kind === 'answer' ? 'false' : null },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
-      nodeLabels(tab, id, kind, file).filter(Boolean).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      nodeLabels(tab, id, kind, file).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
     tab.nodes.set(id, node);
@@ -1437,12 +1435,11 @@
     redrawEdges(tab);
   }
 
-  // Document nodes are created only here: one per loaded or run file, at its position in `at` if it had
-  // one, else below the last document node. A run's grid is planned once, when it starts; later syncs
-  // only add or drop document entries.
+  // Document nodes are created only here: one per file of the tab, at its position in `at` if it had one,
+  // else below the last document node. A run's grid is planned once, when it starts.
   /** @param {Tab} tab @param {{ at?: Map<string, Point>, animate?: boolean, replan?: boolean }} [options] */
   function syncDocNodes(tab, { at = new Map(), animate = false, replan = !tab.run } = {}) {
-    const files = panelFiles(tab);
+    const { files } = tab;
     const keep = new Set(files.map(docId));
     for (const n of [...tab.nodes.values()]) {
       if (n.kind !== 'doc' || keep.has(n.id)) continue;
@@ -1455,6 +1452,7 @@
       tab.layout.set(node.id, { x: node.x, y: node.y });
     }
     if (replan) tab.layout = plan(tab, nodeOrigin(tab));
+    if (tab !== state.shown) return;
     updateHint();
     fitShown(animate);
   }
@@ -1741,7 +1739,6 @@
   /** @param {LoadedFile} file */
   function fileMeta(file) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (isPending(state.shown, file)) meta.push('not run yet');
     if (file.text.length > PREVIEW_CHARS) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
     return meta.join(' · ');
   }
@@ -2015,10 +2012,12 @@
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
 
   // A tab keeps its run's status, which the status line shows while the tab is shown; a stop's line stays
-  // until what it stopped has ended.
+  // until what it stopped has ended. A tab without a run says what its next question would run.
   /** @param {Tab} tab */
   function showStatus(tab) {
-    if (tab === state.shown) setStatus(...(stopping(tab) ? [STOPPING] : tab.status));
+    if (tab !== state.shown) return;
+    if (!tab.run) return readyStatus();
+    setStatus(...(stopping(tab) ? [STOPPING] : tab.status));
   }
 
   /** @param {Tab} tab @param {...(string | Node)} content */
@@ -2038,8 +2037,9 @@
   const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
 
   function readyStatus() {
-    if (state.tabs.length) return;
+    if (state.shown.run) return;
     if (connectionProblem) return errorStatus(connectionProblem);
+    if (!state.shown.files.length) return setStatus(ADD_FILES);
     setStatus(`${fileCount()} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
@@ -2057,22 +2057,6 @@
     button.disabled = !enabled;
   }
 
-  const newRunCovers = () => `a new run would cover ${fileCount()}`;
-
-  // How the files differ from the tab's run, and so what a new run would cover; nothing while they match.
-  /** @param {Tab} tab */
-  function coverNote(tab) {
-    const added = pendingFiles(tab).length;
-    const left = tab.run.docs.filter((f) => !state.files.includes(f)).length;
-    if (!added && !left) return '';
-    const parts = [
-      added && `${plural(added, "new document isn't", "new documents aren't")} in this run`,
-      left && `${plural(left, "document of this run isn't", "documents of this run aren't")} in the files now`,
-      newRunCovers(),
-    ];
-    return parts.filter(Boolean).join(' · ');
-  }
-
   function updateComposer() {
     const asks = primaryAction() === 'ask';
     updateTabs();
@@ -2080,16 +2064,14 @@
     // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
     offer($('stop-btn', HTMLButtonElement), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
     offer($('new-run-btn', HTMLButtonElement), asks);
-    const note = $('ask-note');
-    note.textContent = asks ? coverNote(state.shown) : '';
-    note.hidden = !note.textContent;
+    $('replay-btn').hidden = live || !state.shown.run;
   }
 
   function updateHint() {
-    const pending = pendingFiles(state.shown).length;
+    const { run, files } = state.shown;
     const hint = $('panel-hint');
-    if (!state.shown.run) hint.textContent = `${fileCount()} · ready to run`;
-    else hint.textContent = pending ? `${plural(pending, 'new document')} · not run yet` : '';
+    if (run) hint.textContent = '';
+    else hint.textContent = files.length ? `${fileCount()} · ready to run` : ADD_FILES;
     hint.hidden = !hint.textContent;
   }
 
@@ -2103,7 +2085,7 @@
     }
     const asks = action === 'ask';
     // An ask needs only the run's representation; a run needs files.
-    const refused = asks || state.files.length ? refusal(question, asks) : null;
+    const refused = asks || state.shown.files.length ? refusal(question, asks) : null;
     if (refused) {
       setStatus(refused);
       if (refused === TYPE_A_MODEL) modelOther.focus();
@@ -2111,7 +2093,7 @@
     }
     if (asks) {
       mode.ask(question);
-    } else if (!state.files.length) {
+    } else if (!state.shown.files.length) {
       narrator(null, addTurn(null, question), { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
     } else {
       startRun(question);
@@ -2125,7 +2107,7 @@
   function refusal(question, asks) {
     if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
     if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
-    return asks ? null : mode.refuseFiles(state.files);
+    return asks ? null : mode.refuseFiles(state.shown.files);
   }
 
   // ---------- replay ----------
@@ -2393,7 +2375,6 @@
 
   /** @param {Tab} tab @param {Narrator} narr */
   function playTimeline(tab, narr) {
-    $('replay-btn').hidden = false;
     const steps = buildTimeline(tab, narr);
     if (reduceMotion()) {
       steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
@@ -2557,17 +2538,15 @@
     updateComposer();
   }
 
-  // Every run opens a tab of its own, its documents and view starting where the shown tab has them.
   /** @param {string} question */
   function startRun(question) {
-    const at = docPositions(state.shown);
-    const tab = newTab(state.shown.view);
-    tab.id = state.nextTab++;
-    tab.run = { ...mode.newRun(question), lit: null };
+    const from = state.shown;
+    const at = docPositions(from);
+    const tab = from.run ? openTab(newTab(from.files, from.view)) : from;
+    tab.run = { ...mode.newRun(question, tab.files), lit: null };
     tab.turn = addTurn(tab, question, RUN_ANSWER);
-    state.tabs.push(tab);
-    openTab(tab);
-    showDrawing(tab);
+    if (tab === from) renderFiles();
+    else showTabContents(tab);
     playRun(tab, at);
     revealTab(tab);
   }
@@ -2634,40 +2613,50 @@
   // ---------- tabs ----------
 
   /** @param {Tab} tab */
-  const tabLabel = (tab) => answerLabel(tab.run.answers[0]);
+  function tabLabel(tab) {
+    if (tab.run) return answerLabel(tab.run.answers[0]);
+    return tab.files.length ? `new · ${plural(tab.files.length, 'file')}` : 'new';
+  }
+
   /** @param {Tab} tab */
   const tabButtonId = (tab) => `run-tab-${tab.id}`;
   // A tab can't close while its run or an ask over it is going.
   /** @param {Tab} tab */
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
-  // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
+  // Lists the tab. The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
   /** @param {Tab} tab */
   function openTab(tab) {
+    tab.id = state.nextTab++;
+    state.tabs.push(tab);
     const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
     tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
     tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
     $('run-tabs').append(tab.button, tab.close);
+    return tab;
   }
 
   function updateTabs() {
-    const row = $('run-tabs');
-    row.hidden = !state.tabs.length;
     for (const tab of state.tabs) {
       const shown = tab === state.shown;
+      const label = tabLabel(tab);
+      // A label grows as files are added, which can push the shown tab out of the row's view.
+      if (tab.button.lastChild.textContent !== label) {
+        tab.button.lastChild.textContent = label;
+        if (shown) revealTab(tab);
+      }
       tab.button.setAttribute('aria-selected', String(shown));
       tab.button.tabIndex = shown ? 0 : -1;
       tab.close.hidden = state.tabs.length === 1;
       tab.close.disabled = tabBusy(tab);
       tab.button.ariaKeyShortcuts = tab.close.hidden || tab.close.disabled ? null : 'Delete';
     }
-    if (!state.tabs.length) return;
     panel.setAttribute('role', 'tabpanel');
     panel.setAttribute('aria-labelledby', tabButtonId(state.shown));
   }
 
   /** @param {Tab} tab */
-  function showDrawing(tab) {
+  function showTabContents(tab) {
     finishSlide(state.shown);
     // A drawing taken out of the page mid-animation never hears the animation end.
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
@@ -2677,6 +2666,9 @@
     world.replaceChildren(tab.drawing);
     applyView();
     refreshHighlight();
+    closeFile();
+    renderFiles();
+    showFilesLines(false);
   }
 
   // On a phone the tab row scrolls, and the shown tab could be out of sight.
@@ -2688,8 +2680,8 @@
   /** @param {Tab} tab */
   function switchTab(tab) {
     if (tab === state.shown) return;
-    showDrawing(tab);
-    // Nodes drawn while their tab was hidden had no size to fit by, and files may have changed since.
+    showTabContents(tab);
+    // Nodes drawn while their tab was hidden had no size to fit by.
     syncDocNodes(tab);
     showStatus(tab);
     updateComposer();
@@ -2744,21 +2736,40 @@
   }
 
   function renderFiles() {
-    const sampleOnly = state.files.length > 0 && state.files.every((f) => f.sample);
-    $('files-head').textContent = `${fileCount()} · ${fmtBytes(totalBytes(state.files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
+    const { files, run } = state.shown;
+    const sampleOnly = files.length > 0 && files.every((f) => f.sample);
+    const head = `${fileCount()} · ${fmtBytes(totalBytes(files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
+    $('files-head').textContent = files.length ? head : NO_FILES;
     $('file-list').replaceChildren(
-      ...state.files.map((f) =>
+      ...files.map((f) =>
         h(
           'li',
           {},
           h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'size' }, fmtBytes(f.size))),
-          h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${f.name}`, onclick: () => removeFile(f) }, 'remove'),
+          run ? null : h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${f.name}`, onclick: () => removeFile(f) }, 'remove'),
         ),
       ),
     );
-    $('files-count').textContent = String(state.files.length);
-    $('sample-btn').hidden = filesAreSample();
-    $('sample-btn').textContent = state.files.some((f) => f.sample) ? `use all ${plural(SAMPLE_FILES.length, 'sample memo')}` : 'use the sample memos';
+    $('files-count').textContent = String(files.length);
+    $('files-locked').hidden = !run;
+    $('file-actions').hidden = $('drop-hint').hidden = Boolean(run);
+    $('drop-overlay').textContent = run ? DROP_LOCKED : DROP_ADDS;
+    $('sample-btn').hidden = files === SAMPLE_FILES;
+    $('sample-btn').textContent = files.some((f) => f.sample) ? `use all ${plural(SAMPLE_FILES.length, 'sample memo')}` : 'use the sample memos';
+  }
+
+  // Lines restored on switching to their tab were said already, so they are written with the live regions off.
+  function showFilesLines(announce = true) {
+    const { filesSaid, filesError } = state.shown;
+    const said = $('files-said');
+    const error = $('files-error');
+    said.ariaLive = announce ? 'polite' : 'off';
+    error.ariaLive = announce ? 'assertive' : 'off';
+    // Shown before it is filled, so that it is announced.
+    error.hidden = !filesError;
+    // A line written again unchanged would be announced again.
+    if (error.textContent !== filesError) error.textContent = filesError;
+    if (said.textContent !== filesSaid) said.textContent = filesSaid;
   }
 
   /** @param {LoadedFile} file */
@@ -2813,93 +2824,103 @@
     return { why: hasSuffix(file, OLD_WORD_SUFFIX) ? OLD_WORD : NOT_TEXT };
   }
 
-  // Batches are read and added one after another, so that each one's lines in the files pane stand.
-  let adding = Promise.resolve();
-
-  /** @param {Iterable<File | null>} list */
-  function addFiles(list) {
+  // A tab's batches are read and added one after another, so that each one's lines in the files pane stand.
+  /** @param {Iterable<File | null>} list @param {Tab} [tab] */
+  function addFiles(list, tab = state.shown) {
     // Copied now: a file input's list empties once its value is reset.
     const files = [...list];
-    adding = adding.then(() => addBatch(files)).catch(failedToAdd);
+    tellFiles(tab, { filesError: '' });
+    tab.adding = tab.adding.then(() => addBatch(files, tab)).catch((error) => failedToAdd(tab, error));
   }
 
-  // Shown before it is filled, so that the alert is announced.
-  /** @param {string} text */
-  function showFilesError(text) {
-    const error = $('files-error');
-    error.hidden = false;
-    error.textContent = text;
+  /** @param {Tab} tab @param {{ filesSaid?: string, filesError?: string }} lines */
+  function tellFiles(tab, lines) {
+    Object.assign(tab, lines);
+    showFilesLines();
   }
 
-  /** @param {unknown} error */
-  function failedToAdd(error) {
-    $('files-said').textContent = '';
-    showFilesError(explain(error, "Couldn't add those files.", "couldn't add files"));
+  // A user's action on a tab's files clears its error line, and what its batches say later only adds to it.
+  /** @param {Tab} tab @param {string} text */
+  function addFilesError(tab, text) {
+    tellFiles(tab, { filesError: [tab.filesError, text].filter(Boolean).join(' ') });
   }
 
+  /** @param {string[]} names @param {string} why */
+  const notAdded = (names, why) => (names.length ? `Not added: ${names.join(', ')}. ${why}` : '');
   /** @param {(File | null)[]} files */
-  async function addBatch(files) {
-    const picked = files.filter((f) => f && !f.name.startsWith('.') && !f.name.startsWith(LOCK_FILE_PREFIX)).slice(0, MAX_FILES);
-    picked.sort((a, b) => a.name.localeCompare(b.name));
-    if (!picked.length) {
-      showFilesError('No files found there. Try picking the files themselves.');
-      return;
-    }
-    $('files-error').hidden = true;
-    $('files-said').textContent = `Reading ${plural(picked.length, 'file')}…`;
+  const pickFiles = (files) => files.filter((f) => f && !f.name.startsWith('.') && !f.name.startsWith(LOCK_FILE_PREFIX)).slice(0, MAX_FILES).sort((a, b) => a.name.localeCompare(b.name));
+
+  /** @param {Tab} tab @param {unknown} error */
+  function failedToAdd(tab, error) {
+    tellFiles(tab, { filesSaid: '' });
+    addFilesError(tab, explain(error, "Couldn't add those files.", "couldn't add files"));
+  }
+
+  /** @param {(File | null)[]} files @param {Tab} tab */
+  async function addBatch(files, tab) {
+    // A tab closed, or run, since its files were picked takes none of them, so they aren't read.
+    if (!state.tabs.includes(tab)) return;
+    const picked = pickFiles(files);
+    if (tab.run) return addFilesError(tab, notAdded(picked.map((f) => f.name), RAN_FIRST) || RAN_FIRST);
+    if (!picked.length) return addFilesError(tab, 'No files found there. Try picking the files themselves.');
+    tellFiles(tab, { filesSaid: `Reading ${plural(picked.length, 'file')}…` });
     const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
+    if (!state.tabs.includes(tab)) return;
     /** @type {LoadedFile[]} */
     const read = [];
     /** @type {Map<string, string[]>} */
     const refused = new Map();
+    /** @param {string} why @param {File} file */
+    const refuse = (why, file) => refused.set(why, [...(refused.get(why) ?? []), file.name]);
     for (const r of reads) {
-      if ('why' in r) refused.set(r.why, [...(refused.get(r.why) ?? []), r.file.name]);
+      if ('why' in r) refuse(r.why, r.file);
+      else if (tab.run) refuse(RAN_FIRST, r.file);
       else read.push(loaded({ name: r.file.name, size: r.file.size, text: r.text, sample: false }));
     }
-    if (refused.size) showFilesError([...refused].map(([why, names]) => `Not added: ${names.join(', ')}. ${why}`).join(' '));
+    for (const [why, names] of refused) addFilesError(tab, notAdded(names, why));
     if (!read.length) {
-      $('files-said').textContent = '';
+      tellFiles(tab, { filesSaid: '' });
       return;
     }
     // Files added over the sample memos take the place of any that are left.
-    const replaced = state.files.filter((f) => f.sample).length;
-    state.files = [...state.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
+    const replaced = tab.files.filter((f) => f.sample).length;
+    tab.files = [...tab.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
     const added = `${plural(read.length, 'file')} added`;
-    filesChanged(replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added);
-  }
-
-  function nextRunLine() {
-    return primaryAction() === 'ask' ? `${newRunCovers()}, and ask stays on this run` : `your next question runs over ${fileCount()}`;
+    filesChanged(tab, replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added);
   }
 
   // The re-render drops the clicked button, and the focus with it.
   /** @param {LoadedFile} file */
   function removeFile(file) {
-    const i = state.files.indexOf(file);
-    state.files = state.files.filter((f) => f !== file);
-    filesChanged(`Removed ${file.name}`);
+    const tab = state.shown;
+    const i = tab.files.indexOf(file);
+    tab.files = tab.files.filter((f) => f !== file);
+    tellFiles(tab, { filesError: '' });
+    filesChanged(tab, `Removed ${file.name}`);
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
   }
 
   function useSample() {
-    state.files = SAMPLE_FILES;
+    state.shown.files = SAMPLE_FILES;
     if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
-    filesChanged(`Back to the ${plural(SAMPLE_FILES.length, 'sample memo')}`);
+    tellFiles(state.shown, { filesError: '' });
+    filesChanged(state.shown, `Using the ${plural(SAMPLE_FILES.length, 'sample memo')}`);
   }
 
-  // `what` happened to the files. The chat is hidden while the files tab is shown, so the pane says it too;
-  // only the chat, which is history, says what the next run would cover, since that changes as runs do.
-  /** @param {string} what */
-  function filesChanged(what) {
-    closeFile();
-    renderFiles();
+  /** @param {Tab} tab @param {string} what */
+  function filesChanged(tab, what) {
+    // Rendered again for another tab's files, the pane would close the shown tab's open file, and drop the focus.
+    if (tab === state.shown) {
+      closeFile();
+      renderFiles();
+    }
     updateComposer();
-    syncDocNodes(state.shown);
+    syncDocNodes(tab);
     readyStatus();
-    $('files-said').textContent = `${what}.`;
-    transcript.append(line('main', `${what}: ${nextRunLine()}.`, { dim: true }));
+    tellFiles(tab, { filesSaid: `${what}.` });
+    transcript.append(line('main', `${what}: tab ${tab.id}'s next question runs over ${fileCount(tab)}.`, { dim: true }));
     scrollTranscript();
   }
 
@@ -3355,6 +3376,12 @@
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(state.shown));
     $('run-tabs').addEventListener('keydown', onTabKey);
+    $('new-tab-btn').addEventListener('click', () => {
+      const tab = openTab(newTab([]));
+      switchTab(tab);
+      showTab('files');
+      tab.button.focus();
+    });
     transcript.addEventListener('click', onTranscriptClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
@@ -3408,8 +3435,11 @@
       if (!hasFiles(e)) return;
       e.preventDefault();
       side.classList.remove('dropping');
+      const tab = state.shown;
       showTab('files');
-      addFiles(await filesFromDrop(e.dataTransfer));
+      // A tab that has run keeps its run's files, so what is dropped on it is refused unread.
+      if (tab.run) return tellFiles(tab, { filesError: notAdded(pickFiles([...e.dataTransfer.files]).map((f) => f.name), LOCKED_DROP) });
+      addFiles(await filesFromDrop(e.dataTransfer), tab);
     });
     window.addEventListener('dragover', (e) => hasFiles(e) && e.preventDefault());
     window.addEventListener('drop', (e) => hasFiles(e) && e.preventDefault());
@@ -3432,7 +3462,7 @@
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
     extract: async () => ({ why: NEEDS_APP }),
-    newRun: (question) => (replaysRecording(question) ? sampleRun() : simulatedRun(state.files, question, pickedModel())),
+    newRun: (question, files) => (replaysRecording(question, files) ? sampleRun() : simulatedRun(files, question, pickedModel())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
     runGoing: (tab) => tab.timers.length > 0 && !landed(tab, RUN_ANSWER),
@@ -3464,7 +3494,7 @@
         return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a file's text")}.` };
       }
     },
-    newRun: (question) => liveRun(question, pickedModel()),
+    newRun: (question, files) => liveRun(question, pickedModel(), files),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
@@ -3490,14 +3520,15 @@
     removeStored(RETIRED_SETTINGS_KEY);
     buildSettings();
     questionEl.value = SAMPLE.question;
-    renderFiles();
-    showDrawing(state.shown);
+    openTab(state.shown);
+    showTabContents(state.shown);
     syncDocNodes(state.shown);
     updateComposer();
     renderPicker([]);
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('keys-note').textContent = mode.keysNote;
+    $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
     transcript.append(line('main', mode.intro, { dim: true }));
     wire();

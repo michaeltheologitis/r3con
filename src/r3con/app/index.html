@@ -38,7 +38,10 @@
 
   <div class="frame">
     <main class="board" aria-label="Run panel">
-      <div class="run-tabs" id="run-tabs" role="tablist" aria-label="runs"></div>
+      <div class="tab-row">
+        <div class="run-tabs" id="run-tabs" role="tablist" aria-label="tabs"></div>
+        <button class="btn new-tab" id="new-tab-btn" type="button" aria-label="new tab" title="new tab">+</button>
+      </div>
       <div class="panel" id="panel">
         <div class="world" id="world"></div>
         <div class="panel-hint" id="panel-hint" hidden></div>
@@ -74,7 +77,6 @@
           </div>
           <input class="field" id="model-other" type="text" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
-          <p class="k" id="ask-note"></p>
         </form>
       </section>
 
@@ -85,21 +87,22 @@
             <p class="dim" id="files-said" aria-live="polite"></p>
           </div>
           <ul class="file-list" id="file-list"></ul>
-          <div class="file-actions">
+          <p class="dim" id="files-locked" hidden></p>
+          <div class="file-actions" id="file-actions">
             <input class="vh" id="file-input" type="file" multiple>
             <label class="btn" for="file-input">+ add files</label>
             <input class="vh" id="folder-input" type="file" webkitdirectory multiple>
             <label class="btn" for="folder-input">+ add folder</label>
             <button class="btn" id="sample-btn" type="button"></button>
           </div>
-          <div class="drop-hint">or drop files and folders here</div>
-          <p class="err" id="files-error" role="alert" hidden></p>
+          <div class="drop-hint" id="drop-hint">or drop files and folders here</div>
+          <p class="err" id="files-error" aria-live="assertive" hidden></p>
         </div>
         <div class="files file-view" id="file-view" hidden></div>
       </section>
 
       <p class="note" id="mode-note"></p>
-      <div class="drop-overlay" aria-hidden="true">drop to add files</div>
+      <div class="drop-overlay" id="drop-overlay" aria-hidden="true"></div>
     </aside>
   </div>
 </div>
