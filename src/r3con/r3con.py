@@ -78,14 +78,15 @@ _GLOB_WILDCARDS = frozenset("*?[")
 
 
 def _read_one(path: Path) -> str:
-    """One file's text, as :func:`_read_stream` reads it. A file that can't be opened or
-    read is logged, and gives ``""``, which the caller then drops."""
+    """One file's text, as :func:`_read_stream` reads it. A file that can't be opened is
+    logged, and gives ``""``, which the caller then drops."""
     try:
-        with path.open("rb") as file:
-            return _read_stream(str(path), file)
+        file = path.open("rb")
     except OSError as e:
         _log.warning("%s: not readable (%s); skipping it", path, type(e).__name__)
         return ""
+    with file:
+        return _read_stream(str(path), file)
 
 
 def _read_stream(name: str, file: BinaryIO) -> str:

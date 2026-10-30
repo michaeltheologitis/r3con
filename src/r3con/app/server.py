@@ -27,13 +27,13 @@ opened URL's fragment, ``#token=...``.
   body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
   the entries ``r3con.read_documents``' folder walk would read, by suffix and with no
   Office lock file, less, by the app's own rule, anything hidden or under
-  ``__MACOSX/``. The first ``limit`` of them, in the walk's order, are read as that
-  walk reads a file, each named by its path in the zip less a top folder they all
-  share, its text ``""`` if it has none. ``skipped`` counts the files left out by
-  their suffix, nested zips among them, which are never opened; ``unread``, the
-  documents past ``limit``. A zip that is corrupt, encrypted, of more than
-  ``MAX_ZIP_ENTRIES`` entries, or whose documents read would unzip to more than
-  ``MAX_ZIP_BYTES``, is refused (422).
+  ``__MACOSX/``. They are read in the walk's order, as that walk reads a file, until
+  ``limit`` of them have text; each is named by its path in the zip less a top folder
+  they all share, and one with no text comes back with ``""`` and doesn't count.
+  ``skipped`` counts the files left out by their suffix, nested zips among them,
+  which are never opened; ``unread``, the documents not read. A zip that is corrupt,
+  encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
+  unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -488,27 +488,36 @@ def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
             (e for e in files if r3con._walk_reads(e.filename.rsplit("/", 1)[-1])),
             key=lambda entry: entry.filename.split("/"),
         )
-        read = documents[:limit]
-        if any(entry.flag_bits & ZIP_ENCRYPTED_FLAG for entry in read):
-            raise HTTPException(422, ENCRYPTED_ZIP)
-        if sum(entry.file_size for entry in read) > MAX_ZIP_BYTES:
-            raise HTTPException(422, TOO_MANY_BYTES)
-        # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
-        contents = _refused_if_unreadable(name, lambda: list(map(archive.read, read)))
-    names = _below_shared_folder([entry.filename for entry in documents])
-    unzipped = [
-        {
-            "name": shown,
-            "size": len(data),
-            "text": r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data)),
-        }
-        for entry, shown, data in zip(read, names, contents, strict=False)
-    ]
+        unzipped = _read_until(archive, name, documents, limit)
     return {
         "files": unzipped,
         "skipped": len(files) - len(documents),
-        "unread": len(documents) - len(read),
+        "unread": len(documents) - len(unzipped),
     }
+
+
+def _read_until(
+    archive: zipfile.ZipFile, name: str, documents: list[zipfile.ZipInfo], limit: int
+) -> list[dict[str, Any]]:
+    """``documents``, read in order until ``limit`` of them have text; each is checked
+    before it is read, and those with no text come back too, for the page to refuse."""
+    names = _below_shared_folder([entry.filename for entry in documents])
+    unzipped: list[dict[str, Any]] = []
+    with_text = unzipped_bytes = 0
+    for entry, shown in zip(documents, names, strict=True):
+        if with_text == limit:
+            break
+        if entry.flag_bits & ZIP_ENCRYPTED_FLAG:
+            raise HTTPException(422, ENCRYPTED_ZIP)
+        unzipped_bytes += entry.file_size
+        if unzipped_bytes > MAX_ZIP_BYTES:
+            raise HTTPException(422, TOO_MANY_BYTES)
+        # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
+        data = _refused_if_unreadable(name, partial(archive.read, entry))
+        text = r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data))
+        with_text += bool(text.strip())
+        unzipped.append({"name": shown, "size": len(data), "text": text})
+    return unzipped
 
 
 async def document_zip(request: Request) -> Response:

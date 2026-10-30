@@ -864,6 +864,19 @@ def test_a_zip_read_to_a_limit_reads_its_first_documents_and_counts_the_rest(
     assert response.json()["unread"] == 1
 
 
+def test_a_zip_read_to_a_limit_counts_only_documents_with_text(
+    client: TestClient, tmp_path: Path
+):
+    memos = {
+        "1.txt": "",
+        "2.txt": " \n",
+        **{f"{i}.txt": f"Memo {i}.\n" for i in range(3, 7)},
+    }
+    response = unzip(client, zipped(tmp_path, memos).read_bytes(), limit="3")
+    assert unzipped_names(response) == ["1.txt", "2.txt", "3.txt", "4.txt", "5.txt"]
+    assert response.json()["unread"] == 1
+
+
 def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse(
     client: TestClient, tmp_path: Path
 ):

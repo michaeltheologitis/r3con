@@ -619,7 +619,7 @@
   const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
   const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
-  const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} left out` : ''}.`;
+  const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} skipped` : ''}.`;
   const TOO_MANY_FILES = `A tab takes ${MAX_FILES} files at most.`;
   const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
   // A refusal names this many files, then counts the rest.
@@ -2878,13 +2878,13 @@
     return `Not added: ${more > 0 ? `${names.slice(0, NAMED_AT_MOST).join(', ')} and ${more} more` : names.join(', ')}. ${why}`;
   }
 
-  // By path, a part at a time, so that a folder's files stay together: a/b.txt before a-b/x.txt.
+  // By path, a part at a time and by character code, as r3con's walk and r3con app's zips order files: a/b.txt before a-b/x.txt.
   /** @param {File} a @param {File} b */
   function byPath(a, b) {
     const [x, y] = [a.name.split('/'), b.name.split('/')];
     const i = x.findIndex((part, j) => part !== y[j]);
     if (i < 0) return x.length - y.length;
-    return i < y.length ? x[i].localeCompare(y[i]) : 1;
+    return i < y.length && x[i] < y[i] ? -1 : 1;
   }
 
   /** @param {File[]} files */
@@ -2990,7 +2990,7 @@
   /** @param {string[]} parts @param {boolean} isFile @returns {'read' | 'skipped' | 'unsaid'} */
   function folderTakes(parts, isFile) {
     const name = parts.at(-1) ?? '';
-    if (parts.some((part) => part.startsWith('.')) || name.startsWith(LOCK_FILE_PREFIX)) return 'unsaid';
+    if (parts.some((part) => part.startsWith('.')) || (isFile && name.startsWith(LOCK_FILE_PREFIX))) return 'unsaid';
     return !isFile || FOLDER_SUFFIXES.some((suffix) => name.toLowerCase().endsWith(suffix)) ? 'read' : 'skipped';
   }
 
@@ -3563,16 +3563,23 @@
     frame.addEventListener('drop', async (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      dragDepth = 0;
-      frame.classList.remove('dropping');
       const tab = state.shown;
       showTab('files');
       // A tab that has run keeps its run's files, so what is dropped on it is refused unread.
       if (tab.run) return tellFiles(tab, { filesError: notAdded(pickFiles([...e.dataTransfer.files]).map((f) => f.name), LOCKED_DROP) });
       addFiles(await filesFromDrop(e.dataTransfer), tab);
     });
+    // However a drag ends, dropped anywhere or called off, the overlay goes, whatever dragleave was missed.
+    const dragEnded = () => {
+      dragDepth = 0;
+      frame.classList.remove('dropping');
+    };
     window.addEventListener('dragover', (e) => hasFiles(e) && e.preventDefault());
-    window.addEventListener('drop', (e) => hasFiles(e) && e.preventDefault());
+    window.addEventListener('drop', (e) => {
+      dragEnded();
+      if (hasFiles(e)) e.preventDefault();
+    });
+    window.addEventListener('dragend', dragEnded);
 
     new ResizeObserver(() => {
       fitShown();

@@ -2415,6 +2415,22 @@ function dragAcross() {
   });
 }
 
+// Drags files in over the panel, then ends the drag outside the frame, dropped on the top bar, then called off;
+// whether the overlay was on after each step.
+function dragEndsOutside() {
+  const transfer = new DataTransfer();
+  transfer.items.add(new File(['A memo.\n'], 'memo.txt'));
+  const fire = (target, type) => target.dispatchEvent(new DragEvent(type, { dataTransfer: transfer, bubbles: true, cancelable: true }));
+  const on = () => document.getElementById('frame').classList.contains('dropping');
+  const ends = [() => fire(document.querySelector('.topbar'), 'drop'), () => fire(document, 'dragend')];
+  return ends.flatMap((end) => {
+    fire(document.getElementById('panel'), 'dragenter');
+    const entered = on();
+    end();
+    return [entered, on()];
+  });
+}
+
 // A folder of documents, two of one name in two folders; a .py, which r3con's folder walk leaves out by its suffix;
 // a hidden file, Word's lock file and a memo in a hidden folder, which the page leaves out unsaid; and a file the
 // browser can't read. It has more entries than one batch.
@@ -2448,6 +2464,9 @@ async function dropArea() {
     const across = await page.evaluate(dragAcross);
     const acrossName = 'files dragged over the frame keep the overlay on from the panel onto the side column, and leaving the frame turns it off, with no relatedTarget, as WebKit sends';
     check('drop', acrossName, isDeepStrictEqual(across, [true, true, true, false]), JSON.stringify(across));
+    const ended = await page.evaluate(dragEndsOutside);
+    const endedName = 'a drag of files that ends outside the frame, dropped there or called off, turns the overlay off, though the frame had no dragleave';
+    check('drop', endedName, isDeepStrictEqual(ended, [true, false, true, false]), JSON.stringify(ended));
 
     await page.evaluate(dropItems, { on: 'panel', items: [DROPPED_FOLDER, LOOSE_FILE] });
     await removeButton(page, LOOSE_FILE[0]).waitFor();
@@ -2463,8 +2482,8 @@ async function dropArea() {
     check('drop', folderName, isDeepStrictEqual(folder, expected), JSON.stringify(folder));
 
     await page.evaluate(dropItems, { on: 'panel', items: [['scripts', [['a.py', 'x'], ['b.py', 'x'], ['.DS_Store', 'x']]]] });
-    const none = { error: await becomes(page, (text) => document.getElementById('files-error').textContent === text, `${NO_DOCUMENTS}; 2 left out.`), names: (await page.evaluate(filesPane)).names };
-    check('drop', 'a folder with no file r3con run reads adds nothing, and says how many it left out', none.error && isDeepStrictEqual(none.names, expected.names), `${await filesError(page)}; ${JSON.stringify(none)}`);
+    const none = { error: await becomes(page, (text) => document.getElementById('files-error').textContent === text, `${NO_DOCUMENTS}; 2 skipped.`), names: (await page.evaluate(filesPane)).names };
+    check('drop', 'a folder with no file r3con run reads adds nothing, and says how many it skipped', none.error && isDeepStrictEqual(none.names, expected.names), `${await filesError(page)}; ${JSON.stringify(none)}`);
 
     await page.click('#new-tab-btn');
     const many = memoNames(0, MAX_FILES + 2).map((name) => [name, `${name}\n`]);
@@ -3115,7 +3134,7 @@ async function liveNotText(url) {
     const error = await filesError(page);
     const refused =
       error === `Not added: data.bin, ff_fe.bin, old.ppt, utf16_no_bom.txt, utf32.txt. ${NOT_TEXT} Not added: old.doc. ${OLD_WORD}` &&
-      isDeepStrictEqual(listed, ['remove notes.log', 'remove page.html', 'remove README', 'remove utf16_bom.txt']);
+      isDeepStrictEqual(listed, ['remove README', 'remove notes.log', 'remove page.html', 'remove utf16_bom.txt']);
     const name =
       'an old .doc and .ppt, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an .html, an extensionless file and UTF-16 with a byte-order mark are added as text';
     check('live', name, four && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
@@ -3123,7 +3142,7 @@ async function liveNotText(url) {
     const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
-    const texts = ['A log line.\n', '<p>An HTML note.</p>\n', 'An extensionless note.\n', 'A Notepad note.\n'];
+    const texts = ['An extensionless note.\n', 'A log line.\n', '<p>An HTML note.</p>\n', 'A Notepad note.\n'];
     check('live', 'a run is sent only the text files, the UTF-16 one decoded', isDeepStrictEqual(sent, texts), JSON.stringify(sent));
   });
 }
@@ -3160,7 +3179,7 @@ async function liveZip(url) {
     const expected = {
       names: ['01_zipped.txt'],
       said: '1 file added, in place of the 5 sample memos; 1 skipped.',
-      error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${NO_DOCUMENTS}; 1 left out.`,
+      error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${NO_DOCUMENTS}; 1 skipped.`,
       limits: ['40', '40', '39'],
     };
     const name =
