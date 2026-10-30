@@ -81,8 +81,9 @@ const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SIMULATED_ASK = 'simulated ask over this run';
 const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
-// WCAG 2.2's minimum target size.
+// WCAG 2.2's minimum target size, and its minimum contrast for text.
 const MIN_TARGET_PX = 24;
+const MIN_TEXT_CONTRAST = 4.5;
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
@@ -621,6 +622,55 @@ function tabRow() {
       closeForMouseOnly: close.tabIndex === -1 && close.getAttribute('aria-hidden') === 'true',
     };
   });
+}
+
+// The tab row's colors as painted, each an element's own background or else the first behind it: the bar's, each
+// tab's and its ×'s, with whether the × meets its tab and where the pair starts and ends, and the text in the row,
+// + included, with the lowest contrast against what is behind it.
+function tabColors() {
+  const painted = (el) => {
+    for (; el; el = el.parentElement) {
+      const color = getComputedStyle(el).backgroundColor;
+      if (color !== 'rgba(0, 0, 0, 0)') return color;
+    }
+    return null;
+  };
+  // A pixel painted in the color reads back as sRGB bytes, whatever syntax the color was computed in.
+  const pixel = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  const luminance = (color) => {
+    pixel.fillStyle = color;
+    pixel.fillRect(0, 0, 1, 1);
+    const [r, g, b] = [...pixel.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((byte) => {
+      const c = byte / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (el) => {
+    const [high, low] = [luminance(getComputedStyle(el).color), luminance(painted(el))].sort((a, b) => b - a);
+    return { ratio: (high + 0.05) / (low + 0.05), text: el.textContent };
+  };
+  const list = document.getElementById('run-tabs');
+  const texts = [...list.querySelectorAll('.run-tab, .num, .tab-close:not([hidden])'), document.getElementById('new-tab-btn')];
+  const lowest = texts.map(contrast).reduce((a, b) => (b.ratio < a.ratio ? b : a));
+  const tabs = [...list.querySelectorAll('.run-tab')].map((tab) => {
+    const box = tab.getBoundingClientRect();
+    const close = tab.nextElementSibling.getBoundingClientRect();
+    const selected = tab.getAttribute('aria-selected') === 'true';
+    return { selected, color: painted(tab), closeColor: painted(tab.nextElementSibling), joined: Math.abs(close.left - box.right) < 0.5, left: box.left, right: close.right };
+  });
+  return { bar: painted(list), tabs, lowest };
+}
+
+// The focused tab shows its focus ring, and the ring lies inside the tab row, which would clip it.
+function focusRingFits() {
+  const tab = document.activeElement;
+  const style = getComputedStyle(tab);
+  const ring = parseFloat(style.outlineOffset) + parseFloat(style.outlineWidth);
+  const box = tab.getBoundingClientRect();
+  const row = document.getElementById('run-tabs').getBoundingClientRect();
+  const fits = box.left - ring >= row.left && box.right + ring <= row.right && box.top - ring >= row.top && box.bottom + ring <= row.bottom;
+  return tab.matches('.run-tab:focus-visible') && style.outlineStyle !== 'none' && ring > 0 && fits;
 }
 
 // The shown tab as drawn, so it can be compared with how it was left: the view, every node's place, every
@@ -1796,6 +1846,11 @@ async function tabs() {
     const whyName = 'Delete is offered only on a tab it closes; on a tab whose run is going it keeps the tab, and the status says why';
     check('tabs', whyName, isDeepStrictEqual(going.map((tab) => tab.keys), ['Delete', null]) && keeps, `${JSON.stringify(going.map((tab) => tab.keys))}; ${said.join(' | ')}`);
     await page.locator('.run-tab').first().click();
+    await page.locator('.tab-close').nth(1).hover();
+    const busy = (await page.evaluate(tabColors)).tabs[1];
+    const stillGoing = !(await page.evaluate(tabRow))[1].closable;
+    const unlit = stillGoing && busy.closeColor === busy.color;
+    check('tabs', "a tab not shown whose run is going keeps its disabled × unlit under the pointer", unlit, `going ${stillGoing}; × ${busy.closeColor}, tab ${busy.color}`);
     const ended = await becomes(page, tabEnded, 1, REPLAY_MS);
     await page.waitForTimeout(LIT_DELAY_MS);
     const untouched = ended && isDeepStrictEqual(await page.evaluate(panelSnapshot), first);
@@ -1868,6 +1923,43 @@ async function tabs() {
     const noScroll = await page.evaluate(noHorizontalScroll);
     check('tabs', '400 dark: with three tabs the tab row scrolls within itself, and the page has no horizontal scroll', rowScrolls && noScroll, `row scrolls ${rowScrolls}`);
   });
+
+  for (const layout of [LAYOUTS.desktop, LAYOUTS.phone]) {
+    await withPage('tabs', { layout }, async (page) => {
+      for (let i = 0; i < 2; i += 1) await page.click('#new-tab-btn');
+      await page.locator('.run-tab').first().click();
+      await page.mouse.move(0, 0);
+      const rest = await page.evaluate(tabColors);
+      const { bar, tabs: row } = rest;
+      const others = row.filter((tab) => !tab.selected);
+      const shown = row.find((tab) => tab.selected);
+      const blocks = row.every((tab) => tab.joined && tab.closeColor === tab.color) && row.slice(1).every((tab, i) => tab.left > row[i].right);
+      const colors = others.every((tab) => tab.color === others[0].color && tab.color !== bar) && ![bar, others[0].color].includes(shown.color);
+      const blocksName = `${layout.name}: with three tabs each tab and its × are one block of color set apart from the next; the tabs not shown are tinted off the bar, and the shown tab differs from both`;
+      check('tabs', blocksName, blocks && colors, JSON.stringify({ bar, shown: shown.color, other: others[0].color }));
+
+      const pointed = [];
+      for (const target of [page.locator('.run-tab').nth(1), page.locator('.tab-close').nth(1), page.locator('.run-tab').first(), page.locator('#new-tab-btn')]) {
+        await target.hover();
+        pointed.push(await page.evaluate(tabColors));
+      }
+      await page.mouse.move(0, 0);
+      const [overTab, overClose] = pointed.map((paint) => paint.tabs[1]);
+      const tabAlone = overTab.color !== row[1].color && overTab.closeColor === row[1].closeColor;
+      const closeAlone = overClose.closeColor !== row[1].closeColor && overClose.color === row[1].color;
+      const close = await page.locator('.tab-close').nth(1).boundingBox();
+      const big = close.width >= MIN_TARGET_PX && close.height >= MIN_TARGET_PX;
+      const hoverName = `${layout.name}: under the pointer a tab not shown lights alone, and so does its ×, which is at least ${MIN_TARGET_PX} px each way`;
+      check('tabs', hoverName, tabAlone && closeAlone && big, `tab alone ${tabAlone}; × alone ${closeAlone}; × ${Math.round(close.width)}×${Math.round(close.height)}`);
+      const lowest = [rest, ...pointed].map((paint) => paint.lowest).reduce((a, b) => (b.ratio < a.ratio ? b : a));
+      const contrastName = `${layout.name}: all text in the tab row, at rest and under the pointer, has at least ${MIN_TEXT_CONTRAST}:1 contrast with what is behind it`;
+      check('tabs', contrastName, lowest.ratio >= MIN_TEXT_CONTRAST, `lowest ${lowest.ratio.toFixed(2)} on ${lowest.text}`);
+
+      await page.locator('.run-tab').first().focus();
+      for (const key of ['ArrowRight', 'ArrowLeft']) await page.keyboard.press(key);
+      check('tabs', `${layout.name}: a tab focused from the keyboard shows its focus ring whole inside the tab row`, await page.evaluate(focusRingFits));
+    });
+  }
 }
 
 // ---------- tab files: each tab's own, locked once it has run ----------
