@@ -78,6 +78,7 @@
    * @property {LoadedFile[]} files
    * @property {string} filesSaid
    * @property {string} filesError
+   * @property {string} draft
    * @property {Promise<void>} adding
    * @property {HTMLButtonElement | null} button
    * @property {HTMLButtonElement | null} close
@@ -596,18 +597,15 @@
   // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
-  const LIVE_KEYS_NOTE =
-    "Or set the provider's own variable, e.g. OPENAI_API_KEY, before starting r3con app. A saved key stays in r3con app's memory on this computer until it stops; it is never written to disk.";
   const LIVE_MODE_NOTE = 'live · r3con app on this computer';
   const LIVE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with a question about them. Press run to run r3con on them, or add your own files.`;
-  const PROTOTYPE_KEYS_NOTE =
-    "Or set the provider's own variable, e.g. OPENAI_API_KEY. This prototype sends nothing and drops each key once saved; the real app keeps them on your computer.";
+  const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
   const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
   const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
-  const FILES_LOCKED = "These are this run's files. Press + for a new tab; a new run copies them.";
+  const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
   const ADD_FILES = `${NO_FILES} · add them in the files tab`;
   const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
@@ -711,6 +709,7 @@
       files,
       filesSaid: '',
       filesError: '',
+      draft: '',
       adding: Promise.resolve(),
       button: null,
       close: null,
@@ -1771,7 +1770,7 @@
     return [
       textBlock(run[kind][d].summary),
       row('read', refs([docId(run.docs[d])])),
-      kind === 'r2' ? row('drew on', refs(cites(run, id))) : null,
+      kind === 'r2' ? row('provenance', refs(cites(run, id))) : null,
       callMeta(run, id),
       openFileButton(run.docs[d], 'open document ›'),
     ];
@@ -1800,7 +1799,7 @@
       return [
         parse.records?.length ? recordBlock(parse.records) : textBlock(count ? plural(count, 'record') : '', 'no records'),
         row('read', refs([docId(run.docs[d])])),
-        row('drew on', refs(cites(run, id))),
+        row('provenance', refs(cites(run, id))),
         row('filled from', refs(['schema'])),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
@@ -1811,8 +1810,7 @@
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
       row('asked', answer.question),
-      row('drew on summaries', refs(answer.provenance.summary_ids.map((i) => `r2-${i}`))),
-      row('drew on parses', refs(answer.provenance.parse_ids.map((i) => `parsed-${i}`))),
+      row('provenance', refs(cites(run, id))),
       h('div', { class: 'k' }, answer.summary),
     ];
   }
@@ -2680,6 +2678,10 @@
   /** @param {Tab} tab */
   function switchTab(tab) {
     if (tab === state.shown) return;
+    // Each tab keeps its question. Once shown its draft is emptied: new run leaves a tab without saving the box.
+    state.shown.draft = questionEl.value;
+    questionEl.value = tab.draft;
+    tab.draft = '';
     showTabContents(tab);
     // Nodes drawn while their tab was hidden had no size to fit by.
     syncDocNodes(tab);
@@ -3068,10 +3070,10 @@
       const marker = h('span', { class: 'k', id: `state-${provider}` });
       if (provider !== OTHER) {
         const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
-        return [h('label', { for: key.id }, label), key, marker];
+        return [h('label', { for: key.id }, `${label} API key`), key, marker];
       }
       const endpoint = endpointField({ 'aria-label': `${label}: server URL`, 'aria-describedby': `${marker.id} other-hint` });
-      const key = keyField(provider, { placeholder: 'key, if it needs one', 'aria-label': `${label}: key` });
+      const key = keyField(provider, { placeholder: 'API key, if any', 'aria-label': `${label}: API key` });
       return [h('label', { for: endpoint.id }, label), endpoint, marker, key];
     });
   }
@@ -3481,7 +3483,7 @@
   const liveMode = {
     intro: LIVE_INTRO,
     note: LIVE_MODE_NOTE,
-    keysNote: LIVE_KEYS_NOTE,
+    keysNote: '',
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
@@ -3528,6 +3530,7 @@
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('keys-note').textContent = mode.keysNote;
+    $('keys-note').hidden = !mode.keysNote;
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
     transcript.append(line('main', mode.intro, { dim: true }));
