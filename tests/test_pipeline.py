@@ -162,6 +162,17 @@ def stamped(ids: list[str]) -> dict:
     }
 
 
+def parse_of(parsing: dict, doc_id: str) -> dict:
+    """Document ``doc_id``'s records in a parsing ``result.json``, by field."""
+    sources = parsing["source_ids"]
+    return {
+        field: [
+            r for r, id_ in zip(records, sources[field], strict=True) if id_ == doc_id
+        ]
+        for field, records in parsing["parsed"].items()
+    }
+
+
 def chars(request) -> int:
     return sum(len(message["content"]) for message in request["messages"])
 
@@ -1113,7 +1124,12 @@ def test_each_finished_event_carries_what_the_run_folder_records(
     ]
     parsing = read_json(logger, "structuring/parsing/result")
     assert by_type["parsing_finished"] == [
-        {"doc_id": id_, "n_records": 1, "provenance": parsing["provenance"][i]}
+        {
+            "doc_id": id_,
+            "n_records": 1,
+            "parse": parse_of(parsing, id_),
+            "provenance": parsing["provenance"][i],
+        }
         for i, id_ in enumerate(result.document_ids)
     ]
     reasoning = read_json(logger, "reasoning/result")
@@ -1179,11 +1195,13 @@ def test_a_split_document_starts_once_a_round_and_finishes_each_part_it_ends_up_
     ]
     assert sorted(reported) == sorted(recorded)
     assert len(recorded) == 2 * len(REGISTRY_IN_4_PARTS)
-    records = {
-        e["doc_id"]: e["n_records"] for e in events if e["type"] == "parsing_finished"
-    }
-    assert records == {id_: 1 for id_ in result.document_ids} | {
-        result.document_ids[3]: 4
+    finished = {e["doc_id"]: e for e in events if e["type"] == "parsing_finished"}
+    assert {id_: e["n_records"] for id_, e in finished.items()} == {
+        id_: 1 for id_ in result.document_ids
+    } | {result.document_ids[3]: 4}
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert {id_: e["parse"] for id_, e in finished.items()} == {
+        id_: parse_of(parsing, id_) for id_ in result.document_ids
     }
 
 

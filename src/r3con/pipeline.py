@@ -313,8 +313,10 @@ def run_pipeline(
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
-      ``doc_id``; finished adds ``n_records`` and the ids of the relevance snippets
-      the parse used, ``provenance``.
+      ``doc_id``; finished adds ``n_records``, the document's ``parse`` as JSON
+      (each field of ``Parse`` and its records, a document read in parts with its
+      parts' records in order), and the ids of the relevance snippets the parse used,
+      ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
       ``answer``, ``provenance`` (``{summary_ids, parse_ids}``), ``path``, ``fallback``.
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``

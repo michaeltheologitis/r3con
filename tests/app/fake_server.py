@@ -3,13 +3,14 @@ prints the URL that opens the page, with its token, then serves until killed.
 
 The model answers every stage as one would, citing real ids, so a run draws its whole
 panel: each summary is its document's first line that is not ``QUIET`` (none if all
-are), and each parse its first line; round 2 cites the first summary it is shown, each
-parse its own document's note, and the answer the first two documents' summaries and
-parses. It refuses a document over ``PART_CHARS`` as too long, so that r3con reads it
-in parts. A question holding ``FAILS`` makes every call raise, and one holding
-``HANGS`` makes every call wait until the server is killed. One holding ``STALLS``
-makes every call wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one
-holding ``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
+are), and each parse its first line as a memo's title, its other lines nested under
+it; round 2 cites the first summary it is shown, each parse its own document's note,
+and the answer the first two documents' summaries and parses. It refuses a document
+over ``PART_CHARS`` as too long, so that r3con reads it in parts. A question holding
+``FAILS`` makes every call raise, and one holding ``HANGS`` makes every call wait
+until the server is killed. One holding ``STALLS`` makes every call wait until
+``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding ``OFF_SCHEMA`` makes
+every reply with a schema miss it, so r3con sends again.
 """
 
 import os
@@ -49,10 +50,15 @@ READS_A_DOCUMENT = frozenset({"round 1", "RelevanceSummary", "ParseReply"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-SCHEMA_REPLY = """Thought: one row per memo.
+SCHEMA_REPLY = """Thought: one row per memo, with its lines.
 <schema>
+class Line(BaseModel):
+    text: str
+
+
 class Memo(BaseModel):
     title: str
+    lines: list[Line]
 
 
 class Parse(BaseModel):
@@ -110,8 +116,9 @@ def content(request: dict[str, Any]) -> str:
     if name == "ParseReply":
         heading = PARSE_HEADING.match(user)
         own = [heading[1]] if heading else []
-        title = first_line(PARSE_HEADING.sub("", user))
-        parse = {"memos": [{"title": title}]}
+        text = PARSE_HEADING.sub("", user)
+        lines = [{"text": line} for line in text.splitlines() if line.strip()][1:]
+        parse = {"memos": [{"title": first_line(text), "lines": lines}]}
         return json.dumps({"parse": parse, "provenance_ids": own})
     provenance = {
         view: citable(schema, view)[:CITED_PER_VIEW]

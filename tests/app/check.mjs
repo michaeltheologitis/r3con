@@ -81,6 +81,9 @@ const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
 const SIMULATED_NOTE = "simulated · each relevance snippet is the file's first 140 characters, and the citations are made up";
 // A relevance round's line for a document with a snippet.
 const SNIPPET_READY = 'snippet ready';
+// A parsed document's line, and the popup of one with nothing in its parse.
+const STRUCTURE_READY = 'structure ready';
+const NOTHING_PARSED = 'nothing parsed';
 const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
 const SAMPLE_READY = 'ready · gpt-6-luna · $0.0038';
@@ -188,6 +191,11 @@ const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
 // The page's PREVIEW_CHARS: a file's preview shows this much of its text, and says so when there is more.
 const PREVIEW_CHARS = 20000;
 const PREVIEW_NOTE = 'first 20,000 characters shown';
+// The page's PREVIEW_LINES: a parse's popup shows this many lines of its JSON, and says so when there are more.
+const PREVIEW_LINES = 5000;
+const PREVIEW_LINES_NOTE = 'first 5,000 lines shown';
+// The page's JSON_INDENT: a parse's JSON is indented this many spaces a level.
+const JSON_INDENT = 2;
 // A stream this long, which no page uses, makes a PDF of more bytes than its preview has characters.
 const PDF_PADDING = PREVIEW_CHARS + 5000;
 // The Markdown r3con makes of report.docx below.
@@ -253,6 +261,11 @@ const DRAG_STEPS = 8;
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
 const scriptedSummary = (text) => text.split('\n').find((line) => line.trim() && !line.includes(QUIET)) ?? '';
+// fake_server.py's parse of a document read whole: its first line as a memo's title, its other lines nested under it.
+function scriptedParse(text) {
+  const [title, ...lines] = text.split('\n').filter((line) => line.trim());
+  return { memos: [{ title, lines: lines.map((line) => ({ text: line })) }] };
+}
 
 let browser;
 let failures = 0;
@@ -407,6 +420,13 @@ function recordedSample() {
   return match ? JSON.parse(match[1]) : null;
 }
 
+// Each sample memo's name without its suffix, as the page labels it.
+const SAMPLE_STEMS = recordedSample().docs.map((d) => d.name.replace(/\.txt$/, ''));
+const stem = (i) => SAMPLE_STEMS[i];
+
+// The fields of a parse that hold records, as its popup shows them.
+const filledFields = (parse) => Object.fromEntries(Object.entries(parse).filter(([, records]) => records.length > 0));
+
 function recordedAsks() {
   const match = readFileSync(SCRIPT_FILE, 'utf8').match(/const RECORDED_ASKS = (\[[\s\S]*?\n\]);/);
   return match ? JSON.parse(match[1]) : [];
@@ -420,6 +440,14 @@ function withFewerMemos(script) {
   return script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => fewer);
 }
 const withNoAsks = (script) => script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, 'const RECORDED_ASKS = [];');
+
+// app.js with the sample's first parse holding its first record over and over, past PREVIEW_LINES lines of JSON.
+function withLongParse(script) {
+  const sample = recordedSample();
+  const [record] = sample.parsed[0].parse.site_incident_reports;
+  const parsed = [{ ...sample.parsed[0], parse: { site_incident_reports: Array(PREVIEW_LINES).fill(record) } }, ...sample.parsed.slice(1)];
+  return script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => `const SAMPLE = ${JSON.stringify({ ...sample, parsed })};`);
+}
 
 // What `read` finds on the page as shipped, then on the page with app.js passed through `edit`.
 async function shippedAndEdited(area, options, edit, read) {
@@ -465,6 +493,10 @@ function lineage(sample, docIds, answerId = 'answer-0', provenance = sample.answ
 
 // A log's steps as RUN_STEPS lists them.
 const stepsOf = (log) => log.steps.map(({ step, nested, links }) => [step, nested.length, links.map((id) => id.split('-')[0]).join(' ')]);
+// The lines nested under a log's parsing step, sorted.
+const parsedLines = (log) => [...(log.steps.find(({ step }) => step === `parsing ${SAMPLE_DOCS} documents`)?.nested ?? [])].sort();
+// The parse an open parsed node's popup shows.
+const shownParse = (page) => page.$eval('#inspector pre.code', (el) => JSON.parse(el.textContent));
 
 // In-page functions, passed to page.evaluate and page.waitForFunction.
 
@@ -974,10 +1006,12 @@ async function chatLog() {
     const opened = await page.evaluate(logOf);
     const openName = "its chevron opens the log: each step in turn, each document's line under its own step and linked to its node, and no line repeats ready";
     check('chat log', openName, opened.open && isDeepStrictEqual(stepsOf(opened), REPLAY_STEPS), JSON.stringify(stepsOf(opened)));
-    const stem = (i) => sample.docs[i].name.replace(/\.txt$/, '');
     const roundLines = opened.steps.slice(1, 1 + ROUNDS).flatMap(({ nested }) => nested).sort();
     const settled = ['r1', 'r2'].flatMap((kind) => sample[kind].map(({ summary }, i) => `${stem(i)} — ${summary ? SNIPPET_READY : 'nothing relevant'}`)).sort();
     check('chat log', "each round's line says its document's snippet is ready, or that nothing was relevant", isDeepStrictEqual(roundLines, settled), roundLines[0]);
+    const parseLines = parsedLines(opened);
+    const filled = sample.parsed.map(({ parse }, i) => `${stem(i)} — ${Object.keys(filledFields(parse)).length ? STRUCTURE_READY : NOTHING_PARSED}`).sort();
+    check('chat log', "each parsed document's line says its structure is ready, or that nothing was parsed", isDeepStrictEqual(parseLines, filled), parseLines.join(' | '));
     await page.click('.log-lines .line[data-node="r2-3"]');
     const title = (await popup(page))?.title;
     check('chat log', 'a nested line still opens its node on the panel', title === '● 04_contractor_registry · round 2', title);
@@ -1560,7 +1594,6 @@ async function popupArea() {
     }
     const sample = recordedSample();
     const { summary_ids, parse_ids } = sample.answer.provenance;
-    const stem = (i) => sample.docs[i].name.replace(/\.txt$/, '');
     const roundNames = (await page.$$eval('.node.r1, .node.r2', (els) => els.map((el) => el.getAttribute('aria-label')))).sort();
     const snippetNames = [1, 2].flatMap((round) => sample.docs.map((_, i) => `${stem(i)}, round ${round} relevance snippet`)).sort();
     check('popup', "each round's node is named for its document and its relevance snippet", isDeepStrictEqual(roundNames, snippetNames), roundNames[0]);
@@ -1571,6 +1604,24 @@ async function popupArea() {
       return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
     });
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
+    await inspect(page, 'parsed-0');
+    const recorded = await shownParse(page);
+    const block = await page.$eval('#inspector pre.code', (el) => {
+      getSelection().selectAllChildren(el);
+      const heights = [...el.children].map((line) => line.getBoundingClientRect().height);
+      return { text: el.textContent, copied: getSelection().toString(), oneLineEach: heights.every((height) => height === heights[0]) };
+    });
+    const parsedWidth = (await rect(page, '#inspector')).width;
+    await inspect(page, 'schema');
+    const schemaWidth = (await rect(page, '#inspector')).width;
+    const empty = await inspect(page, 'parsed-4', '#inspector .insp-text');
+    const filled = filledFields(sample.parsed[0].parse);
+    const parseName = "a parsed node's popup shows its document's parse as recorded, without its empty fields, and an empty one says nothing was parsed";
+    check('popup', parseName, isDeepStrictEqual(recorded, filled) && empty === NOTHING_PARSED, empty);
+    const json = JSON.stringify(filled, null, JSON_INDENT);
+    const textName = "the parse's text, and a copy of it, is its JSON, indented, each line one line high";
+    check('popup', textName, block.text === json && block.copied === json && block.oneLineEach, JSON.stringify(block.copied.slice(0, 40)));
+    check('popup', "a parsed node's popup is as wide as the structure's", parsedWidth === schemaWidth, `${parsedWidth} and ${schemaWidth}`);
     await page.keyboard.press('Escape');
 
     const panel = await rect(page, '#panel');
@@ -1614,6 +1665,16 @@ async function popupArea() {
     check('popup', 'back at 1440 it returns to where it was dropped', returned);
     await page.keyboard.press('Escape');
     check('popup', 'Escape closes it', (await popup(page)) === null);
+  });
+
+  const body = withLongParse(readFileSync(SCRIPT_FILE, 'utf8'));
+  const before = (page) => page.route('**/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body }));
+  await withPage('popup', { before }, async (page) => {
+    await inspect(page, 'parsed-0');
+    const lines = await count(page, '#inspector pre.code > span');
+    const notes = await page.$$eval('#inspector > .k', (els) => els.map((el) => el.textContent));
+    const capName = `a parse of more than ${PREVIEW_LINES} lines shows its first ${PREVIEW_LINES} and says so`;
+    check('popup', capName, lines === PREVIEW_LINES && notes.includes(PREVIEW_LINES_NOTE), `${lines} lines; ${notes.join(' | ')}`);
   });
 }
 
@@ -2873,10 +2934,17 @@ async function liveParts(url) {
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const lines = await page.evaluate(lastTurnLines);
     const ready = lines.filter((text) => text === `${SPLIT_MEMO} — ${SNIPPET_READY}`).length;
-    const parsed = lines.includes(`${SPLIT_MEMO} — 2 records`);
+    const parsed = lines.includes(`${SPLIT_MEMO} — ${STRUCTURE_READY}`);
     const cited = (await count(page, `.edge.cite[data-key="r1-0>r2-${SAMPLE_DOCS}"]`)) === 1;
     const partsName = 'a document read in two parts, the first with nothing relevant, is drawn and logged from both: ready in both rounds, its round-2 citation kept, both parts parsed';
     check('live', partsName, done && ready === ROUNDS && cited && parsed, `ready in ${ready} rounds; cited ${cited}; parsed ${parsed}`);
+    await inspect(page, `parsed-${SAMPLE_DOCS}`);
+    const { memos } = await shownParse(page);
+    const read = memos.flatMap((memo) => [memo.title, ...memo.lines.map(({ text }) => text)]);
+    const both = memos.length === 2 && isDeepStrictEqual(read, splitMemo().buffer.toString().split('\n\n'));
+    check('live', "its popup shows both parts' parses, one memo each, which hold its lines in order", both, `${memos.length} memos, ${read.length} lines`);
+    const scrolls = await page.$eval('#inspector pre.code', (el) => el.scrollHeight > el.clientHeight);
+    check('live', 'a parse taller than the panel scrolls in its popup, which stays inside the panel', scrolls && (await page.evaluate(popupInsidePanel)), JSON.stringify(await popup(page)));
   });
 }
 
@@ -2951,6 +3019,14 @@ async function liveLog(url) {
     const sentFirst = sent?.[0].startsWith(`sent ${SAMPLE_DOCS} documents to r3con · `) && sent[1] === 0;
     const listed = opened.open && sentFirst && isDeepStrictEqual(steps, RUN_STEPS);
     check('live', "Enter on its chevron opens the log: what was sent, then each step in turn with its documents' lines under it", listed, JSON.stringify(stepsOf(opened)));
+    const docs = recordedSample().docs;
+    const ready = docs.map((_, i) => `${stem(i)} — ${STRUCTURE_READY}`).sort();
+    check('live', "each parsed document's line says its structure is ready", isDeepStrictEqual(parsedLines(opened), ready), parsedLines(opened).join(' | '));
+    await page.click('.log-lines .line[data-node="parsed-0"]');
+    const title = (await popup(page))?.title;
+    const shown = await shownParse(page);
+    const filledName = "a parsed document's line opens its node's popup, which shows the parse the model filled, nested lines and all";
+    check('live', filledName, title === '● 01_northgate · parsed' && isDeepStrictEqual(shown, scriptedParse(docs[0].text)), `${title}; ${JSON.stringify(shown)}`);
   });
 }
 
