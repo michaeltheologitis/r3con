@@ -26,7 +26,7 @@ opened URL's fragment, ``#token=...``.
 - ``POST /api/documents/zip?name=<file name>&limit=<n>``, with a zip's bytes as the
   body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
   the entries ``r3con.read_documents``' folder walk would read, by suffix and with no
-  Office lock file, less, by the app's own rule, anything hidden or under
+  Office lock file, and with nothing hidden, in a hidden folder or under
   ``__MACOSX/``. They are read in the walk's order, as that walk reads a file, until
   ``limit`` of them have text; each is named by its path in the zip less a top folder
   they all share, and one with no text comes back with ``""`` and doesn't count.
@@ -138,8 +138,6 @@ MAX_BODY_BYTES = 64 * 1024 * 1024
 MAX_ZIP_ENTRIES = 1_000
 MAX_ZIP_MEGABYTES = 100
 MAX_ZIP_BYTES = MAX_ZIP_MEGABYTES * 1024 * 1024
-# Where macOS's Finder puts each file's metadata in a zip it makes.
-MACOS_METADATA_FOLDER = "__MACOSX"
 ZIP_ENCRYPTED_FLAG = 0x1
 # What zipfile raises, opening a zip or reading an entry, for a zip it can't read.
 UNREADABLE_ZIP_ERRORS = (
@@ -445,18 +443,6 @@ async def document_text(request: Request) -> Response:
     return JSONResponse({"text": text})
 
 
-def _left_out_unsaid(entry: zipfile.ZipInfo) -> bool:
-    """Whether the app leaves ``entry`` out without counting it: Office's lock file, as
-    ``r3con run`` does, and, by the app's own rule, which ``r3con run`` doesn't follow,
-    a hidden file, or one under a hidden folder or ``__MACOSX``."""
-    parts = entry.filename.split("/")
-    return (
-        parts[-1].startswith(r3con._LOCK_FILE_PREFIX)
-        or MACOS_METADATA_FOLDER in parts
-        or any(part.startswith(".") for part in parts)
-    )
-
-
 def _below_shared_folder(paths: list[str]) -> list[str]:
     """``paths``, less the one folder at the top that they all share, if they do."""
     tops = {path.split("/", 1)[0] for path in paths}
@@ -483,9 +469,13 @@ def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
         entries = archive.infolist()
         if len(entries) > MAX_ZIP_ENTRIES:
             raise HTTPException(422, TOO_MANY_ENTRIES)
-        files = [e for e in entries if not e.is_dir() and not _left_out_unsaid(e)]
+        files = [
+            e
+            for e in entries
+            if not e.is_dir() and not r3con._left_out_unsaid(e.filename.split("/"))
+        ]
         documents = sorted(
-            (e for e in files if r3con._walk_reads(e.filename.rsplit("/", 1)[-1])),
+            (e for e in files if r3con._walk_reads(e.filename.split("/"))),
             key=lambda entry: entry.filename.split("/"),
         )
         unzipped = _read_until(archive, name, documents, limit)

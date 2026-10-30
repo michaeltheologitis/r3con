@@ -544,6 +544,8 @@
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
   const LOCK_FILE_PREFIX = '~$';
+  // Where macOS's Finder puts each file's metadata in a zip it makes.
+  const MACOS_METADATA_FOLDER = '__MACOSX';
   // What r3con app extracts the text of: r3con's own list, which tests/app/test_server.py holds this to.
   const EXTRACTED_SUFFIXES = ['.pdf', '.docx'];
   const PLAIN_TEXT_SUFFIXES = ['.txt', '.md', '.markdown', '.rst', '.json', '.jsonl', '.csv', '.tsv', '.yaml', '.yml', '.html', '.xml'];
@@ -2984,13 +2986,14 @@
     scrollTranscript();
   }
 
-  // How a file in a dropped or picked folder is taken, by its path below that folder: as r3con's folder walk
-  // reads, by suffix and with no Office lock file, and, by this page's own rule, with nothing hidden. Only a
-  // file left out by its suffix is counted as skipped.
+  // How a file in a dropped or picked folder is taken, by its path below that folder, mirroring r3con's folder walk:
+  // by suffix, with no Office lock file and nothing hidden or under __MACOSX. Only a file left out by its suffix is
+  // counted as skipped.
   /** @param {string[]} parts @param {boolean} isFile @returns {'read' | 'skipped' | 'unsaid'} */
   function folderTakes(parts, isFile) {
     const name = parts.at(-1) ?? '';
-    if (parts.some((part) => part.startsWith('.')) || (isFile && name.startsWith(LOCK_FILE_PREFIX))) return 'unsaid';
+    const hidden = parts.some((part) => part.startsWith('.') || part === MACOS_METADATA_FOLDER);
+    if (hidden || (isFile && name.startsWith(LOCK_FILE_PREFIX))) return 'unsaid';
     return !isFile || FOLDER_SUFFIXES.some((suffix) => name.toLowerCase().endsWith(suffix)) ? 'read' : 'skipped';
   }
 

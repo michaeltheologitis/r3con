@@ -74,6 +74,10 @@ from r3con.settings import active_logs_dir, settings_snapshot
 _log = get_logger("documents")
 # Office's lock file for a document someone has open: ~$report.docx.
 _LOCK_FILE_PREFIX = "~$"
+# Where macOS's Finder puts each file's metadata in a zip it makes.
+_MACOS_METADATA_FOLDER = "__MACOSX"
+# A path's . and .. are steps, not hidden names.
+_PATH_STEPS = frozenset({".", ".."})
 _GLOB_WILDCARDS = frozenset("*?[")
 
 
@@ -212,12 +216,22 @@ def _extractor(name: str) -> Callable[[str, BinaryIO], str] | None:
     )
 
 
-def _walk_reads(name: str) -> bool:
-    """Whether a folder walk reads the file called ``name``: one whose suffix is in
-    :data:`TEXT_SUFFIXES`, unless it is Office's lock file."""
-    return name.lower().endswith(tuple(TEXT_SUFFIXES)) and not name.startswith(
-        _LOCK_FILE_PREFIX
+def _left_out_unsaid(parts: Sequence[str]) -> bool:
+    """Whether a walk or a glob leaves out, without a word, the file at ``parts`` below
+    its folder: Office's lock file, or one that is hidden or under a hidden folder or
+    ``__MACOSX``."""
+    return parts[-1].startswith(_LOCK_FILE_PREFIX) or any(
+        part == _MACOS_METADATA_FOLDER
+        or (part.startswith(".") and part not in _PATH_STEPS)
+        for part in parts
     )
+
+
+def _walk_reads(parts: Sequence[str]) -> bool:
+    """Whether a folder walk reads the file at ``parts`` below the folder: one whose
+    suffix is in :data:`TEXT_SUFFIXES`, and not :func:`_left_out_unsaid`."""
+    name = parts[-1].lower()
+    return name.endswith(tuple(TEXT_SUFFIXES)) and not _left_out_unsaid(parts)
 
 
 def _resolves_inside(path: Path, root: Path) -> bool:
@@ -240,11 +254,12 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
     name**, so that a ``.log``, a ``.py`` or an extensionless file is yours to pass; the
     flip side is that a glob aimed at binaries will happily turn them into garbage
-    documents. A walk and a glob both skip Office's lock files (``~$report.docx``), and
-    read only files that resolve inside the folder you named, or the glob's part before
-    its first wildcard: a file that a link or a ``..`` takes outside it is logged and
-    skipped, so a folder you received can't point r3con at files elsewhere. What you
-    name, a file or that folder, is taken as named, link or not.
+    documents. A walk and a glob both skip Office's lock files (``~$report.docx``) and,
+    below the folder you named or the glob's part before its first wildcard, anything
+    hidden or under ``__MACOSX``; and both read only files that resolve inside that
+    folder: a file that a link or a ``..`` takes outside it is logged and skipped, so a
+    folder you received can't point r3con at files elsewhere. What you name, a file or
+    that folder, is taken as named, even if hidden or a link.
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
     is logged and then dropped; OCR is outside this package. A Word file is converted to
@@ -269,13 +284,16 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
             files = sorted(
                 p
                 for p in path.rglob("*")
-                if p.is_file() and _walk_reads(p.name) and _resolves_inside(p, root)
+                if p.is_file()
+                and _walk_reads(p.relative_to(path).parts)
+                and _resolves_inside(p, root)
             )
         elif path.is_file():
             files = [path]
         else:  # treat it as a glob, anchored if it is absolute
             pattern, anchor = str(src), Path(src).anchor
-            root = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts)).resolve()
+            base = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts))
+            root = base.resolve()
             files = sorted(
                 p
                 for p in (
@@ -284,7 +302,7 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
                     else Path().glob(pattern)
                 )
                 if p.is_file()
-                and not p.name.startswith(_LOCK_FILE_PREFIX)
+                and not _left_out_unsaid(p.relative_to(base).parts)
                 and _resolves_inside(p, root)
             )
         if not files:

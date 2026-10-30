@@ -779,7 +779,14 @@ def test_a_zips_documents_come_back_by_path_as_a_folder_walk_reads_them(
     write_pdf(folder / "reports" / "03_memo.pdf", PDF_TEXT)
     files = sorted(path for path in folder.rglob("*") if path.is_file())
     names = [path.relative_to(folder).as_posix() for path in files]
-    archive = zipped(tmp_path, {n: f.read_bytes() for n, f in zip(names, files)})
+    for hidden in [".notes.md", ".git/notes.txt", "__MACOSX/01_memo.txt"]:
+        (folder / hidden).parent.mkdir(exist_ok=True)
+        (folder / hidden).write_text("Left out of a folder walk, and of a zip.\n")
+    every = (path for path in folder.rglob("*") if path.is_file())
+    archive = zipped(
+        tmp_path,
+        {path.relative_to(folder).as_posix(): path.read_bytes() for path in every},
+    )
     response = unzip(client, archive.read_bytes())
     assert response.status_code == 200
     unzipped = response.json()
