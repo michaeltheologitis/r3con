@@ -8,13 +8,13 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
-    result.provenance             # the ids of the summaries and parses the answer used
+    result.provenance             # the ids of the relevance snippets and parses the answer used
     result.schema_code            # the schema proposed for this question
 
-The answer cites its two views separately: the summaries it used
+The answer cites its two views separately: the relevance snippets it used
 (``result.provenance["summary_ids"]``) and the documents whose parsed records it used
-(``result.provenance["parse_ids"]``). Each document's relevance summary and its parse
-also record the summaries they used (``result.relevance_provenance``,
+(``result.provenance["parse_ids"]``). Each document's relevance snippet and its parse
+also record the snippets they used (``result.relevance_provenance``,
 ``result.parsing_provenance``).
 
 (``from r3con import run`` works too — same function, imported from the package root.)
@@ -420,8 +420,8 @@ def run(
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
-        ``str()`` of the result), the ids of the summaries and the parsed records it
-        used (``.provenance``: ids from ``.document_ids``, a part's summary as
+        ``str()`` of the result), the ids of the relevance snippets and parsed records
+        it used (``.provenance``: ids from ``.document_ids``, a part's snippet as
         ``<id>.<k>``, whose document is the part before the dot), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
         schema proposed for this question (``.schema_code``), and where the artifacts

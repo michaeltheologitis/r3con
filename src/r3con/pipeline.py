@@ -14,7 +14,7 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
    sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
-   fit the model's window). The answer cites the summaries it used, and the documents
+   fit the model's window). The answer cites the snippets it used, and the documents
    whose parsed records it used, by id.
 
 The document is the unit throughout: a document too long for the model's window is read

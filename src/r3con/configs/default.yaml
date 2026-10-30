@@ -13,7 +13,7 @@ model: openai/gpt-6-luna
 # 2+ = re-read in light of the other documents' relevance snippets.
 relevance_rounds: 2
 
-# How reasoning answers. direct = one call over the summaries and the whole parse;
+# How reasoning answers. direct = one call over the snippets and the whole parse;
 # coding = an agent that reads the parse with code, and runs when direct does not fit.
 reasoning: direct
 
