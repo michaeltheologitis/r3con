@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any, Literal
 
 import litellm
+from litellm.exceptions import ContextWindowExceededError
 
 _completion = litellm.completion
 
@@ -58,8 +59,9 @@ class FakeLLM:
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
     refused as too long instead of answered; ``refuses_over(tokens=...)`` counts the
     request as a provider does, in tokens.
-    Each request sets ``called`` as it arrives, then waits at ``gate``, open until a
-    test clears it, for at most ``GATE_TIMEOUT_SECONDS`` before it is answered.
+    Each request sets ``called`` as it arrives, its reply already chosen, then waits
+    at ``gate``, open until a test clears it, for at most ``GATE_TIMEOUT_SECONDS``
+    before it is answered.
     """
 
     def __init__(self) -> None:
@@ -102,10 +104,11 @@ class FakeLLM:
     def requests_for(self, stage: Stage) -> list[Request]:
         return [request for request in self.requests if stage_of(request) == stage]
 
-    def __call__(self, **request: Any) -> litellm.ModelResponse:
+    def __call__(self, **request: Any) -> Any:
         snapshot = copy.deepcopy(request)
         with self._lock:
             self.requests.append(snapshot)
+            self.called.set()
             size = sum(len(message["content"]) for message in request["messages"])
             if self._limit is not None and size > self._limit:
                 reply = too_long(self._limit, size, request["model"])
@@ -118,7 +121,6 @@ class FakeLLM:
                 reply = self._next_reply(snapshot)
             self._in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self._in_flight)
-        self.called.set()
         try:
             self.gate.wait(GATE_TIMEOUT_SECONDS)
             if isinstance(reply, BaseException):
@@ -175,9 +177,9 @@ def request_tokens(request: Request) -> int:
     return sum(len(litellm.encode(text=text)) for text in texts)
 
 
-def too_long(limit: int, size: int, model: str) -> litellm.ContextWindowExceededError:
+def too_long(limit: int, size: int, model: str) -> ContextWindowExceededError:
     """The error litellm raises for a provider that refuses a request as too long."""
-    return litellm.ContextWindowExceededError(
+    return ContextWindowExceededError(
         message=(
             f"This model's maximum context length is {limit} tokens. However, you "
             f"requested {size} tokens in the messages."

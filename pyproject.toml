@@ -83,7 +83,7 @@ extend-exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pyright]
 # tests/app keeps the type checks it had as the app's own project.
-include = ["src", "evals", "tests/app"]
+include = ["src", "evals", "tests/app", "tests/fakes.py"]
 exclude = ["src/r3con/runtime/python_executor.py"]
 
 [tool.pytest.ini_options]
