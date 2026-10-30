@@ -88,7 +88,8 @@ print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total.
 ```
 
 `read_documents` reads PDF and Word (`.docx`) files, and text files such as `.txt`,
-`.md`, `.csv`, `.json`, `.html` and `.xml`, and skips a folder's hidden files and folders.
+`.md`, `.csv`, `.json`, `.html` and `.xml`, and skips a folder's hidden files and folders;
+a glob's wildcards skip them too, as in the shell.
 
 If you already have the documents in memory, pass them directly:
 

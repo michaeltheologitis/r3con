@@ -501,14 +501,7 @@ def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
     ]
 
 
-@pytest.mark.parametrize(
-    "source",
-    [lambda root: root, lambda root: str(root / "**" / "*.md")],
-    ids=["walk", "glob"],
-)
-def test_a_walk_or_a_glob_skips_what_is_hidden_or_under_macosx_below_its_folder(
-    tmp_path, source: Callable[[Path], str | Path]
-):
+def test_a_walk_skips_what_is_hidden_or_under_macosx_below_its_folder(tmp_path):
     texts = {
         "a_memo.md": "a memo",
         ".notes.md": "a hidden note",
@@ -519,7 +512,49 @@ def test_a_walk_or_a_glob_skips_what_is_hidden_or_under_macosx_below_its_folder(
     for name, text in texts.items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text, encoding="utf-8")
-    assert read_documents(source(tmp_path)) == ["a memo"]
+    assert read_documents(tmp_path) == ["a memo"]
+
+
+@pytest.mark.parametrize(
+    ("pattern", "documents"),
+    [
+        ("d/*.md", ["a memo"]),
+        ("d/**/*.md", ["a memo", "a memo further down"]),
+        ("d/.*", ["a hidden memo"]),
+        ("**/.env.md", ["a hidden file further down"]),
+        ("d/*/.env.md", ["a hidden file further down"]),
+        ("d/*/../*.md", ["a memo"]),
+    ],
+    ids=[
+        "wildcard",
+        "recursive",
+        "dot-wildcard",
+        "recursive-to-a-dot-name",
+        "wildcard-to-a-dot-name",
+        "climbing-back-after-a-wildcard",
+    ],
+)
+def test_a_globs_wildcards_match_no_hidden_name_but_a_dot_in_the_pattern_does(
+    tmp_path, pattern: str, documents: list[str]
+):
+    texts = {
+        "d/a.md": "a memo",
+        "d/.x.md": "a hidden memo",
+        "d/q3/b.md": "a memo further down",
+        "d/q3/.env.md": "a hidden file further down",
+        "d/.git/.env.md": "a hidden folder's hidden file",
+    }
+    for name, text in texts.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    assert read_documents(pattern) == documents
+
+
+def test_a_recursive_glob_reads_a_file_once_past_a_link_to_its_own_folder(tmp_path):
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "a.md").write_text("a memo", encoding="utf-8")
+    (tmp_path / "d" / "loop").symlink_to(".")
+    assert read_documents("d/**/*.md") == ["a memo"]
 
 
 @pytest.mark.parametrize(
@@ -540,12 +575,6 @@ def test_a_hidden_file_or_folder_you_name_is_read(
     )
     (tmp_path / ".env.md").write_text("a hidden file", encoding="utf-8")
     assert read_documents(source) == documents
-
-
-def test_a_glob_reads_what_climbs_back_into_its_folder(tmp_path):
-    (tmp_path / "folder" / "q3").mkdir(parents=True)
-    (tmp_path / "folder" / "a_memo.md").write_text("a memo", encoding="utf-8")
-    assert read_documents("folder/*/../*.md") == ["a memo"]
 
 
 FOLDER_DOCUMENTS = ["a received memo", "a memo stored as a blob"]

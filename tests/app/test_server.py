@@ -813,6 +813,23 @@ def test_a_zips_documents_come_in_the_order_read_documents_walks_a_folder(
     assert [f["text"] for f in response.json()["files"]] == read_documents(folder)
 
 
+def test_a_zip_of_a_hidden_folder_reads_its_documents_as_a_walk_of_that_folder_does(
+    client: TestClient, tmp_path: Path
+):
+    entries = {
+        ".notes/a.txt": "A note.\n",
+        ".notes/.git/b.txt": "A hidden folder's note.\n",
+        "__MACOSX/.notes/._a.txt": "x",
+    }
+    for path, text in entries.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+    response = unzip(client, zipped(tmp_path, entries).read_bytes())
+    assert unzipped_names(response) == ["a.txt"]
+    texts = [file["text"] for file in response.json()["files"]]
+    assert texts == read_documents(tmp_path / ".notes")
+
+
 @pytest.mark.parametrize(
     ("paths", "names"),
     [

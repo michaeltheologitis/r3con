@@ -25,11 +25,12 @@ opened URL's fragment, ``#token=...``.
   The page sends each PDF and Word file it is given here, and reads other files itself.
 - ``POST /api/documents/zip?name=<file name>&limit=<n>``, with a zip's bytes as the
   body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
-  the entries ``r3con.read_documents``' folder walk would read, by suffix and with no
-  Office lock file, and with nothing hidden, in a hidden folder or under
+  the entries ``r3con.read_documents``' folder walk would read, judged by their paths
+  below the one top folder the zip's files share, if they do, ``__MACOSX/`` aside: by
+  suffix, and with no Office lock file and nothing hidden, in a hidden folder or under
   ``__MACOSX/``. They are read in the walk's order, as that walk reads a file, until
-  ``limit`` of them have text; each is named by its path in the zip less a top folder
-  they all share, and one with no text comes back with ``""`` and doesn't count.
+  ``limit`` of them have text; each is named by that path, and one with no text comes
+  back with ``""`` and doesn't count.
   ``skipped`` counts the files left out by their suffix, nested zips among them,
   which are never opened; ``unread``, the documents not read. A zip that is corrupt,
   encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
@@ -443,12 +444,14 @@ async def document_text(request: Request) -> Response:
     return JSONResponse({"text": text})
 
 
-def _below_shared_folder(paths: list[str]) -> list[str]:
-    """``paths``, less the one folder at the top that they all share, if they do."""
-    tops = {path.split("/", 1)[0] for path in paths}
-    if len(tops) != 1 or not all("/" in path for path in paths):
+def _below_shared_folder(paths: list[list[str]]) -> list[list[str]]:
+    """``paths``, each as its parts, less the one folder at the top that all but those
+    under ``__MACOSX`` share, if they do."""
+    tops = {parts[0] for parts in paths if parts[0] != r3con._MACOS_METADATA_FOLDER}
+    if len(tops) != 1 or any(len(parts) == 1 for parts in paths):
         return paths
-    return [path.split("/", 1)[1] for path in paths]
+    [top] = tops
+    return [parts[1:] if parts[0] == top else parts for parts in paths]
 
 
 def _refused_if_unreadable(name: str, call: Callable[[], Result]) -> Result:
@@ -469,32 +472,37 @@ def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
         entries = archive.infolist()
         if len(entries) > MAX_ZIP_ENTRIES:
             raise HTTPException(422, TOO_MANY_ENTRIES)
-        files = [
-            e
-            for e in entries
-            if not e.is_dir() and not r3con._left_out_unsaid(e.filename.split("/"))
+        files = [entry for entry in entries if not entry.is_dir()]
+        paths = _below_shared_folder([entry.filename.split("/") for entry in files])
+        kept = [
+            (parts, entry)
+            for parts, entry in zip(paths, files, strict=True)
+            if not r3con._left_out_unsaid(parts)
         ]
         documents = sorted(
-            (e for e in files if r3con._walk_reads(e.filename.split("/"))),
-            key=lambda entry: entry.filename.split("/"),
+            ((parts, entry) for parts, entry in kept if r3con._walk_reads(parts[-1])),
+            key=lambda document: document[0],
         )
         unzipped = _read_until(archive, name, documents, limit)
     return {
         "files": unzipped,
-        "skipped": len(files) - len(documents),
+        "skipped": len(kept) - len(documents),
         "unread": len(documents) - len(unzipped),
     }
 
 
 def _read_until(
-    archive: zipfile.ZipFile, name: str, documents: list[zipfile.ZipInfo], limit: int
+    archive: zipfile.ZipFile,
+    name: str,
+    documents: list[tuple[list[str], zipfile.ZipInfo]],
+    limit: int,
 ) -> list[dict[str, Any]]:
-    """``documents``, read in order until ``limit`` of them have text; each is checked
-    before it is read, and those with no text come back too, for the page to refuse."""
-    names = _below_shared_folder([entry.filename for entry in documents])
+    """``documents``, each its entry and the parts it is named by, read in order until
+    ``limit`` of them have text; each is checked before it is read, and those with no
+    text come back too, for the page to refuse."""
     unzipped: list[dict[str, Any]] = []
     with_text = unzipped_bytes = 0
-    for entry, shown in zip(documents, names, strict=True):
+    for parts, entry in documents:
         if with_text == limit:
             break
         if entry.flag_bits & ZIP_ENCRYPTED_FLAG:
@@ -506,7 +514,7 @@ def _read_until(
         data = _refused_if_unreadable(name, partial(archive.read, entry))
         text = r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data))
         with_text += bool(text.strip())
-        unzipped.append({"name": shown, "size": len(data), "text": text})
+        unzipped.append({"name": "/".join(parts), "size": len(data), "text": text})
     return unzipped
 
 
