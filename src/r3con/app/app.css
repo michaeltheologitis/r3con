@@ -281,7 +281,7 @@ p { margin: 0; }
   touch-action: pan-x pan-y;
 }
 .settings {
-  --settings-width: min(52ch, calc(100vw - 2 * var(--gutter)));
+  --settings-width: min(60ch, calc(100vw - 2 * var(--gutter)));
   inset: auto;
   margin: 0;
   width: var(--settings-width);

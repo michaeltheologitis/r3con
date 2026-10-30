@@ -49,10 +49,10 @@ const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 29,490 tokens �
 const POPUP_ROWS = {
   'doc-0': ['summary'],
   'r1-0': ['read'],
-  'r2-3': ['read', 'drew on'],
+  'r2-3': ['read', 'provenance'],
   schema: ['why', 'fills'],
-  'parsed-0': ['read', 'drew on', 'filled from'],
-  'answer-0': ['asked', 'drew on summaries', 'drew on parses'],
+  'parsed-0': ['read', 'provenance', 'filled from'],
+  'answer-0': ['asked', 'provenance'],
 };
 const MODEL_KEY = 'r3con-proto-model';
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
@@ -65,12 +65,13 @@ const RECORDED_MODEL = 'gpt-6-luna';
 const FIRST_TYPED_MODEL = 'hosted_vllm/foo';
 const ready = (kind, model) => `${SAMPLE_DOCS} documents ready · ${kind} · ${model}`;
 const FIELD_NAMES = {
-  OpenAI: 'key-openai',
-  Anthropic: 'key-anthropic',
-  Google: 'key-gemini',
+  'OpenAI API key': 'key-openai',
+  'Anthropic API key': 'key-anthropic',
+  'Google API key': 'key-gemini',
   'Other: server URL': 'endpoint-other',
-  'Other: key': 'key-other',
+  'Other: API key': 'key-other',
 };
+const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 // The page's GRID.rowGap: answer nodes stack this far apart.
@@ -193,7 +194,7 @@ const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only 
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
-const FILES_LOCKED = "These are this run's files. Press + for a new tab; a new run copies them.";
+const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
 const ADD_FILES = 'no files yet · add them in the files tab';
 const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
 const RAN_FIRST = "The tab's run started first, so its files are locked.";
@@ -715,6 +716,8 @@ async function load() {
 
 async function beforeRun() {
   await withPage('before a run', { sample: false }, async (page) => {
+    const names = { title: await page.title(), brand: await page.textContent('.brand') };
+    check('before a run', "the browser tab is titled with the page's brand, ✻ r3con", names.title === '✻ r3con' && names.title === names.brand, JSON.stringify(names));
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
@@ -1044,6 +1047,8 @@ async function keys(page, checkAt) {
 
   await page.click(nodeSel('doc-0'));
   await page.click('#settings-btn');
+  const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
+  checkAt('the note under the keys says only that the prototype sends nothing', note === PROTOTYPE_KEYS_NOTE, note);
   const named = [];
   for (const [name, id] of Object.entries(FIELD_NAMES)) {
     const ids = await page.getByRole('textbox', { name, exact: true }).evaluateAll((els) => els.map((el) => el.id));
@@ -1169,6 +1174,16 @@ async function popupArea() {
       const rows = await rowsOf(page, id);
       check('popup', `${id} shows ${expected.join(', ')}`, isDeepStrictEqual(rows, expected), rows.join(', '));
     }
+    const sample = recordedSample();
+    const { summary_ids, parse_ids } = sample.answer.provenance;
+    const stem = (i) => sample.docs[i].name.replace(/\.txt$/, '');
+    const cited = [...summary_ids.map((i) => `${stem(i)} · round 2`), ...parse_ids.map((i) => `${stem(i)} · parsed`)];
+    await inspect(page, 'answer-0');
+    const listed = await page.$$eval('#inspector .row', (rows) => {
+      const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
+      return [...provenance.querySelectorAll('.ref')].map((el) => el.textContent);
+    });
+    check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
     await page.keyboard.press('Escape');
 
     const panel = await rect(page, '#panel');
@@ -1756,6 +1771,7 @@ async function tabFiles() {
     const before = await tabLabels(page);
     check('tab files', 'before any run, the first tab is listed, named by its number and its files', isDeepStrictEqual(before, [[FIRST_TAB_BEFORE_RUN, true]]), JSON.stringify(before));
 
+    const preloaded = await page.inputValue('#question');
     const plus = page.getByRole('button', { name: NEW_TAB, exact: true });
     const outside = (await plus.count()) === 1 && (await plus.evaluate((el) => el.id === 'new-tab-btn' && !el.closest('[role="tablist"]')));
     await page.locator('.run-tab').first().focus();
@@ -1782,11 +1798,13 @@ async function tabFiles() {
       status: ADD_FILES,
     };
     check('tab files', plusName, outside && reached === 'new-tab-btn' && isDeepStrictEqual(opened, expected), `${reached}; ${JSON.stringify(opened)}`);
+    const inPlusTab = await page.inputValue('#question');
 
     await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
     await removeButton(page, second[1]).waitFor();
     const inSecond = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), tabs: await tabLabels(page), chat: await lastChatLine(page) };
     await showRunTab(page, 0);
+    const backOnFirst = await page.inputValue('#question');
     const inFirst = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page) };
     await removeButton(page, names[0]).click();
     await showRunTab(page, 1);
@@ -1800,6 +1818,10 @@ async function tabFiles() {
       isDeepStrictEqual(firstAgain, names.slice(1));
     const apartName = "files added in tab 2 are its own: tab 1 keeps the sample memos, and a memo removed in tab 1 stays in tab 2";
     check('tab files', apartName, apart, JSON.stringify({ inSecond, inFirst, secondAgain, firstAgain }));
+    const questions = [preloaded, inPlusTab, backOnFirst];
+    const sampleQuestion = recordedSample().question;
+    const questionsName = "the sample's question is in the box on the first tab, before its run, and a + tab starts with an empty box";
+    check('tab files', questionsName, isDeepStrictEqual(questions, [sampleQuestion, '', sampleQuestion]), JSON.stringify(questions));
 
     await showRunTab(page, 1);
     await page.click('#tab-chat');
@@ -1878,6 +1900,11 @@ async function tabFiles() {
     const one = [[FIRST_TAB_BEFORE_RUN, true]];
     const closes = isDeepStrictEqual(closedEmpty, { tabs: one, focus: 'run-tab-1' }) && isDeepStrictEqual(lastKept, one) && isDeepStrictEqual(closedWithFiles, one);
     check('tab files', "a + tab closes, empty with Delete or with files by its ×, and the focus goes to the tab shown; the last tab doesn't close", closes, JSON.stringify({ closedEmpty, lastKept, closedWithFiles }));
+    await page.click('#tab-chat');
+    await page.fill('#question', NEW_QUESTION);
+    await page.click('#new-tab-btn');
+    const typed = await page.inputValue('#question');
+    check('tab files', 'a question the user typed stays in the box when + opens a tab', typed === NEW_QUESTION, typed);
   });
 
   await withPage('tab files', { layout: LAYOUTS.phone }, async (page) => {
@@ -2065,6 +2092,8 @@ async function liveSession(url) {
     check('live', readyName, ready === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`, ready);
 
     await page.click('#settings-btn');
+    const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
+    check('live', 'the settings show no note under the keys', note === null, note);
     await page.fill('#key-openai', TEST_KEY);
     const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
     await page.keyboard.press('Escape');
