@@ -147,15 +147,23 @@ p { margin: 0; }
 
 /* ---- panel ---- */
 .board { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* The tab list scrolls within the row on its own, so + stays in view beside it. */
+.tab-row {
+  display: flex;
+  align-items: center;
+  padding-right: 1.5ch;
+  border-bottom: 1px solid var(--line);
+}
 .run-tabs {
   display: flex;
   gap: 1ch;
+  min-width: 0;
   padding: 0.45em 1.5ch;
   overflow-x: auto;
   scrollbar-width: thin;
   white-space: nowrap;
-  border-bottom: 1px solid var(--line);
 }
+.new-tab { flex: none; min-width: 24px; min-height: 24px; }
 .run-tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
 .run-tab .num { color: var(--dim); font-weight: 400; }
 .tab-close { padding: 0 0.5ch; }
@@ -235,7 +243,6 @@ p { margin: 0; }
 .fill-blue { fill: var(--fill-blue); }
 .ink { stroke: var(--tree-ink); }
 .drawing.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
-.node.pending .icon { opacity: 0.5; }
 
 .panel-hint {
   position: absolute;
