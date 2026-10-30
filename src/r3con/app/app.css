@@ -156,7 +156,9 @@ p { margin: 0; }
   padding-right: 1.5ch;
   border-bottom: 1px solid var(--line);
 }
+/* --dim falls short of 4.5:1 on the tabs' fills, so text in a tab is a shade nearer --fg. */
 .run-tabs {
+  --tab-ink: color-mix(in srgb, var(--fg) 20%, var(--dim));
   display: flex;
   min-width: 0;
   padding: 0.3em 1.5ch;
@@ -167,15 +169,15 @@ p { margin: 0; }
 }
 .new-tab { flex: none; min-width: 24px; min-height: 24px; }
 /* A tab is its button and the × after it, drawn as one block. */
-.run-tab, .tab-close { background: var(--code); }
+.run-tab, .tab-close { color: var(--tab-ink); background: var(--code); }
 .run-tab { padding: 0.15em 1.2ch; border-radius: 4px 0 0 4px; }
 .run-tab:has(+ .tab-close[hidden]) { border-radius: 4px; }
-.tab-close { padding: 0 1ch 0 0.4ch; border-radius: 0 4px 4px 0; }
+.tab-close { min-width: 24px; border-radius: 0 4px 4px 0; }
 .tab-close + .run-tab { margin-left: 0.75ch; }
-.run-tab:hover, .run-tab:hover + .tab-close, .new-tab:hover { background: var(--line); }
 .run-tab[aria-selected="true"], .run-tab[aria-selected="true"] + .tab-close { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
+.run-tab:hover, .tab-close:enabled:hover, .new-tab:hover { background: var(--line); }
 .run-tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
-.run-tab .num { color: var(--dim); font-weight: 400; }
+.run-tab .num { color: var(--tab-ink); font-weight: 400; }
 .panel {
   position: relative;
   flex: 1;
