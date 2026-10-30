@@ -2,18 +2,19 @@
 
 :func:`reason` answers on one of two paths, the run config's ``reasoning``:
 
-- **direct**: one completion. The ``reasoning/direct`` prompt carries the summaries and
-  the whole parse, the user message is the task, and the reply is structured: the
-  ``answer`` and its ``provenance_ids``, ``{"summary_ids": [...], "parse_ids": [...]}``.
+- **direct**: one completion. The ``reasoning/direct`` prompt carries the relevance
+  snippets and the whole parse, the user message is the task, and the reply is
+  structured: the ``answer`` and its ``provenance_ids``,
+  ``{"summary_ids": [...], "parse_ids": [...]}``.
 - **coding**: the multi-turn CodeAct loop. The merged parse is bound as the Python
   variable ``parse`` in a sandboxed interpreter, the ``reasoning/coding`` prompt is
   rendered with a view of the records, and the agent writes and runs code until it
   commits with ``final_answer(answer, provenance_ids={...})``, the same mapping.
 
-Either way the prompt names each document by its id for the run: a summary is headed
+Either way the prompt names each document by its id for the run: a snippet is headed
 ``### Document ID: <id>`` (``<id>.<k>`` for part ``k`` of a document read in parts), and
 each record says ``"document": "<id>"``. The answer cites the two views separately: the
-ids of the summaries it used, and the ids of the documents whose records it used, each
+ids of the snippets it used, and the ids of the documents whose records it used, each
 from among those the prompt shows (:func:`_cited`).
 
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
@@ -207,7 +208,7 @@ def tag_source_documents(
 ) -> Any:
     """Stamp each list-field record with the id of the document it was parsed from
     (``"document": "<id>"``), from the parsing step's ``source_docs``, so the model can
-    say which document a fact came from and match it against that document's summary,
+    say which document a fact came from and match it against that document's snippet,
     headed by the same id. No-op without ``source_docs`` or for a non-dict parse.
     Mutates and returns ``parse_dict`` (``document`` first, so it reads first).
     A record's own ``document`` value is kept; ``check_schema`` warns of such schemas."""
@@ -248,8 +249,8 @@ class ReasoningResult:
     - ``answer``: the answer text.
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
     - ``provenance``: the ids the answer used, by view: under ``"summary_ids"``, those
-      of the summaries it used (``<id>.<k>`` for a part of a document read in parts),
-      and under ``"parse_ids"``, those of the documents whose records it used.
+      of the relevance snippets it used (``<id>.<k>`` for a part of a document read in
+      parts), and under ``"parse_ids"``, those of the documents whose records it used.
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -285,11 +286,11 @@ def _system_prompt(
     included; Jinja renders only the ones its template references:
 
     - ``task``, ``schema_code``, ``relevance``: the question, the schema source, the
-      summaries, each headed by its document's id;
+      relevance snippets, each headed by its document's id;
     - ``parse_block``: the whole parse, or samples and a note;
     - ``samples_block``: one sample record per field;
     - ``parse_json``: the whole parse as JSON;
-    - ``read_in_parts``: whether a summary is one part of a document read in parts.
+    - ``read_in_parts``: whether a snippet is one part of a document read in parts.
     """
     return load_prompt(
         stage,
