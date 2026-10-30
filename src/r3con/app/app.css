@@ -158,18 +158,24 @@ p { margin: 0; }
 }
 .run-tabs {
   display: flex;
-  gap: 1ch;
   min-width: 0;
-  padding: 0.45em 1.5ch;
+  padding: 0.3em 1.5ch;
+  scroll-padding-inline: 1.5ch;
   overflow-x: auto;
   scrollbar-width: thin;
   white-space: nowrap;
 }
 .new-tab { flex: none; min-width: 24px; min-height: 24px; }
+/* A tab is its button and the × after it, drawn as one block. */
+.run-tab, .tab-close { background: var(--code); }
+.run-tab { padding: 0.15em 1.2ch; border-radius: 4px 0 0 4px; }
+.run-tab:has(+ .tab-close[hidden]) { border-radius: 4px; }
+.tab-close { padding: 0 1ch 0 0.4ch; border-radius: 0 4px 4px 0; }
+.tab-close + .run-tab { margin-left: 0.75ch; }
+.run-tab:hover, .run-tab:hover + .tab-close, .new-tab:hover { background: var(--line); }
+.run-tab[aria-selected="true"], .run-tab[aria-selected="true"] + .tab-close { background: color-mix(in srgb, var(--accent) 18%, var(--bg)); }
 .run-tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
 .run-tab .num { color: var(--dim); font-weight: 400; }
-.tab-close { padding: 0 0.5ch; }
-.tab-close + .run-tab { margin-left: 1.5ch; }
 .panel {
   position: relative;
   flex: 1;

@@ -623,6 +623,37 @@ function tabRow() {
   });
 }
 
+// The tab row's colors as painted, each an element's own background or else the first behind it: the bar's, and
+// each tab's and its ×'s, with whether the × meets its tab and where the pair starts and ends.
+function tabColors() {
+  const painted = (el) => {
+    for (; el; el = el.parentElement) {
+      const color = getComputedStyle(el).backgroundColor;
+      if (color !== 'rgba(0, 0, 0, 0)') return color;
+    }
+    return null;
+  };
+  const list = document.getElementById('run-tabs');
+  const tabs = [...list.querySelectorAll('.run-tab')].map((tab) => {
+    const box = tab.getBoundingClientRect();
+    const close = tab.nextElementSibling.getBoundingClientRect();
+    const selected = tab.getAttribute('aria-selected') === 'true';
+    return { selected, color: painted(tab), closeColor: painted(tab.nextElementSibling), joined: Math.abs(close.left - box.right) < 0.5, left: box.left, right: close.right };
+  });
+  return { bar: painted(list), tabs };
+}
+
+// The focused tab shows its focus ring, and the ring lies inside the tab row, which would clip it.
+function focusRingFits() {
+  const tab = document.activeElement;
+  const style = getComputedStyle(tab);
+  const ring = parseFloat(style.outlineOffset) + parseFloat(style.outlineWidth);
+  const box = tab.getBoundingClientRect();
+  const row = document.getElementById('run-tabs').getBoundingClientRect();
+  const fits = box.left - ring >= row.left && box.right + ring <= row.right && box.top - ring >= row.top && box.bottom + ring <= row.bottom;
+  return tab.matches('.run-tab:focus-visible') && style.outlineStyle !== 'none' && ring > 0 && fits;
+}
+
 // The shown tab as drawn, so it can be compared with how it was left: the view, every node's place, every
 // line's path, whether the drawing is lit and along which lines, and the status line.
 function panelSnapshot() {
@@ -1868,6 +1899,28 @@ async function tabs() {
     const noScroll = await page.evaluate(noHorizontalScroll);
     check('tabs', '400 dark: with three tabs the tab row scrolls within itself, and the page has no horizontal scroll', rowScrolls && noScroll, `row scrolls ${rowScrolls}`);
   });
+
+  for (const layout of [LAYOUTS.desktop, LAYOUTS.phone]) {
+    await withPage('tabs', { layout }, async (page) => {
+      for (let i = 0; i < 2; i += 1) await page.click('#new-tab-btn');
+      await page.locator('.run-tab').first().click();
+      const { bar, tabs: row } = await page.evaluate(tabColors);
+      const others = row.filter((tab) => !tab.selected);
+      const shown = row.find((tab) => tab.selected);
+      const blocks = row.every((tab) => tab.joined && tab.closeColor === tab.color) && row.slice(1).every((tab, i) => tab.left > row[i].right);
+      const colors = others.every((tab) => tab.color === others[0].color && tab.color !== bar) && ![bar, others[0].color].includes(shown.color);
+      const blocksName = `${layout.name}: with three tabs each tab and its × are one block of color set apart from the next; the tabs not shown are tinted off the bar, and the shown tab differs from both`;
+      check('tabs', blocksName, blocks && colors, JSON.stringify({ bar, shown: shown.color, other: others[0].color }));
+      await page.locator('.run-tab').nth(1).hover();
+      const hovered = (await page.evaluate(tabColors)).tabs[1].color;
+      await page.mouse.move(0, 0);
+      await page.locator('.run-tab').first().focus();
+      for (const key of ['ArrowRight', 'ArrowLeft']) await page.keyboard.press(key);
+      const ringFits = await page.evaluate(focusRingFits);
+      const hoverName = `${layout.name}: a tab not shown changes color under the pointer, and a tab focused from the keyboard shows its focus ring whole inside the tab row`;
+      check('tabs', hoverName, hovered !== others[0].color && ringFits, `hovered ${hovered}; ring fits ${ringFits}`);
+    });
+  }
 }
 
 // ---------- tab files: each tab's own, locked once it has run ----------
