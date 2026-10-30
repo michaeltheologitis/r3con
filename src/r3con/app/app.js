@@ -78,6 +78,7 @@
    * @property {LoadedFile[]} files
    * @property {string} filesSaid
    * @property {string} filesError
+   * @property {string} draft
    * @property {Promise<void>} adding
    * @property {HTMLButtonElement | null} button
    * @property {HTMLButtonElement | null} close
@@ -708,6 +709,7 @@
       files,
       filesSaid: '',
       filesError: '',
+      draft: '',
       adding: Promise.resolve(),
       button: null,
       close: null,
@@ -1804,12 +1806,11 @@
       ];
     }
     const answer = answerOf(run, id);
-    const { summary_ids, parse_ids } = answer.provenance;
     return [
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
       row('asked', answer.question),
-      row('provenance', refs([...summary_ids.map((i) => `r2-${i}`), ...parse_ids.map((i) => `parsed-${i}`)])),
+      row('provenance', refs(cites(run, id))),
       h('div', { class: 'k' }, answer.summary),
     ];
   }
@@ -2677,9 +2678,10 @@
   /** @param {Tab} tab */
   function switchTab(tab) {
     if (tab === state.shown) return;
-    // The sample's question goes with the sample memos until they have run; a question the user typed stays.
-    const typed = questionEl.value.trim() && questionEl.value !== SAMPLE.question;
-    if (!typed) questionEl.value = tab.files === SAMPLE_FILES && !tab.run ? SAMPLE.question : '';
+    // Each tab keeps its question. Once shown its draft is emptied: new run leaves a tab without saving the box.
+    state.shown.draft = questionEl.value;
+    questionEl.value = tab.draft;
+    tab.draft = '';
     showTabContents(tab);
     // Nodes drawn while their tab was hidden had no size to fit by.
     syncDocNodes(tab);

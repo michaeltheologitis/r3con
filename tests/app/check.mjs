@@ -1181,7 +1181,7 @@ async function popupArea() {
     await inspect(page, 'answer-0');
     const listed = await page.$$eval('#inspector .row', (rows) => {
       const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
-      return [...provenance.querySelectorAll('.ref')].map((el) => el.textContent);
+      return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
     });
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
     await page.keyboard.press('Escape');
@@ -1903,8 +1903,19 @@ async function tabFiles() {
     await page.click('#tab-chat');
     await page.fill('#question', NEW_QUESTION);
     await page.click('#new-tab-btn');
-    const typed = await page.inputValue('#question');
-    check('tab files', 'a question the user typed stays in the box when + opens a tab', typed === NEW_QUESTION, typed);
+    const inNewTab = await page.inputValue('#question');
+    await showRunTab(page, 0);
+    const typed = [inNewTab, await page.inputValue('#question')];
+    const ownName = 'a question typed in a tab stays with it: a + tab opens with an empty box, and back on the first tab the question is there';
+    check('tab files', ownName, isDeepStrictEqual(typed, ['', NEW_QUESTION]), JSON.stringify(typed));
+
+    await page.click('#tab-chat');
+    await page.press('#question', 'Enter');
+    await waitLit(page);
+    await send(page, 'Which memo is longest?', 'Control+Enter');
+    await showRunTab(page, 0);
+    const left = await page.inputValue('#question');
+    check('tab files', 'back on a tab that new run left, the box is empty: no question from before its run', left === '', left);
   });
 
   await withPage('tab files', { layout: LAYOUTS.phone }, async (page) => {
