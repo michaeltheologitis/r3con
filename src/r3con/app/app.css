@@ -20,6 +20,7 @@
   --gutter: 16px;
   --icon-size: 28px;
   --doc-icon-size: 46px;
+  --trash-size: 32px;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -244,13 +245,28 @@ p { margin: 0; }
 .ink { stroke: var(--tree-ink); }
 .drawing.is-lit .node.parsed.on-path .icon { --tree-ink: var(--accent); }
 
+.trash {
+  position: absolute;
+  left: 1ch;
+  top: 0.3em;
+  display: grid;
+  place-items: center;
+  width: var(--trash-size);
+  height: var(--trash-size);
+  color: var(--dim);
+  border: 1px dashed transparent;
+  border-radius: 6px;
+}
+.trash svg { width: 24px; height: 24px; }
+.trash.over { color: var(--accent); background: var(--bg); border-color: var(--accent); }
 .panel-hint {
   position: absolute;
-  left: 1.5ch;
+  left: calc(2ch + var(--trash-size));
   top: 0.7em;
   color: var(--dim);
   pointer-events: none;
 }
+.trash[hidden] + .panel-hint { left: 1.5ch; }
 .panel-tools {
   position: absolute;
   left: 1.5ch;
