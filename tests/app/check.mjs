@@ -79,7 +79,17 @@ const ROW_GAP = 112;
 const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
 const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
-const SIMULATED_ASK = 'simulated ask over this run';
+const RUN_LOG = 'run log';
+const ASK_LOG = 'ask log';
+const SAMPLE_READY = 'ready · gpt-6-luna · $0.0038';
+const SAMPLE_STEPS = [`reading ${SAMPLE_DOCS} documents`, 'round 1 · extracting relevance', 'round 2 · extracting relevance', 'proposing a structure', `parsing ${SAMPLE_DOCS} documents`, 'reasoning', SAMPLE_READY];
+// A line per document in each round and in parsing, and the structure's; each links to its node.
+const SAMPLE_LINKED = 3 * SAMPLE_DOCS + 1;
+// What the chat no longer says: lines that only describe how r3con works, and the citations and source under an answer.
+const COMMENTARY = ['one summary per document', 'beside the other summaries', 'cite another document', 'drew on', 'ask over this run'];
+const PROTOTYPE_NOTE = 'prototype · replays one recorded run';
+// The chat's line height: 13.5px at 1.55.
+const LINE_PX = 21;
 const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
 // WCAG 2.2's minimum target size, and its minimum contrast for text.
 const MIN_TARGET_PX = 24;
@@ -131,6 +141,8 @@ const OFF_SCHEMA = '(the model answers off schema)';
 const RELEASE_FILE = 'release';
 const QUIET = '(nothing relevant here)';
 const SPLIT_MEMO = '06_split_memo';
+// The relevance rounds r3con's default config runs, and the page draws.
+const ROUNDS = 2;
 const SCRIPTED_ANSWER = "The check's scripted model answers this.";
 const SCRIPTED_CITES = {
   r2: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i === 0 ? 1 : 0] })),
@@ -138,7 +150,9 @@ const SCRIPTED_CITES = {
   answer: { provenance: { summary_ids: [0, 1], parse_ids: [0, 1] } },
 };
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
-const LIVE_FAILED = "● failed in relevance · RuntimeError: the check's model is down";
+const LIVE_READY = /^ready · openai\/gpt-6-luna · \$[\d.]+$/;
+const LIVE_FAILED_LINE = "failed in relevance · RuntimeError: the check's model is down";
+const LIVE_FAILED = `● ${LIVE_FAILED_LINE}`;
 const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
 const LOST_CONNECTION = '● lost the connection to r3con app';
 const UNAUTHORIZED_LOG = 'Failed to load resource: the server responded with a status of 401';
@@ -153,8 +167,8 @@ const STOPPED_IN_PARSING = '● stopped in parsing';
 const STOPPED_WHILE_READING = '● stopped while reading';
 const STOPPED_ASK = '● ask stopped in reasoning';
 const STOPPED = '● stopped';
-// How a stopped ask's line in the chat ends.
-const STOPPED_ASK_TAIL = '· stopped in reasoning';
+// A stopped ask's line in the chat, under its log.
+const STOPPED_ASK_LINE = 'stopped in reasoning';
 const CANCEL_REFUSED = 'no run with that id';
 const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a status of 404';
 const LIVE_ASK = 'live ask over this run';
@@ -536,6 +550,37 @@ function lastTurnSays(starts) {
   return starts.every((start) => lines.some((text) => text.startsWith(start)));
 }
 
+// The last turn's log: its button's name, whether the button controls it and has it open, its folded line and
+// whether that spins, the steps and nested lines in view, the nodes they link to, and the lines in view outside it.
+function logOf() {
+  const turn = [...document.querySelectorAll('.turn')].at(-1);
+  const log = turn.querySelector('.log');
+  const toggle = log.querySelector('.log-toggle');
+  const lines = log.querySelector('.log-lines');
+  const shown = [...lines.querySelectorAll('.line')].filter((el) => el.checkVisibility());
+  const texts = (kind) => shown.filter((el) => el.classList.contains(kind)).map((el) => el.querySelector('.t').textContent);
+  const outside = [...turn.querySelector('.turn-body').children].filter((el) => el !== log && el.checkVisibility());
+  return {
+    logs: turn.querySelectorAll('.log').length,
+    name: toggle.getAttribute('aria-label'),
+    controls: toggle.getAttribute('aria-controls') === lines.id,
+    open: toggle.getAttribute('aria-expanded') === 'true',
+    folded: log.querySelector('.log-head .t').textContent,
+    spins: log.querySelector('.log-spin')?.checkVisibility() ?? false,
+    steps: texts('main'),
+    nested: texts('sub'),
+    links: shown.filter((el) => el.dataset.node).map((el) => el.dataset.node),
+    after: outside.map((el) => el.querySelector('.t').textContent),
+  };
+}
+
+// The note under the composer, if shown, and how far the composer's foot is from the chat column's.
+function composerPlace() {
+  const note = document.getElementById('mode-note');
+  const foot = (id) => document.getElementById(id).getBoundingClientRect().bottom;
+  return { note: note.checkVisibility() ? note.textContent : null, gap: Math.round(foot('side') - foot('ask-form')) };
+}
+
 // Cuts every event stream the page reads into chunks of `size` bytes.
 function cutEventStreams(size) {
   const realFetch = window.fetch;
@@ -861,6 +906,74 @@ async function sampleReplay() {
   check('sample replay', `the replay ends by offering the ${asks.length} recorded asks under their header`, isDeepStrictEqual(offered, offers), offered.join(' | '));
   const withoutName = 'a page shipped with no recorded asks ends the replay with neither offers nor their header';
   check('sample replay', withoutName, isDeepStrictEqual(none, shipped.slice(0, -offers.length)), none.at(-1));
+}
+
+// ---------- chat log: a run or an ask told as a log, folded under one line ----------
+
+async function chatLog() {
+  await withPage('chat log', {}, async (page) => {
+    const sample = recordedSample();
+    const folded = await page.evaluate(logOf);
+    const oneLog = folded.logs === 1 && folded.name === RUN_LOG && folded.controls;
+    check('chat log', "a run's turn holds one log, behind a button named run log that controls it", oneLog, JSON.stringify(folded.name));
+    const quiet = !folded.open && folded.folded === SAMPLE_READY && !folded.spins && folded.steps.length + folded.nested.length === 0;
+    check('chat log', 'once the replay ends its log is folded under one line: ready, the model and the cost', quiet, folded.folded);
+    const offers = [ASKS_HEADER, ...recordedAsks().map(offerLabel)];
+    const underName = 'outside the log the turn shows only the answer, then the recorded asks on offer: nothing about the answer';
+    check('chat log', underName, isDeepStrictEqual(folded.after, [sample.answer.text, ...offers]), folded.after.slice(0, 2).join(' | '));
+
+    await page.click('.log-toggle');
+    const opened = await page.evaluate(logOf);
+    const listed = opened.open && isDeepStrictEqual(opened.steps, SAMPLE_STEPS) && opened.nested.length === SAMPLE_LINKED + 1 && opened.links.length === SAMPLE_LINKED;
+    const openName = "its chevron opens the log: each step, the replay's read line and each document's line nested under their step, then ready";
+    check('chat log', openName, listed, `${opened.steps.join(' | ')}; ${opened.nested.length} nested`);
+    await page.click('.log-lines .line[data-node="r2-3"]');
+    const title = (await popup(page))?.title;
+    check('chat log', 'a nested line still opens its node on the panel', title === '● 04_contractor_registry · round 2', title);
+    await page.keyboard.press('Escape');
+    await page.click('.log-toggle');
+    const byClick = !(await page.evaluate(logOf)).open;
+    await page.focus('.log-toggle');
+    await page.keyboard.press('Enter');
+    const byEnter = (await page.evaluate(logOf)).open;
+    await page.keyboard.press('Space');
+    const bySpace = !(await page.evaluate(logOf)).open;
+    check('chat log', 'a click on the chevron folds the log again, and from the keyboard Enter opens it and Space folds it', byClick && byEnter && bySpace, `click ${byClick}, Enter ${byEnter}, Space ${bySpace}`);
+
+    await send(page, NEW_QUESTION);
+    const said = await page.textContent('#transcript');
+    const commentary = COMMENTARY.filter((text) => said.includes(text));
+    check('chat log', "no chat line only describes the method, and none gives an answer's citations or source", commentary.length === 0, commentary.join(', '));
+  });
+
+  await withPage('chat log', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    await becomes(page, statusStarts, 'running · round 2', REPLAY_MS);
+    const second = await page.evaluate(logOf);
+    await becomes(page, statusStarts, 'running · parsing', REPLAY_MS);
+    const parsing = await page.evaluate(logOf);
+    const going = [second, parsing].every((log) => log.spins && !log.open) && second.folded === SAMPLE_STEPS[2] && parsing.folded === SAMPLE_STEPS[4];
+    check('chat log', 'while a replay goes its log stays folded, its line the step it is on, with a spinner', going, `${second.folded} → ${parsing.folded}`);
+    await pressStop(page);
+    const stopped = await page.evaluate(logOf);
+    const inView = !stopped.open && !stopped.spins && stopped.folded === SAMPLE_STEPS[4] && isDeepStrictEqual(stopped.after, ['stopped in parsing']);
+    check('chat log', "a stopped replay's log stays folded at its step, its spinner gone, and that it stopped is in view below it", inView, stopped.after.join(' | '));
+  });
+
+  await withPage('chat log', { layout: LAYOUTS.phone, sample: false }, async (page) => {
+    await send(page, NEW_QUESTION);
+    await waitLit(page);
+    const simulated = await page.evaluate(logOf);
+    const flags = simulated.after.filter((text) => text.startsWith('simulated'));
+    const flagged = !simulated.open && flags.length === 2 && simulated.folded === `ready · ${DEFAULT_MODEL} · nothing was sent`;
+    check('chat log', "400 dark: a simulated run's two warnings stay in view with its log folded, which says nothing was sent", flagged, flags.join(' | '));
+    const target = await rect(page, '.log-toggle');
+    const fits = target.width >= MIN_TARGET_PX && target.height >= MIN_TARGET_PX && (await page.evaluate(noHorizontalScroll));
+    check('chat log', `400 dark: the chevron is a ${MIN_TARGET_PX}px target, and the page has no horizontal scroll`, fits, `${target.width}×${target.height}`);
+    const place = await page.evaluate(composerPlace);
+    check('chat log', 'the prototype keeps its note under the composer, since its runs are replays', place.note === PROTOTYPE_NOTE, JSON.stringify(place));
+  });
 }
 
 async function arrange() {
@@ -1546,15 +1659,15 @@ async function answersOnTheRun(sample, asks) {
     check('answers', 'an ask leaves the status alone: its live region is not rewritten', writes === 0, `${writes} writes`);
     const linesWhileAskLit = await page.evaluate(answerLines);
 
-    const lines = await page.evaluate(lastTurnLines);
+    const askLog = await page.evaluate(logOf);
     const { summary_ids, parse_ids } = asks[0].provenance;
-    const cited = new Set([...summary_ids, ...parse_ids]).size;
     const summary = `${RECORDED_ASK} · ${asks[0].model} · ${asks[0].totals.tokens.toLocaleString('en-US')} tokens · $`;
-    const told = lines.includes(asks[0].text) && lines.filter((text) => text.startsWith('drew on ')).length === cited && lines.some((text) => text.startsWith(summary));
+    const told = isDeepStrictEqual(askLog.after, [asks[0].text]) && askLog.name === ASK_LOG && !askLog.open && askLog.folded.startsWith(`ready · ${asks[0].model} · $`);
     const shown = await inspect(page, 'answer-1');
     const rows = await page.$$eval('#inspector .row', (els) => els.map((r) => r.firstChild.textContent));
     const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']);
-    check('answers', "a recorded ask's chat and popup give its real answer, citations and source", told && inPopup, lines.slice(1).join(' | '));
+    const toldName = "a recorded ask's chat gives its real answer with nothing under it, its folded log its model and cost, and its popup its citations and source";
+    check('answers', toldName, told && inPopup, `${askLog.folded}; ${askLog.after.join(' | ')}`);
     const label = await page.textContent(`${nodeSel('answer-1')} .label`);
     check('answers', 'an answer node is labelled with a short form of its question, and its model', label === ASK_LABEL, label);
     const kept = await positionOf(page, 'answer-0');
@@ -1595,10 +1708,10 @@ async function answersOnTheRun(sample, asks) {
     await send(page, NEW_QUESTION);
     const leftAlone = isDeepStrictEqual(await litAnswers(page), ['answer-0']) && (await popup(page))?.title === openTitle;
     check('answers', "a landing ask leaves an open answer's popup, and its lit path, alone", leftAlone, openTitle);
-    const simulated = await page.evaluate(lastTurnLines);
-    const flaggedInChat = simulated.includes(SIMULATED_LABEL) && simulated.some((text) => text.startsWith(`${SIMULATED_ASK} · ${DEFAULT_MODEL} · nothing was sent`));
+    const simulated = await page.evaluate(logOf);
+    const flaggedInChat = simulated.after.includes(SIMULATED_LABEL) && simulated.folded === `ready · ${DEFAULT_MODEL} · nothing was sent`;
     const flaggedInPopup = (await inspect(page, 'answer-2')).includes(SIMULATED_LABEL);
-    check('answers', 'an unrecorded ask is labelled simulated, in the chat and its popup', flaggedInChat && flaggedInPopup, simulated.slice(1, 3).join(' | '));
+    check('answers', 'an unrecorded ask is labelled simulated, in the chat, in view, and its popup', flaggedInChat && flaggedInPopup, `${simulated.folded}; ${simulated.after[0]}`);
 
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: offerLabel(asks[1]), exact: true }).click();
@@ -1606,7 +1719,7 @@ async function answersOnTheRun(sample, asks) {
     await page.press('#question', 'Enter');
     const other = await page.evaluate(lastTurnLines);
     const fromOffer = isDeepStrictEqual(filled, [asks[1].question, OTHER_RECORDED_MODEL]) && asks[1].model === OTHER_RECORDED_MODEL;
-    const otherRecorded = other.includes(asks[1].text) && other.some((text) => text.startsWith(`${RECORDED_ASK} · ${OTHER_RECORDED_MODEL} · `));
+    const otherRecorded = other.includes(asks[1].text) && other.some((text) => text.startsWith(`ready · ${OTHER_RECORDED_MODEL} · $`));
     const offeredName = 'an offered recorded ask fills its question and model, and is answered as recorded';
     check('answers', offeredName, fromOffer && otherRecorded, `${filled.join(' · ')}; ${other.slice(1, 2).join('')}`);
 
@@ -2377,12 +2490,11 @@ async function liveSession(url) {
     await page.keyboard.press('Escape');
     await page.fill('#question', 'Which memo is the registry?');
     await page.click('#run-btn');
-    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, LIVE_ASK], LIVE_RUN_MS);
-    const lines = await page.evaluate(lastTurnLines);
-    const cited = lines.filter((text) => text.startsWith('drew on ')).length === 2;
-    const named = lines.some((text) => text.startsWith(`${LIVE_ASK} · ${DEFAULT_MODEL} · `));
-    const askName = 'a follow-up runs an ask and shows its answer, provenance and model in the chat';
-    check('live', askName, answered && cited && named, lines.slice(1).join(' | '));
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, `ready · ${DEFAULT_MODEL} · $`], LIVE_RUN_MS);
+    const askLog = await page.evaluate(logOf);
+    const told = isDeepStrictEqual(askLog.after, [SCRIPTED_ANSWER]) && askLog.name === ASK_LOG && !askLog.open;
+    const askName = 'a follow-up runs an ask and shows its answer in the chat with nothing under it, and its model and cost on its folded log';
+    check('live', askName, answered && told, `${askLog.folded}; ${askLog.after.join(' | ')}`);
 
     const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
     const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
@@ -2411,15 +2523,10 @@ async function liveParts(url) {
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const lines = await page.evaluate(lastTurnLines);
-    const expected = [
-      `round 1 · ${SPLIT_MEMO} — summary ready`,
-      `round 2 · ${SPLIT_MEMO} — drew on 01_northgate`,
-      `round 2 · ${SAMPLE_DOCS + 1} summaries cite another document`,
-      `${SPLIT_MEMO} — 2 records`,
-    ];
-    const missing = expected.filter((start) => !lines.some((text) => text.startsWith(start)));
-    const partsName = 'a document read in two parts, the first with nothing relevant, is narrated from both';
-    check('live', partsName, done && missing.length === 0, missing.join(' | ') || 'all four lines');
+    const ready = lines.filter((text) => text === `${SPLIT_MEMO} — summary ready`).length;
+    const parsed = lines.includes(`${SPLIT_MEMO} — 2 records`);
+    const partsName = 'a document read in two parts, the first with nothing relevant, is logged from both: ready in both rounds, and both parts parsed';
+    check('live', partsName, done && ready === ROUNDS && parsed, `ready in ${ready} rounds; parsed ${parsed}`);
   });
 }
 
@@ -2469,6 +2576,32 @@ async function liveAnswers(url) {
   });
 }
 
+// Holds the run's answer back, so its log is seen going.
+async function liveLog(url) {
+  const before = (page) => page.addInitScript(holdFrom, 'reasoning_finished');
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    const place = await page.evaluate(composerPlace);
+    check('live', "no note under the composer: it takes the note's place, a line at most from the foot of the chat column", place.note === null && place.gap < LINE_PX, JSON.stringify(place));
+    await page.click('#run-btn');
+    await becomes(page, answerWorking, null, LIVE_RUN_MS);
+    const going = await page.evaluate(logOf);
+    const goingName = 'while a run goes its log is folded under the step it is on, with a spinner, behind a button named run log';
+    check('live', goingName, !going.open && going.spins && going.folded === 'reasoning' && going.name === RUN_LOG, going.folded);
+    await page.evaluate(() => (window.release = true));
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ended = await page.evaluate(logOf);
+    const endedName = 'once it ends its folded line says ready, the model and the cost, and nothing is under its answer';
+    check('live', endedName, !ended.open && !ended.spins && LIVE_READY.test(ended.folded) && isDeepStrictEqual(ended.after, [SCRIPTED_ANSWER]), `${ended.folded}; ${ended.after.join(' | ')}`);
+    await page.focus('.log-toggle');
+    await page.keyboard.press('Enter');
+    const opened = await page.evaluate(logOf);
+    const [sent, ...steps] = opened.steps;
+    const sentFirst = sent?.startsWith(`sent ${SAMPLE_DOCS} documents to r3con · `);
+    const listed = opened.open && sentFirst && isDeepStrictEqual(steps, [...SAMPLE_STEPS.slice(1, -1), ended.folded]) && opened.nested.length === SAMPLE_LINKED && opened.links.length === SAMPLE_LINKED;
+    check('live', "Enter on its chevron opens the log: what was sent, each step with its documents' lines, then ready", listed, opened.steps.join(' | '));
+  });
+}
+
 // Holds the second run's answer back until the first tab is shown.
 async function liveTabs(url) {
   const before = (page) => page.addInitScript(holdFrom, 'reasoning_finished');
@@ -2484,7 +2617,7 @@ async function liveTabs(url) {
     const held = await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
     await page.evaluate(() => (window.release = true));
-    const ended = await becomes(page, lastTurnSays, [`${DEFAULT_MODEL} · `], LIVE_RUN_MS);
+    const ended = await becomes(page, lastTurnSays, [`ready · ${DEFAULT_MODEL} · `], LIVE_RUN_MS);
     const untouched = isDeepStrictEqual(await page.evaluate(panelSnapshot), first) && (await page.textContent('#run-status')) === firstStatus;
     const awayName = "a run's events land in its own tab: the tab shown meanwhile is left as it was";
     check('live', awayName, held && ended && untouched, `held ${held}; ended ${ended}`);
@@ -2579,6 +2712,9 @@ async function liveFailure(url) {
     const readsStopped = stopped.length > 0 && stopped.every(([empty, name]) => !empty && name.endsWith(', stopped'));
     const stoppedName = "a failed run's unfinished nodes look and read as stopped, not as empty";
     check('live', stoppedName, readsStopped, stopped.map(([, name]) => name).join(' | '));
+    const failedLog = await page.evaluate(logOf);
+    const inView = !failedLog.open && !failedLog.spins && failedLog.folded === 'round 1 · extracting relevance' && isDeepStrictEqual(failedLog.after, [LIVE_FAILED_LINE]);
+    check('live', "a failed run's log stays folded at the step it reached, its spinner gone, and its error is in view below it", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
     const label = await page.textContent('#run-btn');
     check('live', 'after a failed run the next question starts a new run', label === 'run ⏎', label);
   });
@@ -3142,9 +3278,9 @@ async function liveStopAsk(url, server) {
     server.release();
     const ended = (await becomes(page, failedNode, 'answer-1', LIVE_RUN_MS)) && (await becomes(page, failedNode, 'answer-2', LIVE_RUN_MS));
     const names = await page.$$eval('.node.answer.failed', (els) => els.map((el) => el.getAttribute('aria-label')));
-    const said = await page.evaluate(lastTurnLines);
+    const said = (await page.evaluate(logOf)).after;
     const status = await page.textContent('#run-status');
-    const chatSays = said.some((text) => text.endsWith(STOPPED_ASK_TAIL));
+    const chatSays = said.includes(STOPPED_ASK_LINE);
     const stoppedAsks = ended && names.length === 2 && names.every((name) => name.endsWith(', stopped')) && chatSays && status === STOPPED_ASK && !(await page.evaluate(composer)).stop;
     const askName = 'stop during an ask over a finished tab cancels that ask; its answer node, its chat and the status say it stopped';
     check('live', askName, stoppedAsks, `${names.length} stopped; ${status}`);
@@ -3230,6 +3366,7 @@ async function live() {
     await introCounts('live', { url, sample: false }, liveIntro);
     await liveCutStream(url);
     await liveAnswers(url);
+    await liveLog(url);
     await liveAskAfterFailed(url);
     await liveTabs(url);
     await liveWhileGoing(url);
@@ -3259,7 +3396,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
