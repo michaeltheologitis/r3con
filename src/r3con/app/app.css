@@ -359,8 +359,6 @@ p { margin: 0; }
   text-underline-offset: 3px;
 }
 .ref:hover { text-decoration-color: var(--fg); }
-.records { display: flex; flex-direction: column; gap: 0.15em; }
-.rec { padding-left: 2ch; overflow-wrap: anywhere; }
 .code {
   margin: 0;
   padding: 0.7em 1.5ch;
@@ -372,6 +370,7 @@ p { margin: 0; }
   border-radius: 4px;
 }
 .code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.code.json > span { display: block; padding-left: var(--indent); text-indent: calc(-1 * var(--indent)); }
 
 /* ---- side column ---- */
 .side {

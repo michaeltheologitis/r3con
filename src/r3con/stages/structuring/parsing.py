@@ -462,7 +462,7 @@ def parse_documents(
     )
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
-    def one(i: int, _document: str) -> tuple[list[BaseModel], list[str]]:
+    def one(i: int, _document: str) -> tuple[BaseModel, list[str]]:
         _log.info("parse doc %d/%d", i + 1, len(documents))
         emit("parsing_started", doc_id=document_ids[i])
         parts = reader.read_in_parts(
@@ -481,22 +481,22 @@ def parse_documents(
                 **llm_kwargs,
             ),
         )
-        parses = [parse for parse, _ in parts]
+        merged, _ = _merge_with_source_docs(
+            [(i, parse) for parse, _ in parts], parse_cls
+        )
         provenance = combine_parts(ids for _, ids in parts)
         emit(
             "parsing_finished",
             doc_id=document_ids[i],
-            n_records=sum(
-                len(getattr(p, f)) for p in parses for f in parse_cls.model_fields
-            ),
+            n_records=sum(len(getattr(merged, f)) for f in parse_cls.model_fields),
+            parse=merged.model_dump(mode="json"),
             provenance=provenance,
         )
-        return parses, provenance
+        return merged, provenance
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(
-        [(i, parse) for i, (parses, _) in enumerate(per_doc) for parse in parses],
-        parse_cls,
+        [(i, parse) for i, (parse, _) in enumerate(per_doc)], parse_cls
     )
     counts = {f: len(v) for f, v in source_docs.items()}
     _log.info(

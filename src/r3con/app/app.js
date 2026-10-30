@@ -23,8 +23,7 @@
    * @typedef {{ files: File[], skipped: number, failed: string[] }} Picked
    */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
-  /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
-  /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
+  /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
   /** @typedef {{ summary_ids: number[], parse_ids: number[] }} Provenance */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
@@ -120,7 +119,7 @@
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
-   *   | { type: 'parsing_finished', doc_id: string, n_records: number, provenance: string[] }
+   *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
    *   | { type: 'reasoning_finished', answer: string, provenance: { summary_ids: string[], parse_ids: string[] } }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
@@ -243,68 +242,68 @@
  },
  "parsed": [
   {
-   "records": [
-    {
-     "field": "site_incident_reports",
-     "record": {
+   "parse": {
+    "site_incident_reports": [
+     {
       "site": "Northgate",
       "period": "Q3",
       "incident_count": 5,
       "contractor_code": "CT-118"
      }
-    }
-   ],
+    ],
+    "contractor_registry_entries": []
+   },
    "provenance": []
   },
   {
-   "records": [
-    {
-     "field": "site_incident_reports",
-     "record": {
+   "parse": {
+    "site_incident_reports": [
+     {
       "site": "Eastfield",
       "period": "Q3",
       "incident_count": 9,
       "contractor_code": "CT-204"
      }
-    }
-   ],
+    ],
+    "contractor_registry_entries": []
+   },
    "provenance": []
   },
   {
-   "records": [
-    {
-     "field": "site_incident_reports",
-     "record": {
+   "parse": {
+    "site_incident_reports": [
+     {
       "site": "Riverside",
       "period": "Q3",
       "incident_count": 6,
       "contractor_code": "CT-118"
      }
-    }
-   ],
+    ],
+    "contractor_registry_entries": []
+   },
    "provenance": []
   },
   {
-   "records": [
-    {
-     "field": "contractor_registry_entries",
-     "record": {
+   "parse": {
+    "site_incident_reports": [],
+    "contractor_registry_entries": [
+     {
       "contractor_code": "CT-118",
       "contractor_name": "Halloran Services Ltd"
-     }
-    },
-    {
-     "field": "contractor_registry_entries",
-     "record": {
+     },
+     {
       "contractor_code": "CT-204",
       "contractor_name": "Merrow Facilities Group"
      }
-    }
-   ],
+    ]
+   },
    "provenance": []
   },
   {
-   "records": [],
+   "parse": {
+    "site_incident_reports": [],
+    "contractor_registry_entries": []
+   },
    "provenance": []
   }
  ],
@@ -541,6 +540,8 @@
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
   const PREVIEW_CHARS = 20000;
+  const PREVIEW_LINES = 5000;
+  const JSON_INDENT = 2;
   const MAX_FILES = 40;
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
@@ -594,7 +595,7 @@
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
-  const ARIA_KIND = { doc: 'document', r1: 'round 1 relevance snippet', r2: 'round 2 relevance snippet', parsed: 'parsed records', schema: 'proposed schema' };
+  const ARIA_KIND = { doc: 'document', r1: 'round 1 relevance snippet', r2: 'round 2 relevance snippet', parsed: 'parsed structure', schema: 'proposed schema' };
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
@@ -914,9 +915,8 @@
     return [tokens !== null && `${fmtInt(tokens)} tokens`, usd !== null && fmtUsd(usd)].filter(Boolean);
   }
 
-  // A recorded or simulated parse holds its records; a live one, only how many there were.
   /** @param {Parse} parse */
-  const recordCount = (parse) => parse.records?.length ?? parse.n_records;
+  const hasRecords = (parse) => Object.values(parse.parse).some((records) => records.length > 0);
 
   // ---------- r3con app ----------
 
@@ -1122,7 +1122,7 @@
       text: `r3con's answer to “${question}” would appear here. The documents it cites are made up.`,
       provenance: {
         summary_ids: every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary)),
-        parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => recordCount(run.parsed[i]) > 0),
+        parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i])),
       },
     };
   }
@@ -1133,7 +1133,7 @@
     const order = range(n);
     /** @param {LoadedFile} f */
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
-    const records = files.map((f) => (f.text.trim() ? [{ field: 'excerpts', record: { source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) } }] : []));
+    const parses = files.map((f) => ({ excerpts: f.text.trim() ? [{ source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) }] : [] }));
     // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
     /** @param {number} j */
     const hasSummary = (j) => Boolean(summary(files[j]));
@@ -1146,7 +1146,7 @@
       r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]) })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: records.map((docRecords, i) => ({ records: docRecords, provenance: madeUp(i, docRecords.length > 0) })),
+      parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
       calls: null,
       totals: null,
       order: { r1: order, r2: order, parsed: order },
@@ -1739,28 +1739,22 @@
     return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
   }
 
+  // A block per line of the JSON, its newline kept so it copies as is, wrapping under its own indent.
+  /** @param {unknown} value */
+  function jsonBlock(value) {
+    const lines = JSON.stringify(value, null, JSON_INDENT).split(/(?<=\n)/);
+    /** @param {string} line */
+    const hanging = (line) => h('span', { style: `--indent: ${line.length - line.trimStart().length}ch` }, line);
+    return [
+      lines.length > PREVIEW_LINES ? h('div', { class: 'k' }, `first ${fmtInt(PREVIEW_LINES)} lines shown`) : null,
+      h('pre', { class: 'code wrap json' }, lines.slice(0, PREVIEW_LINES).map(hanging)),
+    ];
+  }
+
   /** @param {Run} run @param {string} id */
   function callMeta(run, id) {
     const call = run.calls?.[id];
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
-  }
-
-  /** @param {ParsedRecord[]} records */
-  function recordBlock(records) {
-    const block = h('div', { class: 'records' });
-    let field = null;
-    for (const { field: f, record } of records) {
-      if (f !== field) block.append(h('div', { class: 'k' }, f));
-      field = f;
-      const pairs = Object.entries(record).map(([k, v], i) => [
-        i ? '  ' : '',
-        h('span', { class: 'k' }, k),
-        ' ',
-        v === null ? h('span', { class: 'k' }, 'null') : String(v),
-      ]);
-      block.append(h('div', { class: 'rec' }, pairs));
-    }
-    return block;
   }
 
   /** @param {LoadedFile} file */
@@ -1822,10 +1816,9 @@
       ];
     }
     if (kind === 'parsed') {
-      const parse = run.parsed[d];
-      const count = recordCount(parse);
+      const filled = Object.entries(run.parsed[d].parse).filter(([, records]) => records.length > 0);
       return [
-        parse.records?.length ? recordBlock(parse.records) : textBlock(count ? plural(count, 'record') : '', 'no records'),
+        filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
         row('provenance', refs(cites(run, id))),
         row('filled from', refs(['schema'])),
@@ -1848,7 +1841,7 @@
     if (!id || !state.shown.nodes.has(id)) return;
     const [kind] = splitId(id);
     inspector.setAttribute('aria-label', nodeName(state.shown, id));
-    inspector.classList.toggle('wide', kind === 'schema');
+    inspector.classList.toggle('wide', kind === 'schema' || kind === 'parsed');
     fill(
       inspector,
       h(
@@ -2202,7 +2195,7 @@
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
     if (kind === 'r2') return every('r1', (j) => j !== i && run.r1[j].summary);
     if (kind === 'parsed' || kind === 'schema') return every('r2');
-    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => recordCount(run.parsed[j]))];
+    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
     return [];
   }
 
@@ -2261,7 +2254,7 @@
   function isVoid(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'r1' || kind === 'r2') return !run[kind][i].summary;
-    return kind === 'parsed' && !recordCount(run.parsed[i]);
+    return kind === 'parsed' && !hasRecords(run.parsed[i]);
   }
 
   /** @param {Run} run @param {string} id */
@@ -2269,8 +2262,7 @@
     const [kind, i] = splitId(id);
     if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'snippet ready' : 'nothing relevant'}`;
     if (kind === 'schema') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
-    const count = recordCount(run.parsed[i]);
-    return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}`;
+    return `${docLabel(run, i)} — ${hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed'}`;
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
@@ -2433,7 +2425,7 @@
         appear(tab, `parsed-${doc(event.doc_id)}`);
         break;
       case 'parsing_finished':
-        run.parsed[doc(event.doc_id)] = { n_records: event.n_records, provenance: docIndices(run, event.provenance) };
+        run.parsed[doc(event.doc_id)] = { parse: event.parse, provenance: docIndices(run, event.provenance) };
         settle(tab, narr, `parsed-${doc(event.doc_id)}`);
         break;
       case 'reasoning_finished':
