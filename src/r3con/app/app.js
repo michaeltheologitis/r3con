@@ -115,13 +115,14 @@
    * } ServerEvent
    */
   /** @typedef {{ node?: string | null, tab?: Tab | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
   /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
   /**
    * What differs between the page served by r3con app and the prototype.
    * @typedef {object} Mode
    * @property {string} intro
-   * @property {string} note Under the chat, where the run isn't real: none live.
+   * @property {string} note
    * @property {string} keysNote
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
@@ -579,7 +580,7 @@
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
-  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
+  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
   const ROUNDS = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
@@ -1138,19 +1139,20 @@
     return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
+  /** @param {boolean} simulated @param {Totals | null | undefined} totals */
+  const spendOf = (simulated, totals) => (simulated ? ['nothing was sent'] : spent(totals));
+
   /** @param {Run} run */
   function runSummary(run) {
-    const { model } = run.answers[0];
-    if (run.simulated) return `simulated run · ${model} · nothing was sent`;
-    return [run.source, model, ...spent(run.totals)].filter(Boolean).join(' · ');
+    const source = run.simulated ? 'simulated run' : run.source;
+    return [source, run.answers[0].model, ...spendOf(run.simulated, run.totals)].filter(Boolean).join(' · ');
   }
 
   // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live;
   // a live one also has the server's `id` for it.
   /** @param {Answer} ask */
   function askSummary({ source, model, totals }) {
-    const spend = source === 'simulated' ? ['nothing was sent'] : spent(totals);
-    return [`${source} ask over this run`, model, ...spend].join(' · ');
+    return [`${source} ask over this run`, model, ...spendOf(source === 'simulated', totals)].join(' · ');
   }
 
   // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
@@ -1945,29 +1947,30 @@
 
   let nextLog = 0;
 
-  // A run or an ask is told as a log, folded by default under one line: its latest step, then ready. What
-  // is said outside the log, the answer and anything gone wrong, stays in view.
-  /** @param {Tab} tab @param {HTMLElement} body @param {string} name @param {string} [first] */
-  function narrator(tab, body, name, first = '') {
-    const lines = h('div', { class: 'log-lines', id: `log-${nextLog++}`, hidden: true });
-    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': lines.id, 'aria-label': name, html: ICONS.chevron });
-    toggle.addEventListener('click', () => {
+  /** @param {Tab} tab @param {HTMLElement} body @param {string} [first] */
+  function narrator(tab, body, first = '') {
+    const id = `log-${nextLog++}`;
+    const lines = h('div', { class: 'log-lines', id, hidden: true, 'aria-live': 'off' });
+    const latest = h('span', { class: 't', id: `${id}-latest` }, first);
+    const asked = body.parentElement.querySelector('.line.user .t');
+    asked.id ||= `${id}-asked`;
+    const fold = () => {
       lines.hidden = !lines.hidden;
       toggle.ariaExpanded = String(!lines.hidden);
-    });
-    const spinner = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, '✻');
-    const latest = h('span', { class: 't' }, first);
-    body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, spinner, latest), lines));
+    };
+    const labels = `${asked.id} ${latest.id}`;
+    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: fold });
+    const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, '✻');
+    body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
     const named = new Map();
     /** @param {HTMLElement} parent @param {string} kind @param {Child} text @param {LineOptions} [opts] */
     const add = (parent, kind, text, opts) => {
       const el = line(kind, text, { ...opts, tab });
       parent.append(el);
-      scrollTranscript();
+      if (!parent.hidden) scrollTranscript();
       return el;
     };
-    // A main line is a step, and the log's folded line until the next.
     /** @param {string} kind @param {string} text @param {LineOptions} [opts] */
     const log = (kind, text, opts) => {
       if (kind === 'main') latest.textContent = text;
@@ -1987,12 +1990,11 @@
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
       /** @type {string | null} */
       stage: null,
-      /** @param {string} text */
-      phase(text) {
-        tabStatus(tab, `running · ${text}`);
-      },
-      done() {
-        spinner.remove();
+      /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
+      finish(text, tone) {
+        latest.textContent = text;
+        mark.className = tone;
+        mark.textContent = '●';
       },
     };
   }
@@ -2018,14 +2020,16 @@
   const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
   /** @param {string} text */
   const errorStatus = (text) => setStatus(...errorLine(text));
-  /** @param {Narrator} narr @param {Child} text */
-  const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
-  // A log ends on ready, the model and the cost, or the tokens where the cost is unknown.
   /** @param {Narrator} narr @param {string} model @param {boolean} simulated @param {Totals | null} totals */
-  function logReady(narr, model, simulated, totals) {
-    const spend = simulated ? ['nothing was sent'] : spent(totals).slice(-1);
-    narr.log('main', ['ready', model, ...spend].join(' · '));
-    narr.done();
+  function sayReady(narr, model, simulated, totals) {
+    // The cost alone, or the tokens where it is unknown, keeps the line short.
+    const spend = spendOf(simulated, totals).slice(-1);
+    narr.finish(['ready', model, ...spend].join(' · '), simulated ? 'flag' : 'ok');
+  }
+  /** @param {Narrator} narr @param {Ending} ending */
+  function sayEnding(narr, { outcome, error }) {
+    narr.finish(outcome, 'err');
+    if (error) narr.say('main', h('span', { class: 'err' }, error));
   }
   /** @param {Run} run */
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
@@ -2052,8 +2056,8 @@
   }
 
   // A job the page asked to stop ends as stopped; any other failure gives its error.
-  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event */
-  const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
+  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event @returns {Ending} */
+  const endingOf = (stopped, { stage, error }) => ({ outcome: inStage(stopped ? 'stopped' : 'failed', stage), error: stopped ? '' : error });
 
   function readyStatus() {
     if (state.shown.run) return;
@@ -2192,8 +2196,9 @@
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
 
   /** @param {Tab} tab @param {StageKind} kind */
-  function stageProgress(tab, kind) {
-    return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
+  function showProgress(tab, kind) {
+    const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
+    tabStatus(tab, `running · ${STAGE_PHASE[kind]}${progress}`);
   }
 
   /** @param {Tab} tab @param {Narrator} narr @param {StageKind} kind */
@@ -2204,11 +2209,11 @@
       r2: 'round 2 · extracting relevance',
       schema: STAGE_PHASE.schema,
       parsed: `parsing ${plural(tab.run.docs.length, 'document')}`,
-      answer: STAGE_OF.answer,
+      answer: STAGE_PHASE.answer,
     };
     narr.log('main', steps[kind]);
     narr.stage = STAGE_OF[kind];
-    narr.phase(stageProgress(tab, kind));
+    showProgress(tab, kind);
   }
 
   /** @param {Tab} tab @param {string} id */
@@ -2231,7 +2236,7 @@
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'summary ready' : 'nothing relevant'}`;
-    if (kind !== 'parsed') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
+    if (kind === 'schema') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
     const count = recordCount(run.parsed[i]);
     return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}`;
   }
@@ -2244,7 +2249,7 @@
     settleNode(tab, id, { empty: isVoid(run, id) });
     showCites(tab, id);
     narr.logAs(id, 'sub', settledLine(run, id), { node: id });
-    narr.phase(stageProgress(tab, kind));
+    showProgress(tab, kind);
   }
 
   // An answer's node settles, with solid lines from what it cites.
@@ -2266,21 +2271,20 @@
   /** @param {Tab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
     const { run } = tab;
-    logReady(narr, run.answers[0].model, run.simulated, run.totals);
+    sayReady(narr, run.answers[0].model, run.simulated, run.totals);
     tabStatus(tab, ...doneLine(run));
     rerenderIfOpen(tab, RUN_ANSWER);
   }
 
   // Marks every stage node still working as stopped, while a document being read just settles; with no
   // answer, the next question starts a new run.
-  /** @param {Tab} tab @param {Narrator} narr @param {string} text */
-  function failRun(tab, narr, text) {
-    narr.done();
+  /** @param {Tab} tab @param {Narrator} narr @param {Ending} ending @param {string} [status] */
+  function failRun(tab, narr, ending, status = [ending.outcome, ending.error].filter(Boolean).join(' · ')) {
     for (const node of tab.nodes.values()) {
       if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: node.kind !== 'doc' });
     }
-    sayError(narr, text);
-    tabStatus(tab, ...errorLine(text));
+    sayEnding(narr, ending);
+    tabStatus(tab, ...errorLine(status));
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
@@ -2301,13 +2305,13 @@
       if (run.simulated) {
         narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
       }
-      narr.phase(`reading · 0 of ${n}`);
+      tabStatus(tab, `running · reading · 0 of ${n}`);
     });
     /** @param {number} i */
     const docAt = (i) => docId(run.docs[i]);
     t = stage(at, t, range(n), n, (i) => markWorking(tab, docAt(i)), (i, rank) => {
       settleNode(tab, docAt(i));
-      narr.phase(`reading · ${rank + 1} of ${n}`);
+      tabStatus(tab, `running · reading · ${rank + 1} of ${n}`);
     }, PACE.read);
     at(t, () => {
       narr.log('sub', `read ${plural(n, 'file')} · ${fmtBytes(textBytes(run.docs))}`);
@@ -2410,7 +2414,7 @@
         lightRun(tab);
         break;
       case 'run_failed':
-        failRun(tab, narr, endLine(stopping(tab), event));
+        failRun(tab, narr, endingOf(stopping(tab), event));
         break;
     }
   }
@@ -2439,7 +2443,8 @@
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
     } catch (error) {
-      failRun(tab, narr, explain(error, /** @type {Error} */ (error).message, 'the live run stopped'));
+      const said = explain(error, /** @type {Error} */ (error).message, 'the live run stopped');
+      failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
     } finally {
       closeStream(stream);
     }
@@ -2452,18 +2457,16 @@
     /** @type {Answer} */
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id), 'ask log');
-    narr.log('main', `asking · ${model}`);
+    const narr = askTurn(tab, question, model, id);
     const stream = openStream('ask', tab, ask);
     // An ask leaves the status alone, but its stop was asked for there: once that has ended, the status
     // says so until it next changes, and the tab keeps its run's own line.
     /** @type {string | null} */
     let stopped = null;
-    /** @param {string} text */
-    const failed = (text) => {
-      narr.done();
+    /** @param {Ending} ending */
+    const failed = (ending) => {
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
-      sayError(narr, text);
+      sayEnding(narr, ending);
     };
     /** @param {ServerEvent} event */
     const onEvent = (event) => {
@@ -2474,13 +2477,13 @@
       }
       if (event.type === 'ask_finished') {
         ask.totals = totalsOf(event);
-        logReady(narr, model, false, ask.totals);
+        sayReady(narr, model, false, ask.totals);
         rerenderIfOpen(tab, id);
       }
       if (event.type === 'ask_failed') {
-        const end = endLine(stream.stopping, event);
-        failed(end);
-        if (stream.stopping) stopped = `ask ${end}`;
+        const ending = endingOf(stream.stopping, event);
+        failed(ending);
+        if (stream.stopping) stopped = `ask ${ending.outcome}`;
       }
     };
     try {
@@ -2488,7 +2491,7 @@
       jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
-      failed(explain(error, /** @type {Error} */ (error).message, 'the ask stopped'));
+      failed({ outcome: 'failed', error: explain(error, /** @type {Error} */ (error).message, 'the ask stopped') });
     } finally {
       closeStream(stream);
       if (stopped && tab === state.shown && !stopping(tab)) errorStatus(stopped);
@@ -2507,8 +2510,8 @@
     tab.drawing.style.setProperty('--context-fade', String(Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length)));
     tab.turn.replaceChildren();
     tab.userMoved = false;
-    const narr = (tab.narr = narrator(tab, tab.turn, 'run log', 'starting'));
-    narr.phase('starting');
+    const narr = (tab.narr = narrator(tab, tab.turn, 'starting'));
+    tabStatus(tab, 'running · starting');
     syncDocNodes(tab, { at, animate: true, replan: true });
     mode.play(tab, narr);
     updateComposer();
@@ -2529,6 +2532,13 @@
 
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
+
+  /** @param {Tab} tab @param {string} question @param {string} model @param {string} id */
+  function askTurn(tab, question, model, id) {
+    const narr = narrator(tab, addTurn(tab, question, id));
+    narr.log('main', `asking · ${model}`);
+    return narr;
+  }
 
   /** @param {Tab} tab @param {Answer} ask */
   function addAsk(tab, ask) {
@@ -2560,10 +2570,9 @@
     /** @type {Answer} */
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id), 'ask log');
-    narr.log('main', `asking · ${model}`);
+    const narr = askTurn(tab, question, model, id);
     showAnswer(tab, narr, id);
-    logReady(narr, model, ask.source === 'simulated', ask.totals);
+    sayReady(narr, model, ask.source === 'simulated', ask.totals);
     lightLanded(tab, id);
   }
 
@@ -2680,7 +2689,9 @@
     tab.button.remove();
     tab.close.remove();
     for (const turn of transcript.querySelectorAll(`.turn[data-tab="${tab.id}"]`)) {
-      for (const button of turn.querySelectorAll('button')) button.disabled = true;
+      // Only what leads to the closed tab: its logs can still be read.
+      const links = /** @type {NodeListOf<HTMLButtonElement>} */ (turn.querySelectorAll('button[data-tab]'));
+      for (const button of links) button.disabled = true;
       const marker = turn.querySelector('.marker');
       marker.removeAttribute('aria-label');
       marker.textContent = `tab ${tab.id} · closed`;
@@ -3469,7 +3480,7 @@
     // It stops where it is, as a live run does once its call in flight is back.
     stop(tab) {
       cancelTimers(tab);
-      failRun(tab, tab.narr, inStage('stopped', tab.narr.stage));
+      failRun(tab, tab.narr, { outcome: inStage('stopped', tab.narr.stage), error: '' });
     },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
