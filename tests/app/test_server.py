@@ -5,7 +5,6 @@ import re
 import socket
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +19,7 @@ from r3con import r3con
 from r3con.app.server import ServerState, _server, create_app, listen, serve
 from r3con.r3con import read_documents
 from tests.documents import CORRUPT_DOCX, write_docx, write_pdf
+from tests.fakes import GATE_TIMEOUT_SECONDS, FakeLLM
 
 litellm.suppress_debug_info = True
 
@@ -29,7 +29,6 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MEMOS = Path(__file__).resolve().parents[2] / "examples" / "memos"
 APP_DIR = Path(__file__).resolve().parents[2] / "src" / "r3con" / "app"
-GATE_TIMEOUT_SECONDS = 10
 LONG_RETRY_AFTER_SECONDS = 60
 # Far below GATE_TIMEOUT_SECONDS, which ends a held call by itself.
 STILL_WAITING_SECONDS = 0.5
@@ -68,7 +67,6 @@ RUN_EVENTS = [
     "run_finished",
 ]
 ASK_EVENTS = ["ask_started", "reasoning_started", "reasoning_finished", "ask_finished"]
-USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
 SCHEMA_REPLY = """Thought: one row per site.
 <schema>
 class Row(BaseModel):
@@ -78,71 +76,28 @@ class Row(BaseModel):
 class Parse(BaseModel):
     rows: list[Row]
 </schema>"""
-# Each reply by the name of the structure its request asks for; "schema" asks for none.
-REPLIES = {
-    "schema": SCHEMA_REPLY,
-    "RelevanceSummary": json.dumps({"summary": "A site memo.", "provenance_ids": []}),
-    "ParseReply": json.dumps(
-        {"parse": {"rows": [{"site": "Northgate"}]}, "provenance_ids": []}
-    ),
-    "ReasoningAnswer": json.dumps(
-        {
-            "answer": "Northgate",
-            "provenance_ids": {"summary_ids": [], "parse_ids": []},
-        }
-    ),
+ANSWER = {
+    "answer": "Northgate",
+    "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
 
 
-def opened() -> threading.Event:
-    gate = threading.Event()
-    gate.set()
-    return gate
-
-
-@dataclass
-class FakeModel:
-    """A ``completion=`` that answers r3con's requests as a model would, with
-    ``replies``, through litellm's own mock, and keeps them. Each request waits at
-    ``gate``; a request for the reply named ``fail_on`` raises ``error`` instead of
-    being answered."""
-
-    gate: threading.Event = field(default_factory=opened)
-    fail_on: str | None = None
-    error: Exception = field(default_factory=lambda: RuntimeError("the model is down"))
-    replies: dict[str, str] = field(default_factory=lambda: dict(REPLIES))
-    requests: list[dict[str, Any]] = field(default_factory=list)
-    called: threading.Event = field(default_factory=threading.Event)
-
-    def __call__(self, **request: Any) -> Any:
-        self.requests.append(request)
-        self.called.set()
-        self.gate.wait(GATE_TIMEOUT_SECONDS)
-        reply = request.get("response_format", {}).get("json_schema", {})
-        name = reply.get("name", "schema")
-        if name == self.fail_on:
-            raise self.error
-        choice = {
-            "index": 0,
-            "finish_reason": "stop",
-            "message": {"content": self.replies[name]},
-        }
-        return litellm.completion(
-            **request, mock_response={"choices": [choice], "usage": USAGE}
-        )
+@pytest.fixture
+def llm() -> FakeLLM:
+    """A model that answers every stage, so that a run or an ask over it finishes."""
+    return FakeLLM().answers(
+        relevance="A site memo.",
+        schema=SCHEMA_REPLY,
+        parsing={"rows": [{"site": "Northgate"}]},
+        reasoning=ANSWER,
+    )
 
 
 @pytest.fixture
-def llm() -> FakeModel:
-    return FakeModel()
-
-
-@pytest.fixture
-def held_llm() -> FakeModel:
-    """A fake model that holds every request until its gate opens."""
-    model = FakeModel()
-    model.gate.clear()
-    return model
+def held_llm(llm: FakeLLM) -> FakeLLM:
+    """``llm``, holding every request until its gate opens."""
+    llm.gate.clear()
+    return llm
 
 
 @pytest.fixture
@@ -156,14 +111,14 @@ def logs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
-def client_for(model: FakeModel, logs_dir: Path, **options: Any) -> TestClient:
+def client_for(model: FakeLLM, logs_dir: Path, **options: Any) -> TestClient:
     state = ServerState(logs_dir=logs_dir, completion=model)
     app = create_app(token=TOKEN, port=PORT, state=state, **options)
     return TestClient(app, base_url=BASE_URL, headers=AUTH)
 
 
 @pytest.fixture
-def client(llm: FakeModel, logs_dir: Path) -> Iterator[TestClient]:
+def client(llm: FakeLLM, logs_dir: Path) -> Iterator[TestClient]:
     with client_for(llm, logs_dir) as client:
         yield client
 
@@ -221,7 +176,7 @@ def text_of(client: TestClient, path: Path) -> httpx2.Response:
     )
 
 
-def transport(llm: FakeModel) -> list[dict[str, str]]:
+def transport(llm: FakeLLM) -> list[dict[str, str]]:
     """The key and endpoint each request was sent with."""
     return [
         {name: call[name] for name in ("api_key", "api_base") if name in call}
@@ -257,7 +212,7 @@ def http_client(url: str) -> httpx2.Client:
 
 
 def shut_down_with_a_stream_open(
-    url: str, model: FakeModel, shut_down: Callable[[], None]
+    url: str, model: FakeLLM, shut_down: Callable[[], None]
 ) -> tuple[str, dict[str, Any]]:
     """Over a real connection: start a run and read its stream's first event; once
     ``model`` holds its first call, call ``shut_down``, and read on until the server's
@@ -433,7 +388,7 @@ def test_keys_say_which_providers_have_one_and_never_what_it_is(
 )
 def test_a_stored_key_reaches_every_call_for_its_providers_model(
     client: TestClient,
-    llm: FakeModel,
+    llm: FakeLLM,
     stored: dict[str, str],
     model_name: str,
     sent: dict[str, str],
@@ -444,7 +399,7 @@ def test_a_stored_key_reaches_every_call_for_its_providers_model(
 
 
 def test_a_name_litellm_cannot_place_is_sent_to_other_which_litellm_then_refuses(
-    client: TestClient, llm: FakeModel
+    client: TestClient, llm: FakeLLM
 ):
     client.post("/api/keys", json=OTHER)
     last = run_events(client, start_run(client, "qwen3-32b"))[-1]
@@ -457,34 +412,32 @@ def test_a_name_litellm_cannot_place_is_sent_to_other_which_litellm_then_refuses
 
 
 def test_a_pasted_key_and_endpoint_are_used_and_masked_without_their_whitespace(
-    client: TestClient, llm: FakeModel
+    client: TestClient, llm: FakeLLM
 ):
     client.post("/api/keys", json={"provider": "openai", "key": f"{OPENAI_KEY}\n"})
     client.post("/api/keys", json={**OTHER, "endpoint": f" {ENDPOINT}\n"})
     assert client.get("/api/keys").json()["other"]["endpoint"] == ENDPOINT
-    llm.fail_on = "ReasoningAnswer"
-    llm.error = RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}.")
+    llm.answers(reasoning=RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}."))
     last = run_events(client, start_run(client))[-1]
     assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
     assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
-    llm.fail_on = None
+    llm.answers(reasoning=ANSWER)
     llm.requests.clear()
     finished_run(client, "hosted_vllm/qwen")
     assert {call["api_base"] for call in llm.requests} == {ENDPOINT}
 
 
 def test_a_placeholder_key_too_short_to_be_a_secret_is_not_masked(
-    client: TestClient, llm: FakeModel
+    client: TestClient, llm: FakeLLM
 ):
     client.post("/api/keys", json={**OTHER, "key": "EMPTY"})
-    llm.fail_on = "RelevanceSummary"
-    llm.error = RuntimeError("The model sent an EMPTY reply.")
+    llm.answers(relevance=RuntimeError("The model sent an EMPTY reply."))
     last = run_events(client, start_run(client, "hosted_vllm/qwen"))[-1]
     assert last["error"] == "RuntimeError: The model sent an EMPTY reply."
 
 
 def test_with_a_keyless_other_a_bare_openai_model_never_reaches_its_endpoint(
-    client: TestClient, llm: FakeModel, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
     client.post("/api/keys", json=KEYLESS_OTHER)
@@ -511,7 +464,7 @@ def test_a_stored_key_is_in_no_response_event_or_file(
 @pytest.mark.parametrize("held", ["stored", "environment"])
 def test_a_key_a_provider_quotes_in_its_error_is_masked_in_the_event_and_the_log(
     client: TestClient,
-    llm: FakeModel,
+    llm: FakeLLM,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     held: str,
@@ -522,8 +475,7 @@ def test_a_key_a_provider_quotes_in_its_error_is_masked_in_the_event_and_the_log
     else:
         monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
         key = ENVIRONMENT_KEY
-    llm.fail_on = "RelevanceSummary"
-    llm.error = RuntimeError(f"Incorrect API key provided: {key}.")
+    llm.answers(relevance=RuntimeError(f"Incorrect API key provided: {key}."))
     with caplog.at_level(logging.ERROR, logger="r3con.app"):
         last = run_events(client, start_run(client))[-1]
     assert last["type"] == "run_failed"
@@ -554,9 +506,7 @@ def test_an_ask_over_a_finished_run_streams_its_own_events(client: TestClient):
     assert Path(events[-1]["ask_dir"]).parent == run_dir / "asks"
 
 
-def test_an_ask_over_a_run_still_running_is_refused(
-    held_llm: FakeModel, logs_dir: Path
-):
+def test_an_ask_over_a_run_still_running_is_refused(held_llm: FakeLLM, logs_dir: Path):
     with client_for(held_llm, logs_dir) as client:
         run_id = start_run(client)
         assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
@@ -568,20 +518,20 @@ def test_an_ask_over_a_run_still_running_is_refused(
 
 
 def test_an_ask_over_a_run_that_failed_in_reasoning_is_answered(
-    client: TestClient, llm: FakeModel
+    client: TestClient, llm: FakeLLM
 ):
-    llm.fail_on = "ReasoningAnswer"
+    llm.answers(reasoning=RuntimeError("the model is down"))
     run_id = start_run(client)
     last = run_events(client, run_id)[-1]
     assert (last["type"], last["stage"]) == ("run_failed", "reasoning")
-    llm.fail_on = None
+    llm.answers(reasoning=ANSWER)
     assert [event["type"] for event in ask_events(client, run_id)] == ASK_EVENTS
 
 
 def test_an_ask_over_a_run_that_failed_before_parsing_fails_saying_why(
-    client: TestClient, llm: FakeModel
+    client: TestClient, llm: FakeLLM
 ):
-    llm.fail_on = "RelevanceSummary"
+    llm.answers(relevance=RuntimeError("the model is down"))
     run_id = start_run(client)
     assert run_events(client, run_id)[-1]["stage"] == "relevance"
     events = ask_events(client, run_id)
@@ -592,7 +542,7 @@ def test_an_ask_over_a_run_that_failed_before_parsing_fails_saying_why(
 
 
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(
-    client: TestClient, llm: FakeModel, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setattr("r3con.settings.REASONING_MAX_TURNS", 0)
     run_id = start_run(client)
@@ -623,7 +573,7 @@ def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_aske
     ],
 )
 def test_a_run_body_that_is_not_valid_is_refused_with_what_is_wrong(
-    client: TestClient, llm: FakeModel, change: dict[str, Any], wrong: str
+    client: TestClient, llm: FakeLLM, change: dict[str, Any], wrong: str
 ):
     response = client.post("/api/runs", json={**run_body(), **change})
     assert response.status_code == 422
@@ -641,7 +591,7 @@ def test_a_body_that_is_not_json_is_refused(client: TestClient):
 # Streamed, the body has no Content-Length, so only reading it can find it too long.
 @pytest.mark.parametrize("streamed", [False, True], ids=["sized", "streamed"])
 def test_a_body_over_the_limit_is_refused(
-    llm: FakeModel, logs_dir: Path, path: str, streamed: bool
+    llm: FakeLLM, logs_dir: Path, path: str, streamed: bool
 ):
     body = {"question": QUESTION, "model": MODEL, "documents": ["x" * 1_001]}
     content = json.dumps(body).encode()
@@ -808,7 +758,7 @@ def test_a_run_or_ask_this_server_did_not_start_is_not_found(
 
 @pytest.mark.usefixtures("one_call_at_a_time")
 def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_failed(
-    held_llm: FakeModel, logs_dir: Path, caplog: pytest.LogCaptureFixture
+    held_llm: FakeLLM, logs_dir: Path, caplog: pytest.LogCaptureFixture
 ):
     with (
         caplog.at_level(logging.INFO, logger="r3con.app"),
@@ -832,23 +782,22 @@ def test_a_cancelled_run_sends_no_further_call_and_its_stream_ends_with_run_fail
 
 
 def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_failed(
-    held_llm: FakeModel, logs_dir: Path
+    llm: FakeLLM, logs_dir: Path
 ):
-    held_llm.gate.set()
-    with client_for(held_llm, logs_dir) as client:
+    with client_for(llm, logs_dir) as client:
         run_id = finished_run(client)
-        held_llm.gate.clear()
-        held_llm.called.clear()
+        llm.gate.clear()
+        llm.called.clear()
         # A reply that does not fit, which the ask would send again.
-        held_llm.replies["ReasoningAnswer"] = "not an answer"
-        sent = len(held_llm.requests)
+        llm.answers(reasoning="not an answer")
+        sent = len(llm.requests)
         ask_id = client.post(f"/api/runs/{run_id}/asks", json=ASK).json()["ask_id"]
-        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        assert llm.called.wait(GATE_TIMEOUT_SECONDS)
         response = client.post(f"/api/asks/{ask_id}/cancel")
-        held_llm.gate.set()
+        llm.gate.set()
         last = events_of(client, f"/api/asks/{ask_id}/events")[-1]
     assert response.status_code == 202
-    assert len(held_llm.requests) == sent + 1
+    assert len(llm.requests) == sent + 1
     assert (last["type"], last["stage"]) == ("ask_failed", "reasoning")
     assert last["error"].startswith("Cancelled: ")
 
@@ -856,7 +805,7 @@ def test_a_cancelled_ask_sends_no_further_call_and_its_stream_ends_with_ask_fail
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_serve_streams_a_runs_events_as_they_happen_and_stops(
-    held_llm: FakeModel, logs_dir: Path
+    held_llm: FakeLLM, logs_dir: Path
 ):
     url, stop = serve(logs_dir=logs_dir, completion=held_llm)
     try:
@@ -874,7 +823,7 @@ def test_serve_streams_a_runs_events_as_they_happen_and_stops(
 @pytest.mark.allow_hosts(["127.0.0.1"])
 @pytest.mark.usefixtures("one_call_at_a_time")
 def test_stop_waits_for_a_run_on_a_held_call_and_returns_once_it_has_ended(
-    held_llm: FakeModel, logs_dir: Path
+    held_llm: FakeLLM, logs_dir: Path
 ):
     url, stop = serve(logs_dir=logs_dir, completion=held_llm)
     stopping = threading.Thread(target=stop)
@@ -895,7 +844,7 @@ def test_stop_waits_for_a_run_on_a_held_call_and_returns_once_it_has_ended(
 @pytest.mark.allow_hosts(["127.0.0.1"])
 @pytest.mark.usefixtures("one_call_at_a_time")
 def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly(
-    held_llm: FakeModel,
+    held_llm: FakeLLM,
     logs_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -926,7 +875,7 @@ def test_a_forced_exit_ends_the_wait_at_once_and_the_run_left_going_ends_cleanly
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_a_run_posted_once_the_server_is_stopping_is_refused_and_starts_nothing(
-    llm: FakeModel, logs_dir: Path
+    llm: FakeLLM, logs_dir: Path
 ):
     listener = listen(0)
     server, url = _server(listener, logs_dir, llm)
