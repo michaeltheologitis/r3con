@@ -23,6 +23,14 @@ opened URL's fragment, ``#token=...``.
   ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
   scan, a file with no text or one that can't be read, as the server's log then says.
   The page sends each PDF and Word file it is given here, and reads other files itself.
+- ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body, answers
+  ``{files: [{name, size, text}], skipped}``: the entries a folder walk of
+  ``r3con.read_documents`` would read, each named by its path in the zip and read as
+  that walk reads a file, sorted by path, its text ``""`` if it has none; and how many
+  file entries it left out (hidden, under ``__MACOSX/``, Office lock files, other
+  suffixes, nested zips, which are not opened). A zip that is corrupt, encrypted, of
+  more than ``MAX_ZIP_ENTRIES`` entries, or whose documents unzip to more than
+  ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
@@ -58,6 +66,7 @@ import contextlib
 import hmac
 import io
 import json
+import lzma
 import os
 import secrets
 import signal
@@ -65,6 +74,8 @@ import socket
 import threading
 import time
 import webbrowser
+import zipfile
+import zlib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -120,6 +131,27 @@ LOGS_DIR = platformdirs.user_data_path("r3con") / "runs"
 TOKEN_BYTES = 32
 ID_BYTES = 8
 MAX_BODY_BYTES = 64 * 1024 * 1024
+# A dropped zip is outside input: these bound what unpacking one can cost.
+MAX_ZIP_ENTRIES = 1_000
+MAX_ZIP_MEGABYTES = 100
+MAX_ZIP_BYTES = MAX_ZIP_MEGABYTES * 1024 * 1024
+# Where macOS's Finder puts each file's metadata in a zip it makes.
+MACOS_METADATA_FOLDER = "__MACOSX"
+ZIP_ENCRYPTED_FLAG = 0x1
+# What zipfile raises, opening a zip or reading an entry, for one it can't read.
+UNREADABLE_ZIP_ERRORS = (
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+    OSError,
+    EOFError,
+    ValueError,
+    NotImplementedError,
+)
+UNREADABLE_ZIP = "it's corrupt, or not a zip"
+ENCRYPTED_ZIP = "it's encrypted"
+TOO_MANY_ENTRIES = f"it holds more than {MAX_ZIP_ENTRIES:,} entries"
+TOO_MANY_BYTES = f"its documents unzip to more than {MAX_ZIP_MEGABYTES} MB"
 SHUTDOWN_GRACE_SECONDS = 1
 WORKERS_EXIT_SECONDS = 60
 WORKER_POLL_SECONDS = 0.1
@@ -403,6 +435,76 @@ async def document_text(request: Request) -> Response:
     return JSONResponse({"text": text})
 
 
+def _zip_reads(entry: zipfile.ZipInfo) -> bool:
+    """Whether a folder walk of ``r3con.read_documents`` would read ``entry``: a file,
+    with no hidden part in its path and none of ``__MACOSX``, not Office's lock file,
+    and with a suffix the walk reads, which a nested zip's is not."""
+    *folders, name = entry.filename.split("/")
+    return (
+        not entry.is_dir()
+        and MACOS_METADATA_FOLDER not in folders
+        and not any(part.startswith(".") for part in [*folders, name])
+        and not name.startswith(r3con._LOCK_FILE_PREFIX)
+        and name.lower().endswith(tuple(r3con.TEXT_SUFFIXES))
+    )
+
+
+def _entry_bytes(archive: zipfile.ZipFile, entry: zipfile.ZipInfo, room: int) -> bytes:
+    """``entry``'s bytes, read no further than ``room`` whatever size the zip claims."""
+    with archive.open(entry) as file:
+        data = file.read(room + 1)
+    if len(data) > room:
+        raise HTTPException(422, TOO_MANY_BYTES)
+    return data
+
+
+def _entry_text(name: str, data: bytes) -> str:
+    """The text of a file called ``name`` holding ``data``, as ``r3con.read_documents``
+    reads one: extracted, or read as UTF-8 replacing undecodable bytes."""
+    extract = r3con._extractor(name)
+    if extract is not None:
+        return extract(name, io.BytesIO(data))
+    return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="replace").read()
+
+
+def _unpack(name: str, body: bytes) -> dict[str, Any]:
+    with zipfile.ZipFile(io.BytesIO(body)) as archive:
+        entries = archive.infolist()
+        if len(entries) > MAX_ZIP_ENTRIES:
+            raise HTTPException(422, TOO_MANY_ENTRIES)
+        read = sorted(filter(_zip_reads, entries), key=lambda entry: entry.filename)
+        skipped = sum(not entry.is_dir() for entry in entries) - len(read)
+        if any(entry.flag_bits & ZIP_ENCRYPTED_FLAG for entry in read):
+            raise HTTPException(422, ENCRYPTED_ZIP)
+        # What the zip claims first; each read is then bounded, since a claim can lie.
+        if sum(entry.file_size for entry in read) > MAX_ZIP_BYTES:
+            raise HTTPException(422, TOO_MANY_BYTES)
+        files: list[dict[str, Any]] = []
+        room = MAX_ZIP_BYTES
+        for entry in read:
+            data = _entry_bytes(archive, entry, room)
+            room -= len(data)
+            text = _entry_text(f"{name}/{entry.filename}", data)
+            files.append({"name": entry.filename, "size": len(data), "text": text})
+    return {"files": files, "skipped": skipped}
+
+
+def _unzipped(name: str, body: bytes) -> dict[str, Any]:
+    """What ``POST /api/documents/zip`` answers for the zip ``body``, called ``name``."""
+    try:
+        return _unpack(name, body)
+    except UNREADABLE_ZIP_ERRORS as error:
+        logger.warning("%s: not a readable zip (%s)", name, type(error).__name__)
+        raise HTTPException(422, UNREADABLE_ZIP) from None
+
+
+async def document_zip(request: Request) -> Response:
+    query = _valid(DocumentQuery.model_validate, dict(request.query_params))
+    body = await request.body()
+    # As in document_text: on the event loop, it would hold up every other request.
+    return JSONResponse(await run_in_threadpool(_unzipped, query.name, body))
+
+
 async def start_run(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, RunRequest.model_validate_json)
@@ -519,6 +621,7 @@ def create_app(
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
             Route("/api/documents/text", document_text, methods=["POST"]),
+            Route("/api/documents/zip", document_zip, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(

@@ -1,10 +1,10 @@
 // Checks the run panel in src/r3con/app/ (index.html, app.css, app.js) in headless Chromium: node tests/app/check.mjs
 // The live area serves it with tests/app/fake_server.py, through uv.
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { extname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -188,6 +188,17 @@ const PREVIEW_NOTE = 'first 20,000 characters shown';
 const PDF_PADDING = PREVIEW_CHARS + 5000;
 // The Markdown r3con makes of report.docx below.
 const WORD_TEXT = 'Incidents by site:\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |\n| Merrow | 3 |';
+const ZIPPED_TEXT = 'A memo that came in a zip.\n';
+// What memos.zip holds: a memo, a blank one, and four files r3con's folder walk leaves out.
+const ZIPPED_ENTRIES = {
+  'memos/': '',
+  'memos/01_zipped.txt': ZIPPED_TEXT,
+  'memos/02_blank.txt': '',
+  'memos/.DS_Store': 'x',
+  '__MACOSX/memos/._01_zipped.txt': 'x',
+  'memos/notes.py': "print('not a document')\n",
+  'memos/~$draft.docx': 'x',
+};
 // Every document the checks add, by name: the arguments its writer in tests/documents.py takes for it, so
 // that the checks and the tests make them one way. A PDF with no text makes a scan.
 const DOCUMENT_SPECS = {
@@ -196,10 +207,13 @@ const DOCUMENT_SPECS = {
   '03_padded.pdf': { text: PADDED_TEXT, padding: PDF_PADDING },
   'empty.docx': {},
   'report.docx': { blocks: ['Incidents by site:', [['Site', 'Incidents'], ['Halloran', '7'], ['Merrow', '3']]] },
+  'memos.zip': { entries: ZIPPED_ENTRIES },
+  'photos.zip': { entries: { 'photo.jpg': 'x' } },
 };
 const MIME_TYPES = {
   '.pdf': 'application/pdf',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  '.zip': 'application/zip',
 };
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF32LE_BOM = [0xff, 0xfe, 0x00, 0x00];
@@ -212,7 +226,12 @@ const WRITE_DOCUMENTS =
 const OLE2_START = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00];
 const NOT_TEXT = 'r3con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
 const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
-const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
+const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
+const UNREADABLE_ZIP = "Couldn't unzip it: it's corrupt, or not a zip.";
+const EMPTY_ZIP = 'It holds no text, PDF or Word (.docx) files.';
+const TOO_MANY_FILES = 'A tab takes 40 files at most.';
+// The page's MAX_FILES.
+const MAX_FILES = 40;
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
@@ -1108,12 +1127,12 @@ async function filesNotText() {
     const longUtf16 = utf16('utf16_long.txt', 'A Notepad note, saved as Unicode. '.repeat(LONG_UTF16_CHARS).slice(0, LONG_UTF16_CHARS), UTF16LE_BOM);
     const longText = memo('long.txt', 'A long memo. '.repeat(PREVIEW_CHARS).slice(0, PREVIEW_CHARS + 1));
     const texts = [memo('notes.log', 'A log line.\n'), longUtf16, longText];
-    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], oldWord(), ...texts]);
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), ...texts]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
-    const expected = `Not added: 01_memo.pdf, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
-    const name = 'the prototype refuses a PDF and a .docx, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
+    const expected = `Not added: 01_memo.pdf, memos.zip, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
+    const name = 'the prototype refuses a PDF, a .docx and a zip, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
     const added = isDeepStrictEqual(listed, ['remove long.txt', 'remove notes.log', 'remove utf16_long.txt']);
     check('files', name, added && error === expected, `${listed.join(', ')}; ${error}`);
 
@@ -2336,6 +2355,148 @@ async function tabFiles() {
   });
 }
 
+// ---------- drop: on the panel too, and folders and zips ----------
+
+// Drops `items` on the element with id `on`, and returns what the overlay said while they were over it and whether
+// it covered that element. An item is [name, text or { bytes }] for a file, or [name, items] for a folder. A
+// script's DataTransfer has no file system behind it, so webkitGetAsEntry is stubbed with entries that read as a
+// dropped folder's do, its reader handing them out in batches until one is empty, as Chromium's does.
+function dropItems({ on, items }) {
+  const BATCH = 2;
+  const file = (name, content) => new File([typeof content === 'string' ? content : new Uint8Array(content.bytes)], name);
+  const entry = (path, [name, content]) => {
+    const fullPath = `${path}/${name}`;
+    if (!Array.isArray(content)) return { isFile: true, isDirectory: false, name, fullPath, file: (done) => done(file(name, content)) };
+    const children = content.map((child) => entry(fullPath, child));
+    const createReader = () => {
+      let next = 0;
+      const readEntries = (done) => {
+        const batch = children.slice(next, next + BATCH);
+        next += BATCH;
+        done(batch);
+      };
+      return { readEntries };
+    };
+    return { isFile: false, isDirectory: true, name, fullPath, createReader };
+  };
+  const transfer = new DataTransfer();
+  for (const [name, content] of items) transfer.items.add(Array.isArray(content) ? new File([], name) : file(name, content));
+  const entries = items.map((item) => entry('', item));
+  Object.defineProperty(transfer, 'items', { value: entries.map((e) => ({ kind: 'file', webkitGetAsEntry: () => e })) });
+  const target = document.getElementById(on);
+  const drag = (type) => target.dispatchEvent(new DragEvent(type, { dataTransfer: transfer, bubbles: true, cancelable: true }));
+  drag('dragover');
+  const overlay = document.getElementById('drop-overlay');
+  const shown = getComputedStyle(overlay).display !== 'none';
+  const box = target.getBoundingClientRect();
+  const over = overlay.getBoundingClientRect();
+  const covers = shown && over.left <= box.left && over.right >= box.right && over.top <= box.top && over.bottom >= box.bottom;
+  drag('drop');
+  return { said: shown ? overlay.textContent : null, covers };
+}
+
+// A folder of documents, and of files r3con's folder walk leaves out: a hidden file, a .py, Word's lock file, and a
+// memo in a hidden folder. It has more entries than one batch, and a folder in it.
+const DROPPED_FOLDER = [
+  'reports',
+  [
+    ['01_summary.txt', 'A summary in a dropped folder.\n'],
+    ['.DS_Store', 'x'],
+    ['notes.py', "print('not a document')\n"],
+    ['~$draft.docx', 'x'],
+    ['q3', [['02_incidents.md', 'Incidents in Q3.\n'], ['.hidden', [['03_secret.txt', 'A memo in a hidden folder.\n']]]]],
+  ],
+];
+const LOOSE_FILE = ['loose.py', "print('dropped on its own')\n"];
+const FOLDER_SAID = '3 files added; 4 skipped.';
+const filesSaid = (page) => page.textContent('#files-said');
+
+async function dropArea() {
+  await withPage('drop', { sample: false }, async (page) => {
+    await page.click('#new-tab-btn');
+    await page.click('#tab-chat');
+    const over = await page.evaluate(dropItems, { on: 'panel', items: [['panel_memo.txt', 'A memo dropped on the panel.\n']] });
+    await removeButton(page, 'panel_memo.txt').waitFor();
+    const added = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), filesShown: await page.$eval('#files-pane', (el) => !el.hidden) };
+    const panelName = 'files dropped on the panel are added to the shown tab, as on the files pane, which then shows; the overlay covers the panel while they are over it';
+    const onPanel = over.said === DROP_ADDS && over.covers && isDeepStrictEqual(added, { names: ['panel_memo.txt'], docs: ['panel_memo.txt'], filesShown: true });
+    check('drop', panelName, onPanel, `${JSON.stringify(over)}; ${JSON.stringify(added)}`);
+
+    await page.evaluate(dropItems, { on: 'panel', items: [DROPPED_FOLDER, LOOSE_FILE] });
+    await removeButton(page, LOOSE_FILE[0]).waitFor();
+    const folder = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), chat: await lastChatLine(page), error: await filesError(page) };
+    const expected = {
+      names: ['panel_memo.txt', '01_summary.txt', '02_incidents.md', 'loose.py'],
+      said: FOLDER_SAID,
+      chat: "3 files added; 4 skipped: tab 2's next question runs over 4 documents.",
+      error: null,
+    };
+    const folderName =
+      "a folder dropped on the panel is read through every batch its reader gives, for only what r3con's folder walk reads: no hidden file or folder, no lock file, only text, PDF and Word; a file dropped beside it is taken as it is, and the files pane says how many were added and skipped";
+    check('drop', folderName, isDeepStrictEqual(folder, expected), JSON.stringify(folder));
+
+    await page.click('#new-tab-btn');
+    const many = Array.from({ length: MAX_FILES + 2 }, (_, i) => [`memo_${String(i).padStart(2, '0')}.txt`, `Memo ${i}.\n`]);
+    await page.evaluate(dropItems, { on: 'panel', items: [['many', many]] });
+    await removeButton(page, 'memo_39.txt').waitFor();
+    const capped = { count: (await page.evaluate(filesPane)).count, error: await filesError(page), said: await filesSaid(page) };
+    const cappedName = `a folder of more files than a tab takes adds the first ${MAX_FILES} by name, and says how many it left out`;
+    const cappedExpected = { count: String(MAX_FILES), error: `Not added: 2 files. ${TOO_MANY_FILES}`, said: `${MAX_FILES} files added.` };
+    check('drop', cappedName, isDeepStrictEqual(capped, cappedExpected), JSON.stringify(capped));
+
+    await showRunTab(page, 1);
+    await page.click('#tab-chat');
+    await send(page, NEW_QUESTION);
+    const overLocked = await page.evaluate(dropItems, { on: 'panel', items: [['late.txt', 'A late memo.\n'], DROPPED_FOLDER] });
+    const refused = { error: await filesError(page), names: (await page.evaluate(filesPane)).names, tabs: (await page.evaluate(tabRow)).length };
+    const lockedName = 'files and a folder dropped on the panel of a tab that has run are refused at once, unread, as the overlay over the panel says';
+    const lockedExpected = { error: `Not added: late.txt, reports. ${LOCKED_DROP}`, names: expected.names, tabs: 3 };
+    check('drop', lockedName, overLocked.said === DROP_LOCKED && isDeepStrictEqual(refused, lockedExpected), `${JSON.stringify(overLocked)}; ${JSON.stringify(refused)}`);
+  });
+
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-folder-'));
+  try {
+    const picked = join(dir, 'picked');
+    for (const [path, text] of [['01_memo.txt', 'A picked memo.\n'], ['.DS_Store', 'x'], ['notes.py', 'x'], ['.git/02_memo.txt', 'x']]) {
+      mkdirSync(dirname(join(picked, path)), { recursive: true });
+      writeFileSync(join(picked, path), text);
+    }
+    await withPage('drop', { sample: false }, async (page) => {
+      await page.click('#tab-files');
+      await page.setInputFiles('#folder-input', picked);
+      await removeButton(page, '01_memo.txt').waitFor();
+      const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page) };
+      const pickedName = "a folder picked is read as a dropped one is, for only what r3con's folder walk reads, and the files pane says how many it skipped";
+      check('drop', pickedName, isDeepStrictEqual(pane, { names: ['01_memo.txt'], said: '1 file added, in place of the 5 sample memos; 3 skipped.' }), JSON.stringify(pane));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  await withPage('drop', {}, async (page) => {
+    await page.evaluate(() => {
+      window.everDropping = false;
+      const frame = document.getElementById('frame');
+      new MutationObserver(() => (window.everDropping ||= frame.classList.contains('dropping'))).observe(frame, { attributes: true });
+    });
+    const before = await positionOf(page, 'r2-1');
+    await dragNode(page, 'r2-1', 60, 40);
+    const moved = !isDeepStrictEqual(before, await positionOf(page, 'r2-1'));
+    const textTaken = await page.evaluate(() => {
+      const transfer = new DataTransfer();
+      transfer.setData('text/plain', 'a dragged line');
+      const panel = document.getElementById('panel');
+      const over = new DragEvent('dragover', { dataTransfer: transfer, bubbles: true, cancelable: true });
+      panel.dispatchEvent(over);
+      panel.dispatchEvent(new DragEvent('drop', { dataTransfer: transfer, bubbles: true, cancelable: true }));
+      return over.defaultPrevented;
+    });
+    const after = { everDropping: await page.evaluate(() => window.everDropping), files: (await page.evaluate(filesPane)).count, chatShown: await page.$eval('#chat-pane', (el) => !el.hidden) };
+    const name = 'a node dragged in the panel, and text dragged over it, show no drop overlay and add nothing: only a drag of files is taken';
+    check('drop', name, moved && !textTaken && isDeepStrictEqual(after, { everDropping: false, files: String(SAMPLE_DOCS), chatShown: true }), `moved ${moved}; text taken ${textTaken}; ${JSON.stringify(after)}`);
+  });
+}
+
 // ---------- stop: the shown tab's run, in the prototype ----------
 
 // Some node reads as stopped, and every failed node does.
@@ -2942,6 +3103,31 @@ async function liveUnreadable(url) {
 }
 
 // A + tab's run and ask are sent its own files, and tab 1 keeps the sample memos, not run.
+// A zip dropped on the panel goes to r3con app, which unpacks it; its documents are added and run as dropped files are.
+async function liveZip(url) {
+  await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {
+    const posts = postsOf(page);
+    const zipped = (name) => [name, { bytes: [...documents[name].buffer] }];
+    await page.evaluate(dropItems, { on: 'panel', items: [zipped('memos.zip'), zipped('photos.zip'), ['broken.zip', 'not a zip']] });
+    await removeButton(page, 'memos/01_zipped.txt').waitFor();
+    const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page), posts };
+    const expected = {
+      names: ['memos/01_zipped.txt'],
+      said: '1 file added, in place of the 5 sample memos; 5 skipped.',
+      error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: memos/02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${EMPTY_ZIP}`,
+      posts: Array(3).fill('/api/documents/zip'),
+    };
+    const name =
+      "zips dropped on the panel are unpacked by r3con app: their documents are added by their paths in them, one with no text is refused, the files pane says how many were skipped, and a zip with no documents, or one r3con app can't open, is refused saying so";
+    check('live', name, isDeepStrictEqual(pane, expected), JSON.stringify(pane));
+    await page.click('#tab-chat');
+    const started = runPosted(page);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    check('live', "a run is sent the zipped memo's text", isDeepStrictEqual(sent, [ZIPPED_TEXT]), JSON.stringify(sent));
+  });
+}
+
 async function liveTabFiles(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = postsOf(page);
@@ -3450,6 +3636,7 @@ async function live() {
     await liveRemoveKeepsProblem(url);
     await liveTabFiles(url);
     await liveTrash(url);
+    await liveZip(url);
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
     await liveRefusalWhileChatting(url);
@@ -3463,7 +3650,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, gestures, scale, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

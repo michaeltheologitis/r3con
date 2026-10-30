@@ -12,6 +12,9 @@
   // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
   /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
+  /** @typedef {{ name: string, size: number } & FileRead} DocumentRead */
+  /** @typedef {{ docs: DocumentRead[], skipped: number }} Unpacked A file's documents, many for a zip, and how many it left out. */
+  /** @typedef {{ files: (File | null)[], skipped: number }} Picked Files to add, and how many their folders' walks left out. */
   /** @typedef {{ summary: string, provenance: number[] }} Summary */
   /** @typedef {{ field: string, record: Record<string, unknown> }} ParsedRecord */
   /** @typedef {{ records?: ParsedRecord[], n_records?: number, provenance: number[] }} Parse */
@@ -128,6 +131,7 @@
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File, noText: string) => Promise<FileRead>} extract
+   * @property {(file: File) => Promise<Unpacked>} unzip
    * @property {(question: string, files: LoadedFile[]) => Run} newRun
    * @property {(tab: Tab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
@@ -535,6 +539,9 @@
   const LOCK_FILE_PREFIX = '~$';
   // What r3con app extracts the text of: r3con's own list, which tests/app/test_server.py holds this to.
   const EXTRACTED_SUFFIXES = ['.pdf', '.docx'];
+  // What a folder walk reads: r3con's TEXT_SUFFIXES, which tests/app/test_server.py holds this to.
+  const FOLDER_SUFFIXES = ['.txt', '.md', '.markdown', '.rst', '.json', '.jsonl', '.csv', '.tsv', '.yaml', '.yml', '.html', '.xml', '.pdf', '.docx'];
+  const ZIP_SUFFIX = '.zip';
   const OLD_WORD_SUFFIX = '.doc';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
   const SNIFF_BYTES = 8000;
@@ -602,7 +609,9 @@
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const PROTOTYPE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with the question this run answered. Press run to watch it.`;
-  const NEEDS_APP = 'PDF and Word files need r3con app; this prototype reads only text files.';
+  const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
+  const EMPTY_ZIP = 'It holds no text, PDF or Word (.docx) files.';
+  const TOO_MANY_FILES = `A tab takes ${MAX_FILES} files at most.`;
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
   const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
@@ -669,7 +678,7 @@
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelOther = $('model-other', HTMLInputElement);
-  const side = $('side');
+  const frame = $('frame');
   const trash = $('trash');
 
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
@@ -2816,13 +2825,19 @@
     return { why: hasSuffix(file, OLD_WORD_SUFFIX) ? OLD_WORD : NOT_TEXT };
   }
 
+  /** @param {File} file @param {FileRead} read @returns {Unpacked} */
+  const oneDocument = (file, read) => ({ docs: [{ name: file.name, size: file.size, ...read }], skipped: 0 });
+
+  /** @param {File} file @returns {Promise<Unpacked>} */
+  async function readDocuments(file) {
+    return hasSuffix(file, ZIP_SUFFIX) ? mode.unzip(file) : oneDocument(file, await readFile(file));
+  }
+
   // A tab's batches are read and added one after another, so that each one's lines in the files pane stand.
-  /** @param {Iterable<File | null>} list @param {Tab} [tab] */
-  function addFiles(list, tab = state.shown) {
-    // Copied now: a file input's list empties once its value is reset.
-    const files = [...list];
+  /** @param {Picked} batch @param {Tab} [tab] */
+  function addFiles(batch, tab = state.shown) {
     tellFiles(tab, { filesError: '' });
-    tab.adding = tab.adding.then(() => addBatch(files, tab)).catch((error) => failedToAdd(tab, error));
+    tab.adding = tab.adding.then(() => addBatch(batch, tab)).catch((error) => failedToAdd(tab, error));
   }
 
   /** @param {Tab} tab @param {{ filesSaid?: string, filesError?: string }} lines */
@@ -2840,7 +2855,7 @@
   /** @param {string[]} names @param {string} why */
   const notAdded = (names, why) => (names.length ? `Not added: ${names.join(', ')}. ${why}` : '');
   /** @param {(File | null)[]} files */
-  const pickFiles = (files) => files.filter((f) => f && !f.name.startsWith('.') && !f.name.startsWith(LOCK_FILE_PREFIX)).slice(0, MAX_FILES).sort((a, b) => a.name.localeCompare(b.name));
+  const pickFiles = (files) => files.filter((f) => f && !f.name.startsWith('.') && !f.name.startsWith(LOCK_FILE_PREFIX)).sort((a, b) => a.name.localeCompare(b.name));
 
   /** @param {Tab} tab @param {unknown} error */
   function failedToAdd(tab, error) {
@@ -2848,37 +2863,44 @@
     addFilesError(tab, explain(error, "Couldn't add those files.", "couldn't add files"));
   }
 
-  /** @param {(File | null)[]} files @param {Tab} tab */
-  async function addBatch(files, tab) {
+  /** @param {Picked} batch @param {Tab} tab */
+  async function addBatch({ files, skipped }, tab) {
     // A tab closed, or run, since its files were picked takes none of them, so they aren't read.
     if (!state.tabs.includes(tab)) return;
-    const picked = pickFiles(files);
+    const pickable = pickFiles(files);
+    const picked = pickable.slice(0, MAX_FILES);
     if (tab.run) return addFilesError(tab, notAdded(picked.map((f) => f.name), RAN_FIRST) || RAN_FIRST);
     if (!picked.length) return addFilesError(tab, 'No files found there. Try picking the files themselves.');
     tellFiles(tab, { filesSaid: `Reading ${plural(picked.length, 'file')}…` });
-    const reads = await Promise.all(picked.map(async (file) => ({ file, ...(await readFile(file)) })));
+    const unpacked = await Promise.all(picked.map(readDocuments));
     if (!state.tabs.includes(tab)) return;
     /** @type {LoadedFile[]} */
     const read = [];
     /** @type {Map<string, string[]>} */
     const refused = new Map();
-    /** @param {string} why @param {File} file */
-    const refuse = (why, file) => refused.set(why, [...(refused.get(why) ?? []), file.name]);
-    for (const r of reads) {
-      if ('why' in r) refuse(r.why, r.file);
-      else if (tab.run) refuse(RAN_FIRST, r.file);
-      else read.push(loaded({ name: r.file.name, size: r.file.size, text: r.text, sample: false }));
+    /** @param {string} why @param {string} name */
+    const refuse = (why, name) => refused.set(why, [...(refused.get(why) ?? []), name]);
+    for (const r of unpacked.flatMap((u) => u.docs)) {
+      if ('why' in r) refuse(r.why, r.name);
+      else if (tab.run) refuse(RAN_FIRST, r.name);
+      else read.push(loaded({ name: r.name, size: r.size, text: r.text, sample: false }));
     }
     for (const [why, names] of refused) addFilesError(tab, notAdded(names, why));
-    if (!read.length) {
+    // Files added over the sample memos take the place of any that are left.
+    const kept = tab.files.filter((f) => !f.sample);
+    const fits = read.slice(0, MAX_FILES - kept.length);
+    const over = pickable.length - picked.length + read.length - fits.length;
+    if (over) addFilesError(tab, notAdded([plural(over, 'file')], TOO_MANY_FILES));
+    if (!fits.length) {
       tellFiles(tab, { filesSaid: '' });
       return;
     }
-    // Files added over the sample memos take the place of any that are left.
-    const replaced = tab.files.filter((f) => f.sample).length;
-    tab.files = [...tab.files.filter((f) => !f.sample), ...read].slice(0, MAX_FILES);
-    const added = `${plural(read.length, 'file')} added`;
-    filesChanged(tab, replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added);
+    const replaced = tab.files.length - kept.length;
+    tab.files = [...kept, ...fits];
+    const added = `${plural(fits.length, 'file')} added`;
+    const said = replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added;
+    const left = unpacked.reduce((sum, u) => sum + u.skipped, skipped);
+    filesChanged(tab, left ? `${said}; ${left} skipped` : said);
   }
 
   // The re-render drops the clicked button, and the focus with it.
@@ -2917,16 +2939,37 @@
     scrollTranscript();
   }
 
-  /** @param {DataTransfer} dataTransfer @returns {Promise<(File | null)[]>} */
+  // Whether r3con's folder walk reads the file at `path`, from its folder's own name: a document by its
+  // suffix, with no hidden part in its path below the folder, and not Office's lock file.
+  /** @param {string} path */
+  function walkReads(path) {
+    const parts = path.split('/').filter(Boolean).slice(1);
+    const name = parts.at(-1)?.toLowerCase() ?? '';
+    return !parts.some((part) => part.startsWith('.')) && !name.startsWith(LOCK_FILE_PREFIX) && FOLDER_SUFFIXES.some((suffix) => name.endsWith(suffix));
+  }
+
+  // A picked folder's files are taken as a dropped folder's are; picked files, as they are.
+  /** @param {File[]} files @returns {Picked} */
+  function fromFolders(files) {
+    const taken = files.filter((f) => !f.webkitRelativePath || walkReads(f.webkitRelativePath));
+    return { files: taken, skipped: files.length - taken.length };
+  }
+
+  // What is dropped is taken as it is; what is in a dropped folder, only as r3con's folder walk takes it.
+  /** @param {DataTransfer} dataTransfer @returns {Promise<Picked>} */
   async function filesFromDrop(dataTransfer) {
     const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
-    if (!entries.length) return [...dataTransfer.files];
-    /** @type {(File | null)[]} */
-    const files = [];
-    /** @param {FileSystemEntry} entry */
-    const walk = async (entry) => {
+    if (!entries.length) return { files: [...dataTransfer.files], skipped: 0 };
+    /** @type {Picked} */
+    const dropped = { files: [], skipped: 0 };
+    /** @param {FileSystemEntry} entry @param {boolean} inFolder */
+    const walk = async (entry, inFolder) => {
+      if (entry.isFile && inFolder && !walkReads(entry.fullPath)) {
+        dropped.skipped += 1;
+        return;
+      }
       if (entry.isFile) {
-        files.push(await new Promise((resolve) => /** @type {FileSystemFileEntry} */ (entry).file(resolve, () => resolve(null))));
+        dropped.files.push(await new Promise((resolve) => /** @type {FileSystemFileEntry} */ (entry).file(resolve, () => resolve(null))));
         return;
       }
       const reader = /** @type {FileSystemDirectoryEntry} */ (entry).createReader();
@@ -2934,11 +2977,11 @@
         /** @type {FileSystemEntry[]} */
         const batch = await new Promise((resolve) => reader.readEntries(resolve, () => resolve([])));
         if (!batch.length) return;
-        for (const child of batch) await walk(child);
+        for (const child of batch) await walk(child, true);
       }
     };
-    for (const entry of entries) await walk(entry);
-    return files;
+    for (const entry of entries) await walk(entry, false);
+    return dropped;
   }
 
   // ---------- theme ----------
@@ -3425,7 +3468,8 @@
     for (const id of ['file-input', 'folder-input']) {
       const input = $(id, HTMLInputElement);
       input.addEventListener('change', () => {
-        if (input.files.length) addFiles(input.files);
+        // Copied now: a file input's list empties once its value is reset.
+        if (input.files.length) addFiles(fromFolders([...input.files]));
         input.value = '';
       });
     }
@@ -3433,19 +3477,20 @@
 
     /** @param {DragEvent} e */
     const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
-    side.addEventListener('dragover', (e) => {
+    // The panel and the side column take files alike. A node dragged in the panel is pointer events, never a drag of files.
+    frame.addEventListener('dragover', (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
-      side.classList.add('dropping');
+      frame.classList.add('dropping');
     });
-    side.addEventListener('dragleave', (e) => {
-      if (!side.contains(/** @type {Node} */ (e.relatedTarget))) side.classList.remove('dropping');
+    frame.addEventListener('dragleave', (e) => {
+      if (!frame.contains(/** @type {Node} */ (e.relatedTarget))) frame.classList.remove('dropping');
     });
-    side.addEventListener('drop', async (e) => {
+    frame.addEventListener('drop', async (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      side.classList.remove('dropping');
+      frame.classList.remove('dropping');
       const tab = state.shown;
       showTab('files');
       // A tab that has run keeps its run's files, so what is dropped on it is refused unread.
@@ -3473,6 +3518,7 @@
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
     extract: async () => ({ why: NEEDS_APP }),
+    unzip: async (file) => oneDocument(file, { why: NEEDS_APP }),
     newRun: (question, files) => (replaysRecording(question, files) ? sampleRun() : simulatedRun(files, question, pickedModel())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
@@ -3503,6 +3549,19 @@
         return text.trim() ? { text } : { why: noText };
       } catch (error) {
         return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a file's text")}.` };
+      }
+    },
+    // A zipped document with no text is refused as a dropped one is, and so is a zip with none.
+    async unzip(file) {
+      try {
+        const unzipped = await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+        /** @type {{ files: { name: string, size: number, text: string }[], skipped: number }} */
+        const { files, skipped } = await unzipped.json();
+        if (!files.length) return { ...oneDocument(file, { why: EMPTY_ZIP }), skipped };
+        const noText = (/** @type {{ name: string }} */ f) => (hasSuffix(f, PDF_SUFFIX) ? NO_TEXT_LAYER : NO_TEXT);
+        return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noText(f) })), skipped };
+      } catch (error) {
+        return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }
     },
     newRun: (question, files) => liveRun(question, pickedModel(), files),
