@@ -414,7 +414,7 @@ p { margin: 0; }
   border-radius: 3px;
   overflow-wrap: anywhere;
 }
-.line.main, .line.answer, .line.spin { margin-top: 0.55em; }
+.line.main, .line.answer, .log { margin-top: 0.55em; }
 .line.sub { padding-left: 2ch; color: var(--dim); }
 .line.dim { color: var(--dim); }
 .line.link { cursor: pointer; }
@@ -432,11 +432,23 @@ p { margin: 0; }
 .marker:disabled { cursor: default; }
 .line.answer .g { color: var(--accent); }
 .line.answer .t { font-weight: 600; }
-.line.spin { color: var(--dim); }
-.line.spin .g { color: var(--accent); }
+.log { color: var(--dim); }
+.log-head { grid-template-columns: 2ch 2ch minmax(0, 1fr); }
+/* A 24px target, centred on the glyph column, that doesn't grow its line. */
+.log-toggle {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin: calc((1lh - 24px) / 2) 0 calc((1lh - 24px) / 2) calc(0.5ch - 12px);
+}
+.log-toggle svg { width: 10px; height: 10px; transition: rotate 0.15s; }
+.log-toggle[aria-expanded="true"] svg { rotate: 90deg; }
+.log-spin { color: var(--accent); }
+.log-lines { padding-left: 2ch; }
 
 .ask {
-  margin: 0 2ch;
+  margin: 0 2ch 0.7em;
   padding: 0.55em 1.5ch 0.45em;
   display: flex;
   flex-direction: column;
@@ -486,7 +498,7 @@ p { margin: 0; }
 #model-hint { align-self: flex-start; }
 .ask-actions { display: flex; gap: 2ch; margin-left: auto; }
 .run-btn { font-weight: 600; }
-.note { padding: 0.5em 2ch 0.7em; color: var(--dim); }
+.note { padding: 0 2ch 0.7em; color: var(--dim); }
 
 .files {
   flex: 1;

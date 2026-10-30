@@ -115,6 +115,7 @@
    * } ServerEvent
    */
   /** @typedef {{ node?: string | null, tab?: Tab | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
   /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
   /**
@@ -579,7 +580,7 @@
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
-  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'answering' };
+  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
   const ROUNDS = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
@@ -597,7 +598,6 @@
   // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
   const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
-  const LIVE_MODE_NOTE = 'live · r3con app on this computer';
   const LIVE_INTRO = `The ${plural(SAMPLE.docs.length, 'sample memo is', 'sample memos are')} loaded, with a question about them. Press run to run r3con on them, or add your own files.`;
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
@@ -614,6 +614,9 @@
   const DROP_LOCKED = 'this tab has run · press + for a new tab';
 
   const ICONS = {
+    chevron: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3.5 10.5 8 6 12.5"/>
+    </svg>`,
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M19.25 3H8.5a2 2 0 0 0-2 2v22a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V9.25z"/>
       <path d="M19.25 3v5.25a1 1 0 0 0 1 1h5.25"/>
@@ -1054,7 +1057,7 @@
   setInterval(() => {
     if (reduceMotion()) return;
     spinFrame = (spinFrame + 1) % SPIN_FRAMES.length;
-    for (const el of document.querySelectorAll('.node.working .spin, .node.working .glyph, .line.spin .g')) el.textContent = SPIN_FRAMES[spinFrame];
+    for (const el of document.querySelectorAll('.node.working .spin, .node.working .glyph, .log-spin')) el.textContent = SPIN_FRAMES[spinFrame];
   }, SPIN_FRAME_MS);
 
   // ---------- runs ----------
@@ -1093,7 +1096,7 @@
     /** @param {number} stride @param {(i: number) => boolean} citable */
     const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
     return {
-      text: `r3con's answer to “${question}” would appear here. The documents it cites below are made up.`,
+      text: `r3con's answer to “${question}” would appear here. The documents it cites are made up.`,
       provenance: {
         summary_ids: every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary)),
         parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => recordCount(run.parsed[i]) > 0),
@@ -1136,19 +1139,20 @@
     return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, text: null, provenance: null }], ...empty };
   }
 
+  /** @param {boolean} simulated @param {Totals | null | undefined} totals */
+  const spendOf = (simulated, totals) => (simulated ? ['nothing was sent'] : spent(totals));
+
   /** @param {Run} run */
   function runSummary(run) {
-    const { model } = run.answers[0];
-    if (run.simulated) return `simulated run · ${model} · nothing was sent`;
-    return [run.source, model, ...spent(run.totals)].filter(Boolean).join(' · ');
+    const source = run.simulated ? 'simulated run' : run.source;
+    return [source, run.answers[0].model, ...spendOf(run.simulated, run.totals)].filter(Boolean).join(' · ');
   }
 
   // An ask is `{ question, model, source, text, provenance, totals }`, its source recorded, simulated or live;
   // a live one also has the server's `id` for it.
   /** @param {Answer} ask */
   function askSummary({ source, model, totals }) {
-    const spend = source === 'simulated' ? ['nothing was sent'] : spent(totals);
-    return [`${source} ask over this run`, model, ...spend].join(' · ');
+    return [`${source} ask over this run`, model, ...spendOf(source === 'simulated', totals)].join(' · ');
   }
 
   // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
@@ -1904,7 +1908,7 @@
 
   /** @param {string} kind @param {Child} text @param {LineOptions} [options] */
   function line(kind, text, { node = null, tab = null, glyph = null, dim = false } = {}) {
-    const g = glyph ?? { sub: '⎿', user: '›', spin: '✻' }[kind] ?? '●';
+    const g = glyph ?? { sub: '⎿', user: '›' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
     return h(
       node ? 'button' : 'div',
@@ -1941,45 +1945,56 @@
     if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
   }
 
-  /** @param {Tab | null} tab @param {HTMLElement} body */
-  function narrator(tab, body, { status = true } = {}) {
-    /** @type {HTMLElement | null} */
-    let spinner = null;
+  let nextLog = 0;
+
+  /** @param {Tab} tab @param {HTMLElement} body @param {string} [first] */
+  function narrator(tab, body, first = '') {
+    const id = `log-${nextLog++}`;
+    const lines = h('div', { class: 'log-lines', id, hidden: true, 'aria-live': 'off' });
+    const latest = h('span', { class: 't', id: `${id}-latest` }, first);
+    const asked = body.parentElement.querySelector('.line.user .t');
+    asked.id ||= `${id}-asked`;
+    const fold = () => {
+      lines.hidden = !lines.hidden;
+      toggle.ariaExpanded = String(!lines.hidden);
+    };
+    const labels = `${asked.id} ${latest.id}`;
+    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: fold });
+    const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, '✻');
+    body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
     const named = new Map();
-    /** @param {string} kind @param {Child} text @param {LineOptions} [opts] */
-    const say = (kind, text, opts) => {
+    /** @param {HTMLElement} parent @param {string} kind @param {Child} text @param {LineOptions} [opts] */
+    const add = (parent, kind, text, opts) => {
       const el = line(kind, text, { ...opts, tab });
-      body.insertBefore(el, spinner);
-      scrollTranscript();
+      parent.append(el);
+      if (!parent.hidden) scrollTranscript();
       return el;
     };
+    /** @param {string} kind @param {string} text @param {LineOptions} [opts] */
+    const log = (kind, text, opts) => {
+      if (kind === 'main') latest.textContent = text;
+      return add(lines, kind, text, opts);
+    };
     return {
-      say,
+      log,
+      // Logs a line once under `key`; logging it again rewrites it in place.
+      /** @param {string} key @param {string} kind @param {string} text @param {LineOptions} [opts] */
+      logAs(key, kind, text, opts) {
+        const said = named.get(key);
+        if (said) said.querySelector('.t').textContent = text;
+        else named.set(key, log(kind, text, opts));
+      },
+      /** @param {string} kind @param {Child} text @param {LineOptions} [opts] */
+      say: (kind, text, opts) => add(body, kind, text, opts),
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
       /** @type {string | null} */
       stage: null,
-      // Says a line once under `name`; saying it again rewrites it in place.
-      /** @param {string} name @param {string} kind @param {string} text @param {LineOptions} [opts] */
-      sayAs(name, kind, text, opts) {
-        const said = named.get(name);
-        if (said) said.querySelector('.t').textContent = text;
-        else named.set(name, say(kind, text, opts));
-      },
-      /** @param {string} text */
-      phase(text) {
-        if (!spinner) {
-          spinner = line('spin', text);
-          body.append(spinner);
-        } else {
-          spinner.querySelector('.t').textContent = text;
-        }
-        if (status) tabStatus(tab, `running · ${text}`);
-        scrollTranscript();
-      },
-      done() {
-        spinner?.remove();
-        spinner = null;
+      /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
+      finish(text, tone) {
+        latest.textContent = text;
+        mark.className = tone;
+        mark.textContent = '●';
       },
     };
   }
@@ -2005,8 +2020,17 @@
   const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
   /** @param {string} text */
   const errorStatus = (text) => setStatus(...errorLine(text));
-  /** @param {Narrator} narr @param {Child} text */
-  const sayError = (narr, text) => narr.say('main', h('span', { class: 'err' }, text));
+  /** @param {Narrator} narr @param {string} model @param {boolean} simulated @param {Totals | null} totals */
+  function sayReady(narr, model, simulated, totals) {
+    // The cost alone, or the tokens where it is unknown, keeps the line short.
+    const spend = spendOf(simulated, totals).slice(-1);
+    narr.finish(['ready', model, ...spend].join(' · '), simulated ? 'flag' : 'ok');
+  }
+  /** @param {Narrator} narr @param {Ending} ending */
+  function sayEnding(narr, { outcome, error }) {
+    narr.finish(outcome, 'err');
+    if (error) narr.say('main', h('span', { class: 'err' }, error));
+  }
   /** @param {Run} run */
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
 
@@ -2032,8 +2056,8 @@
   }
 
   // A job the page asked to stop ends as stopped; any other failure gives its error.
-  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event */
-  const endLine = (stopped, { stage, error }) => (stopped ? inStage('stopped', stage) : `${inStage('failed', stage)} · ${error}`);
+  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event @returns {Ending} */
+  const endingOf = (stopped, { stage, error }) => ({ outcome: inStage(stopped ? 'stopped' : 'failed', stage), error: stopped ? '' : error });
 
   function readyStatus() {
     if (state.shown.run) return;
@@ -2094,7 +2118,7 @@
     if (asks) {
       mode.ask(question);
     } else if (!state.shown.files.length) {
-      narrator(null, addTurn(null, question), { status: false }).say('main', 'Add files in the files tab first, then ask again.', { dim: true });
+      addTurn(null, question).append(line('main', 'Add files in the files tab first, then ask again.', { dim: true }));
     } else {
       startRun(question);
     }
@@ -2140,35 +2164,6 @@
   }
 
   /** @param {Run} run @param {string} id */
-  const idLabel = (run, id) => docLabel(run, splitId(id)[1]);
-  /** @param {Run} run @param {string} id */
-  const drewOn = (run, id) => `drew on ${cites(run, id).map((c) => idLabel(run, c)).join(', ')}`;
-
-  /** @param {Run} run @param {number} i */
-  function roundTwoLine(run, i) {
-    const name = docLabel(run, i);
-    if (!run.r2[i].summary) return `round 2 · ${name} — nothing relevant`;
-    if (!cites(run, `r2-${i}`).length) return `round 2 · ${name} — cites no other document`;
-    return `round 2 · ${name} — ${drewOn(run, `r2-${i}`)}`;
-  }
-
-  /** @param {Run} run @param {number} i */
-  function parseLine(run, i) {
-    const count = recordCount(run.parsed[i]);
-    return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}${cites(run, `parsed-${i}`).length ? ` · ${drewOn(run, `parsed-${i}`)}` : ''}`;
-  }
-
-  /** @param {Tab} tab @param {Provenance} provenance */
-  function answerCiteLines(tab, { summary_ids, parse_ids }) {
-    /** @param {string} label @param {string} id */
-    const view = (label, id) => h('button', { class: 'ref', type: 'button', 'data-tab': tab.id, 'data-node': id }, label);
-    return [...new Set([...summary_ids, ...parse_ids])].map((d) => {
-      const views = [summary_ids.includes(d) && view('summary', `r2-${d}`), parse_ids.includes(d) && view('parse', `parsed-${d}`)].filter(Boolean);
-      return [`drew on ${docLabel(tab.run, d)} · `, views.flatMap((v, k) => (k ? [' and ', v] : [v]))];
-    });
-  }
-
-  /** @param {Run} run @param {string} id */
   function inputsOf(run, id) {
     const [kind, i] = splitId(id);
     /** @param {string} step @param {(j: number) => unknown} [keep] */
@@ -2199,28 +2194,26 @@
   const hasNodes = (tab, kind) => [...tab.nodes.values()].some((n) => n.kind === kind);
   /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
-  // Round 2's first line, rewritten once every document is through it.
-  const ROUND_TWO_HEAD = 'round 2 head';
 
   /** @param {Tab} tab @param {StageKind} kind */
-  function stageProgress(tab, kind) {
-    return kind === 'schema' || kind === 'answer' ? STAGE_PHASE[kind] : `${STAGE_PHASE[kind]} · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
+  function showProgress(tab, kind) {
+    const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
+    tabStatus(tab, `running · ${STAGE_PHASE[kind]}${progress}`);
   }
 
   /** @param {Tab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
-    const n = tab.run.docs.length;
-    /** @type {Partial<Record<StageKind, string>>} */
-    const heads = {
-      r1: 'round 1 · one summary per document',
-      r2: 'round 2 · each document beside the other summaries',
+    /** @type {Record<StageKind, string>} */
+    const steps = {
+      r1: 'round 1 · extracting relevance',
+      r2: 'round 2 · extracting relevance',
       schema: STAGE_PHASE.schema,
-      parsed: `parsing ${plural(n, 'document')}`,
+      parsed: `parsing ${plural(tab.run.docs.length, 'document')}`,
+      answer: STAGE_PHASE.answer,
     };
-    if (kind === 'r2') narr.sayAs(ROUND_TWO_HEAD, 'main', heads.r2);
-    else if (heads[kind]) narr.say('main', heads[kind]);
+    narr.log('main', steps[kind]);
     narr.stage = STAGE_OF[kind];
-    narr.phase(stageProgress(tab, kind));
+    showProgress(tab, kind);
   }
 
   /** @param {Tab} tab @param {string} id */
@@ -2242,10 +2235,10 @@
   /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'r1') return `round 1 · ${docLabel(run, i)} — ${run.r1[i].summary ? 'summary ready' : 'nothing relevant'}`;
-    if (kind === 'r2') return roundTwoLine(run, i);
-    if (kind === 'parsed') return parseLine(run, i);
-    return schemaClasses(run.schema.code).join(', ') || 'structure ready';
+    if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'summary ready' : 'nothing relevant'}`;
+    if (kind === 'schema') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
+    const count = recordCount(run.parsed[i]);
+    return `${docLabel(run, i)} — ${count ? plural(count, 'record') : 'no records'}`;
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
@@ -2253,22 +2246,10 @@
   function settle(tab, narr, id) {
     const { run } = tab;
     const [kind] = /** @type {[StageKind, number | null]} */ (splitId(id));
-    const n = run.docs.length;
     settleNode(tab, id, { empty: isVoid(run, id) });
     showCites(tab, id);
-    narr.sayAs(id, 'sub', settledLine(run, id), { node: id });
-    narr.phase(stageProgress(tab, kind));
-    if (kind !== 'r2' || settledCount(tab, 'r2') < n) return;
-    const citing = range(n).filter((i) => cites(run, `r2-${i}`).length).length;
-    narr.sayAs(ROUND_TWO_HEAD, 'main', `round 2 · ${citing} ${citing === 1 ? 'summary cites' : 'summaries cite'} another document`);
-  }
-
-  /** @param {Tab} tab @param {Narrator} narr @param {Answer} answer @param {string} node */
-  function sayAnswer(tab, narr, answer, node) {
-    narr.say('answer', answer.text, { node });
-    const citeLines = answerCiteLines(tab, answer.provenance);
-    for (const text of citeLines) narr.say('sub', text);
-    if (!citeLines.length) narr.say('sub', 'cites no document');
+    narr.logAs(id, 'sub', settledLine(run, id), { node: id });
+    showProgress(tab, kind);
   }
 
   // An answer's node settles, with solid lines from what it cites.
@@ -2281,30 +2262,29 @@
   /** @param {Tab} tab @param {Narrator} narr */
   function showAnswer(tab, narr, id = RUN_ANSWER) {
     drawAnswer(tab, id);
-    narr.done();
     const answer = answerOf(tab.run, id);
     if (answer.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-    sayAnswer(tab, narr, answer, id);
+    narr.say('answer', answer.text, { node: id });
     updateComposer();
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
-    narr.say('sub', runSummary(tab.run));
-    tabStatus(tab, ...doneLine(tab.run));
+    const { run } = tab;
+    sayReady(narr, run.answers[0].model, run.simulated, run.totals);
+    tabStatus(tab, ...doneLine(run));
     rerenderIfOpen(tab, RUN_ANSWER);
   }
 
   // Marks every stage node still working as stopped, while a document being read just settles; with no
   // answer, the next question starts a new run.
-  /** @param {Tab} tab @param {Narrator} narr @param {string} text */
-  function failRun(tab, narr, text) {
-    narr.done();
+  /** @param {Tab} tab @param {Narrator} narr @param {Ending} ending @param {string} [status] */
+  function failRun(tab, narr, ending, status = [ending.outcome, ending.error].filter(Boolean).join(' · ')) {
     for (const node of tab.nodes.values()) {
       if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: node.kind !== 'doc' });
     }
-    sayError(narr, text);
-    tabStatus(tab, ...errorLine(text));
+    sayEnding(narr, ending);
+    tabStatus(tab, ...errorLine(status));
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
@@ -2321,20 +2301,20 @@
 
     at(t, () => {
       narr.stage = READING;
-      narr.say('main', `reading ${plural(n, 'document')}`);
+      narr.log('main', `reading ${plural(n, 'document')}`);
       if (run.simulated) {
         narr.say('sub', h('span', { class: 'flag' }, `simulated · each summary is the file's first ${SUMMARY_CHARS} characters, and the citations are made up`));
       }
-      narr.phase(`reading · 0 of ${n}`);
+      tabStatus(tab, `running · reading · 0 of ${n}`);
     });
     /** @param {number} i */
     const docAt = (i) => docId(run.docs[i]);
     t = stage(at, t, range(n), n, (i) => markWorking(tab, docAt(i)), (i, rank) => {
       settleNode(tab, docAt(i));
-      narr.phase(`reading · ${rank + 1} of ${n}`);
+      tabStatus(tab, `running · reading · ${rank + 1} of ${n}`);
     }, PACE.read);
     at(t, () => {
-      narr.say('sub', `read ${plural(n, 'file')} · ${fmtBytes(textBytes(run.docs))}`);
+      narr.log('sub', `read ${plural(n, 'file')} · ${fmtBytes(textBytes(run.docs))}`);
       narr.stage = null;
     });
 
@@ -2395,7 +2375,7 @@
       case 'run_started':
         if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
         run.ids = event.document_ids;
-        narr.say('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
+        narr.log('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         if (!hasNodes(tab, `r${event.round}`)) beginStage(tab, narr, `r${event.round}`);
@@ -2434,7 +2414,7 @@
         lightRun(tab);
         break;
       case 'run_failed':
-        failRun(tab, narr, endLine(stopping(tab), event));
+        failRun(tab, narr, endingOf(stopping(tab), event));
         break;
     }
   }
@@ -2463,7 +2443,8 @@
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
     } catch (error) {
-      failRun(tab, narr, explain(error, /** @type {Error} */ (error).message, 'the live run stopped'));
+      const said = explain(error, /** @type {Error} */ (error).message, 'the live run stopped');
+      failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
     } finally {
       closeStream(stream);
     }
@@ -2476,17 +2457,16 @@
     /** @type {Answer} */
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
+    const narr = askTurn(tab, question, model, id);
     const stream = openStream('ask', tab, ask);
     // An ask leaves the status alone, but its stop was asked for there: once that has ended, the status
     // says so until it next changes, and the tab keeps its run's own line.
     /** @type {string | null} */
     let stopped = null;
-    /** @param {string} text */
-    const failed = (text) => {
-      narr.done();
+    /** @param {Ending} ending */
+    const failed = (ending) => {
       if (!landed(tab, id)) settleNode(tab, id, { failed: true });
-      sayError(narr, text);
+      sayEnding(narr, ending);
     };
     /** @param {ServerEvent} event */
     const onEvent = (event) => {
@@ -2497,22 +2477,21 @@
       }
       if (event.type === 'ask_finished') {
         ask.totals = totalsOf(event);
-        narr.say('sub', askSummary(ask));
+        sayReady(narr, model, false, ask.totals);
         rerenderIfOpen(tab, id);
       }
       if (event.type === 'ask_failed') {
-        const end = endLine(stream.stopping, event);
-        failed(`${askSummary(ask)} · ${end}`);
-        if (stream.stopping) stopped = `ask ${end}`;
+        const ending = endingOf(stream.stopping, event);
+        failed(ending);
+        if (stream.stopping) stopped = `ask ${ending.outcome}`;
       }
     };
-    narr.phase(`asking · ${model}`);
     try {
       const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
       jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
-      failed(explain(error, /** @type {Error} */ (error).message, 'the ask stopped'));
+      failed({ outcome: 'failed', error: explain(error, /** @type {Error} */ (error).message, 'the ask stopped') });
     } finally {
       closeStream(stream);
       if (stopped && tab === state.shown && !stopping(tab)) errorStatus(stopped);
@@ -2531,8 +2510,8 @@
     tab.drawing.style.setProperty('--context-fade', String(Math.min(1, FAINT_FADE_FROM_DOCS / tab.run.docs.length)));
     tab.turn.replaceChildren();
     tab.userMoved = false;
-    const narr = (tab.narr = narrator(tab, tab.turn));
-    narr.phase('starting');
+    const narr = (tab.narr = narrator(tab, tab.turn, 'starting'));
+    tabStatus(tab, 'running · starting');
     syncDocNodes(tab, { at, animate: true, replan: true });
     mode.play(tab, narr);
     updateComposer();
@@ -2553,6 +2532,13 @@
 
   // ---------- asks ----------
   // An ask answers again over the run's representation; its answer node joins the run's in the answer column.
+
+  /** @param {Tab} tab @param {string} question @param {string} model @param {string} id */
+  function askTurn(tab, question, model, id) {
+    const narr = narrator(tab, addTurn(tab, question, id));
+    narr.log('main', `asking · ${model}`);
+    return narr;
+  }
 
   /** @param {Tab} tab @param {Answer} ask */
   function addAsk(tab, ask) {
@@ -2584,9 +2570,9 @@
     /** @type {Answer} */
     const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
-    const narr = narrator(tab, addTurn(tab, question, id), { status: false });
+    const narr = askTurn(tab, question, model, id);
     showAnswer(tab, narr, id);
-    narr.say('sub', askSummary(ask));
+    sayReady(narr, model, ask.source === 'simulated', ask.totals);
     lightLanded(tab, id);
   }
 
@@ -2703,7 +2689,9 @@
     tab.button.remove();
     tab.close.remove();
     for (const turn of transcript.querySelectorAll(`.turn[data-tab="${tab.id}"]`)) {
-      for (const button of turn.querySelectorAll('button')) button.disabled = true;
+      // Only what leads to the closed tab: its logs can still be read.
+      const links = /** @type {NodeListOf<HTMLButtonElement>} */ (turn.querySelectorAll('button[data-tab]'));
+      for (const button of links) button.disabled = true;
       const marker = turn.querySelector('.marker');
       marker.removeAttribute('aria-label');
       marker.textContent = `tab ${tab.id} · closed`;
@@ -3492,7 +3480,7 @@
     // It stops where it is, as a live run does once its call in flight is back.
     stop(tab) {
       cancelTimers(tab);
-      failRun(tab, tab.narr, inStage('stopped', tab.narr.stage));
+      failRun(tab, tab.narr, { outcome: inStage('stopped', tab.narr.stage), error: '' });
     },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
     saveKey: async (provider) => [...keyed.add(provider)],
@@ -3503,7 +3491,7 @@
   /** @type {Mode} */
   const liveMode = {
     intro: LIVE_INTRO,
-    note: LIVE_MODE_NOTE,
+    note: '',
     keysNote: '',
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
@@ -3554,6 +3542,7 @@
     $('keys-note').hidden = !mode.keysNote;
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
+    $('mode-note').hidden = !mode.note;
     transcript.append(line('main', mode.intro, { dim: true }));
     wire();
   }
