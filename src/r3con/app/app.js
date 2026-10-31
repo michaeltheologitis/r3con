@@ -3281,7 +3281,7 @@
     const unlisted = listed.has(remembered) || remembered === typed ? null : option(entry(...parseModelId(remembered)));
     fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))), option(entry('', null, 'other model…')));
     modelPick.value = pick;
-    $('model-hint').hidden = providers.length > 0 || servers.length > 0;
+    $('model-hint').hidden = !live || providers.length > 0 || servers.length > 0;
     showOtherModel();
   }
 

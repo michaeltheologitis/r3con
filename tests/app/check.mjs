@@ -1567,8 +1567,8 @@ async function keys(page, checkAt) {
   const retired = await page.evaluate((key) => localStorage.getItem(key), RETIRED_SETTINGS_KEY);
   checkAt('loading removes the old settings entry', retired === null, retired);
   const fresh = await page.evaluate(pickerState);
-  const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL, ''], hint: true };
-  const freshName = 'with no keys the picker shows the default model, other model… and the hint';
+  const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL, ''], hint: false };
+  const freshName = 'with no keys the picker shows the default model and other model…, and no hint to add a key, which the prototype never needs';
   checkAt(freshName, isDeepStrictEqual(fresh, defaultOnly), JSON.stringify(fresh));
 
   await page.click(nodeSel('doc-0'));
@@ -1743,7 +1743,7 @@ async function picker(page, checkAt) {
 
   await page.reload();
   const after = await page.evaluate(pickerState);
-  const keysGone = after.groups.length === 0 && after.hint && (await page.evaluate(keyStates)).length === 0;
+  const keysGone = after.groups.length === 0 && !after.hint && (await page.evaluate(keyStates)).length === 0;
   const survives = after.value === OTHER_MODEL && keysGone && (await status()) === recordedReady;
   checkAt('after a reload the choice is kept and the keys are not', survives, JSON.stringify(after));
   await page.selectOption('#model-pick', '');
@@ -3258,8 +3258,11 @@ async function liveSession(url) {
     await page.click('#settings-btn');
     const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
     check('live', 'the settings show no note under the keys', note === null, note);
+    const hintWithout = (await page.evaluate(pickerState)).hint;
     await page.fill('#key-openai', TEST_KEY);
     const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
+    const hintWith = (await page.evaluate(pickerState)).hint;
+    check('live', 'with no key and no server the hint to add a key shows, and a saved key hides it', hintWithout && !hintWith, `${hintWithout} → ${hintWith}`);
     await page.keyboard.press('Escape');
     const fresh = await page.context().newPage();
     await fresh.goto(url);
