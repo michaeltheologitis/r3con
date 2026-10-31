@@ -66,6 +66,14 @@ const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 const TEST_HINT = '••••7f3a';
 const ENVIRONMENT_KEY = 'env-check-not-a-real-key-9c1d';
 const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
+const SECOND_ENDPOINT = 'http://localhost:11434';
+const OTHER_PATH_ENDPOINT = 'http://10.0.0.7:8000/v2';
+const OTHER_SCHEME_ENDPOINT = 'https://10.0.0.7:8000/v1';
+const CREDENTIALS_ENDPOINT = 'http://user:hunter2@10.0.0.9:8000/v1';
+// What r3con app answers for a server URL it refuses, as the settings show it.
+const CREDENTIALS_REFUSED = 'Server · other.endpoint: must not hold a user or password: put the key in its key field';
+const NO_HOST_REFUSED = 'Server · other.endpoint: must name a host';
+const HALF_TYPED = 'hosted_vllm/half-typed';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
 const NEW_QUESTION = 'Which memo mentions the storm?';
@@ -76,8 +84,8 @@ const FIELD_NAMES = {
   'OpenAI API key': 'key-openai',
   'Anthropic API key': 'key-anthropic',
   'Google API key': 'key-gemini',
-  'Other: server URL': 'endpoint-other',
-  'Other: API key': 'key-other',
+  'add server: URL': 'endpoint-other',
+  'add server: API key': 'key-other',
 };
 const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
 const LARGE_RUN_DOCS = 40;
@@ -629,6 +637,7 @@ function keyRows() {
     states: Object.fromEntries([...document.querySelectorAll('[id^="state-"]')].filter(shown).map((el) => [el.id, el.textContent])),
     described: Object.fromEntries([...document.querySelectorAll('#keys input')].map((el) => [el.id, textOf(el.getAttribute('aria-describedby'))])),
     removes: [...document.querySelectorAll('#keys button')].filter(shown).map((el) => el.getAttribute('aria-label')),
+    servers: [...document.querySelectorAll('#server-list span')].filter(shown).map((el) => el.textContent),
   };
 }
 
@@ -1540,6 +1549,7 @@ async function settings() {
     const checkAt = (name, pass, detail) => check('settings', `${layout.name}: ${name}`, pass, detail);
     await withPage('settings', { layout, sample: false }, async (page, messages) => {
       await keys(page, checkAt);
+      await serverMenu(page, checkAt);
       await picker(page, checkAt);
       await savedModels(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
@@ -1578,27 +1588,27 @@ async function keys(page, checkAt) {
   await page.fill('#endpoint-other', '');
   await page.fill('#key-other', TEST_KEY);
   await page.click('#settings-save');
-  checkAt('an Other key without an endpoint blocks the save', await blocked());
+  checkAt("a server's key without its URL blocks the save", await blocked());
   await page.fill('#key-other', '');
   await page.fill('#key-openai', TEST_KEY);
   await page.fill('#endpoint-other', TEST_ENDPOINT);
   await page.fill('#key-gemini', TEST_KEY);
   const savedKeys = await saveKeys(page);
   const set = await states();
-  const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
-  checkAt('a save marks OpenAI, Google and Other as set', marked, set.join(', '));
   const rows = await page.evaluate(keyRows);
-  const shownStates = { 'state-openai': TEST_HINT, 'state-gemini': TEST_HINT, 'state-other': `${TEST_ENDPOINT} · no key` };
-  const shownName = "each row shows its key's last four masked, Other its endpoint and that it has no key, and each field is described by its row's state";
-  const describedBy = rows.described['key-openai'] === TEST_HINT && rows.described['endpoint-other'].startsWith(shownStates['state-other']);
+  const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini']) && isDeepStrictEqual(rows.servers, [`${TEST_ENDPOINT} · no key`]);
+  checkAt('a save marks OpenAI and Google as set, and lists the server with no key', marked, `${set.join(', ')}; ${rows.servers.join(', ')}`);
+  const shownStates = { 'state-openai': TEST_HINT, 'state-gemini': TEST_HINT };
+  const shownName = "each row shows its key's last four masked, and each key field is described by its row's state";
+  const describedBy = rows.described['key-openai'] === TEST_HINT && rows.described['key-anthropic'] === '';
   checkAt(shownName, isDeepStrictEqual(rows.states, shownStates) && describedBy, JSON.stringify(rows));
-  const removesNamed = isDeepStrictEqual(rows.removes, ['remove OpenAI key', 'remove Google key', 'remove Other key']);
+  const removesNamed = isDeepStrictEqual(rows.removes, ['remove OpenAI key', 'remove Google key', `remove server ${TEST_ENDPOINT}`]);
   const noShowKeys = (await page.getByRole('button', { name: /show keys/ }).count()) === 0;
-  checkAt('each key set here has a remove button named for its provider, and there is no show keys', removesNamed && noShowKeys, rows.removes.join(', '));
+  checkAt('each key set here and each server has a remove button named for it, and there is no show keys', removesNamed && noShowKeys, rows.removes.join(', '));
   const keyed = await page.evaluate(pickerState);
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
-  const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google']) && noAnthropic && !keyed.hint;
-  checkAt('the picker offers only the providers with a key', onlyKeyed, keyed.groups.join(', '));
+  const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google', '10.0.0.7:8000']) && noAnthropic && !keyed.hint;
+  checkAt('the picker offers only the providers with a key, and the server', onlyKeyed, keyed.groups.join(', '));
   await page.click('#settings-save');
   const nothing = await saved();
   const unchanged = isDeepStrictEqual(await states(), set);
@@ -1612,7 +1622,7 @@ async function keys(page, checkAt) {
   const holding = (value) => page.evaluate(placesHolding, value);
   const endpointHolders = (await holding(TEST_ENDPOINT)).filter((place) => place !== 'markup');
   const holders = [...(await holding(TEST_KEY)), ...endpointHolders];
-  const notKept = "once closed, no field, storage, address or markup holds a key, and only Other's row shows the endpoint";
+  const notKept = 'once closed, no field, storage, address or markup holds a key, and only the server list shows the endpoint';
   checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
   const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
@@ -1623,9 +1633,58 @@ async function keys(page, checkAt) {
   const removed = await becomes(page, () => document.getElementById('settings-saved').textContent === 'removed');
   const afterRemove = await page.evaluate(keyRows);
   const dropped = (await page.evaluate(pickerState)).groups;
-  const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google']) && (await focusedId(page)) === 'key-openai';
+  const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google', '10.0.0.7:8000']) && (await focusedId(page)) === 'key-openai';
   checkAt("remove forgets the key, the picker drops its provider's models, and focus goes to its field", forgotten, `${JSON.stringify(afterRemove.states)}; ${dropped.join(', ')}`);
+  await page.getByRole('button', { name: `remove server ${TEST_ENDPOINT}`, exact: true }).click();
+  const noServers = await becomes(page, () => document.getElementById('server-list').hidden && document.getElementById('servers-label').hidden);
+  checkAt('remove forgets a server, the list hides once empty, and focus goes to the URL field', noServers && (await focusedId(page)) === 'endpoint-other');
   await page.keyboard.press('Escape');
+}
+
+async function serverMenu(page, checkAt) {
+  const servers = async () => (await page.evaluate(keyRows)).servers;
+  await page.click('#settings-btn');
+  for (const endpoint of [`${TEST_ENDPOINT}/`, `${TEST_ENDPOINT}//`, TEST_ENDPOINT, OTHER_PATH_ENDPOINT, OTHER_SCHEME_ENDPOINT]) {
+    await page.fill('#endpoint-other', endpoint);
+    await saveKeys(page);
+  }
+  const listed = await servers();
+  const labels = Object.keys(await page.evaluate(menuGroups));
+  const three = [TEST_ENDPOINT, OTHER_PATH_ENDPOINT, OTHER_SCHEME_ENDPOINT];
+  const one = isDeepStrictEqual(listed, three.map((endpoint) => `${endpoint} · no key`));
+  const apart = isDeepStrictEqual(labels, ['Google', TEST_ENDPOINT, '10.0.0.7:8000/v2', OTHER_SCHEME_ENDPOINT]);
+  const apartName = 'trailing slashes make no new server, and servers on one host are labelled by their paths, or their whole URLs when those match too';
+  checkAt(apartName, one && apart, `${listed.join(', ')}; ${labels.join(', ')}`);
+
+  const refusals = [];
+  for (const endpoint of [CREDENTIALS_ENDPOINT, 'http:///']) {
+    await page.fill('#endpoint-other', endpoint);
+    await page.click('#settings-save');
+    await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
+    refusals.push(await page.textContent('#settings-saved'));
+  }
+  await page.fill('#endpoint-other', '');
+  const kept = await page.evaluate(placesHolding, 'hunter2');
+  const refused = isDeepStrictEqual(refusals, [CREDENTIALS_REFUSED, NO_HOST_REFUSED]) && isDeepStrictEqual(await servers(), listed) && kept.length === 0;
+  checkAt('a server URL with a user or password, or with no host, is refused as r3con app refuses it, and kept nowhere', refused, `${refusals.join(' | ')}; ${kept.join(', ')}`);
+  await page.keyboard.press('Escape');
+
+  await page.selectOption('#model-pick', { label: `other model on ${OTHER_SCHEME_ENDPOINT}…` });
+  await page.fill('#model-other', HALF_TYPED);
+  await page.$eval('#model-other', (el) => el.blur());
+  await page.click('#settings-btn');
+  for (const [i, endpoint] of three.entries()) {
+    await page.getByRole('button', { name: `remove server ${endpoint}`, exact: true }).click();
+    await becomes(page, (left) => document.querySelectorAll('#server-list li').length === left, three.length - 1 - i);
+  }
+  await page.keyboard.press('Escape');
+  const typing = await page.evaluate(() => {
+    const select = document.getElementById('model-pick');
+    return { value: select.value, options: [...select.options].map((o) => o.textContent), field: document.getElementById('model-other').value };
+  });
+  const once = typing.value === '' && typing.field === HALF_TYPED && !typing.options.includes(HALF_TYPED);
+  checkAt('removing the server a model is being typed on leaves it typed on no server, and not listed besides', once, JSON.stringify(typing));
+  await page.press('#model-other', 'Escape');
 }
 
 async function picker(page, checkAt) {
@@ -3173,8 +3232,12 @@ function splitMemo() {
 
 async function keysOnServer(url) {
   const response = await fetch(new URL('/api/keys', url), { headers: { Authorization: `Bearer ${tokenOf(url)}` } });
-  return Object.entries(await response.json()).filter(([, set]) => set).map(([provider]) => `state-${provider}`);
+  return response.json();
 }
+
+// The state markers a server's keys would light.
+const keyedOn = (status) => Object.entries(status).filter(([provider, set]) => provider !== 'other' && set).map(([provider]) => `state-${provider}`);
+const serversOn = (status) => status.other.map(({ endpoint }) => endpoint);
 
 function postsOf(page) {
   const posts = [];
@@ -3259,10 +3322,110 @@ async function liveKeyStates(url) {
 
     await page.getByRole('button', { name: 'remove OpenAI key', exact: true }).click();
     const gone = await becomes(page, () => !document.getElementById('state-openai').textContent);
-    const onServer = await keysOnServer(url);
+    const onServer = keyedOn(await keysOnServer(url));
     const groups = (await page.evaluate(pickerState)).groups;
     const forgotten = gone && isDeepStrictEqual(onServer, ['state-gemini']) && isDeepStrictEqual(groups, ['Google']);
     check('live', "remove forgets the key on the server, and the picker drops its provider's models", forgotten, `${onServer.join(' ')}; ${groups.join(', ')}`);
+  });
+}
+
+// The model menu's groups, each its label and its options' text.
+function menuGroups() {
+  const groups = document.getElementById('model-pick').querySelectorAll('optgroup');
+  return Object.fromEntries([...groups].map((g) => [g.label, [...g.children].map((o) => o.textContent)]));
+}
+
+// Adds two servers on its server, saves a model on each, runs on one and asks on the other, asks with a model on no
+// server, then removes a server.
+async function liveServers(url) {
+  const bodies = [];
+  const before = (page) => page.on('request', (request) => request.method() === 'POST' && /^\/api\/runs(\/\w+\/asks)?$/.test(new URL(request.url()).pathname) && bodies.push(request.postDataJSON()));
+  const onFirst = 'hosted_vllm/qwen3-32b';
+  const onSecond = 'ollama_chat/llama3.3';
+  const typedHosted = 'anthropic/claude-sonnet-5-5';
+  const typedOnServer = 'hosted_vllm/typed-only';
+  const [first, second] = ['10.0.0.7:8000', 'localhost:11434'];
+  const otherOn = (label) => `other model on ${label}…`;
+  const sent = () => bodies.map(({ model, endpoint }) => [model, endpoint ?? null]);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.click('#settings-btn');
+    await page.fill('#endpoint-other', TEST_ENDPOINT);
+    await page.fill('#key-other', TEST_KEY);
+    await saveKeys(page);
+    await page.fill('#endpoint-other', `${SECOND_ENDPOINT}/`);
+    const added = await saveKeys(page);
+    const listed = (await page.evaluate(keyRows)).servers;
+    const onServer = serversOn(await keysOnServer(url));
+    const both = isDeepStrictEqual(listed, [`${TEST_ENDPOINT} · ${TEST_HINT}`, `${SECOND_ENDPOINT} · no key`]) && isDeepStrictEqual(onServer, [TEST_ENDPOINT, SECOND_ENDPOINT]);
+    check('live', "settings list each server added, with its key's last four or no key, and its URL as stored, without a trailing slash", added && both, listed.join(', '));
+    await page.keyboard.press('Escape');
+
+    const offered = await page.evaluate(menuGroups);
+    await page.selectOption('#model-pick', { label: otherOn(first) });
+    await page.fill('#model-other', onFirst);
+    await page.press('#model-other', 'Enter');
+    await page.selectOption('#model-pick', { label: otherOn(second) });
+    await page.fill('#model-other', onSecond);
+    await page.press('#model-other', 'Enter');
+    const menu = await page.evaluate(menuGroups);
+    const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)), SAVED_MODELS_KEY);
+    const places = isDeepStrictEqual(offered, { [first]: [otherOn(first)], [second]: [otherOn(second)] });
+    const grouped = isDeepStrictEqual(menu, { [first]: [onFirst, otherOn(first)], [second]: [onSecond, otherOn(second)] });
+    const remembered = isDeepStrictEqual(stored, [{ model: onFirst, endpoint: TEST_ENDPOINT }, { model: onSecond, endpoint: SECOND_ENDPOINT }]);
+    const savedName = 'the menu offers other model on each server, and a model typed there is saved in that server\'s group, stored with its URL';
+    check('live', savedName, places && grouped && remembered, JSON.stringify({ offered, menu }));
+
+    await page.click('#run-btn');
+    const ran = await becomes(page, statusMatches, `^● done · ${onSecond} · `, LIVE_RUN_MS);
+    await page.selectOption('#model-pick', { label: onFirst });
+    await send(page, 'Which memo is the registry?');
+    const asked = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
+    const routed = ran && asked && isDeepStrictEqual(sent(), [[onSecond, SECOND_ENDPOINT], [onFirst, TEST_ENDPOINT]]);
+    check('live', "a run and an ask each send their saved model's server, which runs them", routed, `${await page.textContent('#run-status')}; ${JSON.stringify(sent())}`);
+
+    await page.selectOption('#model-pick', { label: 'other model…' });
+    await page.fill('#model-other', typedHosted);
+    await page.$eval('#model-other', (el) => el.blur());
+    await send(page, 'Which memo mentions the storm?');
+    const typedAsked = await becomes(page, (count) => document.querySelectorAll('.transcript:not([hidden]) .turn').length === count, 3, LIVE_RUN_MS);
+    const answered = typedAsked && (await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS));
+    check('live', 'a hosted model typed under other model… runs on no server', answered && isDeepStrictEqual(sent().at(-1), [typedHosted, null]), JSON.stringify(sent().at(-1)));
+
+    await page.selectOption('#model-pick', { label: onSecond });
+    await page.click('#settings-btn');
+    await page.getByRole('button', { name: `remove server ${SECOND_ENDPOINT}`, exact: true }).click();
+    await becomes(page, () => document.getElementById('settings-saved').textContent === 'removed');
+    const left = (await page.evaluate(keyRows)).servers;
+    const removed = isDeepStrictEqual(left, [`${TEST_ENDPOINT} · ${TEST_HINT}`]) && isDeepStrictEqual(serversOn(await keysOnServer(url)), [TEST_ENDPOINT]);
+    await page.keyboard.press('Escape');
+    const after = { groups: await page.evaluate(menuGroups), picker: await page.evaluate(pickerState) };
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    const fellBack = await becomes(page, statusMatches, `^● done · ${onSecond} · `, LIVE_RUN_MS);
+    const noDeadServer = isDeepStrictEqual(Object.keys(after.groups), [first]) && after.picker.value === onSecond && isDeepStrictEqual(sent().at(-1), [onSecond, null]);
+    const removedName = "removing a server forgets it and drops its group from the menu, and the model picked on it runs on no server, never its URL";
+    check('live', removedName, removed && fellBack && noDeadServer, JSON.stringify({ after, sent: sent().at(-1) }));
+
+    await page.selectOption('#model-pick', { label: otherOn(first) });
+    await page.fill('#model-other', typedOnServer);
+    await page.$eval('#model-other', (el) => el.blur());
+    const restoring = await page.context().newPage();
+    await restoring.goto(url);
+    await becomes(restoring, () => document.querySelectorAll('#model-pick optgroup').length > 0);
+    const restored = await restoring.evaluate(() => {
+      const select = document.getElementById('model-pick');
+      return { picked: select.selectedOptions[0].textContent, options: [...select.options].map((o) => o.textContent), field: document.getElementById('model-other').value };
+    });
+    await restoring.close();
+    const named = restored.picked === otherOn(first) && restored.field === typedOnServer && !restored.options.includes(typedOnServer);
+    check('live', "a model typed on a server and never saved comes back after a reload in that server's field, listed nowhere else", named, JSON.stringify(restored));
+
+    await page.evaluate((key) => localStorage.setItem(key, 'hosted_vllm/from-before'), MODEL_KEY);
+    const fresh = await page.context().newPage();
+    await fresh.goto(url);
+    await becomes(fresh, () => document.querySelectorAll('#model-pick optgroup').length > 0);
+    const old = { value: await fresh.inputValue('#model-pick'), remove: await fresh.isVisible('#model-remove'), field: await fresh.isVisible('#model-other') };
+    await fresh.close();
+    check('live', 'a model remembered before servers loads as itself, on no server', isDeepStrictEqual(old, { value: 'hosted_vllm/from-before', remove: false, field: false }), JSON.stringify(old));
   });
 }
 
@@ -3901,7 +4064,7 @@ async function liveKeySaves(url) {
     const named = await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
     const said = await page.textContent('#settings-saved');
     const marked = (await page.evaluate(keyStates)).sort();
-    const onServer = (await keysOnServer(url)).sort();
+    const onServer = keyedOn(await keysOnServer(url)).sort();
     const keysName = 'a key save one provider refuses names it, and the set markers match the server';
     const matches = named && said === 'Google · refused by the check' && isDeepStrictEqual(marked, onServer);
     check('live', keysName, matches, `${said}; page ${marked.join(' ')}; server ${onServer.join(' ')}`);
@@ -4218,6 +4381,7 @@ async function live() {
   const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
+  await withFakeServer(liveServers);
   await liveElsewhere();
 }
 

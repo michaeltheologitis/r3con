@@ -34,6 +34,7 @@
    * @typedef {object} Answer
    * @property {string} question
    * @property {string} model
+   * @property {string | null} [endpoint]
    * @property {string | null} text
    * @property {Provenance | null} provenance
    * @property {'recorded' | 'simulated' | 'live'} [source]
@@ -127,12 +128,12 @@
    */
   /**
    * A provider's key as r3con app answers it: stored there, with its last characters as a hint, or found in an
-   * environment variable. Other is a server's endpoint, with its key's hint or null.
+   * environment variable. `other` lists the servers stored there, each its endpoint and its key's hint or null.
    * @typedef {{ source: 'here', hint: string } | { source: 'environment', variable: string }} KeyState
-   * @typedef {{ endpoint: string, key: string | null }} OtherState
-   * @typedef {Record<string, KeyState | OtherState | null>} KeyStatus
+   * @typedef {{ endpoint: string, key: string | null }} Server
+   * @typedef {Record<string, KeyState | Server[] | null>} KeyStatus
    */
-  /** @typedef {{ model: string }} SavedModel A model typed under the question and saved to the menu with Enter. */
+  /** @typedef {{ model: string, endpoint?: string }} SavedModel A model saved to the menu, and its server, if any. */
   /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
@@ -152,8 +153,10 @@
    * @property {(tab: Tab) => boolean} runGoing
    * @property {(tab: Tab) => void} stop
    * @property {(question: string) => void} ask
-   * @property {(provider: string, key: string, endpoint?: string) => Promise<KeyStatus>} saveKey
+   * @property {(provider: string, key: string) => Promise<KeyStatus>} saveKey
+   * @property {(endpoint: string, key: string) => Promise<KeyStatus>} saveServer
    * @property {(provider: string) => Promise<KeyStatus>} forgetKey
+   * @property {(endpoint: string) => Promise<KeyStatus>} forgetServer
    * @property {() => Promise<KeyStatus>} readKeys
    */
 
@@ -595,6 +598,10 @@
   const SIDE_STEP_PX = 16;
   const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
   const SAVED_GROUP = 'saved';
+  const SERVER_LABEL = 'Server';
+  // r3con app's own words for a server URL it refuses.
+  const CREDENTIALS_IN_URL = 'must not hold a user or password: put the key in its key field';
+  const NO_HOST_IN_URL = 'must name a host';
   // Earlier prototypes kept a model and an endpoint here.
   const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
@@ -604,9 +611,7 @@
     openai: { label: 'OpenAI', models: ['openai/gpt-6.1-sol', 'openai/gpt-6.1-terra', 'openai/gpt-6-luna'] },
     anthropic: { label: 'Anthropic', models: ['anthropic/claude-fable-5-1', 'anthropic/claude-opus-5-5', 'anthropic/claude-sonnet-5-5'] },
     gemini: { label: 'Google', models: ['gemini/gemini-3.8-flash', 'gemini/gemini-3.1-pro-preview'] },
-    other: { label: 'Other', models: [] },
   };
-  const OTHER = 'other';
   const MASK = '••••';
   // r3con app's own hint rule, which the prototype follows: a key's last few characters, if they are a small part of it.
   const KEY_HINT_CHARS = 4;
@@ -1097,6 +1102,21 @@
   const totalsOf = (event) => ({ tokens: event.tokens?.total, usd: event.usd });
   /** @param {KeyStatus} status */
   const keyedProviders = (status) => Object.keys(PROVIDERS).filter((provider) => status[provider]);
+  /** @param {KeyStatus} status */
+  const serversOf = (status) => /** @type {Server[]} */ (status.other ?? []);
+  /** @param {string} endpoint */
+  const normalEndpoint = (endpoint) => endpoint.trim().replace(/\/+$/, '');
+  // r3con app refuses these too, and the prototype must not keep what r3con app would refuse.
+  /** @param {string} endpoint */
+  function serverUrlRefusal(endpoint) {
+    try {
+      const url = new URL(endpoint);
+      if (url.username || url.password) return CREDENTIALS_IN_URL;
+      return url.hostname ? null : NO_HOST_IN_URL;
+    } catch {
+      return NO_HOST_IN_URL;
+    }
+  }
 
   // ---------- spinner ----------
 
@@ -1179,11 +1199,11 @@
   }
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
-  /** @param {string} question @param {string} model @param {LoadedFile[]} docs @returns {Run} */
-  function liveRun(question, model, docs) {
+  /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @returns {Run} */
+  function liveRun(question, model, endpoint, docs) {
     /** @type {Pick<Run, 'r1' | 'r2' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
-    return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, text: null, provenance: null }], ...empty };
+    return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
   /** @param {boolean} simulated @param {Totals | null | undefined} totals */
@@ -2489,8 +2509,8 @@
     const { run } = tab;
     const stream = openStream('run', tab, run);
     try {
-      const { question, model } = run.answers[0];
-      const body = { question, model, documents: run.docs.map((f) => f.text) };
+      const { question, model, endpoint } = run.answers[0];
+      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text) };
       const started = await api('/api/runs', { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
@@ -2503,8 +2523,8 @@
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
-  /** @param {Tab} tab @param {string} question @param {string} model */
-  async function askOver(tab, question, model) {
+  /** @param {Tab} tab @param {string} question @param {string} model @param {string | null} endpoint */
+  async function askOver(tab, question, model, endpoint) {
     const { run } = tab;
     /** @type {Answer} */
     const ask = { question, model, source: 'live', text: null, provenance: null, totals: null };
@@ -2539,7 +2559,7 @@
       }
     };
     try {
-      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model } });
+      const asked = await api(`/api/runs/${run.id}/asks`, { method: 'POST', body: { question, model, endpoint } });
       jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
@@ -3095,40 +3115,56 @@
 
   // ---------- keys ----------
 
-  // The prototype only notes each provider's state, as r3con app answers it; r3con app keeps the keys themselves.
-  /** @type {Map<string, KeyState | OtherState>} */
+  // The prototype only notes what r3con app would answer; r3con app keeps the keys themselves.
+  /** @type {Map<string, KeyState>} */
   const keyed = new Map();
+  /** @type {Map<string, string | null>} */
+  const prototypeServers = new Map();
 
   /** @param {string} key */
   const hintOf = (key) => (key.length >= MIN_HINTED_KEY_CHARS ? key.slice(-KEY_HINT_CHARS) : '');
 
-  /** @param {string} provider @param {string} key @param {string} [endpoint] @returns {KeyState | OtherState} */
-  function prototypeKey(provider, key, endpoint) {
-    if (provider === OTHER) return { endpoint: endpoint.trim(), key: key ? hintOf(key) : null };
-    return { source: 'here', hint: hintOf(key) };
+  /** @returns {KeyStatus} */
+  function prototypeStatus() {
+    return { ...Object.fromEntries(keyed), other: [...prototypeServers].map(([endpoint, key]) => ({ endpoint, key })) };
   }
+
+  /** @param {string | null} key */
+  const keyText = (key) => (key === null ? 'no key' : MASK + key);
 
   /** @param {string} provider @param {KeyStatus} status */
   function keyState(provider, status) {
-    const state = status[provider];
+    const state = /** @type {KeyState} */ (status[provider]);
     if (!state) return { text: '', removable: false };
-    if (provider === OTHER) {
-      const { endpoint, key } = /** @type {OtherState} */ (state);
-      return { text: `${endpoint} · ${key === null ? 'no key' : MASK + key}`, removable: true };
-    }
-    const own = /** @type {KeyState} */ (state);
-    return own.source === 'here' ? { text: MASK + own.hint, removable: true } : { text: `from ${own.variable}`, removable: false };
+    return state.source === 'here' ? { text: keyText(state.hint), removable: true } : { text: `from ${state.variable}`, removable: false };
+  }
+
+  /** @param {Server[]} servers */
+  function renderServers(servers) {
+    /** @param {Server} server */
+    const row = ({ endpoint, key }) =>
+      h(
+        'li',
+        { class: 'key-state' },
+        h('span', {}, `${endpoint} · ${keyText(key)}`),
+        h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove server ${endpoint}`, onclick: () => forget(() => mode.forgetServer(endpoint), SERVER_LABEL, 'endpoint-other') }, 'remove'),
+      );
+    fill($('server-list'), servers.map(row));
+    $('servers-label').hidden = $('server-list').hidden = !servers.length;
   }
 
   /** @param {KeyStatus} status */
   function renderKeys(status) {
+    keysNow = status;
+    keysRead = true;
     for (const provider of Object.keys(PROVIDERS)) {
       const { text, removable } = keyState(provider, status);
       $(`state-${provider}`).textContent = text;
       $(`state-${provider}`).parentElement.hidden = !text;
       $(`remove-${provider}`).hidden = !removable;
     }
-    renderPicker(keyedProviders(status));
+    renderServers(serversOf(status));
+    renderPicker();
     readyStatus();
   }
 
@@ -3138,8 +3174,48 @@
 
   // ---------- model picker ----------
 
+  // A model on no server is its own id, as before this page knew servers; one on a server, or named like an id, is JSON.
+  /** @param {string} model @param {string | null} [endpoint] */
+  const modelId = (model, endpoint) => (endpoint || model.startsWith('[') ? JSON.stringify([model, endpoint || null]) : model);
+  /** @param {SavedModel} entry */
+  const savedId = (entry) => modelId(entry.model, entry.endpoint);
+
+  /** @param {string} id @returns {[string, string | null]} */
+  function parseModelId(id) {
+    if (!id.startsWith('[')) return [id, null];
+    try {
+      const [model, endpoint] = JSON.parse(id);
+      if (typeof model === 'string' && (endpoint === null || typeof endpoint === 'string')) return [model, endpoint];
+    } catch {
+      // Not an id this page wrote: read it as a model's name.
+    }
+    return [id, null];
+  }
+
   function pickedModel() {
-    return modelPick.value || modelOther.value.trim();
+    return parseModelId(modelPick.value)[0] || modelOther.value.trim();
+  }
+
+  const pickedEndpoint = () => parseModelId(modelPick.value)[1];
+
+  /** @param {string} endpoint */
+  function placeOf(endpoint) {
+    try {
+      const { host, pathname } = new URL(endpoint);
+      return { host, path: pathname.replace(/\/$/, '') };
+    } catch {
+      return { host: endpoint, path: '' };
+    }
+  }
+
+  // Servers on one host read apart by their paths, and those that still don't by their whole URLs.
+  /** @param {string[]} endpoints @returns {Map<string, string>} */
+  function serverLabels(endpoints) {
+    const hosts = endpoints.map((endpoint) => placeOf(endpoint).host);
+    const paths = endpoints.map((endpoint, i) => hosts[i] + placeOf(endpoint).path);
+    /** @param {string[]} labels @param {number} i */
+    const once = (labels, i) => labels.filter((label) => label === labels[i]).length === 1;
+    return new Map(endpoints.map((endpoint, i) => [endpoint, once(hosts, i) ? hosts[i] : once(paths, i) ? paths[i] : endpoint]));
   }
 
   // Storage is outside input: whatever it holds that isn't a list of named models is left out.
@@ -3147,7 +3223,9 @@
   function readSavedModels() {
     try {
       const saved = JSON.parse(readStored(SAVED_MODELS_KEY));
-      return Array.isArray(saved) ? saved.filter((entry) => typeof entry?.model === 'string' && entry.model.trim()) : [];
+      /** @param {SavedModel} entry */
+      const valid = (entry) => typeof entry?.model === 'string' && entry.model.trim() && ['string', 'undefined'].includes(typeof entry.endpoint);
+      return Array.isArray(saved) ? saved.filter(valid) : [];
     } catch {
       return [];
     }
@@ -3159,57 +3237,80 @@
     else removeStored(SAVED_MODELS_KEY);
   }
 
-  /** @type {string[]} */
-  let providersWithKeys = [];
+  /** @type {KeyStatus} */
+  let keysNow = {};
+  let keysRead = false;
   // The model last picked from the menu, for Escape in the other model field to go back to.
   let menuModel = '';
 
-  // The remembered model stays listed without its key, as after a reload; a saved model a provider lists shows only there.
-  function renderPicker(providers = providersWithKeys) {
-    providersWithKeys = providers;
-    const remembered = readStored(MODEL_KEY) || DEFAULT_MODEL;
+  // The remembered model stays listed without its key, as after a reload, but never on a server known to be gone.
+  function renderPicker() {
+    const providers = keyedProviders(keysNow);
+    const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
+    const labels = serverLabels(servers);
+    const [rememberedModel, rememberedEndpoint] = parseModelId(readStored(MODEL_KEY) || DEFAULT_MODEL);
+    const gone = keysRead && !servers.includes(rememberedEndpoint);
+    const remembered = modelId(rememberedModel, gone ? null : rememberedEndpoint);
+    /** @param {string} model @param {string | null} [endpoint] @returns {[string, string]} */
+    const entry = (model, endpoint, text = model) => [modelId(model, endpoint), text];
     const groups = Object.entries(PROVIDERS)
-      .filter(([provider, { models }]) => models.length && providers.includes(provider))
-      .map(([, group]) => group);
-    const offered = groups.flatMap(({ models }) => models);
-    const saved = readSavedModels().map(({ model }) => model).filter((model) => !offered.includes(model));
-    const listed = [...offered, ...saved];
-    const current = modelPick.options.length ? modelPick.value : remembered;
-    /** @param {string} value */
-    const option = (value, text = value) => h('option', { value }, text);
-    /** @param {{ label: string, models: string[] }} group */
-    const optgroup = ({ label, models }) => h('optgroup', { label }, models.map((model) => option(model)));
-    const typed = current === '' ? modelOther.value.trim() : '';
-    const unlisted = listed.includes(remembered) || remembered === typed ? null : option(remembered);
-    const savedGroup = saved.length > 0 && optgroup({ label: SAVED_GROUP, models: saved });
-    fill(modelPick, unlisted, groups.map(optgroup), savedGroup, option('', 'other model…'));
-    modelPick.value = current === '' || listed.includes(current) ? current : remembered;
-    $('model-hint').hidden = providers.length > 0;
+      .filter(([provider]) => providers.includes(provider))
+      .map(([, { label, models }]) => ({ label, entries: models.map((model) => entry(model)) }));
+    const offered = new Set(groups.flatMap(({ entries }) => entries.map(([id]) => id)));
+    const saved = readSavedModels();
+    const savedGroups = [
+      { label: SAVED_GROUP, entries: saved.filter((model) => !model.endpoint && !offered.has(savedId(model))).map(({ model }) => entry(model)) },
+      ...servers.map((endpoint) => ({
+        label: labels.get(endpoint),
+        entries: [...saved.filter((model) => model.endpoint === endpoint).map(({ model }) => entry(model, endpoint)), entry('', endpoint, `other model on ${labels.get(endpoint)}…`)],
+      })),
+    ].filter(({ entries }) => entries.length);
+    const allGroups = [...groups, ...savedGroups];
+    const listed = new Set(['', ...allGroups.flatMap(({ entries }) => entries.map(([id]) => id))]);
+    let pick = modelPick.options.length ? modelPick.value : remembered;
+    if (!listed.has(pick)) pick = parseModelId(pick)[0] === '' ? '' : remembered;
+    // A model typed on a server and never saved comes back in that server's field, so the menu names its server.
+    const [pickModel, pickEndpoint] = parseModelId(pick);
+    if (pickModel && pickEndpoint && !listed.has(pick) && listed.has(modelId('', pickEndpoint))) {
+      modelOther.value = pickModel;
+      pick = modelId('', pickEndpoint);
+    }
+    const typed = parseModelId(pick)[0] === '' ? modelId(modelOther.value.trim(), parseModelId(pick)[1]) : null;
+    /** @param {[string, string]} option */
+    const option = ([value, text]) => h('option', { value }, text);
+    const unlisted = listed.has(remembered) || remembered === typed ? null : option(entry(...parseModelId(remembered)));
+    fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))), option(entry('', null, 'other model…')));
+    modelPick.value = pick;
+    $('model-hint').hidden = providers.length > 0 || servers.length > 0;
     showOtherModel();
   }
 
   function showOtherModel() {
-    modelOther.hidden = modelOther.disabled = modelPick.value !== '';
-    if (modelPick.value) menuModel = modelPick.value;
-    modelRemove.hidden = !readSavedModels().some((entry) => entry.model === modelPick.value);
-    modelRemove.setAttribute('aria-label', `remove ${modelPick.value}`);
+    const [model, endpoint] = parseModelId(modelPick.value);
+    modelOther.hidden = modelOther.disabled = model !== '';
+    if (model) menuModel = modelPick.value;
+    modelRemove.hidden = !readSavedModels().some((entry) => savedId(entry) === modelPick.value);
+    const where = endpoint ? ` on ${serverLabels(serversOf(keysNow).map((server) => server.endpoint)).get(endpoint) ?? endpoint}` : '';
+    modelRemove.setAttribute('aria-label', `remove ${model}${where}`);
   }
 
   function onPick() {
     showOtherModel();
     const model = pickedModel();
-    if (model) writeStored(MODEL_KEY, model);
+    if (model) writeStored(MODEL_KEY, modelId(model, pickedEndpoint()));
     readyStatus();
   }
 
   function saveTypedModel() {
     const model = modelOther.value.trim();
     if (!model) return;
+    const endpoint = pickedEndpoint();
+    const id = modelId(model, endpoint);
     const saved = readSavedModels();
-    if (!saved.some((entry) => entry.model === model)) writeSavedModels([...saved, { model }]);
+    if (!saved.some((entry) => savedId(entry) === id)) writeSavedModels([...saved, endpoint ? { model, endpoint } : { model }]);
     modelOther.value = '';
     renderPicker();
-    modelPick.value = model;
+    modelPick.value = id;
     onPick();
     modelPick.focus();
   }
@@ -3223,8 +3324,8 @@
   }
 
   function removeSavedModel() {
-    const model = modelPick.value;
-    writeSavedModels(readSavedModels().filter((entry) => entry.model !== model));
+    const id = modelPick.value;
+    writeSavedModels(readSavedModels().filter((entry) => savedId(entry) !== id));
     removeStored(MODEL_KEY);
     renderPicker();
     onPick();
@@ -3265,20 +3366,20 @@
     });
   }
 
-  // A row is a label, a field and, below it, the provider's state; Other's field is its endpoint, with its key below.
+  // A provider's row is a label, a field and, below it, its state; the servers follow, then a server to add.
   function keyRows() {
-    return Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
+    const rows = Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
       const marker = h('span', { id: `state-${provider}` });
-      const remove = h('button', { class: 'btn remove', id: `remove-${provider}`, type: 'button', 'aria-label': `remove ${label} key`, onclick: () => forgetKey(provider) }, 'remove');
+      const forgetIt = () => forget(() => mode.forgetKey(provider), label, `key-${provider}`);
+      const remove = h('button', { class: 'btn remove', id: `remove-${provider}`, type: 'button', 'aria-label': `remove ${label} key`, onclick: forgetIt }, 'remove');
       const state = h('div', { class: 'k key-state', hidden: true }, marker, remove);
-      if (provider !== OTHER) {
-        const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
-        return [h('label', { for: key.id }, `${label} API key`), key, state];
-      }
-      const endpoint = endpointField({ 'aria-label': `${label}: server URL`, 'aria-describedby': `${marker.id} other-hint` });
-      const key = keyField(provider, { placeholder: 'API key, if any', 'aria-label': `${label}: API key` });
-      return [h('label', { for: endpoint.id }, label), endpoint, key, state];
+      const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
+      return [h('label', { for: key.id }, `${label} API key`), key, state];
     });
+    const servers = h('ul', { class: 'k server-list', id: 'server-list', 'aria-labelledby': 'servers-label', hidden: true });
+    const endpoint = endpointField({ 'aria-label': 'add server: URL', 'aria-describedby': 'other-hint' });
+    const key = keyField('other', { placeholder: 'API key, if any', 'aria-label': 'add server: API key' });
+    return [...rows, h('span', { class: 'keys-label', id: 'servers-label', hidden: true }, 'Servers'), servers, h('label', { for: endpoint.id }, 'add server'), endpoint, key];
   }
 
   function buildSettings() {
@@ -3316,14 +3417,6 @@
     $('settings-saved').textContent = text;
   }
 
-  /** @param {string} provider */
-  function clearKey(provider) {
-    $(`key-${provider}`, HTMLInputElement).value = '';
-    if (provider !== OTHER) return;
-    $('endpoint-other', HTMLInputElement).value = '';
-    $('endpoint-other', HTMLInputElement).required = false;
-  }
-
   let saving = false;
 
   // A save asked for while one is in flight is dropped: it would send the same keys again.
@@ -3337,22 +3430,27 @@
     }
   }
 
-  // Other is entered once it has an endpoint. Keys are saved one at a time, each field cleared once
-  // its key is saved and the markers following each answer; a failure stops the save, and the fields
-  // left keep what was typed until they close.
+  // One at a time, so a failure stops the save with the fields not yet saved still holding what was typed.
   async function saveEnteredKeys() {
     const endpoint = $('endpoint-other', HTMLInputElement).value;
     const entered = Object.keys(PROVIDERS)
       .map((provider) => [provider, $(`key-${provider}`, HTMLInputElement).value.trim()])
-      .filter(([provider, key]) => (provider === OTHER ? endpoint : key));
-    if (!entered.length) return showSaveResult('nothing to save');
+      .filter(([, key]) => key);
+    if (!entered.length && !endpoint) return showSaveResult('nothing to save');
     for (const [provider, key] of entered) {
       try {
-        renderKeys(await mode.saveKey(provider, key, provider === OTHER ? endpoint : undefined));
+        renderKeys(await mode.saveKey(provider, key));
       } catch (error) {
         return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't save", "couldn't save the keys")}`);
       }
-      clearKey(provider);
+      $(`key-${provider}`, HTMLInputElement).value = '';
+    }
+    if (endpoint) {
+      try {
+        renderKeys(await mode.saveServer(endpoint, $('key-other', HTMLInputElement).value.trim()));
+      } catch (error) {
+        return showSaveResult(`${SERVER_LABEL} · ${explain(error, "couldn't save", "couldn't save the server")}`);
+      }
     }
     clearSettings();
     showDone('saved');
@@ -3364,15 +3462,15 @@
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
 
-  // Its button goes with the key, so focus moves to the field the key was typed in.
-  /** @param {string} provider */
-  async function forgetKey(provider) {
+  // Its button goes with what it removes, so focus moves to the field that was typed in.
+  /** @param {() => Promise<KeyStatus>} request @param {string} label @param {string} field */
+  async function forget(request, label, field) {
     try {
-      renderKeys(await mode.forgetKey(provider));
+      renderKeys(await request());
     } catch (error) {
-      return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't remove", "couldn't remove a key")}`);
+      return showSaveResult(`${label} · ${explain(error, "couldn't remove", "couldn't remove a key")}`);
     }
-    $(provider === OTHER ? 'endpoint-other' : `key-${provider}`).focus();
+    $(field).focus();
     showDone('removed');
   }
 
@@ -3813,12 +3911,25 @@
       failRun(tab, tab.narr, { outcome: inStage('stopped', tab.narr.stage), error: '' });
     },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
-    saveKey: async (provider, key, endpoint) => Object.fromEntries(keyed.set(provider, prototypeKey(provider, key, endpoint))),
+    async saveKey(provider, key) {
+      keyed.set(provider, { source: 'here', hint: hintOf(key) });
+      return prototypeStatus();
+    },
+    async saveServer(endpoint, key) {
+      const refusal = serverUrlRefusal(normalEndpoint(endpoint));
+      if (refusal) throw new ServerError(`other.endpoint: ${refusal}`);
+      prototypeServers.set(normalEndpoint(endpoint), key ? hintOf(key) : null);
+      return prototypeStatus();
+    },
     async forgetKey(provider) {
       keyed.delete(provider);
-      return Object.fromEntries(keyed);
+      return prototypeStatus();
     },
-    readKeys: async () => Object.fromEntries(keyed),
+    async forgetServer(endpoint) {
+      prototypeServers.delete(endpoint);
+      return prototypeStatus();
+    },
+    readKeys: async () => prototypeStatus(),
   };
 
   // A provider whose variable is set where r3con app runs counts as having a key.
@@ -3851,13 +3962,15 @@
         return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }
     },
-    newRun: (question, files) => liveRun(question, pickedModel(), files),
+    newRun: (question, files) => liveRun(question, pickedModel(), pickedEndpoint(), files),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
-    ask: (question) => askOver(state.shown, question, pickedModel()),
-    saveKey: async (provider, key, endpoint) => (await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } })).json(),
+    ask: (question) => askOver(state.shown, question, pickedModel(), pickedEndpoint()),
+    saveKey: async (provider, key) => (await api('/api/keys', { method: 'POST', body: { provider, key } })).json(),
+    saveServer: async (endpoint, key) => (await api('/api/keys', { method: 'POST', body: { provider: 'other', endpoint, key: key || undefined } })).json(),
     forgetKey: async (provider) => (await api('/api/keys', { method: 'DELETE', body: { provider } })).json(),
+    forgetServer: async (endpoint) => (await api('/api/keys', { method: 'DELETE', body: { provider: 'other', endpoint } })).json(),
     readKeys: async () => (await api('/api/keys')).json(),
   };
 
@@ -3881,7 +3994,7 @@
     showTabContents(state.shown);
     syncDocNodes(state.shown);
     updateComposer();
-    renderPicker([]);
+    renderPicker();
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('keys-note').textContent = mode.keysNote;

@@ -55,9 +55,12 @@ OPENAI_KEY = "sk-stored-openai-key-1234"
 OTHER_KEY = "other-endpoint-key-5678"
 ENVIRONMENT_KEY = "key-from-the-environment-9012"
 ENDPOINT = "http://127.0.0.1:9/v1"
+SECOND_ENDPOINT = "http://127.0.0.1:11/v1"
+SECOND_KEY = "second-server-key-3456"
 STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
+SECOND_SERVER = {"provider": "other", "endpoint": SECOND_ENDPOINT, "key": SECOND_KEY}
 ASK = {"question": "Which site logged the fewest?", "model": MODEL}
 PDF_TEXT = "Incidents this quarter: 7."
 CORRUPT_PDF = b"%PDF-1.4 truncated garbage"
@@ -156,8 +159,9 @@ def memos() -> list[str]:
     return [path.read_text() for path in sorted(MEMOS.iterdir())]
 
 
-def run_body(model: str = MODEL) -> dict[str, Any]:
-    return {"question": QUESTION, "model": model, "documents": memos()}
+def run_body(model: str = MODEL, endpoint: str | None = None) -> dict[str, Any]:
+    body = {"question": QUESTION, "model": model, "documents": memos()}
+    return body if endpoint is None else {**body, "endpoint": endpoint}
 
 
 def events_in(stream: str) -> list[dict[str, Any]]:
@@ -169,8 +173,10 @@ def events_in(stream: str) -> list[dict[str, Any]]:
     ]
 
 
-def start_run(client: TestClient, model: str = MODEL) -> str:
-    response = client.post("/api/runs", json=run_body(model))
+def start_run(
+    client: TestClient, model: str = MODEL, endpoint: str | None = None
+) -> str:
+    response = client.post("/api/runs", json=run_body(model, endpoint))
     assert response.status_code == 202, response.text
     return response.json()["run_id"]
 
@@ -191,8 +197,10 @@ def ask_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
     return events_of(client, f"/api/asks/{response.json()['ask_id']}/events")
 
 
-def finished_run(client: TestClient, model: str = MODEL) -> str:
-    run_id = start_run(client, model)
+def finished_run(
+    client: TestClient, model: str = MODEL, endpoint: str | None = None
+) -> str:
+    run_id = start_run(client, model, endpoint)
     last = run_events(client, run_id)[-1]
     assert last["type"] == "run_finished", last
     return run_id
@@ -403,17 +411,17 @@ def test_keys_say_where_each_comes_from_and_only_a_stored_ones_last_four(
         "openai": {"source": "here", "hint": OPENAI_KEY[-4:]},
         "anthropic": None,
         "gemini": {"source": "environment", "variable": "GEMINI_API_KEY"},
-        "other": {"endpoint": ENDPOINT, "key": OTHER_KEY[-4:]},
+        "other": [{"endpoint": ENDPOINT, "key": OTHER_KEY[-4:]}],
     }
     responses += [
         client.request("DELETE", "/api/keys", json={"provider": "openai"}),
-        client.request("DELETE", "/api/keys", json={"provider": "other"}),
+        client.request("DELETE", "/api/keys", json=KEYLESS_OTHER),
     ]
     assert responses[-1].json() == {
         "openai": {"source": "environment", "variable": "OPENAI_API_KEY"},
         "anthropic": None,
         "gemini": {"source": "environment", "variable": "GEMINI_API_KEY"},
-        "other": None,
+        "other": [],
     }
     for response in responses:
         assert response.status_code == 200
@@ -428,13 +436,35 @@ def test_a_key_too_short_to_spare_its_last_four_has_no_hint(
     client.post("/api/keys", json={"provider": "anthropic", "key": key})
     status = client.post("/api/keys", json={**OTHER, "key": key}).json()
     assert status["anthropic"] == {"source": "here", "hint": ""}
-    assert status["other"]["key"] == ""
+    assert status["other"] == [{"endpoint": ENDPOINT, "key": ""}]
     assert key[-4:] not in json.dumps(status)
 
 
-def test_a_keyless_other_says_it_has_no_key(client: TestClient):
+def test_servers_are_stored_by_url_in_the_order_added_and_forgotten_one_at_a_time(
+    client: TestClient,
+):
+    client.post("/api/keys", json=OTHER)
+    client.post("/api/keys", json=SECOND_SERVER)
     status = client.post("/api/keys", json=KEYLESS_OTHER).json()
-    assert status["other"] == {"endpoint": ENDPOINT, "key": None}
+    assert status["other"] == [
+        {"endpoint": ENDPOINT, "key": None},
+        {"endpoint": SECOND_ENDPOINT, "key": SECOND_KEY[-4:]},
+    ]
+    status = client.request("DELETE", "/api/keys", json=KEYLESS_OTHER).json()
+    assert status["other"] == [{"endpoint": SECOND_ENDPOINT, "key": SECOND_KEY[-4:]}]
+
+
+@pytest.mark.parametrize("slashes", ["/", "//"])
+def test_a_server_url_with_trailing_slashes_is_the_same_server(
+    client: TestClient, llm: FakeLLM, slashes: str
+):
+    client.post("/api/keys", json={**OTHER, "endpoint": f"{ENDPOINT}{slashes}"})
+    status = client.post("/api/keys", json=KEYLESS_OTHER).json()
+    assert status["other"] == [{"endpoint": ENDPOINT, "key": None}]
+    finished_run(client, "hosted_vllm/qwen", f"{ENDPOINT}{slashes}")
+    assert {call["api_base"] for call in llm.requests} == {ENDPOINT}
+    forget = {"provider": "other", "endpoint": f"{ENDPOINT}{slashes}"}
+    assert client.request("DELETE", "/api/keys", json=forget).json()["other"] == []
 
 
 @pytest.mark.parametrize(
@@ -443,20 +473,14 @@ def test_a_keyless_other_says_it_has_no_key(client: TestClient):
         (STORED_OPENAI, MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, BARE_OPENAI_MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, "anthropic/claude-sonnet-5-5", {}),
-        (OTHER, "hosted_vllm/qwen", {"api_key": OTHER_KEY, "api_base": ENDPOINT}),
-        (
-            KEYLESS_OTHER,
-            "hosted_vllm/qwen",
-            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
-        ),
+        (OTHER, "hosted_vllm/qwen", {}),
         (OTHER, BARE_OPENAI_MODEL, {}),
         (OTHER, "claude-sonnet-5-5", {}),
         (OTHER, "gemini-2.5-pro", {}),
         (OTHER, "azure/x", {}),
-        (OTHER, "ollama_chat/llama3", {"api_key": OTHER_KEY, "api_base": ENDPOINT}),
     ],
 )
-def test_a_stored_key_reaches_every_call_for_its_providers_model(
+def test_a_model_on_no_server_gets_only_its_providers_stored_key(
     client: TestClient,
     llm: FakeLLM,
     stored: dict[str, str],
@@ -488,7 +512,7 @@ def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment
 ):
     monkeypatch.setenv(variable, ENVIRONMENT_KEY)
     client.post("/api/keys", json=KEYLESS_OTHER)
-    run_events(client, start_run(client, model_name))
+    run_events(client, start_run(client, model_name, ENDPOINT))
     placeholder = KEYLESS_SERVER_KEY.get_secret_value()
     assert llm.requests
     assert transport(llm) == [{"api_key": placeholder, "api_base": ENDPOINT}] * len(
@@ -496,11 +520,80 @@ def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment
     )
 
 
-def test_a_name_litellm_cannot_place_is_sent_to_other_which_litellm_then_refuses(
+@pytest.mark.parametrize(
+    ("model_name", "endpoint", "sent"),
+    [
+        (
+            "hosted_vllm/qwen",
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            "hosted_vllm/qwen",
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
+        (
+            "ollama_chat/llama3",
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
+    ],
+)
+def test_a_model_on_a_server_reaches_that_server_with_its_key(
+    client: TestClient,
+    llm: FakeLLM,
+    model_name: str,
+    endpoint: str,
+    sent: dict[str, str],
+):
+    client.post("/api/keys", json=STORED_OPENAI)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    client.post("/api/keys", json=SECOND_SERVER)
+    finished_run(client, model_name, endpoint)
+    assert transport(llm) == [sent] * len(llm.requests)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "endpoint", "wrong"),
+    [
+        ("hosted_vllm/qwen", "http://127.0.0.1:10/v1", "isn't in settings"),
+        (MODEL, ENDPOINT, f"{MODEL} isn't a self-hosted model"),
+        (BARE_OPENAI_MODEL, ENDPOINT, "isn't a self-hosted model"),
+        ("anthropic/claude-sonnet-5-5", ENDPOINT, "isn't a self-hosted model"),
+    ],
+)
+def test_an_unknown_server_or_a_hosted_model_on_a_server_is_refused(
+    client: TestClient,
+    llm: FakeLLM,
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    endpoint: str,
+    wrong: str,
+):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", ENVIRONMENT_KEY)
+    client.post("/api/keys", json=STORED_OPENAI)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    run_id = finished_run(client)
+    llm.requests.clear()
+    responses = [
+        client.post("/api/runs", json=run_body(model_name, endpoint)),
+        client.post(
+            f"/api/runs/{run_id}/asks",
+            json={**ASK, "model": model_name, "endpoint": endpoint},
+        ),
+    ]
+    for response in responses:
+        assert response.status_code == 422
+        assert wrong in response.json()["error"]
+    assert llm.requests == []
+
+
+def test_a_name_litellm_cannot_place_is_sent_to_its_server_which_litellm_then_refuses(
     client: TestClient, llm: FakeLLM
 ):
     client.post("/api/keys", json=OTHER)
-    last = run_events(client, start_run(client, "qwen3-32b"))[-1]
+    last = run_events(client, start_run(client, "qwen3-32b", ENDPOINT))[-1]
     assert llm.requests
     assert transport(llm) == [{"api_key": OTHER_KEY, "api_base": ENDPOINT}] * len(
         llm.requests
@@ -514,14 +607,14 @@ def test_a_pasted_key_and_endpoint_are_used_and_masked_without_their_whitespace(
 ):
     client.post("/api/keys", json={"provider": "openai", "key": f"{OPENAI_KEY}\n"})
     client.post("/api/keys", json={**OTHER, "endpoint": f" {ENDPOINT}\n"})
-    assert client.get("/api/keys").json()["other"]["endpoint"] == ENDPOINT
+    assert client.get("/api/keys").json()["other"][0]["endpoint"] == ENDPOINT
     llm.answers(reasoning=RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}."))
     last = run_events(client, start_run(client))[-1]
     assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
     assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
     llm.answers(reasoning=ANSWER)
     llm.requests.clear()
-    finished_run(client, "hosted_vllm/qwen")
+    finished_run(client, "hosted_vllm/qwen", f"{ENDPOINT} ")
     assert {call["api_base"] for call in llm.requests} == {ENDPOINT}
 
 
@@ -530,11 +623,11 @@ def test_a_placeholder_key_too_short_to_be_a_secret_is_not_masked(
 ):
     client.post("/api/keys", json={**OTHER, "key": "EMPTY"})
     llm.answers(relevance=RuntimeError("The model sent an EMPTY reply."))
-    last = run_events(client, start_run(client, "hosted_vllm/qwen"))[-1]
+    last = run_events(client, start_run(client, "hosted_vllm/qwen", ENDPOINT))[-1]
     assert last["error"] == "RuntimeError: The model sent an EMPTY reply."
 
 
-def test_with_a_keyless_other_a_bare_openai_model_never_reaches_its_endpoint(
+def test_with_a_keyless_server_a_bare_openai_model_on_no_server_never_reaches_it(
     client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
@@ -668,6 +761,9 @@ def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_aske
         ({"documents": [{"text": "a memo"}]}, "documents.0: Input should be a"),
         ({"documents": "a memo"}, "documents:"),
         ({"temperature": 0}, "temperature: Extra inputs are not permitted"),
+        ({"endpoint": "file:///etc"}, "endpoint: String should match pattern"),
+        ({"endpoint": "http://me:pw@127.0.0.1:9/v1"}, "endpoint: must not hold a user"),
+        ({"endpoint": "http:///"}, "endpoint: must name a host"),
     ],
 )
 def test_a_run_body_that_is_not_valid_is_refused_with_what_is_wrong(
@@ -1084,6 +1180,12 @@ def test_the_page_walks_a_folder_for_the_suffixes_read_documents_walks_for():
         ({**STORED_OPENAI, "x": 1}, "openai.x: Extra inputs"),
         ({"provider": "other", "key": OTHER_KEY}, "other.endpoint: Field required"),
         ({"provider": "other", "endpoint": "file:///etc"}, "other.endpoint"),
+        (
+            {**OTHER, "endpoint": f"http://me:{OTHER_KEY}@127.0.0.1:9/v1"},
+            "other.endpoint: must not hold a user or password",
+        ),
+        ({**OTHER, "endpoint": "http:///"}, "other.endpoint: must name a host"),
+        ({**OTHER, "endpoint": "https:////v1"}, "other.endpoint: must name a host"),
     ],
 )
 def test_a_key_body_that_is_not_valid_is_refused_without_echoing_the_key(
@@ -1094,6 +1196,16 @@ def test_a_key_body_that_is_not_valid_is_refused_without_echoing_the_key(
     assert wrong in response.json()["error"]
     assert OPENAI_KEY not in response.text
     assert OTHER_KEY not in response.text
+
+
+def test_forgetting_a_server_takes_its_url(client: TestClient):
+    client.post("/api/keys", json=OTHER)
+    response = client.request("DELETE", "/api/keys", json={"provider": "other"})
+    assert response.status_code == 422
+    assert "other.endpoint: Field required" in response.json()["error"]
+    assert client.get("/api/keys").json()["other"] == [
+        {"endpoint": ENDPOINT, "key": OTHER_KEY[-4:]}
+    ]
 
 
 @pytest.mark.parametrize(

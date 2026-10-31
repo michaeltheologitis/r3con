@@ -9,17 +9,25 @@ opened URL's fragment, ``#token=...``.
 
 - ``GET /api/keys``: each provider's key, as ``null`` when it has none, ``{source:
   "here", hint}`` when it is stored here, or ``{source: "environment", variable}`` when
-  litellm finds it in that variable; and Other's ``{endpoint, key}``, its key a hint or
-  ``null``, or ``null`` when it has no endpoint. A hint is a key's last
-  ``KEY_HINT_CHARS`` characters, ``""`` for a key shorter than
+  litellm finds it in that variable; and ``other``, the servers stored here, in the
+  order they were added, each ``{endpoint, key}``, its key a hint or ``null``. A hint
+  is a key's last ``KEY_HINT_CHARS`` characters, ``""`` for a key shorter than
   ``MIN_HINTED_KEY_CHARS``.
-  ``POST`` stores one (``{provider, key}``, or ``{provider: "other", endpoint, key?}``),
-  ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. OpenAI's,
-  Anthropic's and Gemini's go to their own models; Other's endpoint and key go to the
-  self-hosted providers in ``SELF_HOSTED`` and to names litellm can't place, and any
-  other provider gets litellm's own setup from the environment. A keyless Other is
-  sent ``KEYLESS_SERVER_KEY`` as its key: given none, litellm would send it one from
-  the environment, such as ``OLLAMA_API_KEY``.
+  ``POST`` stores a provider's key (``{provider, key}``), or a server, by its URL
+  (``{provider: "other", endpoint, key?}``), replacing the key of one stored at that
+  URL; ``DELETE`` forgets one (``{provider}``, or ``{provider: "other", endpoint}``);
+  both answer as ``GET`` does. A URL is kept without its trailing slashes, and one
+  that names no host, or holds a user or password, is refused (422): the page keeps a
+  server's URL with the models it saves.
+- A run or ask names its model and, as ``endpoint``, the server it runs on, if any.
+  With no server, OpenAI's, Anthropic's and Gemini's models get their provider's key
+  stored here, and any other gets litellm's own setup from the environment. On a
+  server, a model of a self-hosted provider in ``SELF_HOSTED``, or a name litellm
+  can't place, is sent there with the server's key, or ``KEYLESS_SERVER_KEY`` for a
+  keyless server: given none, litellm would send it one from the environment, such
+  as ``OLLAMA_API_KEY``. An ``endpoint`` that isn't a stored server, or a model
+  litellm places with a provider that isn't self-hosted, is refused (422), so that no
+  provider's key, stored here or in the environment, ever reaches a server.
 - Keys stay in this process's memory, and the server never logs or writes one, and
   answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
   which r3con registers before sending it and masks in every event's ``error``, in
@@ -43,13 +51,14 @@ opened URL's fragment, ``#token=...``.
   which are never opened; ``unread``, the documents not read. A zip that is corrupt,
   encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
   unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
-- ``POST /api/runs`` (``{question, model, documents: [text, ...]}``) starts
+- ``POST /api/runs`` (``{question, model, endpoint?, documents: [text, ...]}``) starts
   ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
   events as ``text/event-stream``, from the first, until ``run_finished`` or
   ``run_failed``.
-- ``POST /api/runs/{run_id}/asks`` (``{question, model}``) starts ``r3con.ask`` over a
-  run that has ended and answers ``{ask_id}``; ``GET /api/asks/{ask_id}/events``
-  streams its events until ``ask_finished`` or ``ask_failed``.
+- ``POST /api/runs/{run_id}/asks`` (``{question, model, endpoint?}``) starts
+  ``r3con.ask`` over a run that has ended and answers ``{ask_id}``;
+  ``GET /api/asks/{ask_id}/events`` streams its events until ``ask_finished`` or
+  ``ask_failed``.
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -93,6 +102,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
+from urllib.parse import urlsplit
 
 import litellm
 import platformdirs
@@ -179,6 +189,12 @@ SELF_HOSTED = frozenset(
 )
 # vLLM's placeholder for "no key"; non-empty, since r3con drops an empty api_key.
 KEYLESS_SERVER_KEY = SecretStr("EMPTY")
+UNKNOWN_SERVER = "This model's server isn't in settings: add it there first."
+CREDENTIALS_IN_URL = "must not hold a user or password: put the key in its key field"
+NO_HOST_IN_URL = "must name a host"
+NOT_SELF_HOSTED = (
+    "isn't a self-hosted model, so it can't run on a server: pick other model… for it."
+)
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
@@ -197,14 +213,29 @@ def _stripped_secret(secret: SecretStr) -> SecretStr:
     return SecretStr(_not_blank(secret.get_secret_value()).strip())
 
 
+def _server_url(endpoint: str) -> str:
+    if "@" in urlsplit(endpoint).netloc:
+        raise PydanticCustomError("credentials", CREDENTIALS_IN_URL)
+    stripped = endpoint.rstrip("/")
+    if not urlsplit(stripped).hostname:
+        raise PydanticCustomError("host", NO_HOST_IN_URL)
+    return stripped
+
+
 Text = Annotated[str, AfterValidator(_not_blank)]
 Secret = Annotated[SecretStr, AfterValidator(_stripped_secret)]
+Endpoint = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, pattern=r"^https?://\S+$"),
+    AfterValidator(_server_url),
+]
 
 
 class RunRequest(BaseModel):
     model_config = FORBID_EXTRA
     question: Text
     model: Text
+    endpoint: Endpoint | None = None
     documents: list[Text] = Field(min_length=1)
 
 
@@ -223,6 +254,7 @@ class AskRequest(BaseModel):
     model_config = FORBID_EXTRA
     question: Text
     model: Text
+    endpoint: Endpoint | None = None
 
 
 class ProviderKey(BaseModel):
@@ -231,22 +263,29 @@ class ProviderKey(BaseModel):
     key: Secret
 
 
-class OtherEndpoint(BaseModel):
+class ServerKey(BaseModel):
     model_config = FORBID_EXTRA
     provider: Literal["other"]
-    endpoint: Annotated[
-        str, StringConstraints(strip_whitespace=True, pattern=r"^https?://\S+$")
-    ]
+    endpoint: Endpoint
     key: Secret | None = None
 
 
 class ForgetKey(BaseModel):
     model_config = FORBID_EXTRA
-    provider: Provider | Literal["other"]
+    provider: Provider
 
 
-KEY_BODY: TypeAdapter[ProviderKey | OtherEndpoint] = TypeAdapter(
-    Annotated[ProviderKey | OtherEndpoint, Field(discriminator="provider")]
+class ForgetServer(BaseModel):
+    model_config = FORBID_EXTRA
+    provider: Literal["other"]
+    endpoint: Endpoint
+
+
+KEY_BODY: TypeAdapter[ProviderKey | ServerKey] = TypeAdapter(
+    Annotated[ProviderKey | ServerKey, Field(discriminator="provider")]
+)
+FORGET_BODY: TypeAdapter[ForgetKey | ForgetServer] = TypeAdapter(
+    Annotated[ForgetKey | ForgetServer, Field(discriminator="provider")]
 )
 
 
@@ -265,7 +304,7 @@ class ServerState:
     logs_dir: Path
     completion: Callable[..., Any] | None
     keys: dict[Provider, SecretStr] = field(default_factory=dict)
-    other: OtherEndpoint | None = None
+    servers: dict[str, SecretStr | None] = field(default_factory=dict)
     jobs: dict[Kind, dict[str, Job]] = field(
         default_factory=lambda: {"run": {}, "ask": {}}
     )
@@ -314,15 +353,10 @@ def _key_status(state: ServerState) -> dict[str, Any]:
     status: dict[str, Any] = {
         provider: _provider_status(state, provider) for provider in KEY_VARIABLES
     }
-    other = state.other
-    status["other"] = (
-        None
-        if other is None
-        else {
-            "endpoint": other.endpoint,
-            "key": None if other.key is None else _hint(other.key),
-        }
-    )
+    status["other"] = [
+        {"endpoint": endpoint, "key": None if key is None else _hint(key)}
+        for endpoint, key in state.servers.items()
+    ]
     return status
 
 
@@ -335,19 +369,24 @@ def _provider(model: str) -> str | None:
         return None
 
 
-def _model_options(state: ServerState, model: str) -> dict[str, Any]:
-    """What r3con is called with for ``model``: the key stored for its provider; for a
-    self-hosted provider, or a name litellm can't place, the Other endpoint and its key.
-    Anything not stored here is passed as ``None``, so that litellm reads the
-    environment."""
-    provider, other = _provider(model), state.other
-    if provider in KEY_VARIABLES:
-        key, base = state.keys.get(provider), None
-    elif other is not None and (provider is None or provider in SELF_HOSTED):
-        key = KEYLESS_SERVER_KEY if other.key is None else other.key
-        base = other.endpoint
+def _model_options(
+    state: ServerState, model: str, endpoint: str | None
+) -> dict[str, Any]:
+    """What r3con is called with for ``model`` on the server at ``endpoint``, if any,
+    as the module docstring says. Anything not stored here is passed as ``None``, so
+    that litellm reads the environment."""
+    provider = _provider(model)
+    if endpoint is None:
+        key = state.keys.get(provider) if provider in KEY_VARIABLES else None
+        base = None
+    elif endpoint not in state.servers:
+        raise HTTPException(422, UNKNOWN_SERVER)
+    elif provider is None or provider in SELF_HOSTED:
+        stored = state.servers[endpoint]
+        key = KEYLESS_SERVER_KEY if stored is None else stored
+        base = endpoint
     else:
-        key, base = None, None
+        raise HTTPException(422, f"{model} {NOT_SELF_HOSTED}")
     return {
         "model": model,
         "api_key": None if key is None else key.get_secret_value(),
@@ -445,8 +484,8 @@ async def keys(request: Request) -> Response:
 async def save_key(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, KEY_BODY.validate_json)
-    if isinstance(body, OtherEndpoint):
-        state.other = body
+    if isinstance(body, ServerKey):
+        state.servers[body.endpoint] = body.key
     else:
         state.keys[body.provider] = body.key
     return JSONResponse(_key_status(state))
@@ -454,9 +493,9 @@ async def save_key(request: Request) -> Response:
 
 async def forget_key(request: Request) -> Response:
     state = _state(request)
-    body = await _read(request, ForgetKey.model_validate_json)
-    if body.provider == "other":
-        state.other = None
+    body = await _read(request, FORGET_BODY.validate_json)
+    if isinstance(body, ForgetServer):
+        state.servers.pop(body.endpoint, None)
     else:
         state.keys.pop(body.provider, None)
     return JSONResponse(_key_status(state))
@@ -564,7 +603,7 @@ async def start_run(request: Request) -> Response:
         body.question,
         body.documents,
         logs_dir=state.logs_dir,
-        **_model_options(state, body.model),
+        **_model_options(state, body.model, body.endpoint),
     )
     return JSONResponse({"run_id": _start(state, "run", run)}, status_code=202)
 
@@ -582,7 +621,7 @@ async def start_ask(request: Request) -> Response:
         r3con.ask,
         started["run_dir"],
         body.question,
-        **_model_options(state, body.model),
+        **_model_options(state, body.model, body.endpoint),
     )
     return JSONResponse({"ask_id": _start(state, "ask", ask)}, status_code=202)
 
