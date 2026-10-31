@@ -487,29 +487,34 @@ async function introCounts(area, options) {
   check(area, name, isDeepStrictEqual(intros, [SAMPLE_DOCS, FEWER_MEMOS].map(loadedLine)), intros.join(' | '));
 }
 
+// What node `id` draws on in the recorded sample: its own document, then what it cites, with `provenance` for an answer.
+function sourcesOf(sample, docIds, id, provenance = sample.answer.provenance) {
+  const [kind, i] = id.split('-');
+  const own = ['r1', 'r2', 'parsed'].includes(kind) ? [docIds[i]] : [];
+  if (kind === 'answer') return [...provenance.summary_ids.map((d) => `r2-${d}`), ...provenance.parse_ids.map((d) => `parsed-${d}`)];
+  if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((d) => `r2-${d}`)];
+  if (kind === 'r2') return [...own, ...sample.r2[i].provenance.map((d) => `r1-${d}`)];
+  return own;
+}
+
 // The edges an answer's lit path holds: the run's own answer by default, or `answerId` with `provenance`.
 function lineage(sample, docIds, answerId = 'answer-0', provenance = sample.answer.provenance) {
-  const { summary_ids, parse_ids } = provenance;
-  const cites = (id) => {
-    const [kind, i] = id.split('-');
-    if (kind === 'answer') return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
-    if (kind === 'parsed') return sample.parsed[i].provenance.map((d) => `r2-${d}`);
-    if (kind === 'r2') return sample.r2[i].provenance.map((d) => `r1-${d}`);
-    return [];
-  };
-  const ownDocument = (id) => {
-    const [kind, i] = id.split('-');
-    return ['r1', 'r2', 'parsed'].includes(kind) ? docIds[i] : null;
-  };
   const nodes = new Set([answerId]);
   const edges = new Set();
   for (const id of nodes) {
-    for (const from of [ownDocument(id), ...cites(id)].filter(Boolean)) {
+    for (const from of sourcesOf(sample, docIds, id, provenance)) {
       nodes.add(from);
       edges.add(`${from}>${id}`);
     }
   }
   return [...edges].sort();
+}
+
+// The lines a round-2 summary or the run's answer lights in the recorded sample: from what it draws on, and to each of `ids` that draws on it.
+function lightLines(sample, docIds, id, ids) {
+  const into = sourcesOf(sample, docIds, id).map((from) => `${from}>${id}`);
+  const out = ids.filter((to) => sourcesOf(sample, docIds, to).includes(id)).map((to) => `${id}>${to}`);
+  return [...into, ...out].sort();
 }
 
 // A log's steps as RUN_STEPS lists them.
@@ -518,6 +523,13 @@ const stepsOf = (log) => log.steps.map(({ step, nested, links }) => [step, neste
 const parsedLines = (log) => [...(log.steps.find(({ step }) => step === `parsing ${SAMPLE_DOCS} documents`)?.nested ?? [])].sort();
 // The parse an open parsed node's popup shows.
 const shownParse = (page) => page.$eval('#inspector pre.code', (el) => JSON.parse(el.textContent));
+
+// The lines lit on the panel, and node `id`'s faint lines.
+async function linesLitWith(page, id) {
+  const lines = await page.evaluate(lineStates);
+  const lit = lines.filter(({ hl }) => hl).map(({ key }) => key).sort();
+  return { lit, faint: lines.filter(({ key, faint }) => faint && key.split('>').includes(id)) };
+}
 
 // In-page functions, passed to page.evaluate and page.waitForFunction.
 
@@ -899,6 +911,14 @@ function hasFilledIcons(els) {
   return els.map((el) => Boolean(el.querySelector('.fill-orange')));
 }
 
+// Each line on the panel: its key, whether it is faint, whether it is lit as the hovered or open node's, and how it is painted.
+function lineStates() {
+  return [...document.querySelectorAll('.edge')].map((el) => {
+    const { opacity, stroke } = getComputedStyle(el);
+    return { key: el.dataset.key, faint: el.classList.contains('context'), hl: el.classList.contains('hl'), look: `${opacity} ${stroke}` };
+  });
+}
+
 function fitOfRun() {
   const panel = document.getElementById('panel').getBoundingClientRect();
   const isOutside = (el) => {
@@ -1014,6 +1034,38 @@ async function sampleReplay() {
     const clear = geometry.k > 0 && geometry.dotted > 0 && geometry.hits.length === 0;
     const geometryDetail = `${geometry.dotted} dotted lines at zoom ${geometry.k?.toFixed(2)}${hitsNote}`;
     check('geometry', 'no dotted line passes through an icon or a label', clear, geometryDetail);
+
+    const ids = await page.$$eval('.node', (els) => els.map((el) => el.dataset.id));
+    const atRest = Object.fromEntries((await page.evaluate(lineStates)).map(({ key, look }) => [key, look]));
+    const hover = (id) => page.hover(`${nodeSel(id)} .icon`);
+    const openThenLeave = async (id) => {
+      await clickNode(page, id);
+      await page.mouse.move(0, 0);
+    };
+    const lightCases = [
+      ['a hovered round-2 summary', 'r2-0', hover],
+      ['the hovered answer', 'answer-0', hover],
+      ['a round-2 summary with its popup open and the pointer away', 'r2-3', openThenLeave],
+    ];
+    for (const [what, id, light] of lightCases) {
+      await light(id);
+      const { lit, faint } = await linesLitWith(page, id);
+      const onlyOwn = faint.length > 0 && isDeepStrictEqual(lit, lightLines(sample, docIds, id, ids));
+      const lightName = `${what} lights its own lines and its provenance, not the faint lines from what its call was shown`;
+      check('sample replay', lightName, onlyOwn, `${lit.length} lit: ${lit.join(' ')}; ${faint.length} faint`);
+      const changed = faint.filter(({ key, look }) => look !== atRest[key]);
+      const keptName = `${what} leaves its faint lines the colour and opacity they have at rest`;
+      check('sample replay', keptName, faint.length > 0 && changed.length === 0, changed.map(({ key, look }) => `${key} ${atRest[key]} → ${look}`).join('; '));
+    }
+
+    await openThenLeave('r2-4');
+    await send(page, recordedAsks()[0].question);
+    const landed = await becomes(page, landedNode, 'answer-1');
+    const { faint } = await linesLitWith(page, 'r2-4');
+    const drawnLit = faint.filter(({ hl }) => hl).map(({ key }) => key);
+    const askName = "an ask landing while a round-2 summary's popup is open draws the summary's new faint line unlit";
+    const askDetail = `${faint.length} faint: ${faint.map(({ key }) => key).join(' ')}; lit ${drawnLit.join(' ')}`;
+    check('sample replay', askName, landed && faint.some(({ key }) => key === 'r2-4>answer-1') && drawnLit.length === 0, askDetail);
   });
 
   const asks = recordedAsks();

@@ -1658,6 +1658,13 @@
     el.classList.add(how);
   }
 
+  // Faint lines touch nearly every node; lighting them would light the panel.
+  /** @param {Tab} tab @param {PanelEdge} edge */
+  function lightsWith(tab, edge) {
+    const id = hoveredIn(tab) ?? openIn(tab);
+    return edge.kind !== 'context' && id !== null && (edge.from === id || edge.to === id);
+  }
+
   /** @param {Tab} tab @param {string} from @param {string} to @param {EdgeKind} kind @param {'draw' | 'fade'} [how] */
   function addEdge(tab, from, to, kind, how) {
     const key = `${from}>${to}`;
@@ -1674,8 +1681,7 @@
     layerFor(tab, kind).append(edge.el);
     edge.el.setAttribute('d', edgePath(tab, tab.nodes.get(from), tab.nodes.get(to)));
     if (how) animateEdge(tab, edge.el, how);
-    const id = hoveredIn(tab) ?? openIn(tab);
-    edge.el.classList.toggle('hl', id !== null && (id === from || id === to));
+    edge.el.classList.toggle('hl', lightsWith(tab, edge));
     return edge;
   }
 
@@ -1692,8 +1698,7 @@
 
   function refreshHighlight() {
     const tab = state.shown;
-    const id = state.hovered ?? state.selected;
-    for (const e of tab.edges.values()) e.el.classList.toggle('hl', id !== null && (e.from === id || e.to === id));
+    for (const e of tab.edges.values()) e.el.classList.toggle('hl', lightsWith(tab, e));
     for (const n of tab.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
