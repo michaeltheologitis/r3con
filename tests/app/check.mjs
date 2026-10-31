@@ -44,8 +44,8 @@ const COUNTED = {
   flow: '.edge.flow',
   onPath: '.node.on-path',
 };
-const SAMPLE_COUNTS = { nodes: 22, edges: 79, lit: 26, dotted: 10, faint: 45, cited: 14, flow: 10, onPath: 17 };
-const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 29,490 tokens · $0.0038';
+const SAMPLE_COUNTS = { nodes: 22, edges: 79, lit: 29, dotted: 10, faint: 42, cited: 17, flow: 10, onPath: 17 };
+const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 30,370 tokens · $0.0042';
 const POPUP_ROWS = {
   'doc-0': ['relevance snippet'],
   'r1-0': ['read'],
@@ -102,7 +102,7 @@ const STRUCTURE_READY = 'structure ready';
 const NOTHING_PARSED = 'nothing parsed';
 const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
-const SAMPLE_READY = 'ready · gpt-6-luna · $0.0038';
+const SAMPLE_READY = 'ready · gpt-6-luna · $0.0042';
 // Each document's line, linked to its node, under each step that makes one per document.
 const perDocument = (kind) => Array(SAMPLE_DOCS).fill(kind).join(' ');
 // A run's log opened, as stepsOf gives it: each step, how many lines are nested under it, and the kinds of node they link to.
