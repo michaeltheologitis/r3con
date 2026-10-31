@@ -162,11 +162,11 @@
 
   /** @type {RecordedRun} */
   const SAMPLE = {
- "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many? Give the contractor's name, not its code.",
+ "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many?",
  "model": "gpt-6-luna",
- "version": "0.4.0",
- "runFolder": "20261028T223555Z_43b61722",
- "created": "2026-10-28T22:35:55+00:00",
+ "version": "0.6.3",
+ "runFolder": "20261031T212320Z_0df4cb0a",
+ "created": "2026-10-31T21:23:20+00:00",
  "docs": [
   {
    "name": "01_northgate.txt",
@@ -196,47 +196,50 @@
  ],
  "r1": [
   {
-   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies the maintenance contractor only by code, CT-118; it gives no contractor name or information for comparing totals across sites.",
+   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents; planned maintenance is handled by contractor CT-118. The memo does not identify the contractor by name or provide totals for other sites.",
    "provenance": []
   },
   {
-   "summary": "An Eastfield site Q3 operations memo. It reports 9 equipment incidents and says planned maintenance is performed by contractor CT-204, but does not give the contractor’s name.",
+   "summary": "A site operations memo for Eastfield’s Q3 review. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; it does not provide the contractor’s name or totals for other sites.",
    "provenance": []
   },
   {
-   "summary": "A Q3 operations-review memo for the Riverside site. It records 6 equipment incidents and says the site’s planned maintenance is handled by contractor code CT-118; it does not give the contractor’s name or establish its total across sites.",
+   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor CT-118; this contributes 6 incidents for CT-118 toward the contractor-wide total.",
    "provenance": []
   },
   {
-   "summary": "An approved contractor registry extract mapping codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group; it contains no Q3 equipment-incident counts, so it cannot establish which contractor had the most or how many.",
+   "summary": "An approved contractor registry extract, which maps site paperwork codes to contractors. It identifies CT-118 as Halloran Services Ltd (mechanical and electrical maintenance), CT-204 as Merrow Facilities Group (HVAC and compressed air), and CT-311 as Bellweather Grounds (landscaping); it contains no Q3 equipment-incident counts.",
    "provenance": []
   },
   {
-   "summary": "A brief cafeteria refurbishment memo describing a serving-counter replacement and increased seating capacity. It provides no information about maintenance contractors or Q3 equipment incidents.",
+   "summary": "A cafeteria refurbishment memo describing planned October work and temporary service reductions. It provides no information about maintenance contractors, equipment incidents, or Q3 incident totals.",
    "provenance": []
   }
  ],
  "r2": [
   {
-   "summary": "A Northgate site Q3 operations-review memo. It records 5 equipment incidents and identifies contractor CT-118 for planned maintenance; the registry maps CT-118 to Halloran Services Ltd. This site’s count alone does not establish the contractor’s total across sites.",
+   "summary": "A Northgate Q3 operations memo reports 5 equipment incidents under contractor code CT-118, which the registry identifies as Halloran Services Ltd. Combined with Riverside’s 6 incidents, Halloran has 11 incidents in the sites reported so far; Eastfield, under CT-204, reports 9.",
+   "provenance": [
+    2,
+    3,
+    1
+   ]
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and lists maintenance contractor code CT-204, which the contractor registry identifies as Merrow Facilities Group; this contributes 9 incidents to that contractor’s total.",
    "provenance": [
     3
    ]
   },
   {
-   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204, which the contractor registry maps to Merrow Facilities Group.",
+   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents and maintenance contractor code CT-118. The registry maps CT-118 to Halloran Services Ltd; combined with Northgate’s 5 incidents under the same code, the two documented sites total 11 incidents for Halloran Services.",
    "provenance": [
+    0,
     3
    ]
   },
   {
-   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents (4 electrical and 2 storm-related water-ingress incidents) under maintenance contractor code CT-118. The contractor registry identifies CT-118 as Halloran Services Ltd.",
-   "provenance": [
-    3
-   ]
-  },
-  {
-   "summary": "An approved-contractor registry extract mapping CT-118 to Halloran Services Ltd and CT-204 to Merrow Facilities Group. This supplies the contractor names for the codes listed in the Q3 site incident memos.",
+   "summary": "An approved contractor registry extract mapping site-paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group; the site memos report 11 Q3 incidents across CT-118 sites and 9 for CT-204, so the registry identifies Halloran as the contractor associated with the higher total.",
    "provenance": [
     0,
     1,
@@ -249,8 +252,8 @@
   }
  ],
  "schema": {
-  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"A site's equipment-incident count for a reported period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The period covered by the incident count\")\n    incident_count: int | None = Field(description=\"The total equipment incidents reported for this site and period\")\n    contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site\")\n\nclass ContractorRegistryEntry(BaseModel):\n    \"\"\"A contractor code-to-name mapping from a registry.\"\"\"\n    contractor_code: str | None = Field(description=\"The contractor code\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to this code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_registry_entries: list[ContractorRegistryEntry]",
-  "thought": "The answer requires summing incident counts across sites by contractor, then resolving the winning contractor’s code to its name. Capture each site’s incident count and contractor code, plus registry code-to-name mappings, without asking the parser to aggregate across documents."
+  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count for a reporting period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period for the incident count\")\n    equipment_incident_count: int | None = Field(description=\"The incident count reported for this site and period\")\n    contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site\")\n\nclass ContractorCodeMapping(BaseModel):\n    \"\"\"A mapping from a contractor code to the contractor's name.\"\"\"\n    contractor_code: str | None = Field(description=\"The contractor code as written\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_code_mappings: list[ContractorCodeMapping]",
+  "thought": "The answer requires combining incident counts from separate site memos by contractor, then comparing contractor totals. Capture each site’s Q3 incident count and contractor code, plus registry mappings from codes to contractor names; aggregation happens downstream."
  },
  "parsed": [
   {
@@ -259,11 +262,11 @@
      {
       "site": "Northgate",
       "period": "Q3",
-      "incident_count": 5,
+      "equipment_incident_count": 5,
       "contractor_code": "CT-118"
      }
     ],
-    "contractor_registry_entries": []
+    "contractor_code_mappings": []
    },
    "provenance": []
   },
@@ -273,11 +276,11 @@
      {
       "site": "Eastfield",
       "period": "Q3",
-      "incident_count": 9,
+      "equipment_incident_count": 9,
       "contractor_code": "CT-204"
      }
     ],
-    "contractor_registry_entries": []
+    "contractor_code_mappings": []
    },
    "provenance": []
   },
@@ -287,18 +290,18 @@
      {
       "site": "Riverside",
       "period": "Q3",
-      "incident_count": 6,
+      "equipment_incident_count": 6,
       "contractor_code": "CT-118"
      }
     ],
-    "contractor_registry_entries": []
+    "contractor_code_mappings": []
    },
    "provenance": []
   },
   {
    "parse": {
     "site_incident_reports": [],
-    "contractor_registry_entries": [
+    "contractor_code_mappings": [
      {
       "contractor_code": "CT-118",
       "contractor_name": "Halloran Services Ltd"
@@ -306,6 +309,10 @@
      {
       "contractor_code": "CT-204",
       "contractor_name": "Merrow Facilities Group"
+     },
+     {
+      "contractor_code": "CT-311",
+      "contractor_name": "Bellweather Grounds"
      }
     ]
    },
@@ -314,118 +321,118 @@
   {
    "parse": {
     "site_incident_reports": [],
-    "contractor_registry_entries": []
+    "contractor_code_mappings": []
    },
    "provenance": []
   }
  ],
  "answer": {
-  "text": "Halloran Services Ltd's sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
+  "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
   "provenance": {
    "summary_ids": [
     0,
+    1,
     2,
-    3,
-    1
+    3
    ],
    "parse_ids": [
     0,
+    1,
     2,
-    3,
-    1
+    3
    ]
   }
  },
  "calls": {
-  "r1-4": {
+  "r1-1": {
    "step": 1,
-   "tokens": 818,
-   "usd": 0.00010259999999999999
-  },
-  "r1-2": {
-   "step": 2,
-   "tokens": 880,
-   "usd": 0.00013000000000000002
+   "tokens": 845,
+   "usd": 0.00011609999999999999
   },
   "r1-0": {
+   "step": 2,
+   "tokens": 852,
+   "usd": 0.0001192
+  },
+  "r1-4": {
    "step": 3,
-   "tokens": 875,
-   "usd": 0.0001279
+   "tokens": 825,
+   "usd": 0.0001065
+  },
+  "r1-2": {
+   "step": 4,
+   "tokens": 872,
+   "usd": 0.000128
   },
   "r1-3": {
-   "step": 4,
-   "tokens": 860,
-   "usd": 0.0001244
-  },
-  "r1-1": {
    "step": 5,
-   "tokens": 857,
-   "usd": 0.00012009999999999999
+   "tokens": 911,
+   "usd": 0.0001423
   },
   "r2-4": {
    "step": 6,
-   "tokens": 1360,
-   "usd": 0.00018680000000000001
+   "tokens": 1377,
+   "usd": 0.000191925
   },
   "r2-1": {
    "step": 7,
-   "tokens": 1469,
-   "usd": 0.000242425
+   "tokens": 1452,
+   "usd": 0.000234675
   },
-  "r2-0": {
+  "r2-3": {
    "step": 8,
-   "tokens": 1437,
-   "usd": 0.000227925
+   "tokens": 1634,
+   "usd": 0.000328675
   },
   "r2-2": {
    "step": 9,
-   "tokens": 1535,
-   "usd": 0.0002788
+   "tokens": 1628,
+   "usd": 0.00031967499999999995
   },
-  "r2-3": {
+  "r2-0": {
    "step": 10,
-   "tokens": 1614,
-   "usd": 0.00032205
+   "tokens": 1705,
+   "usd": 0.00036117500000000004
   },
   "parsed-4": {
    "step": 1,
-   "tokens": 2274,
-   "usd": 6.190500000000001e-05
+   "tokens": 2344,
+   "usd": 0.000317675
   },
-  "parsed-0": {
+  "parsed-1": {
    "step": 2,
-   "tokens": 2389,
-   "usd": 0.0003638
+   "tokens": 2408,
+   "usd": 9.4285e-05
   },
   "parsed-2": {
    "step": 3,
-   "tokens": 2348,
-   "usd": 9.553e-05
+   "tokens": 2470,
+   "usd": 0.000124535
   },
   "parsed-3": {
    "step": 4,
-   "tokens": 2426,
-   "usd": 0.00013978
+   "tokens": 2521,
+   "usd": 0.00014516
   },
-  "parsed-1": {
+  "parsed-0": {
    "step": 5,
-   "tokens": 2617,
-   "usd": 0.00023152999999999997
+   "tokens": 2653,
+   "usd": 0.000471425
   },
   "schema": {
    "step": 1,
-   "tokens": 2416,
-   "usd": 0.000519425
+   "tokens": 2484,
+   "usd": 0.000533925
   },
   "answer": {
    "step": 1,
-   "tokens": 3315,
-   "usd": 0.0004878
+   "tokens": 3389,
+   "usd": 0.0004910499999999999
   }
  },
  "totals": {
-  "tokens": 29490,
-  "usd": 0.00376277
+  "tokens": 30370,
+  "usd": 0.00422628
  }
 };
 
@@ -435,9 +442,9 @@
  {
   "question": "Which sites does Halloran Services maintain?",
   "model": "openai/gpt-6-luna",
-  "folder": "20261029T073207Z_cc2a2838",
-  "created": "2026-10-29T07:32:07+00:00",
-  "text": "Halloran Services Ltd is identified as the maintenance contractor at the Northgate and Riverside sites in the Q3 reports.",
+  "folder": "20261031T212425Z_7fc5f679",
+  "created": "2026-10-31T21:24:25+00:00",
+  "text": "Halloran Services Ltd maintains the Northgate and Riverside sites; both report contractor code CT-118, which the registry maps to Halloran.",
   "provenance": {
    "summary_ids": [
     0,
@@ -451,16 +458,16 @@
    ]
   },
   "totals": {
-   "tokens": 3279,
-   "usd": 0.00047805
+   "tokens": 3340,
+   "usd": 0.00010604000000000001
   }
  },
  {
   "question": "Which sites does Halloran Services maintain?",
   "model": "openai/gpt-6.1-terra",
-  "folder": "20261029T073212Z_83ad380c",
-  "created": "2026-10-29T07:32:12+00:00",
-  "text": "Halloran Services Ltd maintains Northgate and Riverside.",
+  "folder": "20261031T212428Z_105ab6ed",
+  "created": "2026-10-31T21:24:28+00:00",
+  "text": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
   "provenance": {
    "summary_ids": [
     0,
@@ -474,16 +481,16 @@
    ]
   },
   "totals": {
-   "tokens": 3251,
-   "usd": 0.00464075
+   "tokens": 3342,
+   "usd": 0.004720500000000001
   }
  },
  {
   "question": "How many incidents did Merrow Facilities Group's sites log?",
   "model": "openai/gpt-6-luna",
-  "folder": "20261029T073215Z_99dea02e",
-  "created": "2026-10-29T07:32:15+00:00",
-  "text": "Merrow Facilities Group's identified site, Eastfield, logged 9 incidents in Q3.",
+  "folder": "20261031T212431Z_8edc3a51",
+  "created": "2026-10-31T21:24:31+00:00",
+  "text": "Merrow Facilities Group’s documented site logged 9 incidents in Q3.",
   "provenance": {
    "summary_ids": [
     1,
@@ -495,8 +502,8 @@
    ]
   },
   "totals": {
-   "tokens": 3254,
-   "usd": 0.00011053999999999998
+   "tokens": 3364,
+   "usd": 0.00011653999999999999
   }
  }
 ];
