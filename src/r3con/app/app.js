@@ -132,6 +132,7 @@
    * @typedef {{ endpoint: string, key: string | null }} OtherState
    * @typedef {Record<string, KeyState | OtherState | null>} KeyStatus
    */
+  /** @typedef {{ model: string }} SavedModel A model typed under the question and saved to the menu with Enter. */
   /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
@@ -592,6 +593,8 @@
   const SIDE_MIN_PX = 280;
   const SIDE_MAX_SHARE = 0.6;
   const SIDE_STEP_PX = 16;
+  const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
+  const SAVED_GROUP = 'saved';
   // Earlier prototypes kept a model and an endpoint here.
   const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
@@ -709,6 +712,7 @@
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelOther = $('model-other', HTMLInputElement);
+  const modelRemove = $('model-remove', HTMLButtonElement);
   const frame = $('frame');
   const trash = $('trash');
   const side = $('side');
@@ -3133,14 +3137,38 @@
     return modelPick.value || modelOther.value.trim();
   }
 
-  // The remembered model stays listed without its key, as after a reload; a chosen "other model…" stays chosen.
-  /** @param {string[]} providers */
-  function renderPicker(providers) {
+  // Storage is outside input: whatever it holds that isn't a list of named models is left out.
+  /** @returns {SavedModel[]} */
+  function readSavedModels() {
+    try {
+      const saved = JSON.parse(readStored(SAVED_MODELS_KEY));
+      return Array.isArray(saved) ? saved.filter((entry) => typeof entry?.model === 'string' && entry.model.trim()) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** @param {SavedModel[]} saved */
+  function writeSavedModels(saved) {
+    if (saved.length) writeStored(SAVED_MODELS_KEY, JSON.stringify(saved));
+    else removeStored(SAVED_MODELS_KEY);
+  }
+
+  /** @type {string[]} */
+  let providersWithKeys = [];
+  // The model last picked from the menu, for Escape in the other model field to go back to.
+  let menuModel = '';
+
+  // The remembered model stays listed without its key, as after a reload; a saved model a provider lists shows only there.
+  function renderPicker(providers = providersWithKeys) {
+    providersWithKeys = providers;
     const remembered = readStored(MODEL_KEY) || DEFAULT_MODEL;
     const groups = Object.entries(PROVIDERS)
       .filter(([provider, { models }]) => models.length && providers.includes(provider))
       .map(([, group]) => group);
-    const listed = groups.flatMap(({ models }) => models);
+    const offered = groups.flatMap(({ models }) => models);
+    const saved = readSavedModels().map(({ model }) => model).filter((model) => !offered.includes(model));
+    const listed = [...offered, ...saved];
     const current = modelPick.options.length ? modelPick.value : remembered;
     /** @param {string} value */
     const option = (value, text = value) => h('option', { value }, text);
@@ -3148,7 +3176,8 @@
     const optgroup = ({ label, models }) => h('optgroup', { label }, models.map((model) => option(model)));
     const typed = current === '' ? modelOther.value.trim() : '';
     const unlisted = listed.includes(remembered) || remembered === typed ? null : option(remembered);
-    fill(modelPick, unlisted, groups.map(optgroup), option('', 'other model…'));
+    const savedGroup = saved.length > 0 && optgroup({ label: SAVED_GROUP, models: saved });
+    fill(modelPick, unlisted, groups.map(optgroup), savedGroup, option('', 'other model…'));
     modelPick.value = current === '' || listed.includes(current) ? current : remembered;
     $('model-hint').hidden = providers.length > 0;
     showOtherModel();
@@ -3156,6 +3185,9 @@
 
   function showOtherModel() {
     modelOther.hidden = modelOther.disabled = modelPick.value !== '';
+    if (modelPick.value) menuModel = modelPick.value;
+    modelRemove.hidden = !readSavedModels().some((entry) => entry.model === modelPick.value);
+    modelRemove.setAttribute('aria-label', `remove ${modelPick.value}`);
   }
 
   function onPick() {
@@ -3163,6 +3195,35 @@
     const model = pickedModel();
     if (model) writeStored(MODEL_KEY, model);
     readyStatus();
+  }
+
+  function saveTypedModel() {
+    const model = modelOther.value.trim();
+    if (!model) return;
+    const saved = readSavedModels();
+    if (!saved.some((entry) => entry.model === model)) writeSavedModels([...saved, { model }]);
+    modelOther.value = '';
+    renderPicker();
+    modelPick.value = model;
+    onPick();
+    modelPick.focus();
+  }
+
+  function cancelTypedModel() {
+    modelOther.value = '';
+    modelPick.value = menuModel;
+    if (modelPick.selectedIndex < 0) modelPick.selectedIndex = 0;
+    onPick();
+    modelPick.focus();
+  }
+
+  function removeSavedModel() {
+    const model = modelPick.value;
+    writeSavedModels(readSavedModels().filter((entry) => entry.model !== model));
+    removeStored(MODEL_KEY);
+    renderPicker();
+    onPick();
+    modelPick.focus();
   }
 
   // ---------- settings ----------
@@ -3654,6 +3715,18 @@
     });
     modelPick.addEventListener('change', onPick);
     modelOther.addEventListener('change', onPick);
+    // In the form, Enter would also send the question.
+    modelOther.addEventListener('keydown', (e) => {
+      if (e.isComposing) return;
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        saveTypedModel();
+      } else if (e.key === 'Escape') {
+        e.stopPropagation();
+        cancelTypedModel();
+      }
+    });
+    modelRemove.addEventListener('click', removeSavedModel);
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {

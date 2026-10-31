@@ -521,6 +521,7 @@ p { margin: 0; }
 #model-pick optgroup, #model-pick option { color: var(--fg); background: var(--bg); }
 #model-hint { align-self: flex-start; }
 .ask-actions { display: flex; gap: 2ch; margin-left: auto; }
+#model-remove { margin-right: auto; }
 .run-btn { font-weight: 600; }
 .note { padding: 0 2ch 0.7em; color: var(--dim); }
 
