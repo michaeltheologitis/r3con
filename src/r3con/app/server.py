@@ -12,7 +12,9 @@ opened URL's fragment, ``#token=...``.
   ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. OpenAI's,
   Anthropic's and Gemini's go to their own models; Other's endpoint and key go to the
   self-hosted providers in ``SELF_HOSTED`` and to names litellm can't place, and any
-  other provider gets litellm's own setup from the environment.
+  other provider gets litellm's own setup from the environment. A keyless Other is
+  sent ``KEYLESS_SERVER_KEY`` as its key: given none, litellm would send it one from
+  the environment, such as ``OLLAMA_API_KEY``.
 - Keys stay in this process's memory, and the server never sends, logs or writes one.
   Each goes to r3con as a run's ``api_key``, which r3con registers before sending it
   and masks in every event's ``error``, in what it writes to the logs dir and in what
@@ -166,6 +168,8 @@ KEY_VARIABLES: dict[Provider, str] = {
 SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
+# vLLM's placeholder for "no key"; non-empty, since r3con drops an empty api_key.
+KEYLESS_SERVER_KEY = SecretStr("EMPTY")
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
@@ -315,7 +319,8 @@ def _model_options(state: ServerState, model: str) -> dict[str, Any]:
     if provider in KEY_VARIABLES:
         key, base = state.keys.get(provider), None
     elif other is not None and (provider is None or provider in SELF_HOSTED):
-        key, base = other.key, other.endpoint
+        key = KEYLESS_SERVER_KEY if other.key is None else other.key
+        base = other.endpoint
     else:
         key, base = None, None
     return {

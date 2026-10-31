@@ -18,6 +18,7 @@ from starlette.types import ASGIApp
 from r3con import r3con
 from r3con.app.server import (
     ENCRYPTED_ZIP,
+    KEYLESS_SERVER_KEY,
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
     TOO_MANY_BYTES,
@@ -426,7 +427,11 @@ def test_keys_say_which_providers_have_one_and_never_what_it_is(
         (STORED_OPENAI, BARE_OPENAI_MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, "anthropic/claude-sonnet-5-5", {}),
         (OTHER, "hosted_vllm/qwen", {"api_key": OTHER_KEY, "api_base": ENDPOINT}),
-        (KEYLESS_OTHER, "hosted_vllm/qwen", {"api_base": ENDPOINT}),
+        (
+            KEYLESS_OTHER,
+            "hosted_vllm/qwen",
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
         (OTHER, BARE_OPENAI_MODEL, {}),
         (OTHER, "claude-sonnet-5-5", {}),
         (OTHER, "gemini-2.5-pro", {}),
@@ -444,6 +449,34 @@ def test_a_stored_key_reaches_every_call_for_its_providers_model(
     client.post("/api/keys", json=stored)
     finished_run(client, model_name)
     assert transport(llm) == [sent] * len(llm.requests)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "variable"),
+    [
+        ("hosted_vllm/qwen", "HOSTED_VLLM_API_KEY"),
+        ("lm_studio/qwen", "LM_STUDIO_API_KEY"),
+        ("llamafile/qwen", "LLAMAFILE_API_KEY"),
+        ("ollama/llama3", "OLLAMA_API_KEY"),
+        ("ollama_chat/llama3", "OLLAMA_API_KEY"),
+        ("custom_openai/qwen", "OPENAI_API_KEY"),
+    ],
+)
+def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment(
+    client: TestClient,
+    llm: FakeLLM,
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    variable: str,
+):
+    monkeypatch.setenv(variable, ENVIRONMENT_KEY)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    run_events(client, start_run(client, model_name))
+    placeholder = KEYLESS_SERVER_KEY.get_secret_value()
+    assert llm.requests
+    assert transport(llm) == [{"api_key": placeholder, "api_base": ENDPOINT}] * len(
+        llm.requests
+    )
 
 
 def test_a_name_litellm_cannot_place_is_sent_to_other_which_litellm_then_refuses(
