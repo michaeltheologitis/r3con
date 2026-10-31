@@ -917,6 +917,13 @@ async function load() {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
     });
   }
+  // Each tab row's bottom is its line.
+  await withPage('load', { sample: false }, async (page) => {
+    const chat = await rect(page, '#side .tabs');
+    const panel = await rect(page, '.board .tab-row');
+    const level = chat.top === panel.top && chat.bottom === panel.bottom;
+    check('load', `${LAYOUTS.desktop.name}: the chat's tab row and the panel's start and end level, so their lines meet`, level, `${chat.top}–${chat.bottom}, ${panel.top}–${panel.bottom}`);
+  });
 }
 
 async function beforeRun() {
