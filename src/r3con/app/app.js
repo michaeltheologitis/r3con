@@ -125,6 +125,13 @@
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
    * } ServerEvent
    */
+  /**
+   * A provider's key as r3con app answers it: stored there, with its last characters as a hint, or found in an
+   * environment variable. Other is a server's endpoint, with its key's hint or null.
+   * @typedef {{ source: 'here', hint: string } | { source: 'environment', variable: string }} KeyState
+   * @typedef {{ endpoint: string, key: string | null }} OtherState
+   * @typedef {Record<string, KeyState | OtherState | null>} KeyStatus
+   */
   /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
@@ -144,8 +151,9 @@
    * @property {(tab: Tab) => boolean} runGoing
    * @property {(tab: Tab) => void} stop
    * @property {(question: string) => void} ask
-   * @property {(provider: string, key: string, endpoint?: string) => Promise<string[]>} saveKey
-   * @property {() => Promise<string[]>} providersWithKeys
+   * @property {(provider: string, key: string, endpoint?: string) => Promise<KeyStatus>} saveKey
+   * @property {(provider: string) => Promise<KeyStatus>} forgetKey
+   * @property {() => Promise<KeyStatus>} readKeys
    */
 
   /** @type {RecordedRun} */
@@ -596,6 +604,10 @@
     other: { label: 'Other', models: [] },
   };
   const OTHER = 'other';
+  const MASK = '••••';
+  // r3con app's own hint rule, which the prototype follows: a key's last few characters, if they are a small part of it.
+  const KEY_HINT_CHARS = 4;
+  const MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS;
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
   const FAINT_FADE_FROM_DOCS = 5;
@@ -1079,7 +1091,7 @@
 
   /** @param {{ tokens: { total: number } | null, usd: number | null }} event */
   const totalsOf = (event) => ({ tokens: event.tokens?.total, usd: event.usd });
-  /** @param {Record<string, unknown>} status */
+  /** @param {KeyStatus} status */
   const keyedProviders = (status) => Object.keys(PROVIDERS).filter((provider) => status[provider]);
 
   // ---------- spinner ----------
@@ -3074,21 +3086,45 @@
 
   // ---------- keys ----------
 
-  // The prototype only notes which providers were given a key; r3con app keeps the keys themselves.
-  /** @type {Set<string>} */
-  const keyed = new Set();
+  // The prototype only notes each provider's state, as r3con app answers it; r3con app keeps the keys themselves.
+  /** @type {Map<string, KeyState | OtherState>} */
+  const keyed = new Map();
 
-  /** @param {string[]} providers */
-  function renderKeys(providers) {
-    for (const provider of Object.keys(PROVIDERS)) {
-      $(`state-${provider}`).textContent = providers.includes(provider) ? 'set' : '';
+  /** @param {string} key */
+  const hintOf = (key) => (key.length >= MIN_HINTED_KEY_CHARS ? key.slice(-KEY_HINT_CHARS) : '');
+
+  /** @param {string} provider @param {string} key @param {string} [endpoint] @returns {KeyState | OtherState} */
+  function prototypeKey(provider, key, endpoint) {
+    if (provider === OTHER) return { endpoint: endpoint.trim(), key: key ? hintOf(key) : null };
+    return { source: 'here', hint: hintOf(key) };
+  }
+
+  /** @param {string} provider @param {KeyStatus} status */
+  function keyState(provider, status) {
+    const state = status[provider];
+    if (!state) return { text: '', removable: false };
+    if (provider === OTHER) {
+      const { endpoint, key } = /** @type {OtherState} */ (state);
+      return { text: `${endpoint} · ${key === null ? 'no key' : MASK + key}`, removable: true };
     }
-    renderPicker(providers);
+    const own = /** @type {KeyState} */ (state);
+    return own.source === 'here' ? { text: MASK + own.hint, removable: true } : { text: `from ${own.variable}`, removable: false };
+  }
+
+  /** @param {KeyStatus} status */
+  function renderKeys(status) {
+    for (const provider of Object.keys(PROVIDERS)) {
+      const { text, removable } = keyState(provider, status);
+      $(`state-${provider}`).textContent = text;
+      $(`state-${provider}`).parentElement.hidden = !text;
+      $(`remove-${provider}`).hidden = !removable;
+    }
+    renderPicker(keyedProviders(status));
     readyStatus();
   }
 
   async function refreshKeys() {
-    renderKeys(await mode.providersWithKeys());
+    renderKeys(await mode.readKeys());
   }
 
   // ---------- model picker ----------
@@ -3163,35 +3199,29 @@
     });
   }
 
-  // A row is a label, a field and the provider's state; Other's field is its endpoint, with its key below.
+  // A row is a label, a field and, below it, the provider's state; Other's field is its endpoint, with its key below.
   function keyRows() {
     return Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
-      const marker = h('span', { class: 'k', id: `state-${provider}` });
+      const marker = h('span', { id: `state-${provider}` });
+      const remove = h('button', { class: 'btn remove', id: `remove-${provider}`, type: 'button', 'aria-label': `remove ${label} key`, onclick: () => forgetKey(provider) }, 'remove');
+      const state = h('div', { class: 'k key-state', hidden: true }, marker, remove);
       if (provider !== OTHER) {
         const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
-        return [h('label', { for: key.id }, `${label} API key`), key, marker];
+        return [h('label', { for: key.id }, `${label} API key`), key, state];
       }
       const endpoint = endpointField({ 'aria-label': `${label}: server URL`, 'aria-describedby': `${marker.id} other-hint` });
       const key = keyField(provider, { placeholder: 'API key, if any', 'aria-label': `${label}: API key` });
-      return [h('label', { for: endpoint.id }, label), endpoint, marker, key];
+      return [h('label', { for: endpoint.id }, label), endpoint, key, state];
     });
   }
 
   function buildSettings() {
     fill($('keys'), keyRows());
-    $('keys-show').setAttribute('aria-controls', Object.keys(PROVIDERS).map((provider) => `key-${provider}`).join(' '));
-  }
-
-  /** @param {boolean} show */
-  function showKeys(show) {
-    for (const input of /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('.key'))) input.type = show ? 'text' : 'password';
-    $('keys-show').textContent = show ? 'hide keys' : 'show keys';
   }
 
   function clearSettings() {
     for (const input of $('settings').querySelectorAll('input')) input.value = '';
     $('endpoint-other', HTMLInputElement).required = false;
-    showKeys(false);
   }
 
   // Right-aligned under the button; CSS owns the width, so nothing needs measuring before it opens.
@@ -3259,8 +3289,25 @@
       clearKey(provider);
     }
     clearSettings();
-    showSaveResult('saved');
+    showDone('saved');
+  }
+
+  /** @param {string} text */
+  function showDone(text) {
+    showSaveResult(text);
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
+  }
+
+  // Its button goes with the key, so focus moves to the field the key was typed in.
+  /** @param {string} provider */
+  async function forgetKey(provider) {
+    try {
+      renderKeys(await mode.forgetKey(provider));
+    } catch (error) {
+      return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't remove", "couldn't remove a key")}`);
+    }
+    $(provider === OTHER ? 'endpoint-other' : `key-${provider}`).focus();
+    showDone('removed');
   }
 
   // ---------- gestures ----------
@@ -3560,7 +3607,6 @@
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('settings').addEventListener('input', () => showSaveResult(''));
-    $('keys-show').addEventListener('click', () => showKeys(/** @type {HTMLInputElement} */ (document.querySelector('.key')).type === 'password'));
     $('key-other').addEventListener('input', () => ($('endpoint-other', HTMLInputElement).required = Boolean($('key-other', HTMLInputElement).value.trim())));
     // The key fields sit outside the form, so Enter there doesn't submit it on its own.
     $('settings').addEventListener('keydown', (e) => {
@@ -3689,8 +3735,12 @@
       failRun(tab, tab.narr, { outcome: inStage('stopped', tab.narr.stage), error: '' });
     },
     ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
-    saveKey: async (provider) => [...keyed.add(provider)],
-    providersWithKeys: async () => [...keyed],
+    saveKey: async (provider, key, endpoint) => Object.fromEntries(keyed.set(provider, prototypeKey(provider, key, endpoint))),
+    async forgetKey(provider) {
+      keyed.delete(provider);
+      return Object.fromEntries(keyed);
+    },
+    readKeys: async () => Object.fromEntries(keyed),
   };
 
   // A provider whose variable is set where r3con app runs counts as having a key.
@@ -3728,11 +3778,9 @@
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
     ask: (question) => askOver(state.shown, question, pickedModel()),
-    async saveKey(provider, key, endpoint) {
-      const saved = await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } });
-      return keyedProviders(await saved.json());
-    },
-    providersWithKeys: async () => keyedProviders(await (await api('/api/keys')).json()),
+    saveKey: async (provider, key, endpoint) => (await api('/api/keys', { method: 'POST', body: { provider, endpoint, key: key || undefined } })).json(),
+    forgetKey: async (provider) => (await api('/api/keys', { method: 'DELETE', body: { provider } })).json(),
+    readKeys: async () => (await api('/api/keys')).json(),
   };
 
   // r3con refuses a blank document, so a run with one is not sent.
