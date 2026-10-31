@@ -2769,8 +2769,6 @@
     $('files-locked').hidden = !run;
     $('file-actions').hidden = $('drop-hint').hidden = Boolean(run);
     $('drop-overlay').textContent = run ? DROP_LOCKED : DROP_ADDS;
-    $('sample-btn').hidden = files === SAMPLE_FILES;
-    $('sample-btn').textContent = files.some((f) => f.sample) ? `use all ${plural(SAMPLE_FILES.length, 'sample memo')}` : 'use the sample memos';
   }
 
   // Lines restored on switching to their tab were said already, so they are written with the live regions off.
@@ -2962,13 +2960,6 @@
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
-  }
-
-  function useSample() {
-    state.shown.files = SAMPLE_FILES;
-    if (!questionEl.value.trim()) questionEl.value = SAMPLE.question;
-    tellFiles(state.shown, { filesError: '' });
-    filesChanged(state.shown, `Using the ${plural(SAMPLE_FILES.length, 'sample memo')}`);
   }
 
   /** @param {Tab} tab @param {string} what */
@@ -3540,7 +3531,6 @@
         input.value = '';
       });
     }
-    $('sample-btn').addEventListener('click', useSample);
 
     /** @param {DragEvent} e */
     const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');

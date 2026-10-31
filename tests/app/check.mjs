@@ -110,7 +110,6 @@ const MIN_TARGET_PX = 24;
 const MIN_TEXT_CONTRAST = 4.5;
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
-const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
 // The page's intro, live and in the prototype, for n documents.
 const loadedLine = (n) => (n === 1 ? 'Loaded 1 document.' : `Loaded ${n} documents.`);
 // The shown tab's chat: each tab has its own, and the others are hidden.
@@ -1297,9 +1296,6 @@ async function removeArea() {
     const beforeName = "removing a file before a run drops its node, recounts, still calls the memos left the sample, says so in the files pane's live line, and the focus moves to the next file's remove";
     check('remove', beforeName, isDeepStrictEqual(after, expected), JSON.stringify(after));
 
-    const offer = await page.$eval('#sample-btn', (button) => (button.hidden ? null : button.textContent));
-    check('remove', 'with a sample memo removed, the sample button offers all of them back', offer === ALL_SAMPLE_MEMOS, offer);
-
     await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
     await removeButton(page, '06_extra_memo.txt').waitFor();
     const listed = await removeNames(page);
@@ -1309,11 +1305,10 @@ async function removeArea() {
     const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
     const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && saysSo;
     check('remove', 'files added over the sample memos left take their place, and the files pane and the chat say which they replaced', replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
+  });
 
-    await page.click('#sample-btn');
-    const back = { files: (await removeNames(page)).length, hidden: await page.$eval('#sample-btn', (button) => button.hidden) };
-    check('remove', 'the sample button brings back all the sample memos, then hides', isDeepStrictEqual(back, { files: names.length, hidden: true }), JSON.stringify(back));
-
+  await withPage('remove', { sample: false }, async (page) => {
+    await page.click('#tab-files');
     await removeButton(page, names[1]).click();
     await page.click('#tab-chat');
     await page.click('#run-btn');
