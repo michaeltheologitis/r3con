@@ -504,8 +504,9 @@
     read: { appearStagger: 150, settleFirst: 450, settleStagger: 150, minWork: 350 },
     model: { appearStagger: 260, settleFirst: 900, settleStagger: 380, minWork: 500 },
   };
-  const SPIN_FRAMES = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
-  const SPIN_FRAME_MS = 110;
+  const MARK = '❀';
+  const SPIN_FRAMES = ['·', '✾', '✿', '❀', '❁', '❀', '✿', '✾'];
+  const SPIN_FRAME_MS = 140;
 
   const GRID = { colGap: 230, rowGap: 112 };
   const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
@@ -1374,7 +1375,7 @@
   function iconFor(kind, settled) {
     if (kind === 'doc') return ICONS.document;
     if (kind === 'r1' || kind === 'r2') return ICONS.snippet;
-    if (kind === 'answer') return '<span class="glyph" aria-hidden="true">✻</span>';
+    if (kind === 'answer') return `<span class="glyph" aria-hidden="true">${MARK}</span>`;
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
@@ -1403,7 +1404,7 @@
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id, 'aria-pressed': kind === 'answer' ? 'false' : null },
       h('span', { class: 'icon', html: iconFor(kind, false) }),
-      kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, '✻'),
+      kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
       nodeLabels(tab, id, kind, file).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
@@ -1552,7 +1553,7 @@
     node.el.classList.toggle('void', empty);
     node.el.classList.toggle('failed', failed);
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
-      g.textContent = '✻';
+      g.textContent = MARK;
     });
     if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
     node.el.setAttribute('aria-label', ariaName(tab, node));
@@ -1987,7 +1988,7 @@
     };
     const labels = `${asked.id} ${latest.id}`;
     const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: fold });
-    const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, '✻');
+    const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, MARK);
     body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
     const named = new Map();

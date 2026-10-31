@@ -129,6 +129,9 @@ const LIT_DELAY_MS = 650;
 const ARRANGE_MS = 420;
 // Long enough for a whole replay with motion on.
 const REPLAY_MS = 20_000;
+// The page's MARK and SPIN_FRAMES: its mark at rest, and the frames a working node's spinner cycles through.
+const MARK = '❀';
+const SPIN_FRAMES = ['·', '✾', '✿', '❀', '❁', '❀', '✿', '✾'];
 const TAB_LABEL = '1 Which maintenance… · gpt-6-luna';
 const STARTING = 'running · starting';
 // A model whose name makes an answer's label far wider than the run's own.
@@ -852,6 +855,14 @@ function recordStatuses() {
   new MutationObserver(() => window.statuses.push(status.textContent)).observe(status, { childList: true, characterData: true, subtree: true });
 }
 
+// Records each frame the structure's spinner is given while it works, not the mark it is drawn with.
+function recordSpins() {
+  window.spins = [];
+  new MutationObserver((records) => {
+    for (const { target } of records) if (target.matches?.('.node.schema.working .spin')) window.spins.push(target.textContent);
+  }).observe(document.getElementById('world'), { childList: true, subtree: true });
+}
+
 function failedNode(id) {
   return Boolean(document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('failed'));
 }
@@ -912,7 +923,7 @@ async function load() {
 async function beforeRun() {
   await withPage('before a run', { sample: false }, async (page) => {
     const names = { title: await page.title(), brand: await page.textContent('.brand') };
-    check('before a run', "the browser tab is titled with the page's brand, ✻ r3con", names.title === '✻ r3con' && names.title === names.brand, JSON.stringify(names));
+    check('before a run', "the browser tab is titled with the page's brand, ❀ r3con", names.title === '❀ r3con' && names.title === names.brand, JSON.stringify(names));
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
@@ -986,6 +997,19 @@ async function sampleReplay() {
   check('sample replay', `the replay ends by offering the ${asks.length} recorded asks under their header`, isDeepStrictEqual(offered, offers), offered.join(' | '));
   const withoutName = 'a page shipped with no recorded asks ends the replay with neither offers nor their header';
   check('sample replay', withoutName, isDeepStrictEqual(none, shipped.slice(0, -offers.length)), none.at(-1));
+
+  // With motion on, the structure works 1.4 s: more than one 1.12 s cycle of its spinner.
+  await withPage('sample replay', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.evaluate(recordSpins);
+    await page.click('#run-btn');
+    const landed = await becomes(page, landedNode, 'schema', REPLAY_MS);
+    const spins = await page.evaluate(() => window.spins);
+    const after = await page.textContent(`${nodeSel('schema')} .spin`);
+    const cycled = SPIN_FRAMES.every((frame) => spins.includes(frame)) && SPIN_FRAMES.join('').repeat(spins.length).includes(spins.join(''));
+    const spinName = `while a node works its spinner cycles through ${SPIN_FRAMES.join('')}, and once it settles it shows ${MARK}`;
+    check('sample replay', spinName, landed && cycled && after === MARK, `${spins.join('')}; then ${after}`);
+  });
 }
 
 // ---------- chat log: a run or an ask told as a log, folded under one line ----------
