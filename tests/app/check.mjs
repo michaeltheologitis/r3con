@@ -259,6 +259,17 @@ const DROP_ADDS = 'drop to add files';
 const DROP_LOCKED = 'this tab has run · press + for a new tab';
 const FIRST_TAB_BEFORE_RUN = '1 new · 5 files';
 const DRAG_STEPS = 8;
+// The page's SIDE_WIDTH_KEY, SIDE_MIN_PX, SIDE_MAX_SHARE and SIDE_STEP_PX: where the chat's width is kept, its narrowest, its widest as a share of the frame, and a key press's step.
+const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
+const SIDE_MIN_PX = 280;
+const SIDE_MAX_SHARE = 0.6;
+const SIDE_STEP_PX = 16;
+const CHAT_DRAG_PX = 100;
+// Past the page's DRAG_THRESHOLD of 4 px, so a nudge drags.
+const NUDGE_PX = 10;
+// The separator's focus bar, and a desktop window narrow enough to hold the widest chat back.
+const FOCUS_BAR_PX = 3;
+const NARROW_DESKTOP = { width: 1000, height: 900 };
 // Long enough that a second click lands while the first save is still in flight.
 const SLOW_SAVE_MS = 400;
 // fake_server.py's summary_of: a text's first line that is not quiet.
@@ -1767,6 +1778,152 @@ async function scale() {
       check('scale', name, fits, `${nodes} nodes, ${edges} edges, ${fit.outside} outside, zoom ${fit.zoom}`);
     });
   }
+}
+
+// ---------- chat width: the line between the panel and the side column, dragged or keyed ----------
+
+const chatSeparator = (page) => page.getByRole('separator', { name: 'chat width' });
+
+// The separator's value and bounds, and the widths of the side column, the panel's column and the frame inside its border.
+function sideWidths() {
+  const separator = document.getElementById('resizer');
+  return {
+    now: Number(separator.ariaValueNow),
+    min: Number(separator.ariaValueMin),
+    max: Number(separator.ariaValueMax),
+    side: document.getElementById('side').offsetWidth,
+    board: document.querySelector('.board').offsetWidth,
+    frame: document.getElementById('frame').clientWidth,
+  };
+}
+
+// The side column at its widest for the frame as it is now, as the separator states it.
+function sideAtMax(share) {
+  const max = Math.round(document.getElementById('frame').clientWidth * share);
+  return Number(document.getElementById('resizer').ariaValueMax) === max && document.getElementById('side').offsetWidth === max;
+}
+
+// Whether the separator has the focus, the shadow it draws, and the accent, as the brand is drawn in it.
+function focusBar() {
+  const separator = document.getElementById('resizer');
+  return { on: document.activeElement === separator, shadow: getComputedStyle(separator).boxShadow, accent: getComputedStyle(document.querySelector('.brand')).color };
+}
+
+// The cursor shown at a point, over whatever is there.
+const cursorAt = ([x, y]) => getComputedStyle(document.elementFromPoint(x, y)).cursor;
+
+async function chatWidthArea() {
+  await withPage('chat width', {}, async (page) => {
+    const separator = chatSeparator(page);
+    const states = await separator.evaluate((el) => ({ orientation: el.getAttribute('aria-orientation'), tabIndex: el.tabIndex, controls: el.getAttribute('aria-controls') }));
+    const start = await page.evaluate(sideWidths);
+    const bounds = start.now === start.side && start.min === SIDE_MIN_PX && start.max === Math.round(start.frame * SIDE_MAX_SHARE);
+    const named = isDeepStrictEqual(states, { orientation: 'vertical', tabIndex: 0, controls: 'side' }) && bounds;
+    check('chat width', "the line between the panel and the chat is a focusable vertical separator, named chat width, that states the chat's width and its bounds", named, JSON.stringify({ ...states, ...start }));
+
+    const unfocused = await page.evaluate(focusBar);
+    await page.focus('#tab-chat');
+    await page.keyboard.press('Shift+Tab');
+    const focused = await page.evaluate(focusBar);
+    const bar = `${focused.accent} ${FOCUS_BAR_PX}px 0px 0px 0px inset`;
+    check('chat width', `Tab onto the separator draws a ${FOCUS_BAR_PX} px accent bar on the line`, unfocused.shadow === 'none' && focused.on && focused.shadow === bar, `${unfocused.shadow}; ${focused.shadow}`);
+
+    const grab = await boxCentre(page, '#resizer');
+    const panel = await boxCentre(page, '#panel');
+    const hover = await page.evaluate(cursorAt, [grab.x, grab.y]);
+    const view = await transform(page);
+    const held = await drag(page, grab, { x: grab.x - CHAT_DRAG_PX, y: grab.y }, { whileHeld: () => page.evaluate(cursorAt, [panel.x, panel.y]) });
+    const dragged = await page.evaluate(sideWidths);
+    const wider = dragged.side === start.side + CHAT_DRAG_PX && dragged.now === dragged.side && dragged.board + dragged.side === dragged.frame;
+    check('chat width', `dragging the line ${CHAT_DRAG_PX} px left widens the chat by as much, and the panel takes the rest`, wider, JSON.stringify(dragged));
+    check('chat width', 'the cursor is col-resize over the line, and over the panel while the line is dragged', hover === 'col-resize' && held === 'col-resize', `${hover}; ${held}`);
+    const refitted = await becomes(page, viewChanged, view);
+    check('chat width', "resizing the chat refits the panel's view, as resizing the window does", refitted, await transform(page));
+
+    await drag(page, { x: grab.x - CHAT_DRAG_PX, y: grab.y }, { x: 0, y: grab.y });
+    const widest = await page.evaluate(sideWidths);
+    const from = await boxCentre(page, '#resizer');
+    const outside = LAYOUTS.desktop.options.viewport.width + CHAT_DRAG_PX;
+    await drag(page, from, { x: outside, y: from.y });
+    const narrowest = await page.evaluate(sideWidths);
+    await page.mouse.move(panel.x, panel.y, { steps: DRAG_STEPS });
+    const after = { ...(await page.evaluate(sideWidths)), resizing: await page.$eval('#frame', (el) => el.classList.contains('resizing')) };
+    const clamped = widest.side === widest.max && narrowest.side === SIDE_MIN_PX;
+    check('chat width', `dragged far either way, the chat stops at its widest, ${SIDE_MAX_SHARE * 100}% of the frame, and at its narrowest, ${SIDE_MIN_PX} px`, clamped, `${widest.side} of ${widest.frame}; ${narrowest.side}`);
+    const ended = after.side === narrowest.side && !after.resizing;
+    check('chat width', 'a drag released outside the window ends: moving back with no button leaves the width alone', ended, JSON.stringify(after));
+
+    await separator.focus();
+    const keyed = [];
+    for (const key of ['ArrowLeft', 'ArrowLeft', 'ArrowRight', 'End', 'Home', 'ArrowLeft']) {
+      await page.keyboard.press(key);
+      const { side, now } = await page.evaluate(sideWidths);
+      keyed.push(now === side ? side : `${side} but says ${now}`);
+    }
+    const steps = [SIDE_MIN_PX + SIDE_STEP_PX, SIDE_MIN_PX + 2 * SIDE_STEP_PX, SIDE_MIN_PX + SIDE_STEP_PX, widest.max, SIDE_MIN_PX, SIDE_MIN_PX + SIDE_STEP_PX];
+    const keysName = `the arrow keys move the line ${SIDE_STEP_PX} px a press, Home and End take the chat to its narrowest and widest, and the separator says each width`;
+    check('chat width', keysName, isDeepStrictEqual(keyed, steps), keyed.join(', '));
+    const modified = [
+      ['ArrowLeft', 'altKey'],
+      ['Home', 'ctrlKey'],
+      ['End', 'metaKey'],
+    ];
+    const taken = await separator.evaluate((el, keys) => keys.filter(([key, held]) => !el.dispatchEvent(new KeyboardEvent('keydown', { key, [held]: true, bubbles: true, cancelable: true }))), modified);
+    const stayed = (await page.evaluate(sideWidths)).side;
+    check('chat width', "with Alt, Ctrl or Meta held, the keys are the browser's: none is taken, and the width stays", taken.length === 0 && stayed === steps.at(-1), `${JSON.stringify(taken)}; ${stayed}`);
+
+    await page.keyboard.press('End');
+    await page.setViewportSize(NARROW_DESKTOP);
+    const narrowed = await becomes(page, sideAtMax, SIDE_MAX_SHARE);
+    await page.setViewportSize(LAYOUTS.desktop.options.viewport);
+    const back = await becomes(page, (width) => document.getElementById('side').offsetWidth === width, widest.max);
+    const followName = `a width kept in a wide window is held to ${SIDE_MAX_SHARE * 100}% of the frame at ${NARROW_DESKTOP.width} px, and comes back at ${LAYOUTS.desktop.options.viewport.width}`;
+    check('chat width', followName, narrowed && back, JSON.stringify(await page.evaluate(sideWidths)));
+
+    await page.reload();
+    const kept = await page.evaluate(sideWidths);
+    check('chat width', 'the width is kept after a reload', kept.side === widest.max && kept.now === kept.side, String(kept.side));
+
+    // Two presses close together are a double-click, here after each has dragged the line.
+    const nudge = await boxCentre(page, '#resizer');
+    await page.mouse.move(nudge.x, nudge.y);
+    await page.mouse.down();
+    await page.mouse.move(nudge.x + NUDGE_PX, nudge.y, { steps: 2 });
+    await page.mouse.up();
+    await page.mouse.down({ clickCount: 2 });
+    await page.mouse.move(nudge.x + 2 * NUDGE_PX, nudge.y, { steps: 2 });
+    await page.mouse.up({ clickCount: 2 });
+    const nudged = (await page.evaluate(sideWidths)).side;
+    check('chat width', 'two quick drags move the line twice, and are not taken for a double-click', nudged === kept.side - 2 * NUDGE_PX, `${kept.side} → ${nudged}`);
+
+    await chatSeparator(page).dblclick();
+    const reset = (await page.evaluate(sideWidths)).side;
+    await page.reload();
+    const reloaded = (await page.evaluate(sideWidths)).side;
+    check('chat width', 'a double-click on the line puts the chat back to its default width, after a reload too', reset === start.side && reloaded === start.side, `${reset}, then ${reloaded}`);
+
+    const panelRect = await rect(page, '#panel');
+    const chatTab = await rect(page, '#tab-chat');
+    const plus = await rect(page, '#new-tab-btn');
+    await inspect(page, 'doc-0');
+    await page.mouse.click(panelRect.right - 1, panelRect.bottom - CHAT_DRAG_PX);
+    const closed = await page.$eval('#inspector', (el) => el.hidden);
+    await page.click('#tab-files');
+    await page.mouse.click(chatTab.left + 1, chatTab.top + chatTab.height / 2);
+    const chatShown = await page.$eval('#tab-chat', (el) => el.ariaSelected === 'true');
+    await page.mouse.click(plus.right - 1, plus.top + plus.height / 2);
+    const tabs = (await page.evaluate(tabRow)).length;
+    const clearName = "the line takes no clicks from either side: one at the panel's right edge closes a popup, one at the chat tab's left edge shows the chat, and one at the right edge of + opens a tab";
+    check('chat width', clearName, closed && chatShown && tabs === 2, JSON.stringify({ closed, chatShown, tabs }));
+  });
+
+  const before = (page) => page.addInitScript(([key, width]) => localStorage.setItem(key, width), [SIDE_WIDTH_KEY, String(SIDE_MIN_PX)]);
+  await withPage('chat width', { layout: LAYOUTS.phone, sample: false, before }, async (page) => {
+    const separators = await page.getByRole('separator').count();
+    const { side, frame } = await page.evaluate(sideWidths);
+    const stacked = separators === 0 && side === frame;
+    check('chat width', `${LAYOUTS.phone.name}: the chat, stacked under the panel, has no separator and fills the width, whatever width was kept`, stacked, `${separators} separators; ${side} of ${frame}`);
+  });
 }
 
 // ---------- answers: asks over the run on the panel ----------
@@ -3901,7 +4058,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, gestures, scale, live];
+  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

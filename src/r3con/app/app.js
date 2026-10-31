@@ -579,6 +579,11 @@
   ].join('\n');
   const THEME_KEY = 'r3con-proto-theme';
   const MODEL_KEY = 'r3con-proto-model';
+  const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
+  // The side column's narrowest, where the composer and the files pane still fit, its widest as a share of the frame, and a key press's step.
+  const SIDE_MIN_PX = 280;
+  const SIDE_MAX_SHARE = 0.6;
+  const SIDE_STEP_PX = 16;
   // Earlier prototypes kept a model and an endpoint here.
   const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
   const DEFAULT_MODEL = 'openai/gpt-6-luna';
@@ -694,6 +699,8 @@
   const modelOther = $('model-other', HTMLInputElement);
   const frame = $('frame');
   const trash = $('trash');
+  const side = $('side');
+  const resizer = $('resizer');
 
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
   // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
@@ -3416,6 +3423,81 @@
     return el ? el.dataset.id : null;
   }
 
+  // ---------- side column: its width, from the line between it and the panel ----------
+
+  /** @type {number | null} */
+  let sideWidth = Number(readStored(SIDE_WIDTH_KEY)) || null;
+  let sideMax = SIDE_MIN_PX;
+  const sideGrab = { x: 0, width: 0, moved: false, movedBefore: false };
+
+  // The width chosen, within what the frame allows now; with none chosen, the stylesheet's.
+  function showSideWidth() {
+    const width = sideWidth && clamp(sideWidth, SIDE_MIN_PX, sideMax);
+    if (width) frame.style.setProperty('--side-width', `${width}px`);
+    else frame.style.removeProperty('--side-width');
+    resizer.ariaValueMax = String(sideMax);
+    resizer.ariaValueNow = String(width || side.offsetWidth);
+  }
+
+  // The widest the frame allows now, never under the narrowest, and the width within it.
+  function fitSideToFrame() {
+    sideMax = Math.max(SIDE_MIN_PX, Math.round(frame.clientWidth * SIDE_MAX_SHARE));
+    showSideWidth();
+  }
+
+  /** @param {number | null} width */
+  function setSideWidth(width) {
+    sideWidth = width === null ? null : clamp(Math.round(width), SIDE_MIN_PX, sideMax);
+    showSideWidth();
+  }
+
+  function keepSideWidth() {
+    if (sideWidth) writeStored(SIDE_WIDTH_KEY, String(sideWidth));
+    else removeStored(SIDE_WIDTH_KEY);
+  }
+
+  /** @param {PointerEvent} e */
+  function onResizerGrab(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    Object.assign(sideGrab, { x: e.clientX, width: side.offsetWidth, moved: false, movedBefore: sideGrab.moved });
+    resizer.setPointerCapture(e.pointerId);
+    frame.classList.add('resizing');
+  }
+
+  // A drag only sets the width, reading no layout, and keeps it once, on release.
+  /** @param {PointerEvent} e */
+  function onResizerMove(e) {
+    if (!resizer.hasPointerCapture(e.pointerId)) return;
+    const dx = sideGrab.x - e.clientX;
+    if (!sideGrab.moved && Math.abs(dx) < DRAG_THRESHOLD) return;
+    sideGrab.moved = true;
+    setSideWidth(sideGrab.width + dx);
+  }
+
+  function onResizerDrop() {
+    frame.classList.remove('resizing');
+    if (sideGrab.moved) keepSideWidth();
+  }
+
+  // The line moves the way the arrow points; with a modifier held, the key is the browser's.
+  /** @param {KeyboardEvent} e */
+  function onResizerKey(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const width = side.offsetWidth;
+    const to = { ArrowLeft: width + SIDE_STEP_PX, ArrowRight: width - SIDE_STEP_PX, Home: SIDE_MIN_PX, End: sideMax }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    setSideWidth(to);
+    keepSideWidth();
+  }
+
+  // Pointer capture sends both clicks here even when they dragged, so only two that didn't reset it.
+  function resetSideWidth() {
+    if (sideGrab.moved || sideGrab.movedBefore) return;
+    setSideWidth(null);
+    keepSideWidth();
+  }
+
   // ---------- wiring ----------
 
   function wire() {
@@ -3427,6 +3509,11 @@
     inspector.addEventListener('pointerdown', onInspectorGrab);
     inspector.addEventListener('pointermove', onInspectorMove);
     inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
+    resizer.addEventListener('pointerdown', onResizerGrab);
+    resizer.addEventListener('pointermove', onResizerMove);
+    resizer.addEventListener('lostpointercapture', onResizerDrop);
+    resizer.addEventListener('keydown', onResizerKey);
+    resizer.addEventListener('dblclick', resetSideWidth);
 
     world.addEventListener('pointerover', (e) => {
       state.hovered = hoverFrom(e);
@@ -3577,6 +3664,7 @@
       fitShown();
       positionInspector();
     }).observe(panel);
+    new ResizeObserver(fitSideToFrame).observe(frame);
   }
 
   // ---------- modes ----------
@@ -3658,6 +3746,8 @@
 
   function init() {
     restoreTheme();
+    resizer.ariaValueMin = String(SIDE_MIN_PX);
+    fitSideToFrame();
     removeStored(RETIRED_SETTINGS_KEY);
     buildSettings();
     questionEl.value = SAMPLE.question;
