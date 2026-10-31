@@ -108,6 +108,14 @@ const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
 // WCAG 2.2's minimum target size, and its minimum contrast for text.
 const MIN_TARGET_PX = 24;
 const MIN_TEXT_CONTRAST = 4.5;
+// Fog, the page's theme: its background and accent in each color scheme.
+const FOG = { light: { '--bg': '#f4f6f8', '--accent': '#3a6c9c' }, dark: { '--bg': '#1a1e23', '--accent': '#8db6dd' } };
+const fogOf = (theme) => ({ '--bg': theme['--bg'], '--accent': theme['--accent'] });
+// What each color scheme's block in app.css sets.
+const THEME_PROPERTIES = [
+  '--bg', '--panel', '--fg', '--dim', '--line', '--code', '--accent', '--ok', '--err', '--warn',
+  '--fill-accent', '--fill-yellow', '--fill-blue', '--tree-ink', '--shadow', 'color-scheme',
+];
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 const ALL_SAMPLE_MEMOS = 'use all 5 sample memos';
@@ -817,6 +825,11 @@ function noHorizontalScroll() {
   return document.documentElement.scrollWidth <= document.documentElement.clientWidth;
 }
 
+function themeValues(names) {
+  const root = getComputedStyle(document.documentElement);
+  return Object.fromEntries(names.map((name) => [name, root.getPropertyValue(name)]));
+}
+
 // Only the animations a node or line plays as it appears count, not transitions such as the view's glide.
 function panelStill() {
   const world = document.getElementById('world');
@@ -866,7 +879,7 @@ function storedEntries() {
 }
 
 function hasFilledIcons(els) {
-  return els.map((el) => Boolean(el.querySelector('.fill-orange')));
+  return els.map((el) => Boolean(el.querySelector('.fill-accent')));
 }
 
 function fitOfRun() {
@@ -902,11 +915,24 @@ function recordViews([tab, ms, timeout]) {
 // ---------- areas ----------
 
 async function load() {
+  const worn = { system: {}, forced: {} };
   for (const layout of Object.values(LAYOUTS)) {
     await withPage('load', { layout, sample: false }, async (page) => {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
+      const scheme = layout.options.colorScheme;
+      const other = scheme === 'dark' ? 'light' : 'dark';
+      worn.system[scheme] = await page.evaluate(themeValues, THEME_PROPERTIES);
+      await page.click('#theme-btn');
+      worn.forced[other] = await page.evaluate(themeValues, THEME_PROPERTIES);
+      const fog = { [scheme]: fogOf(worn.system[scheme]), [other]: fogOf(worn.forced[other]) };
+      check('load', `${layout.name}: the page wears Fog, in its color scheme and in the other after the theme button`, isDeepStrictEqual(fog, FOG), JSON.stringify(fog));
     });
   }
+  const drifted = (scheme) => THEME_PROPERTIES.filter((name) => worn.system[scheme]?.[name] !== worn.forced[scheme]?.[name]).map((name) => `${scheme} ${name}`);
+  const differing = [...drifted('light'), ...drifted('dark')];
+  const both = Object.keys(worn.system).length === Object.keys(LAYOUTS).length;
+  const name = `the theme button sets all ${THEME_PROPERTIES.length} theme values just as the system's color scheme does, in light and in dark`;
+  check('load', name, both && !differing.length, differing.join(', '));
 }
 
 async function beforeRun() {

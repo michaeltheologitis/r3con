@@ -659,8 +659,8 @@
         <path d="M15.75 5v2.5M7.8 7.5h15.8M7.8 7.5v2M23.6 7.5v2.5M7.8 14.5v2.1M4 16.6h8M4 16.6v1.9M12 16.6v1.9M23.6 13.75v2.75M23.6 21.7v1.8M18.4 23.5h10.4M18.4 23.5v1.7M23.6 23.5v1.7M28.8 23.5v1.7"/>
         <g${f('ink')}>
         <rect x="10.5" y="1.5" width="10.5" height="3.5" rx=".4"${f('fill-yellow')}/>
-        <circle cx="7.8" cy="12" r="2.5"${f('fill-orange')}/>
-        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('fill-orange')}/>
+        <circle cx="7.8" cy="12" r="2.5"${f('fill-accent')}/>
+        <rect x="19.7" y="10" width="7.8" height="3.75" rx=".4"${f('fill-accent')}/>
         <rect x="1.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
         <rect x="9.2" y="18.5" width="5.6" height="3.4" rx=".4"${f('fill-blue')}/>
         <circle cx="23.6" cy="19.1" r="2.6"${f('fill-yellow')}/>

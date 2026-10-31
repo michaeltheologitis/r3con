@@ -1,21 +1,21 @@
 /* Layout: a terminal window. The run panel (a pannable canvas) fills the left, a 46ch column on the
    right holds the chat and the files tab; on phones the panel stacks above that column. */
 :root {
-  --bg: #fcfbfa;
-  --panel: #f4f2ef;
-  --fg: #1f1e1c;
-  --dim: #736b62;
-  --line: #e5e0d9;
-  --code: #f0ece7;
-  --accent: #c15f3c;
+  --bg: #f4f6f8;
+  --panel: #ebeef2;
+  --fg: #28303a;
+  --dim: #5f6a77;
+  --line: #dbe1e7;
+  --code: #e5e9ee;
+  --accent: #3a6c9c;
   --ok: #3f7d4e;
   --err: #b1452f;
   --warn: #8f6113;
-  --fill-orange: #f27b45;
+  --fill-accent: #7ea6cc;
   --fill-yellow: #f5cd55;
   --fill-blue: #40bde8;
-  --tree-ink: #1f1e1c;
-  --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
+  --tree-ink: #28303a;
+  --shadow: 0 10px 30px rgba(40, 48, 58, 0.12), 0 1px 3px rgba(40, 48, 58, 0.06);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --gutter: 16px;
   --icon-size: 28px;
@@ -25,39 +25,39 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #1a1918;
-    --panel: #141312;
-    --fg: #e8e5e1;
-    --dim: #968e84;
-    --line: #2e2b28;
-    --code: #232120;
-    --accent: #d77757;
+    --bg: #1a1e23;
+    --panel: #15181c;
+    --fg: #dbe2e9;
+    --dim: #8a96a3;
+    --line: #2a3139;
+    --code: #22272d;
+    --accent: #8db6dd;
     --ok: #7fb38a;
     --err: #e2806d;
     --warn: #d6a54c;
-    --fill-orange: #d96d3e;
+    --fill-accent: #6a98c4;
     --fill-yellow: #d8b24c;
     --fill-blue: #3aa4cd;
-    --tree-ink: #0e0d0c;
+    --tree-ink: #0e1114;
     --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
     color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #1a1918;
-  --panel: #141312;
-  --fg: #e8e5e1;
-  --dim: #968e84;
-  --line: #2e2b28;
-  --code: #232120;
-  --accent: #d77757;
+  --bg: #1a1e23;
+  --panel: #15181c;
+  --fg: #dbe2e9;
+  --dim: #8a96a3;
+  --line: #2a3139;
+  --code: #22272d;
+  --accent: #8db6dd;
   --ok: #7fb38a;
   --err: #e2806d;
   --warn: #d6a54c;
-  --fill-orange: #d96d3e;
+  --fill-accent: #6a98c4;
   --fill-yellow: #d8b24c;
   --fill-blue: #3aa4cd;
-  --tree-ink: #0e0d0c;
+  --tree-ink: #0e1114;
   --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
   color-scheme: dark;
 }
@@ -157,7 +157,7 @@ p { margin: 0; }
   padding-right: 1.5ch;
   border-bottom: 1px solid var(--line);
 }
-/* --dim falls short of 4.5:1 on the tabs' fills, so text in a tab is a shade nearer --fg. */
+/* --dim falls short of 4.5:1 on the shown tab's tint and under the pointer, so text in a tab is a shade nearer --fg. */
 .run-tabs {
   --tab-ink: color-mix(in srgb, var(--fg) 20%, var(--dim));
   display: flex;
@@ -249,7 +249,7 @@ p { margin: 0; }
 .drawing.is-lit .node.on-path { opacity: 1; }
 .drawing.is-lit .node.on-path .icon { color: var(--accent); }
 .drawing.is-lit .node.on-path .label { color: var(--fg); }
-.fill-orange { fill: var(--fill-orange); }
+.fill-accent { fill: var(--fill-accent); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
 .ink { stroke: var(--tree-ink); }
