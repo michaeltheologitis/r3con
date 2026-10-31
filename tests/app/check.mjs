@@ -57,6 +57,9 @@ const POPUP_ROWS = {
 const MODEL_KEY = 'r3con-proto-model';
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
+// The page's MASK before TEST_KEY's last four, the only part of it r3con app answers.
+const TEST_HINT = '••••7f3a';
+const ENVIRONMENT_KEY = 'env-check-not-a-real-key-9c1d';
 const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
@@ -572,16 +575,6 @@ function popupInsidePanel() {
   return !el.hidden && r.left >= p.left && r.top >= p.top && r.right <= p.right && r.bottom <= p.bottom;
 }
 
-// The stand-in saveKey adds the provider to a Set, so refusing that one add acts as a server refusing the key.
-function refuseKeyOnce(provider) {
-  const add = Set.prototype.add;
-  Set.prototype.add = function (value) {
-    if (value !== provider) return add.call(this, value);
-    Set.prototype.add = add;
-    throw new Error('the server refused the key');
-  };
-}
-
 function countStatusWrites() {
   window.statusWrites = 0;
   const observer = new MutationObserver((records) => (window.statusWrites += records.length));
@@ -609,6 +602,17 @@ function pickerState() {
 
 function keyStates() {
   return [...document.querySelectorAll('[id^="state-"]')].filter((el) => el.textContent).map((el) => el.id);
+}
+
+// Each provider's state as its row shows it, the text its key field is described by, and the remove buttons in view.
+function keyRows() {
+  const textOf = (ids) => (ids ?? '').split(' ').filter(Boolean).map((id) => document.getElementById(id).textContent).join(' ');
+  const shown = (el) => el.checkVisibility();
+  return {
+    states: Object.fromEntries([...document.querySelectorAll('[id^="state-"]')].filter(shown).map((el) => [el.id, el.textContent])),
+    described: Object.fromEntries([...document.querySelectorAll('#keys input')].map((el) => [el.id, textOf(el.getAttribute('aria-describedby'))])),
+    removes: [...document.querySelectorAll('#keys button')].filter(shown).map((el) => el.getAttribute('aria-label')),
+  };
 }
 
 function statusIs(text) {
@@ -1477,8 +1481,7 @@ async function trashArea() {
 async function settings() {
   for (const layout of Object.values(LAYOUTS)) {
     const checkAt = (name, pass, detail) => check('settings', `${layout.name}: ${name}`, pass, detail);
-    const expectedErrors = ["couldn't save the keys"];
-    await withPage('settings', { layout, sample: false, expectedErrors }, async (page, messages) => {
+    await withPage('settings', { layout, sample: false }, async (page, messages) => {
       await keys(page, checkAt);
       await picker(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
@@ -1520,18 +1523,20 @@ async function keys(page, checkAt) {
   checkAt('an Other key without an endpoint blocks the save', await blocked());
   await page.fill('#key-other', '');
   await page.fill('#key-openai', TEST_KEY);
-  await page.evaluate(refuseKeyOnce, 'openai');
-  await page.click('#settings-save');
-  const refused = await becomes(page, () => document.getElementById('settings-saved').textContent === "OpenAI · couldn't save");
-  const keptKey = (await page.inputValue('#key-openai')) === TEST_KEY && (await states()).length === 0;
-  checkAt('a refused save says so and keeps the typed key', refused && keptKey, await saved());
-
   await page.fill('#endpoint-other', TEST_ENDPOINT);
   await page.fill('#key-gemini', TEST_KEY);
   const savedKeys = await saveKeys(page);
   const set = await states();
   const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini', 'state-other']);
   checkAt('a save marks OpenAI, Google and Other as set', marked, set.join(', '));
+  const rows = await page.evaluate(keyRows);
+  const shownStates = { 'state-openai': TEST_HINT, 'state-gemini': TEST_HINT, 'state-other': `${TEST_ENDPOINT} · no key` };
+  const shownName = "each row shows its key's last four masked, Other its endpoint and that it has no key, and each field is described by its row's state";
+  const describedBy = rows.described['key-openai'] === TEST_HINT && rows.described['endpoint-other'].startsWith(shownStates['state-other']);
+  checkAt(shownName, isDeepStrictEqual(rows.states, shownStates) && describedBy, JSON.stringify(rows));
+  const removesNamed = isDeepStrictEqual(rows.removes, ['remove OpenAI key', 'remove Google key', 'remove Other key']);
+  const noShowKeys = (await page.getByRole('button', { name: /show keys/ }).count()) === 0;
+  checkAt('each key set here has a remove button named for its provider, and there is no show keys', removesNamed && noShowKeys, rows.removes.join(', '));
   const keyed = await page.evaluate(pickerState);
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
   const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google']) && noAnthropic && !keyed.hint;
@@ -1547,13 +1552,21 @@ async function keys(page, checkAt) {
   const settingsOpen = await page.$eval('#settings', (el) => el.matches(':popover-open'));
   checkAt('Escape closes the settings but not the popup', !settingsOpen && Boolean(await popup(page)));
   const holding = (value) => page.evaluate(placesHolding, value);
-  const holders = [...(await holding(TEST_KEY)), ...(await holding(TEST_ENDPOINT))];
-  const notKept = 'once closed, no field, storage, address or markup holds a key or the endpoint';
+  const endpointHolders = (await holding(TEST_ENDPOINT)).filter((place) => place !== 'markup');
+  const holders = [...(await holding(TEST_KEY)), ...endpointHolders];
+  const notKept = "once closed, no field, storage, address or markup holds a key, and only Other's row shows the endpoint";
   checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
   const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
   const reopened = filled.length === 0 && isDeepStrictEqual(await states(), set);
   checkAt('reopened, every field is empty and the providers are still set', reopened, filled.join(', '));
+
+  await page.getByRole('button', { name: 'remove OpenAI key', exact: true }).click();
+  const removed = await becomes(page, () => document.getElementById('settings-saved').textContent === 'removed');
+  const afterRemove = await page.evaluate(keyRows);
+  const dropped = (await page.evaluate(pickerState)).groups;
+  const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google']) && (await focusedId(page)) === 'key-openai';
+  checkAt("remove forgets the key, the picker drops its provider's models, and focus goes to its field", forgotten, `${JSON.stringify(afterRemove.states)}; ${dropped.join(', ')}`);
   await page.keyboard.press('Escape');
 }
 
@@ -2974,11 +2987,12 @@ async function stopArea() {
 
 // ---------- live: served by r3con app, with a scripted model ----------
 
-// Starts fake_server.py with no provider key in its environment, in a process group of its own.
-function startFakeServer() {
+// Starts fake_server.py with no provider key in its environment but those in `keys`, in a process group of its own.
+function startFakeServer(keys = {}) {
   const logsDir = mkdtempSync(join(tmpdir(), 'r3con-checks-'));
   const env = { ...process.env };
   for (const variable of KEY_VARIABLES) delete env[variable];
+  Object.assign(env, keys);
   const server = spawn('uv', [...FAKE_SERVER, logsDir], { cwd: REPO_DIR, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   server.stderr.on('data', (chunk) => (stderr += chunk));
@@ -3005,8 +3019,8 @@ function startFakeServer() {
   return { url, stop, release };
 }
 
-async function withFakeServer(body) {
-  const server = startFakeServer();
+async function withFakeServer(body, keys) {
+  const server = startFakeServer(keys);
   try {
     await body(await server.url, server);
   } catch (error) {
@@ -3056,9 +3070,9 @@ async function liveSession(url) {
     await page.keyboard.press('Escape');
     const fresh = await page.context().newPage();
     await fresh.goto(url);
-    const kept = await becomes(fresh, () => document.getElementById('state-openai').textContent === 'set');
+    const kept = await becomes(fresh, (hint) => document.getElementById('state-openai').textContent === hint, TEST_HINT);
     await fresh.close();
-    const keyName = 'a saved key marks OpenAI as set, and a fresh page of the launch reads it from the server';
+    const keyName = "a saved key shows OpenAI's last four masked, and a fresh page of the launch reads it from the server";
     check('live', keyName, marked && kept, `marked ${marked}, fresh page ${kept}`);
 
     await page.click('#run-btn');
@@ -3098,6 +3112,27 @@ async function liveSession(url) {
     const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
     const keptName = 'no storage, field, address, markup or console message holds the token or the key';
     check('live', keptName, holders.length === 0 && logged === 0, [...holders, `${logged} messages`].join(', '));
+  });
+}
+
+// Saves and removes a key on a server started with GEMINI_API_KEY set.
+async function liveKeyStates(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.click('#settings-btn');
+    await page.fill('#key-openai', TEST_KEY);
+    const saved = await saveKeys(page);
+    const rows = await page.evaluate(keyRows);
+    const both = { 'state-openai': TEST_HINT, 'state-gemini': 'from GEMINI_API_KEY' };
+    const fromEnvironment = saved && isDeepStrictEqual(rows.states, both) && isDeepStrictEqual(rows.removes, ['remove OpenAI key']);
+    const environmentName = 'a key from the environment names its variable and has no remove button, beside one saved here';
+    check('live', environmentName, fromEnvironment && rows.described['key-gemini'] === both['state-gemini'], JSON.stringify(rows));
+
+    await page.getByRole('button', { name: 'remove OpenAI key', exact: true }).click();
+    const gone = await becomes(page, () => !document.getElementById('state-openai').textContent);
+    const onServer = await keysOnServer(url);
+    const groups = (await page.evaluate(pickerState)).groups;
+    const forgotten = gone && isDeepStrictEqual(onServer, ['state-gemini']) && isDeepStrictEqual(groups, ['Google']);
+    check('live', "remove forgets the key on the server, and the picker drops its provider's models", forgotten, `${onServer.join(' ')}; ${groups.join(', ')}`);
   });
 }
 
@@ -4052,6 +4087,7 @@ async function live() {
   });
   const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
   for (const body of stateful) await withFakeServer(body);
+  await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await liveElsewhere();
 }
 

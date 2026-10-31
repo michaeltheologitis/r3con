@@ -7,7 +7,12 @@ request but those for the page and its two files must carry the launch's token a
 ``Authorization: Bearer <token>`` (401 otherwise); the page gets the token from the
 opened URL's fragment, ``#token=...``.
 
-- ``GET /api/keys``: which providers have a key, stored here or in the environment.
+- ``GET /api/keys``: each provider's key, as ``null`` when it has none, ``{source:
+  "here", hint}`` when it is stored here, or ``{source: "environment", variable}`` when
+  litellm finds it in that variable; and Other's ``{endpoint, key}``, its key a hint or
+  ``null``, or ``null`` when it has no endpoint. A hint is a key's last
+  ``KEY_HINT_CHARS`` characters, ``""`` for a key shorter than
+  ``MIN_HINTED_KEY_CHARS``.
   ``POST`` stores one (``{provider, key}``, or ``{provider: "other", endpoint, key?}``),
   ``DELETE`` forgets one (``{provider}``); both answer as ``GET`` does. OpenAI's,
   Anthropic's and Gemini's go to their own models; Other's endpoint and key go to the
@@ -15,11 +20,12 @@ opened URL's fragment, ``#token=...``.
   other provider gets litellm's own setup from the environment. A keyless Other is
   sent ``KEYLESS_SERVER_KEY`` as its key: given none, litellm would send it one from
   the environment, such as ``OLLAMA_API_KEY``.
-- Keys stay in this process's memory, and the server never sends, logs or writes one.
-  Each goes to r3con as a run's ``api_key``, which r3con registers before sending it
-  and masks in every event's ``error``, in what it writes to the logs dir and in what
-  it logs (:mod:`r3con.masking`), the environment's keys too; the server's own log
-  line of a failure goes through the same masking.
+- Keys stay in this process's memory, and the server never logs or writes one, and
+  answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
+  which r3con registers before sending it and masks in every event's ``error``, in
+  what it writes to the logs dir and in what it logs (:mod:`r3con.masking`), the
+  environment's keys too; the server's own log line of a failure goes through the same
+  masking.
 - ``POST /api/documents/text?name=<file name>``, with a PDF's or a Word file's bytes as
   the body, chosen by the name's ``.pdf`` or ``.docx`` (422 for any other), answers
   ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
@@ -165,6 +171,9 @@ KEY_VARIABLES: dict[Provider, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
 }
+# A key shows its last few characters only when they are a small part of it.
+KEY_HINT_CHARS = 4
+MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS
 SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
@@ -287,16 +296,32 @@ def _explain(error: ValidationError) -> str:
     )
 
 
+def _hint(key: SecretStr) -> str:
+    secret = key.get_secret_value()
+    return secret[-KEY_HINT_CHARS:] if len(secret) >= MIN_HINTED_KEY_CHARS else ""
+
+
+def _provider_status(state: ServerState, provider: Provider) -> dict[str, str] | None:
+    stored, variable = state.keys.get(provider), KEY_VARIABLES[provider]
+    if stored is not None:
+        return {"source": "here", "hint": _hint(stored)}
+    if os.environ.get(variable):
+        return {"source": "environment", "variable": variable}
+    return None
+
+
 def _key_status(state: ServerState) -> dict[str, Any]:
     status: dict[str, Any] = {
-        provider: provider in state.keys or bool(os.environ.get(variable))
-        for provider, variable in KEY_VARIABLES.items()
+        provider: _provider_status(state, provider) for provider in KEY_VARIABLES
     }
     other = state.other
     status["other"] = (
         None
         if other is None
-        else {"endpoint": other.endpoint, "key": other.key is not None}
+        else {
+            "endpoint": other.endpoint,
+            "key": None if other.key is None else _hint(other.key),
+        }
     )
     return status
 

@@ -389,35 +389,52 @@ def test_a_request_from_this_servers_own_page_is_answered(
     assert client.get("/api/keys", headers=headers).status_code == 200
 
 
-def test_keys_say_which_providers_have_one_and_never_what_it_is(
+def test_keys_say_where_each_comes_from_and_only_a_stored_ones_last_four(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
     monkeypatch.setenv("GEMINI_API_KEY", ENVIRONMENT_KEY)
+    monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
     responses = [
         client.post("/api/keys", json=STORED_OPENAI),
         client.post("/api/keys", json=OTHER),
         client.get("/api/keys"),
     ]
     assert responses[-1].json() == {
-        "openai": True,
-        "anthropic": False,
-        "gemini": True,
-        "other": {"endpoint": ENDPOINT, "key": True},
+        "openai": {"source": "here", "hint": OPENAI_KEY[-4:]},
+        "anthropic": None,
+        "gemini": {"source": "environment", "variable": "GEMINI_API_KEY"},
+        "other": {"endpoint": ENDPOINT, "key": OTHER_KEY[-4:]},
     }
     responses += [
         client.request("DELETE", "/api/keys", json={"provider": "openai"}),
         client.request("DELETE", "/api/keys", json={"provider": "other"}),
     ]
     assert responses[-1].json() == {
-        "openai": False,
-        "anthropic": False,
-        "gemini": True,
+        "openai": {"source": "environment", "variable": "OPENAI_API_KEY"},
+        "anthropic": None,
+        "gemini": {"source": "environment", "variable": "GEMINI_API_KEY"},
         "other": None,
     }
     for response in responses:
         assert response.status_code == 200
         for key in (OPENAI_KEY, OTHER_KEY, ENVIRONMENT_KEY):
-            assert key not in response.text
+            assert key[:-4] not in response.text
+
+
+@pytest.mark.parametrize("key", ["EMPTY", "short-key-1"])
+def test_a_key_too_short_to_spare_its_last_four_has_no_hint(
+    client: TestClient, key: str
+):
+    client.post("/api/keys", json={"provider": "anthropic", "key": key})
+    status = client.post("/api/keys", json={**OTHER, "key": key}).json()
+    assert status["anthropic"] == {"source": "here", "hint": ""}
+    assert status["other"]["key"] == ""
+    assert key[-4:] not in json.dumps(status)
+
+
+def test_a_keyless_other_says_it_has_no_key(client: TestClient):
+    status = client.post("/api/keys", json=KEYLESS_OTHER).json()
+    assert status["other"] == {"endpoint": ENDPOINT, "key": None}
 
 
 @pytest.mark.parametrize(

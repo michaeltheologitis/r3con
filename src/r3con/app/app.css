@@ -321,12 +321,15 @@ p { margin: 0; }
 .settings-body { display: flex; flex-direction: column; gap: 0.9em; }
 .keys {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) 3ch;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: baseline;
   gap: 0.45em 2ch;
 }
 .keys label { font-weight: 600; }
-#key-other { grid-column: 2; }
+#key-other, .key-state { grid-column: 2; }
+.key-state { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
+.key-state > span { min-width: 0; overflow-wrap: break-word; }
+.key-state .remove { min-height: 24px; }
 .field {
   width: 100%;
   min-width: 0;
