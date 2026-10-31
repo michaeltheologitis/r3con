@@ -1,5 +1,6 @@
-/* Layout: a terminal window. The run panel (a pannable canvas) fills the left, a 46ch column on the
-   right holds the chat and the files tab; on phones the panel stacks above that column. */
+/* Layout: a terminal window. The run panel (a pannable canvas) fills the left, a column on the right,
+   46ch until its edge is dragged, holds the chat and the files tab; on phones the panel stacks above
+   that column. */
 :root {
   --bg: #fcfbfa;
   --panel: #f4f2ef;
@@ -133,7 +134,7 @@ p { margin: 0; }
 .frame {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 46ch;
+  grid-template-columns: minmax(0, 1fr) var(--side-width, 46ch);
   min-height: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -145,6 +146,7 @@ p { margin: 0; }
     grid-template-rows: minmax(0, 55fr) minmax(0, 45fr);
   }
   .side { border-left: 0 !important; border-top: 1px solid var(--line); }
+  .resizer { display: none; }
   .topbar { flex-wrap: wrap; row-gap: 0.1em; }
   .status { order: 3; flex-basis: 100%; }
 }
@@ -375,6 +377,25 @@ p { margin: 0; }
 .code.json > span { display: block; padding-left: var(--indent); text-indent: calc(-1 * var(--indent)); }
 
 /* ---- side column ---- */
+/* Over the side column's left edge and its 2ch of padding, clear of any control on either side;
+   grid-column 2 makes that column its containing block. */
+.resizer {
+  position: absolute;
+  z-index: 1;
+  grid-column: 2;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 2ch;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.resizer:focus-visible { outline: 0; border-radius: 0; }
+.resizer:hover, .resizer:focus-visible, .frame.resizing .resizer { box-shadow: inset 3px 0 var(--accent); }
+.frame.resizing { cursor: col-resize; }
+.frame.resizing > :not(.resizer) { pointer-events: none; }
 .side {
   position: relative;
   display: flex;
