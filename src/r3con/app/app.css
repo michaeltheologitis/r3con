@@ -325,9 +325,11 @@ p { margin: 0; }
   align-items: baseline;
   gap: 0.45em 2ch;
 }
-.keys label { font-weight: 600; }
+.keys label, .keys-label { font-weight: 600; }
 #key-other, .key-state { grid-column: 2; }
-.key-state { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
+.keys-label, .server-list { grid-column: 1 / -1; }
+.server-list { margin: 0; padding: 0; list-style: none; }
+.key-state { display: flex; align-items: baseline; column-gap: 2ch; }
 .key-state > span { min-width: 0; overflow-wrap: break-word; }
 .key-state .remove { min-height: 24px; }
 .field {
