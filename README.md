@@ -9,7 +9,7 @@
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
 task-specific representation of the context, then reasons over it to produce an answer.
 
-![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
+![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the three memos it used](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
 ## App
 
