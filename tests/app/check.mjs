@@ -55,6 +55,11 @@ const POPUP_ROWS = {
   'answer-0': ['question', 'provenance'],
 };
 const MODEL_KEY = 'r3con-proto-model';
+const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
+const SAVED_MODEL = 'ollama_chat/llama3.3';
+const PROVIDER_MODEL = 'anthropic/claude-opus-5-5';
+// Enough Tab presses to reach the other model field from the picker, past the composer's buttons.
+const MAX_TABS = 5;
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 // The page's MASK before TEST_KEY's last four, the only part of it r3con app answers.
@@ -1484,6 +1489,7 @@ async function settings() {
     await withPage('settings', { layout, sample: false }, async (page, messages) => {
       await keys(page, checkAt);
       await picker(page, checkAt);
+      await savedModels(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
       checkAt('no console message holds the key', leaks === 0, `${messages.length} messages`);
     });
@@ -1634,6 +1640,78 @@ async function picker(page, checkAt) {
   const statusIs = (text) => document.getElementById('run-status').textContent === text;
   const replayed = await becomes(page, statusIs, SAMPLE_STATUS);
   checkAt('with other model… left empty the recorded replay still starts', replayed, await status());
+}
+
+// The picker's value and its saved group, whether the other model field and the remove button are shown, the
+// remove button's name, the saved models stored, and the focus.
+function savedState(savedModelsKey) {
+  const select = document.getElementById('model-pick');
+  const group = [...select.querySelectorAll('optgroup')].find((g) => g.label === 'saved');
+  const remove = document.getElementById('model-remove');
+  return {
+    value: select.value,
+    saved: group ? [...group.children].map((o) => o.value) : [],
+    field: !document.getElementById('model-other').hidden,
+    remove: remove.hidden ? null : remove.getAttribute('aria-label'),
+    stored: JSON.parse(localStorage.getItem(savedModelsKey)),
+    focus: document.activeElement.id,
+  };
+}
+
+async function savedModels(page, checkAt) {
+  const turns = () => count(page, '.turn');
+  const state = () => page.evaluate(savedState, SAVED_MODELS_KEY);
+  await page.fill('#question', NEW_QUESTION);
+  await page.focus('#model-pick');
+  await page.keyboard.press('End');
+  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'model-other'; tabs++) await page.keyboard.press('Tab');
+  const before = await turns();
+  await page.keyboard.type(SAVED_MODEL);
+  await page.keyboard.press('Enter');
+  const saved = await state();
+  const savedNow = { value: SAVED_MODEL, saved: [SAVED_MODEL], field: false, remove: `remove ${SAVED_MODEL}`, stored: [{ model: SAVED_MODEL }], focus: 'model-pick' };
+  const sent = (await turns()) !== before || (await page.inputValue('#question')) !== NEW_QUESTION;
+  const savedName = 'from the keyboard alone, Enter in the other model field saves its model to the menu, picks it, hides the field and leaves the question unsent';
+  checkAt(savedName, isDeepStrictEqual(saved, savedNow) && !sent, JSON.stringify(saved));
+
+  await page.selectOption('#model-pick', '');
+  await page.press('#model-other', 'Enter');
+  const empty = await state();
+  await page.fill('#model-other', ` ${SAVED_MODEL} `);
+  await page.press('#model-other', 'Enter');
+  const again = await state();
+  const harmless = empty.field && empty.value === '' && isDeepStrictEqual(again, savedNow) && (await turns()) === before;
+  checkAt('an empty name saves nothing, and a name already saved is picked, not saved twice', harmless, `${JSON.stringify(empty)} → ${JSON.stringify(again)}`);
+
+  await page.selectOption('#model-pick', '');
+  await page.fill('#model-other', 'hosted_vllm/half-typed');
+  await page.press('#model-other', 'Escape');
+  const cancelled = await state();
+  checkAt('Escape in the other model field drops what was typed and goes back to the model picked before', isDeepStrictEqual(cancelled, savedNow), JSON.stringify(cancelled));
+
+  await page.reload();
+  const reloaded = await state();
+  const kept = reloaded.value === SAVED_MODEL && isDeepStrictEqual(reloaded.saved, [SAVED_MODEL]);
+  checkAt('after a reload the saved model is still in the menu, and still picked', kept, JSON.stringify(reloaded));
+
+  await page.getByRole('button', { name: `remove ${SAVED_MODEL}`, exact: true }).click();
+  const removed = await state();
+  const gone = { value: DEFAULT_MODEL, saved: [], field: false, remove: null, stored: null, focus: 'model-pick' };
+  checkAt('remove takes the saved model out of the menu and storage, and the picker goes back to the default model', isDeepStrictEqual(removed, gone), JSON.stringify(removed));
+
+  await page.selectOption('#model-pick', '');
+  await page.fill('#model-other', PROVIDER_MODEL);
+  await page.press('#model-other', 'Enter');
+  await page.click('#settings-btn');
+  await page.fill('#key-anthropic', TEST_KEY);
+  await saveKeys(page);
+  await page.keyboard.press('Escape');
+  const listed = await state();
+  await page.getByRole('button', { name: `remove ${PROVIDER_MODEL}`, exact: true }).click();
+  const unsaved = await state();
+  const stays = listed.remove !== null && listed.saved.length === 0 && unsaved.value === PROVIDER_MODEL && unsaved.stored === null && unsaved.remove === null;
+  const staysName = "a saved model that a provider with a key also lists can be removed, and stays picked in its provider's group";
+  checkAt(staysName, listed.value === PROVIDER_MODEL && stays, `${JSON.stringify(listed)} → ${JSON.stringify(unsaved)}`);
 }
 
 async function popupArea() {
