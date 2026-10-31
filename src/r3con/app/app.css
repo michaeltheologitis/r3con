@@ -18,6 +18,7 @@
   --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --gutter: 16px;
+  --tab-row-height: 2.55em;
   --icon-size: 28px;
   --doc-icon-size: 46px;
   --trash-size: 32px;
@@ -154,6 +155,7 @@ p { margin: 0; }
 .tab-row {
   display: flex;
   align-items: center;
+  min-height: var(--tab-row-height);
   padding-right: 1.5ch;
   border-bottom: 1px solid var(--line);
 }
@@ -384,8 +386,10 @@ p { margin: 0; }
 }
 .tabs {
   display: flex;
+  align-items: center;
   gap: 3ch;
-  padding: 0.6em 2ch;
+  min-height: var(--tab-row-height);
+  padding: 0 2ch;
   border-bottom: 1px solid var(--line);
 }
 .tab[aria-selected="true"] { color: var(--fg); font-weight: 600; }
