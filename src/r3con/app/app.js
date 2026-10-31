@@ -1810,9 +1810,8 @@
     if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
     if (kind === 'schema') {
       return [
-        run.schema.thought ? row('why', run.schema.thought) : null,
+        run.schema.thought ? row('reasoning', run.schema.thought) : null,
         h('pre', { class: 'code' }, run.schema.code),
-        row('fills', plural(run.docs.length, 'parsed document')),
         callMeta(run, 'schema'),
       ];
     }
@@ -1822,16 +1821,16 @@
         filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
         row('provenance', refs(cites(run, id))),
-        row('filled from', refs(['schema'])),
+        row('used', refs(['schema'])),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
       ];
     }
     const answer = answerOf(run, id);
     return [
+      row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
-      row('asked', answer.question),
       row('provenance', refs(cites(run, id))),
       h('div', { class: 'k' }, answer.summary),
     ];

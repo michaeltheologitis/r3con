@@ -50,9 +50,9 @@ const POPUP_ROWS = {
   'doc-0': ['relevance snippet'],
   'r1-0': ['read'],
   'r2-3': ['read', 'provenance'],
-  schema: ['why', 'fills'],
-  'parsed-0': ['read', 'provenance', 'filled from'],
-  'answer-0': ['asked', 'provenance'],
+  schema: ['reasoning'],
+  'parsed-0': ['read', 'provenance', 'used'],
+  'answer-0': ['question', 'provenance'],
 };
 const MODEL_KEY = 'r3con-proto-model';
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
@@ -1628,6 +1628,9 @@ async function popupArea() {
       return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
     });
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
+    const opening = await page.$$eval('#inspector > :not(.insp-head)', (els) => els.slice(0, 2).map((el) => [el.textContent, getComputedStyle(el).fontWeight]));
+    const questionFirst = isDeepStrictEqual(opening, [[`question ${sample.question}`, '400'], [sample.answer.text, '600']]);
+    check('popup', "the answer's popup gives its question first, then the answer in bold", questionFirst, JSON.stringify(opening));
     await inspect(page, 'parsed-0');
     const recorded = await shownParse(page);
     const block = await page.$eval('#inspector pre.code', (el) => {
@@ -1651,11 +1654,13 @@ async function popupArea() {
     const panel = await rect(page, '#panel');
     await page.click(nodeSel('schema'));
     const before = await popup(page);
+    // Unrounded, so the drag's own rounding is the only one.
+    const exact = await rect(page, '#inspector');
     const head = await rect(page, '#inspector .insp-head');
     const width = before.right - before.left;
     const target = { left: Math.round(panel.right - width - 10), top: Math.round(panel.top + 10) };
     const grab = { x: head.left + 40, y: head.top + head.height / 2 };
-    await drag(page, grab, { x: grab.x + target.left - before.left, y: grab.y + target.top - before.top });
+    await drag(page, grab, { x: grab.x + target.left - exact.left, y: grab.y + target.top - exact.top });
     const dropped = await popup(page);
     const moved = `${before.left},${before.top} → ${dropped.left},${dropped.top}`;
     check('popup', 'dragging its header moves it', sameSpot(dropped, target), moved);
