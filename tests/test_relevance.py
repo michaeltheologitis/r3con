@@ -16,30 +16,36 @@ from r3con.stages.relevance import (
     render_relevance,
     surface_relevance,
 )
+from tests.fakes import is_later_round
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
-PROMPTS = {"relevance/first-round": "v1", "relevance/later-rounds": "v2"}
+PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
+NONE = (None, None, None)
+QUOTES_LINE = (
+    "- `quotes`: the sentences of this document that `summary` is based on, copied "
+    "exactly."
+)
 
 
 def paragraphs(n: int) -> str:
-    """``n`` paragraphs of about 195 characters, P0 to P{n-1}, separated by blank
+    """``n`` paragraphs of about 245 characters, P0 to P{n-1}, separated by blank
     lines."""
-    return "\n\n".join(f"P{i}. " + "word " * 38 for i in range(n))
+    return "\n\n".join(f"P{i}. " + "word " * 48 for i in range(n))
 
 
-# About 3,900 characters: refused whole beside the first-round prompt under a
-# 6,500-character limit, and read in halves, from P0 and P10, beside either prompt.
+# About 4,900 characters: refused whole beside the first-round prompt under a
+# 7,800-character limit, and read in halves, from P0 and P10, beside either prompt.
 LONG = paragraphs(20)
-READ_IN_HALVES = 6_500
-# About 7,900 characters: read whole beside the first-round prompt under an
-# 11,500-character limit, and refused whole beside the later-rounds prompt.
+READ_IN_HALVES = 7_800
+# About 9,900 characters: read whole beside the first-round prompt under a
+# 14,000-character limit, and refused whole beside the later-rounds prompt.
 LONGER = paragraphs(40)
-READ_WHOLE_ONLY_IN_ROUND_1 = 11_500
+READ_WHOLE_ONLY_IN_ROUND_1 = 14_000
 
 
 def notes_by_round():
@@ -89,6 +95,26 @@ def allowed_ids(request) -> dict:
     """The JSON schema of each id a request's reply may cite."""
     schema = request["response_format"]["json_schema"]["schema"]
     return schema["properties"]["provenance_ids"]["items"]
+
+
+def quote(text: str, start: int | None, end: int | None, match: str | None) -> dict:
+    return {"text": text, "start": start, "end": end, "match": match, "score": None}
+
+
+def check_strict_schema(request, fields: list[str]) -> None:
+    """Checks ``request`` asks, in strict mode, for a ``RelevanceSummary`` of
+    ``fields``, in order, each required and none with a default: the summary a string
+    or null, and the quotes strings."""
+    sent = request["response_format"]["json_schema"]
+    assert (sent["name"], sent["strict"]) == ("RelevanceSummary", True)
+    schema = sent["schema"]
+    assert list(schema["properties"]) == schema["required"] == fields
+    assert not any("default" in field for field in schema["properties"].values())
+    assert schema["properties"]["summary"]["anyOf"] == [
+        {"type": "string"},
+        {"type": "null"},
+    ]
+    assert schema["properties"]["quotes"]["items"] == {"type": "string"}
 
 
 @pytest.mark.parametrize(("n_docs", "rounds"), [(3, 1), (3, 2), (3, 3), (2, 3), (1, 3)])
@@ -241,18 +267,30 @@ def test_ids_that_are_not_one_distinct_id_per_document_are_refused(llm, document
     assert llm.requests == []
 
 
-def test_round_one_sends_the_first_round_prompt_and_reads_plain_text(llm, sections):
+def test_round_one_sends_the_first_round_prompt_and_asks_for_a_summary_and_quotes(
+    llm, sections
+):
     result = surface(llm, ["DOC0", "DOC1"], rounds=1)
     for request in llm.requests:
         prompt = request["messages"][0]["content"]
         assert f"<task>\n{TASK}\n</task>" in prompt
-        assert list(sections(prompt)) == ["## Output"]
-        assert "it is fine to say so briefly (or reply with nothing)" in prompt
-        assert "response_format" not in request
+        shown = sections(prompt)
+        assert list(shown) == ["## Output"]
+        assert shown["## Output"].startswith("Reply in two fields:")
+        assert shown["## Output"].endswith(QUOTES_LINE)
+        check_strict_schema(request, ["summary", "quotes"])
     assert result.records == [
         [
-            [SnippetRecord("0a0a0a", "N(DOC0,r1)", [])],
-            [SnippetRecord("1b1b1b", "N(DOC1,r1)", [])],
+            [
+                SnippetRecord(
+                    id="0a0a0a", summary="N(DOC0,r1)", quotes=[], provenance=[]
+                )
+            ],
+            [
+                SnippetRecord(
+                    id="1b1b1b", summary="N(DOC1,r1)", quotes=[], provenance=[]
+                )
+            ],
         ]
     ]
 
@@ -270,38 +308,44 @@ def test_a_later_round_shows_the_others_under_their_ids_and_asks_for_their_ids(
     assert shown[others].endswith(
         "### Summary ID: 1b1b1b\nN(DOC1,r1)\n\n### Summary ID: 2c2c2c\nN(DOC2,r1)"
     )
+    output = shown["## Output"]
+    assert output.startswith("Reply in three fields:")
     assert (
-        "- `provenance_ids`: The IDs of the other summaries above" in shown["## Output"]
+        f"{QUOTES_LINE}\n- `provenance_ids`: The IDs of the other summaries" in output
     )
-    schema = request["response_format"]["json_schema"]
-    assert (schema["name"], schema["strict"]) == ("RelevanceSummary", True)
-    assert list(schema["schema"]["properties"]) == ["summary", "provenance_ids"]
-    assert schema["schema"]["required"] == ["summary", "provenance_ids"]
-    assert "default" not in schema["schema"]["properties"]["provenance_ids"]
-    assert schema["schema"]["properties"]["summary"]["anyOf"] == [
-        {"type": "string"},
-        {"type": "null"},
-    ]
+    check_strict_schema(request, ["summary", "quotes", "provenance_ids"])
     assert allowed_ids(request) == {"enum": ["1b1b1b", "2c2c2c"], "type": "string"}
 
 
-def test_a_later_rounds_reply_without_provenance_ids_cites_nothing(llm):
-    def reply(request):
-        if "response_format" not in request:
-            return "A snippet."
-        return {"summary": "A snippet."}
-
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"summary": "A snippet."},
+        {"summary": "A snippet.", "quotes": None, "provenance_ids": None},
+    ],
+    ids=["left-out", "null"],
+)
+def test_a_reply_without_quotes_or_provenance_ids_quotes_and_cites_nothing(llm, reply):
     result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply)
+    assert result.snippets == ["A snippet.", "A snippet."]
+    assert by_round(result, "quotes") == [[[[]], [[]]], [[[]], [[]]]]
     assert result.provenance == [[], []]
     assert len(llm.requests) == 4
 
 
-@pytest.mark.parametrize("version", ["v1", "v2"])
-def test_the_reply_schema_does_not_depend_on_the_later_rounds_prompt_version(
-    llm, version
-):
+@pytest.mark.parametrize(
+    "pinned",
+    [
+        {"relevance/first-round": "v1"},
+        {"relevance/later-rounds": "v1"},
+        {"relevance/later-rounds": "v2"},
+        {},
+    ],
+    ids=["first-round-v1", "later-rounds-v1", "later-rounds-v2", "default"],
+)
+def test_the_reply_schema_does_not_depend_on_the_prompt_version(llm, pinned):
     def reply(request):
-        if "response_format" not in request:
+        if not is_later_round(request):
             return "A snippet."
         return {"summary": "A snippet.", "provenance_ids": ["1b1b1b"]}
 
@@ -310,20 +354,21 @@ def test_the_reply_schema_does_not_depend_on_the_later_rounds_prompt_version(
         documents=["DOC0", "DOC1"],
         document_ids=IDS[:2],
         model=MODEL,
-        prompts={**PROMPTS, "relevance/later-rounds": version},
+        prompts={**PROMPTS, **pinned},
         rounds=2,
         completion=llm.answers(relevance=reply),
     )
     assert result.provenance == [["1b1b1b"], []]
-    for request in llm.requests[2:]:
+    for k, request in enumerate(llm.requests):
         schema = request["response_format"]["json_schema"]["schema"]
-        assert list(schema["properties"]) == ["summary", "provenance_ids"]
+        fields = ["summary", "quotes", "provenance_ids"]
+        assert list(schema["properties"]) == fields[: 2 if k < 2 else 3]
 
 
 def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):
     def reply(request):
         document = request["messages"][1]["content"]
-        if "response_format" not in request:
+        if not is_later_round(request):
             return f"{document} in round 1."
         cited = shown_ids(request)
         return {"summary": f"  {document} in round 2.\n", "provenance_ids": cited}
@@ -347,7 +392,7 @@ def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):
 
 def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog):
     def reply(request):
-        if "response_format" not in request:
+        if not is_later_round(request):
             return "A snippet."
         return {
             "summary": "A snippet.",
@@ -367,21 +412,46 @@ def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog)
     )
 
 
-def test_a_reply_that_does_not_fit_its_schema_is_sent_again(llm, tmp_path):
-    llm.replies("Round 1.", "Round 1.", MALFORMED, MALFORMED)
+@pytest.mark.parametrize(
+    ("rounds", "replies", "kinds"),
+    [
+        (
+            1,
+            [MALFORMED, MALFORMED],
+            [
+                "relevance-r1-d0",
+                "relevance-r1-d0-retry-1",
+                "relevance-r1-d0-retry-2",
+                "relevance-r1-d1",
+            ],
+        ),
+        (
+            2,
+            ["A snippet.", "A snippet.", MALFORMED, MALFORMED],
+            [
+                "relevance-r1-d0",
+                "relevance-r1-d1",
+                "relevance-r2-d0",
+                "relevance-r2-d0-retry-1",
+                "relevance-r2-d0-retry-2",
+                "relevance-r2-d1",
+            ],
+        ),
+    ],
+    ids=["round-1", "round-2"],
+)
+def test_a_reply_that_does_not_fit_its_schema_is_sent_again(
+    llm, tmp_path, rounds, replies, kinds
+):
+    llm.replies(*replies)
     run = StageRun(stage="relevance", task_logger=TaskLogger("run", root=tmp_path))
-    reply = "Round 2."
-    result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply, workers=1, run=run)
-    assert result.snippets == ["Round 2.", "Round 2."]
-    assert [step.kind for step in run.steps] == [
-        "relevance-r1-d0",
-        "relevance-r1-d1",
-        "relevance-r2-d0",
-        "relevance-r2-d0-retry-1",
-        "relevance-r2-d0-retry-2",
-        "relevance-r2-d1",
-    ]
-    first, *resends = sends_of(llm, "DOC0")[1:]
+    reply = "Fitted."
+    result = surface(
+        llm, ["DOC0", "DOC1"], rounds=rounds, reply=reply, workers=1, run=run
+    )
+    assert result.snippets == ["Fitted.", "Fitted."]
+    assert [step.kind for step in run.steps] == kinds
+    first, *resends = sends_of(llm, "DOC0")[-3:]
     assert first["messages"][1]["content"] == "DOC0"
     for resend in resends:
         assert resend["messages"][0] == first["messages"][0]
@@ -405,7 +475,7 @@ def test_the_last_malformed_reply_is_raised_once_the_attempts_run_out(
     monkeypatch.setattr(settings, "RELEVANCE_MAX_ATTEMPTS", attempts)
 
     def reply(request):
-        return MALFORMED if "response_format" in request else "A snippet."
+        return MALFORMED if is_later_round(request) else "A snippet."
 
     with pytest.raises(ValidationError, match="summary"):
         surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply, workers=1)
@@ -432,24 +502,30 @@ def test_fewer_than_one_attempt_is_refused_before_any_request(llm, monkeypatch):
     assert llm.requests == []
 
 
-def test_a_null_summary_is_kept_empty_and_neither_shown_nor_citable(llm, shown_ids):
+@pytest.mark.parametrize("empty", [None, " \n"], ids=["null", "blank"])
+def test_an_empty_summary_is_kept_empty_without_quotes_and_neither_shown_nor_citable(
+    llm, shown_ids, empty
+):
     reads = Counter()
 
     def reply(request):
         document = request["messages"][1]["content"]
         reads[document] += 1
-        if "response_format" not in request:
-            return f"{document} in round {reads[document]}."
-        summary = (
-            None if document == "DOC1" else f"{document} in round {reads[document]}."
-        )
-        return {"summary": summary, "provenance_ids": []}
+        summary = f"{document} in round {reads[document]}."
+        if document == "DOC1" and is_later_round(request):
+            summary = empty
+        return {"summary": summary, "quotes": [document]}
 
     result = surface(llm, ["DOC0", "DOC1", "DOC2"], rounds=3, reply=reply, workers=1)
     assert by_round(result, "summary")[1] == [
         ["DOC0 in round 2."],
         [""],
         ["DOC2 in round 2."],
+    ]
+    assert by_round(result, "quotes")[1] == [
+        [[quote("DOC0", 0, 4, "exact")]],
+        [[]],
+        [[quote("DOC2", 0, 4, "exact")]],
     ]
     round_3 = reads_of(llm, "DOC0")[2]
     assert shown_ids(round_3) == ["2c2c2c"]
@@ -464,15 +540,18 @@ def test_a_later_round_with_nothing_to_show_reads_like_round_one(
 ):
     def reply(request):
         document = request["messages"][1]["content"]
-        if document == "DOC1" and "response_format" not in request and empty_first:
+        if document == "DOC1" and not is_later_round(request) and empty_first:
             return ""
         return f"Notes on {document}."
 
     result = surface(llm, documents, rounds=2, reply=reply)
     [round_1, round_2] = reads_of(llm, "DOC0")
     assert round_2["messages"][0] == round_1["messages"][0]
-    assert "response_format" not in round_2
-    assert result.records[1][0] == [SnippetRecord("0a0a0a", "Notes on DOC0.", [])]
+    assert round_2["response_format"] == round_1["response_format"]
+    assert not is_later_round(round_2)
+    assert result.records[1][0] == [
+        SnippetRecord(id="0a0a0a", summary="Notes on DOC0.", quotes=[], provenance=[])
+    ]
 
 
 def test_a_parts_ids_are_numbered_within_each_round(llm, shown_ids):
@@ -499,5 +578,62 @@ def test_a_parts_ids_are_numbered_within_each_round(llm, shown_ids):
 def test_a_split_documents_provenance_joins_in_order_without_repeats(
     provenance, joined
 ):
-    parts = [SnippetRecord(f"a.{k}", "x", ids) for k, ids in enumerate(provenance, 1)]
+    parts = [
+        SnippetRecord(id=f"a.{k}", summary="x", quotes=[], provenance=ids)
+        for k, ids in enumerate(provenance, 1)
+    ]
     assert RelevantContext(records=[[parts]]).provenance == [joined]
+
+
+def test_each_rounds_quotes_are_kept_where_they_are_in_the_document_they_quote(llm):
+    documents = [
+        "Revenue rose to $5M. Costs fell.",
+        "Sales were \u201cflat\u201d \u2014 at $3M.",
+    ]
+    quotes = {
+        (documents[0], 1): ["Revenue rose to $5M."],
+        (documents[0], 2): ["costs fell.", "Profit doubled."],
+        (documents[1], 1): ['Sales were "flat" - at $3M.'],
+        (documents[1], 2): [documents[1]],
+    }
+
+    def reply(request):
+        document = request["messages"][1]["content"]
+        round_ = 2 if is_later_round(request) else 1
+        return {"summary": "A note.", "quotes": quotes[document, round_]}
+
+    result = surface(llm, documents, rounds=2, reply=reply)
+    assert by_round(result, "quotes") == [
+        [
+            [[quote("Revenue rose to $5M.", 0, 20, "exact")]],
+            [[quote('Sales were "flat" - at $3M.', 0, 27, "normalized")]],
+        ],
+        [
+            [
+                [
+                    quote("costs fell.", 21, 32, "normalized"),
+                    quote("Profit doubled.", *NONE),
+                ]
+            ],
+            [[quote(documents[1], 0, 27, "exact")]],
+        ],
+    ]
+
+
+def test_a_parts_quotes_are_kept_where_they_are_in_its_whole_document(llm):
+    def quoting_its_first_paragraph(request):
+        part = request["messages"][1]["content"]
+        return {"summary": "A note.", "quotes": [part.split("\n\n", 1)[0]]}
+
+    llm.refuses_over(READ_IN_HALVES)
+    documents = ["DOC0", LONG]
+    result = surface(
+        llm, documents, rounds=2, model=QWEN, reply=quoting_its_first_paragraph
+    )
+    first, second = LONG.split("\n\n")[0], LONG.split("\n\n")[10]
+    second_at = LONG.index("P10. ")
+    halves = [
+        [quote(first, 0, len(first), "exact")],
+        [quote(second, second_at, second_at + len(second), "exact")],
+    ]
+    assert [quotes[1] for quotes in by_round(result, "quotes")] == [halves, halves]

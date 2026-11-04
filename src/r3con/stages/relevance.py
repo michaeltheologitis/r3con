@@ -12,14 +12,19 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
 
 - **Round 1** — each document's relevance snippet is written from the task and the
   document alone (no other document is visible), with the ``relevance/first-round``
-  prompt, as plain text.
+  prompt. The reply is structured: the ``summary``, or null, and its ``quotes``, the
+  sentences of the document it is based on.
 - **Round k ≥ 2** — each document's snippet is rewritten given the task and the
   **previous round's** snippets of the OTHER documents (never the document's own prior
   snippet — the document itself is in the user message), with the
   ``relevance/later-rounds`` prompt. Only the immediately-previous round is fed in, not
-  the whole history. The reply is structured: the ``summary``, or null, and its
-  ``provenance_ids``, the ids of the shown snippets it used. With nothing to show, the
-  first-round prompt is used instead.
+  the whole history. The reply adds ``provenance_ids``, the ids of the shown snippets
+  it used. With nothing to show, the first-round prompt is used instead.
+
+Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
+and kept with its position in the whole document, or with none when it is not found; a
+null or empty summary keeps no quotes. Quotes are kept for inspection only: later
+stages read the summaries alone.
 
 Every document has an id for the run (:func:`draw_document_ids`), and each snippet
 carries its document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in
@@ -38,17 +43,25 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
+
+from pydantic import BaseModel
 
 from r3con import settings
 from r3con.config import PromptStage
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
+from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.provenance import CitingRequest, citing_schema, read_citing
+from r3con.stages.provenance import (
+    CitingRequest,
+    citing_schema,
+    lenient_list,
+    read_citing,
+)
 
 _log = get_logger("relevance")
 
@@ -63,12 +76,15 @@ Snippet = str | list[str]
 class SnippetRecord:
     """One relevance snippet with its id: a whole document's, or one part's.
 
-    ``summary`` is the snippet's text, and ``provenance`` the ids of the previous
-    round's snippets it used: empty in round 1, and whenever it used none.
+    ``summary`` is the snippet's text, ``quotes`` the sentences of the document it is
+    based on, each where it was found in the whole document, and ``provenance`` the ids
+    of the previous round's snippets it used: empty in round 1, and whenever it used
+    none.
     """
 
     id: str
     summary: str
+    quotes: list[Quote]
     provenance: list[str]
 
 
@@ -201,16 +217,29 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
+def _reply_schema(citable: Sequence[str] | None) -> type[BaseModel]:
+    """A reply's schema: its ``summary``, or null, its ``quotes`` (:func:`lenient_list`
+    of strings), then, unless ``citable`` is ``None``, its ``provenance_ids`` of those
+    ids."""
+    return citing_schema(
+        "RelevanceSummary",
+        citable,
+        summary=(str | None, ...),
+        quotes=lenient_list(str),
+    )
+
+
 def _request(
     task: str, shown: dict[str, str], prompts: Mapping[PromptStage, str]
 ) -> CitingRequest:
     """A document's request in one round, given the OTHER documents' non-empty snippets
-    it shows, by id: the first-round prompt and plain text when there are none, else
-    the later-rounds prompt and its ``{summary, provenance_ids}`` reply."""
+    it shows, by id: the first-round prompt and its ``{summary, quotes}`` reply when
+    there are none, else the later-rounds prompt and its ``{summary, quotes,
+    provenance_ids}`` reply."""
     if not shown:
         version = prompts["relevance/first-round"]
         prompt = load_prompt("relevance/first-round", version=version, task=task)
-        return CitingRequest(prompt, None, [])
+        return CitingRequest(prompt, _reply_schema(None), [])
     prompt = load_prompt(
         "relevance/later-rounds",
         version=prompts["relevance/later-rounds"],
@@ -218,9 +247,7 @@ def _request(
         other_snippets=_render_other_snippets(shown),
     )
     ids = list(shown)
-    return CitingRequest(
-        prompt, citing_schema("RelevanceSummary", ids, "summary", str | None), ids
-    )
+    return CitingRequest(prompt, _reply_schema(ids), ids)
 
 
 def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
@@ -231,11 +258,11 @@ def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
 
 def _read(
     request: CitingRequest, part: str, *, kind: str, max_attempts: int, **llm_call: Any
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     """``part`` (a document or one part of one) read under ``request`` by
-    :func:`~r3con.stages.provenance.read_citing`: its snippet, stripped, and the shown
-    ids it used."""
-    summary, provenance = read_citing(
+    :func:`~r3con.stages.provenance.read_citing`: its snippet, stripped, its quotes,
+    none for an empty snippet, and the shown ids it used."""
+    reply, provenance = read_citing(
         request,
         part,
         rewrite=_REWRITE,
@@ -243,7 +270,8 @@ def _read(
         max_attempts=max_attempts,
         **llm_call,
     )
-    return (cast(str | None, summary) or "").strip(), provenance
+    summary = (reply.summary or "").strip()
+    return summary, reply.quotes if summary else [], provenance
 
 
 def _report_snippets(
@@ -260,6 +288,7 @@ def _report_snippets(
             doc_id=document_id,
             part=int(k) if k else None,
             summary=record.summary,
+            quotes=record.quotes,
             provenance=record.provenance,
         )
 
@@ -292,27 +321,30 @@ def relevance_snippet(
     kind: str = "relevance",
     max_attempts: int | None = None,
     **llm_kwargs: Any,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[Quote], list[str]]:
     """Surface one ``document``'s relevance snippet for the task, given the OTHER
     documents' previous-round snippets by id (empty in round 1).
 
     The task + the other documents' snippets live in the system prompt; the document is
     the user message. ``prompts`` pins the version of ``relevance/first-round`` and
     ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet
-    to show, the call uses the first-round prompt and reads back plain text; otherwise
-    the later-rounds prompt and a structured ``{summary, provenance_ids}`` reply. A reply
-    that does not fit its schema is sent again with the validator's error, up to
-    ``max_attempts`` sends (``None`` reads ``settings.RELEVANCE_MAX_ATTEMPTS``).
+    to show, the call uses the first-round prompt and a structured ``{summary, quotes}``
+    reply; otherwise the later-rounds prompt and a ``{summary, quotes,
+    provenance_ids}`` reply. A reply that does not fit its schema is sent again with
+    the validator's error, up to ``max_attempts`` sends (``None`` reads
+    ``settings.RELEVANCE_MAX_ATTEMPTS``).
 
     Returns the snippet, stripped — an empty string is allowed (the document contributes
-    nothing relevant to the task) — and the shown ids it used.
+    nothing relevant to the task) — its quotes, each located in ``document``
+    (:func:`r3con.quotes.locate_quotes`), none for an empty snippet, and the shown ids
+    it used.
 
     Raises:
         ValueError: if ``max_attempts`` is not positive.
     """
     attempts = _attempts(max_attempts)
     shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
-    return _read(
+    summary, quotes, provenance = _read(
         _request(task, shown, prompts),
         document,
         kind=kind,
@@ -321,6 +353,7 @@ def relevance_snippet(
         run=run,
         **llm_kwargs,
     )
+    return summary, locate_quotes(quotes, document), provenance
 
 
 def surface_relevance(
@@ -418,10 +451,16 @@ def surface_relevance(
                     **llm_kwargs,
                 ),
             )
+            ids = _part_ids(document_ids[i], len(replies))
             records = [
-                SnippetRecord(id=id_, summary=summary, provenance=provenance)
-                for id_, (summary, provenance) in zip(
-                    _part_ids(document_ids[i], len(replies)), replies, strict=True
+                SnippetRecord(
+                    id=id_,
+                    summary=summary,
+                    quotes=locate_quotes(quotes, part, start),
+                    provenance=provenance,
+                )
+                for id_, part, start, (summary, quotes, provenance) in zip(
+                    ids, reader.parts(i), reader.starts(i), replies, strict=True
                 )
             ]
             _report_snippets(emit, round_idx, document_ids[i], records)

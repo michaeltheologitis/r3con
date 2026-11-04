@@ -530,10 +530,17 @@ def test_with_no_note_to_cite_provenance_is_any_list_and_what_it_holds_is_droppe
 
 
 @pytest.mark.parametrize("snippets", [NOTES, None], ids=["a-note-to-cite", "none"])
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"parse": {"rows": [{"who": "Halloran"}]}},
+        {"parse": {"rows": [{"who": "Halloran"}]}, "provenance_ids": None},
+    ],
+    ids=["left-out", "null"],
+)
 def test_a_reply_without_provenance_ids_cites_nothing_and_is_not_sent_again(
-    llm, snippets
+    llm, snippets, reply
 ):
-    reply = {"parse": {"rows": [{"who": "Halloran"}]}}
     document_ids = IDS[: len(snippets or ())]
     result = parse_one(
         llm.replies(reply), relevance_snippets=snippets, document_ids=document_ids

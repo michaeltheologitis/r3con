@@ -137,21 +137,32 @@ def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, exampl
     assert len(llm.requests) == 1
 
 
-@pytest.mark.parametrize("example", examples("relevance/later-rounds"))
-def test_each_later_rounds_example_replies_in_json_its_reply_schema_takes(llm, example):
+@pytest.mark.parametrize(
+    "example", [*examples("relevance/first-round"), *examples("relevance/later-rounds")]
+)
+def test_each_relevance_example_replies_in_its_schema_quoting_its_document_exactly(
+    llm, example
+):
     others = re.findall(r"^### Summary ID: (\w+)\n(.+)$", example, re.MULTILINE)
+    document = example.split("\nDocument:\n", 1)[1].rsplit("\n\nOutput", 1)[0]
     reply = json.loads(example.rsplit("\n", 1)[1])
-    summary, provenance = relevance_snippet(
+    summary, quotes, provenance = relevance_snippet(
         task="?",
-        document="?",
+        document=document,
         other_snippets=dict(others),
         model=MODEL,
         prompts=PINNED,
         completion=llm.replies(reply),
     )
-    assert set(reply) == {"summary", "provenance_ids"}
-    assert (summary, provenance) == (reply["summary"], reply["provenance_ids"])
-    assert len(llm.requests) == 1
+    [request] = llm.requests
+    assert list(reply) == list(
+        request["response_format"]["json_schema"]["schema"]["properties"]
+    )
+    assert (summary, provenance) == (reply["summary"], reply.get("provenance_ids", []))
+    assert reply["quotes"]
+    assert [(q["text"], q["match"]) for q in quotes] == [
+        (text, "exact") for text in reply["quotes"]
+    ]
 
 
 @pytest.mark.parametrize("example", examples("reasoning/coding"))

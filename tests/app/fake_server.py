@@ -3,14 +3,14 @@ prints the URL that opens the page, with its token, then serves until killed.
 
 The model answers every stage as one would, citing real ids, so a run draws its whole
 panel: each summary is its document's first line that is not ``QUIET`` (none if all
-are), and each parse its first line as a memo's title, its other lines nested under
-it; round 2 cites the first summary it is shown, each parse its own document's note,
-and the answer the first two documents' summaries and parses. It refuses a document
-over ``PART_CHARS`` as too long, so that r3con reads it in parts. A question holding
-``FAILS`` makes every call raise, and one holding ``HANGS`` makes every call wait
-until the server is killed. One holding ``STALLS`` makes every call wait until
-``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding ``OFF_SCHEMA`` makes
-every reply with a schema miss it, so r3con sends again.
+are), quoting that line, and each parse its first line as a memo's title, its other
+lines nested under it; round 2 cites the first summary it is shown, each parse its own
+document's note, and the answer the first two documents' summaries and parses. It
+refuses a document over ``PART_CHARS`` as too long, so that r3con reads it in parts.
+A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
+every call wait until the server is killed. One holding ``STALLS`` makes every call
+wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding
+``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
 """
 
 import os
@@ -43,10 +43,7 @@ OFF_SCHEMA = "(the model answers off schema)"
 EMPTY_REPLY = "{}"
 QUIET = "(nothing relevant here)"
 PART_CHARS = 2000
-# The schema stage asks for no response format, as round 1 of relevance does; its user
-# message is the only one that starts with this.
-SCHEMA_REQUEST_START = "Input:"
-READS_A_DOCUMENT = frozenset({"round 1", "RelevanceSummary", "ParseReply"})
+READS_A_DOCUMENT = frozenset({"RelevanceSummary", "ParseReply"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
@@ -93,12 +90,11 @@ def summary_of(text: str) -> str:
 
 def reply_name(request: dict[str, Any]) -> str:
     """The reply ``request`` asks for: its response format's name, or without one, the
-    schema or a first-round summary."""
+    schema."""
     response_format = request.get("response_format")
-    if response_format is not None:
-        return response_format["json_schema"]["name"]
-    user = request["messages"][-1]["content"]
-    return "schema" if user.startswith(SCHEMA_REQUEST_START) else "round 1"
+    if response_format is None:
+        return "schema"
+    return response_format["json_schema"]["name"]
 
 
 def content(request: dict[str, Any]) -> str:
@@ -107,12 +103,15 @@ def content(request: dict[str, Any]) -> str:
     name = reply_name(request)
     if name == "schema":
         return SCHEMA_REPLY
-    if name == "round 1":
-        return summary_of(user)
     schema = request["response_format"]["json_schema"]["schema"]
     if name == "RelevanceSummary":
-        cited = citable(schema, "provenance_ids")[:1]
-        return json.dumps({"summary": summary_of(user), "provenance_ids": cited})
+        summary = summary_of(user)
+        reply = {
+            "summary": summary,
+            "quotes": [summary] if summary else [],
+            "provenance_ids": citable(schema, "provenance_ids")[:1],
+        }
+        return json.dumps({field: reply[field] for field in schema["properties"]})
     if name == "ParseReply":
         heading = PARSE_HEADING.match(user)
         own = [heading[1]] if heading else []

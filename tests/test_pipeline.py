@@ -24,6 +24,7 @@ from r3con.config import (
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
+from tests.fakes import is_later_round
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -49,7 +50,8 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
-        "relevance/later-rounds": "v2",
+        "relevance/first-round": "v2",
+        "relevance/later-rounds": "v3",
         "structuring/parsing": "v3",
         "reasoning/direct": "v3",
         "reasoning/coding": "v3",
@@ -239,16 +241,28 @@ def counting_ids(monkeypatch) -> None:
 
 
 def citing_every_shown_id(shown_ids):
-    """A relevance reply: a note naming the document, and, from round 2 on, every id
-    the call shows, last first."""
+    """A relevance reply: a note naming the document, quoting its first 20 characters,
+    and, from round 2 on, every id the call shows, last first."""
 
     def reply(request):
-        note = f"Notes on {request['messages'][1]['content'][:20]}."
-        if "response_format" not in request:
-            return note
-        return {"summary": note, "provenance_ids": shown_ids(request)[::-1]}
+        start = request["messages"][1]["content"][:20]
+        quoting = {"summary": f"Notes on {start}.", "quotes": [start]}
+        if not is_later_round(request):
+            return quoting
+        return {**quoting, "provenance_ids": shown_ids(request)[::-1]}
 
     return reply
+
+
+def quoted_whole(document: str) -> dict:
+    """The quote of all of ``document``, found exactly where it is."""
+    return {
+        "text": document,
+        "start": 0,
+        "end": len(document),
+        "match": "exact",
+        "score": None,
+    }
 
 
 def citing_its_own_note(request) -> dict:
@@ -333,20 +347,36 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
     assert read_json(logger, "ids") == {ids[0]: 0, ids[1]: 1, ids[2]: 2}
     rounds = read_json(logger, "relevance/result")["rounds"]
     notes = [f"Notes on {document}." for document in documents]
+    quotes = [[quoted_whole(document)] for document in documents]
     assert rounds == [
         {
             "round": 1,
             "snippets": [
-                {"id": id_, "summary": note, "provenance": []}
-                for id_, note in zip(ids, notes, strict=True)
+                {"id": id_, "summary": note, "quotes": quoted, "provenance": []}
+                for id_, note, quoted in zip(ids, notes, quotes, strict=True)
             ],
         },
         {
             "round": 2,
             "snippets": [
-                {"id": ids[0], "summary": notes[0], "provenance": [ids[2], ids[1]]},
-                {"id": ids[1], "summary": notes[1], "provenance": [ids[2], ids[0]]},
-                {"id": ids[2], "summary": notes[2], "provenance": [ids[1], ids[0]]},
+                {
+                    "id": ids[0],
+                    "summary": notes[0],
+                    "quotes": quotes[0],
+                    "provenance": [ids[2], ids[1]],
+                },
+                {
+                    "id": ids[1],
+                    "summary": notes[1],
+                    "quotes": quotes[1],
+                    "provenance": [ids[2], ids[0]],
+                },
+                {
+                    "id": ids[2],
+                    "summary": notes[2],
+                    "quotes": quotes[2],
+                    "provenance": [ids[1], ids[0]],
+                },
             ],
         },
     ]
@@ -422,6 +452,33 @@ def test_a_config_that_pins_the_prompts_before_provenance_ids_still_records_them
     assert "`provenance`:" in system_prompts(llm, "parsing")[0]
     manifest = read_json(logger, "manifest")["config"]
     assert manifest["prompts"]["relevance/later-rounds"] == "v1"
+
+
+def test_later_stages_read_the_summaries_and_never_their_quotes(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    documents = [f"{memo}\nQUOTED: the {memo} lists two sites." for memo in DOCS]
+
+    def quoting_its_second_line(request):
+        first, second = request["messages"][1]["content"].splitlines()
+        return {"summary": f"Notes on {first}.", "quotes": [second]}
+
+    answer(
+        answering_llm.answers(relevance=quoting_its_second_line),
+        logger,
+        documents=documents,
+    )
+    rounds = read_json(logger, "relevance/result")["rounds"]
+    matches = [q["match"] for r in rounds for s in r["snippets"] for q in s["quotes"]]
+    assert matches == ["exact"] * 4
+    for stage in LATER_STAGES:
+        for request in answering_llm.requests_for(stage):
+            # A parse request's user message is the document itself.
+            sent = (
+                request["messages"][:1] if stage == "parsing" else request["messages"]
+            )
+            assert not any("QUOTED" in message["content"] for message in sent)
 
 
 def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
@@ -556,7 +613,7 @@ def test_document_ids_reach_relevance_and_parsing_only_as_headings_never_the_sch
         return {id_ for id_ in ids if id_ in text}
 
     relevance = answering_llm.requests_for("relevance")
-    later_rounds = [request for request in relevance if "response_format" in request]
+    later_rounds = [request for request in relevance if is_later_round(request)]
     assert [len(shown_ids(request)) for request in later_rounds] == [2, 2, 2]
     for request in relevance:
         text = "\n".join(message["content"] for message in request["messages"])
@@ -850,9 +907,7 @@ def test_identical_documents_get_distinct_ids_and_each_sees_the_others(
     result = answer(answering_llm, documents=["Same memo"] * 3)
     ids = result.document_ids
     assert len(set(ids)) == 3
-    round_2 = [
-        r for r in answering_llm.requests_for("relevance") if "response_format" in r
-    ]
+    round_2 = [r for r in answering_llm.requests_for("relevance") if is_later_round(r)]
     assert [set(shown_ids(request)) for request in round_2] == [
         set(ids) - {id_} for id_ in ids
     ]
@@ -865,7 +920,7 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
     def reply(request):
-        return {"provenance_ids": []} if "response_format" in request else "A snippet."
+        return {"provenance_ids": []} if is_later_round(request) else "A snippet."
 
     logger = TaskLogger("run", root=tmp_path)
     with pytest.raises(ValidationError, match="summary"):
@@ -938,7 +993,7 @@ def test_a_later_stage_splits_further_without_renumbering(
     if not measured:
         llm.refuses_over(25_000)
     logger = TaskLogger("run", root=tmp_path)
-    model = window(6_000) if measured else QWEN
+    model = window(7_000) if measured else QWEN
     result = answer(llm, logger, documents=memos_with(registry), model=model)
     record = read_json(logger, "splits")["documents"]["3"]
     assert record["parts"] == {"relevance-r1": 2, "relevance-r2": 2, "parse": 4}
@@ -1112,11 +1167,13 @@ def test_each_finished_event_carries_what_the_run_folder_records(
             "doc_id": s["id"],
             "part": None,
             "summary": s["summary"],
+            "quotes": s["quotes"],
             "provenance": s["provenance"],
         }
         for r in rounds
         for s in r["snippets"]
     ]
+    assert all(e["quotes"] for e in by_type["relevance_finished"])
     assert any(e["provenance"] for e in by_type["relevance_finished"])
     schema = read_json(logger, "structuring/schema/result")
     assert by_type["schema_finished"] == [

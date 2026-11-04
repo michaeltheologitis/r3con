@@ -307,9 +307,10 @@ def run_pipeline(
     - ``relevance_started``, before a document is read in a round: ``round``,
       ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
       read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
-      ``<id>.<k>``, ``None`` for a document read whole), the snippet's ``summary`` and
-      the ids of the previous round's snippets it used, ``provenance``. A part refused
-      as too long and cut further is no event.
+      ``<id>.<k>``, ``None`` for a document read whole), the snippet's ``summary``, its
+      ``quotes`` as the snippet record holds them, and the ids of the previous round's
+      snippets it used, ``provenance``. A part refused as too long and cut further is
+      no event.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
@@ -579,13 +580,14 @@ def _read_built(run_dir: Path) -> Representation:
 
 
 def _final_round(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
-    """The last of ``rounds``, each document's snippets in a list, one per part."""
+    """The last of ``rounds``, each document's snippets in a list, one per part, a
+    snippet without quotes, as r3context 0.6.4 wrote one, quoting nothing."""
     if not rounds:
         return RelevantContext(records=[])
     final_round: list[list[SnippetRecord]] = [[] for _ in ids]
     for snippet in rounds[-1]["snippets"]:
         document = ids[snippet["id"].partition(".")[0]]
-        final_round[document].append(SnippetRecord(**snippet))
+        final_round[document].append(SnippetRecord(**{"quotes": [], **snippet}))
     return RelevantContext(records=[final_round])
 
 

@@ -39,10 +39,7 @@ def stage_of(request: Request) -> Stage:
     messages = request["messages"]
     if len(messages) > 2:
         return "reasoning"
-    user = messages[1]["content"]
-    if user.startswith("Input:\n<task>"):
-        return "schema" if "Output:" in user else "reasoning"
-    return "relevance"
+    return "schema" if "Output:" in messages[1]["content"] else "reasoning"
 
 
 class FakeLLM:
@@ -52,8 +49,8 @@ class FakeLLM:
     sets each stage's reply for when the queue is empty (one reply for every request
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
-    the content. A relevance request for structured output gets a text reply as its
-    summary, citing nothing; a parsing request for ``{parse, provenance_ids}`` gets a dict
+    the content. A relevance request gets a text reply as its summary, quoting and
+    citing nothing; a parsing request for ``{parse, provenance_ids}`` gets a dict
     reply without ``parse`` as its parse, citing nothing; a direct reasoning request
     gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
@@ -128,10 +125,9 @@ class FakeLLM:
             content = reply(copy.deepcopy(snapshot)) if callable(reply) else reply
             if (
                 isinstance(content, str)
-                and "response_format" in snapshot
-                and stage_of(snapshot) == "relevance"
+                and _schema_name(snapshot) == "RelevanceSummary"
             ):
-                content = {"summary": content, "provenance_ids": []}
+                content = _summary_reply(content, snapshot)
             if (
                 isinstance(content, dict)
                 and "parse" not in content
@@ -166,6 +162,21 @@ class FakeLLM:
                 f"no reply scripted for this {stage} request: {last!r}"
             )
         return answer
+
+
+def _summary_reply(summary: str, request: Request) -> dict[str, Any]:
+    """A relevance reply of ``summary``, quoting and citing nothing, in the fields
+    ``request``'s schema has: no ``provenance_ids`` in round 1."""
+    fields = request["response_format"]["json_schema"]["schema"]["properties"]
+    reply = {"summary": summary, "quotes": [], "provenance_ids": []}
+    return {field: reply[field] for field in fields}
+
+
+def is_later_round(request: Request) -> bool:
+    """Whether a relevance ``request`` is a later round's, whose reply cites the
+    summaries it shows."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    return "provenance_ids" in schema["properties"]
 
 
 def request_tokens(request: Request) -> int:
