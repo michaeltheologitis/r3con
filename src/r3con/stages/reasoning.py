@@ -38,10 +38,17 @@ import functools
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
-from pydantic import BaseModel, Field, ValidationError, create_model, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    ValidationError,
+    create_model,
+    field_validator,
+)
 
 from r3con import settings
 from r3con.config import PromptStage, ReasoningPath
@@ -110,13 +117,21 @@ def _provenance_ids_model(citable: Mapping[str, Sequence[str]]) -> type[BaseMode
 
 def _reply_schema(citable: Mapping[str, Sequence[str]]) -> type[_DirectReply]:
     """The direct reply's schema: the ``answer``, and its ``provenance_ids``
-    (:func:`_provenance_ids_model`). A reply without them cites nothing."""
+    (:func:`_provenance_ids_model`). A reply without them, or with null for them,
+    cites nothing."""
     provenance_ids = _provenance_ids_model(citable)
     return create_model(
         "ReasoningAnswer",
         __base__=_DirectReply,
-        provenance_ids=(provenance_ids, Field(default_factory=provenance_ids)),
+        provenance_ids=(
+            Annotated[provenance_ids, BeforeValidator(_nothing_if_null)],
+            Field(default_factory=provenance_ids),
+        ),
     )
+
+
+def _nothing_if_null(value: Any) -> Any:
+    return {} if value is None else value
 
 
 def _cited(

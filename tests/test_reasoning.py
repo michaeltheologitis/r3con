@@ -223,8 +223,20 @@ def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropp
         assert [lists[key]["items"] for key in lists] == [{"type": "string"}] * 2
 
 
-def test_a_direct_reply_without_provenance_ids_cites_nothing(llm):
-    result = ask(llm, {"answer": "Halloran."})
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"answer": "Halloran."},
+        {"answer": "Halloran.", "provenance_ids": None},
+        {
+            "answer": "Halloran.",
+            "provenance_ids": {"summary_ids": None, "parse_ids": None},
+        },
+    ],
+    ids=["left-out", "null", "null-lists"],
+)
+def test_a_direct_reply_without_provenance_ids_cites_nothing(llm, reply):
+    result = ask(llm, reply)
     assert (result.answer, result.provenance, result.path) == (
         "Halloran.",
         NO_IDS,

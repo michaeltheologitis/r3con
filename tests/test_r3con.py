@@ -131,6 +131,13 @@ def snippets_without_provenance(result: dict) -> None:
         ]
 
 
+def snippets_without_quotes(result: dict) -> None:
+    """As r3context 0.6.4 wrote them."""
+    for round_ in result["rounds"]:
+        for snippet in round_["snippets"]:
+            del snippet["quotes"]
+
+
 def snippets_as_plain_text(result: dict) -> None:
     """As r3context 0.4.0 wrote them."""
     for round_ in result["rounds"]:
@@ -934,6 +941,17 @@ def test_a_run_folder_an_older_r3con_wrote_is_refused_in_one_line(
     assert "\n" not in message
     assert len(answering_llm.requests) == sent
     assert not (result.run_dir / "asks").exists()
+
+
+def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path)
+    in_json("relevance/result.json", snippets_without_quotes)(result.run_dir)
+    asked = ask(result.run_dir, "Who else?", completion=answering_llm)
+    assert asked.answer == JOINED
+    ran, asked_request = answering_llm.requests_for("reasoning")
+    assert asked_request["messages"][0] == ran["messages"][0]
 
 
 def test_a_run_that_never_finished_parsing_cannot_be_asked(answering_llm, tmp_path):

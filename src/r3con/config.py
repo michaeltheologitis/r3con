@@ -25,8 +25,8 @@ Config file shape (``configs/<name>.yaml``)::
     relevance_rounds: 2
     reasoning: direct            # or coding
     prompts:
-      relevance/first-round: v1
-      relevance/later-rounds: v2
+      relevance/first-round: v2
+      relevance/later-rounds: v3
       structuring/schema: v1
       structuring/parsing: v3
       reasoning/direct: v3
@@ -152,7 +152,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v1,rel2=v2,schema=v1,parse=v3,direct=v3,coding=v3)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v2,rel2=v3,schema=v1,parse=v3,direct=v3,coding=v3)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 

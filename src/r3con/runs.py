@@ -20,14 +20,18 @@ Layout per ``logs/<run-folder>/``:
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  rounds: [{round, snippets: [{id, summary, provenance}]}], totals}`` — within a round
-  every relevance snippet in document order, a document read in parts as one per part,
-  each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that round) and
-  the ids of the previous round's snippets it used; the last round is the relevant
-  context that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call,
-  tagged ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a
-  part, and ``-retry-{n}`` added to the n-th resend of a reply that did not fit its
-  schema).
+  rounds: [{round, snippets: [{id, summary, quotes, provenance}]}], totals}`` — within
+  a round every relevance snippet in document order, a document read in parts as one
+  per part, each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that
+  round), its quotes, each ``{text, start, end, match, score}``: the sentence the
+  snippet says it is based on, where it is in the whole document and how it was found
+  there (``exact``, ``normalized`` or ``elided``, verbatim, or ``fuzzy``, only like the
+  text, with its ``score``; all ``None`` when it was not: :mod:`r3con.quotes`), and the
+  ids of the previous round's snippets it used; the last round's summaries are the
+  relevant context that feeds downstream) + ``calls.json`` (one per
+  ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
+  ``relevance-r{round}-d{doc}c{part}`` for a part, and ``-retry-{n}`` added to the n-th
+  resend of a reply that did not fit its schema).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``

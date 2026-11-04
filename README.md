@@ -155,7 +155,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 ├── events.jsonl                 <- each stage's start and finish, as they happened
 ├── splits.json                  <- only when a document was read in parts
 ├── relevance/
-│   ├── result.json              <- each round's snippets
+│   ├── result.json              <- each round's snippets and their quotes
 │   └── calls.json
 ├── structuring/
 │   ├── schema/

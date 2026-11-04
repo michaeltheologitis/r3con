@@ -34,6 +34,8 @@ dependencies = [
     "mammoth>=1.12.2",
     # The first with table_infer_header.
     "markdownify>=1.0.0",
+    # The first with Python 3.14 wheels that is not yanked.
+    "rapidfuzz>=3.14.1",
 ]
 
 [project.optional-dependencies]

@@ -16,13 +16,14 @@ FULL = {
 V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)"
 DEFAULT_PROMPTS = {
     **PROMPTS,
-    "relevance/later-rounds": "v2",
+    "relevance/first-round": "v2",
+    "relevance/later-rounds": "v3",
     "structuring/parsing": "v3",
     "reasoning/direct": "v3",
     CODING: "v3",
 }
 DEFAULT_LABEL_PROMPTS = (
-    "prompts=(rel1=v1,rel2=v2,schema=v1,parse=v3,direct=v3,coding=v3)"
+    "prompts=(rel1=v2,rel2=v3,schema=v1,parse=v3,direct=v3,coding=v3)"
 )
 # The prompts the default config pinned before reasoning had two paths.
 OLD_DEFAULT_PROMPTS = {

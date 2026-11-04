@@ -46,7 +46,7 @@ import ast
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast, get_args, get_origin
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -269,7 +269,9 @@ def _request(
         relevance=render_relevance(relevance_snippets, document_ids),
     )
     return CitingRequest(
-        system_prompt, citing_schema("ParseReply", citable, "parse", parse_cls), citable
+        system_prompt,
+        citing_schema("ParseReply", citable, parse=(parse_cls, ...)),
+        citable,
     )
 
 
@@ -291,7 +293,7 @@ def _read(
     """``part`` (a document or one part of one) parsed under ``request`` by
     :func:`~r3con.stages.provenance.read_citing`, headed by its document's id: its
     ``Parse``, and the citable ids it used."""
-    parse, provenance = read_citing(
+    reply, provenance = read_citing(
         request,
         _headed(document_id, part),
         rewrite=_REWRITE,
@@ -299,7 +301,7 @@ def _read(
         max_attempts=max_attempts,
         **llm_call,
     )
-    return cast(BaseModel, parse), provenance
+    return reply.parse, provenance
 
 
 def _attempts(max_attempts: int | None) -> int:

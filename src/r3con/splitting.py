@@ -103,8 +103,12 @@ class Splits:
         """``documents[doc]`` cut at its cuts so far: ``[documents[doc]]`` until it is
         split."""
         text = self._documents[doc]
-        bounds = itertools.pairwise([0, *self._cuts[doc], len(text)])
+        bounds = itertools.pairwise([*self.starts(doc), len(text)])
         return [text[start:end] for start, end in bounds]
+
+    def starts(self, doc: int) -> list[int]:
+        """Where each of :meth:`parts` starts in ``documents[doc]``."""
+        return [0, *self._cuts[doc]]
 
     def over_line(self, *texts: str) -> int | None:
         """The tokens of ``texts`` together, when the window is known and they are over
@@ -265,10 +269,9 @@ class Splits:
     ) -> int:
         """Halve every part of ``documents[doc]`` longer than one character, record the
         split, and return the number of parts."""
-        starts = [0, *self._cuts[doc]]
         cuts = [
             start + halve(part)
-            for start, part in zip(starts, self.parts(doc))
+            for start, part in zip(self.starts(doc), self.parts(doc))
             if len(part) > 1
         ]
         self._cuts[doc] = sorted([*self._cuts[doc], *cuts])

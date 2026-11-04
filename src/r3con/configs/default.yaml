@@ -18,8 +18,8 @@ relevance_rounds: 2
 reasoning: direct
 
 prompts:
-  relevance/first-round: v1
-  relevance/later-rounds: v2
+  relevance/first-round: v2
+  relevance/later-rounds: v3
   structuring/schema: v1
   structuring/parsing: v3
   reasoning/direct: v3
