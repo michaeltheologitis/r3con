@@ -129,8 +129,8 @@ The examples use five short memos arranged so that no single document contains t
 answer:
 
 - [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
-- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — tracing an answer back to the documents and
-  relevance snippets it came from.
+- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — checking an answer: the sentences behind it,
+  and the relevance snippets and records it used.
 - [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
   path, generation parameters, run configuration, custom connections, and artifact paths.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
