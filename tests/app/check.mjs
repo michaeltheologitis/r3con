@@ -2530,7 +2530,7 @@ async function gestures() {
     await touch('touchEnd', []);
     await cdp.detach();
     const lifted = { zoomed: pinched !== before, thrown: messages.find((m) => m.type === 'error')?.text ?? null, moved: (await transform(page)) !== pinched };
-    const liftName = 'phone: a pinch with one finger lifted ends: moving the other finger throws nothing and zooms nothing';
+    const liftName = 'phone: a pinch with one finger lifted ends: moving the other finger throws nothing and moves nothing';
     check('gestures', liftName, isDeepStrictEqual(lifted, { zoomed: true, thrown: null, moved: false }), JSON.stringify(lifted));
   });
 }
