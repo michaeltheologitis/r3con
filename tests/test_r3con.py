@@ -27,7 +27,12 @@ from tests.documents import (
     write_docx,
     write_pdf,
 )
-from tests.fakes import citable_lists, cited_documents, is_later_round
+from tests.fakes import (
+    ANSWERING_SCHEMA,
+    citable_lists,
+    cited_documents,
+    is_later_round,
+)
 
 # A paragraph whose second run Word tracks as inserted, and third as deleted.
 TRACKED_CHANGES = (
@@ -80,15 +85,6 @@ BARRIER_TIMEOUT_SECONDS = 10
 # Copies of one name that took a quadratic numbering seconds to tell apart.
 MANY_COPIES = 20_000
 AT_ONCE_SECONDS = 1
-SCHEMA_REPLY = """Thought: one row per memo.
-<schema>
-class Row(BaseModel):
-    who: str
-
-
-class Parse(BaseModel):
-    rows: list[Row]
-</schema>"""
 ASK_FILES = {
     "manifest.json",
     "events.jsonl",
@@ -1335,7 +1331,7 @@ def test_a_run_cancelled_during_a_stages_last_call_stops_as_the_next_one_starts(
 
     def schema_while_cancelled(request: dict[str, Any]) -> str:
         cancel.set()
-        return SCHEMA_REPLY
+        return ANSWERING_SCHEMA
 
     answering_llm.answers(schema=schema_while_cancelled)
     events = []

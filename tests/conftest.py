@@ -19,7 +19,14 @@ import urllib3  # noqa: F401
 import yaml
 
 from r3con.config import normalize_model_name
-from tests.fakes import Content, FakeLLM, Request, too_long
+from tests.fakes import (
+    ANSWERING_SCHEMA,
+    PARSE_HEADING,
+    Content,
+    FakeLLM,
+    Request,
+    too_long,
+)
 
 litellm.suppress_debug_info = True
 
@@ -38,17 +45,6 @@ ROUTER_CALLBACKS = (
     "_async_success_callback",
     "_async_failure_callback",
 )
-# The line, and the blank one after it, that heads a parse request's user message.
-PARSE_HEADING = re.compile(r"\ADocument ID: \w+\n\n")
-ANSWERING_SCHEMA = """Thought: one row per person.
-<schema>
-class Row(BaseModel):
-    who: str
-
-
-class Parse(BaseModel):
-    rows: list[Row]
-</schema>"""
 ANSWERING_CODE = (
     '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
     'provenance_ids={"summary_ids": [], '

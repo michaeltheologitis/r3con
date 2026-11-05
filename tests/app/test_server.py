@@ -33,7 +33,7 @@ from r3con.app.server import (
 )
 from r3con.r3con import read_documents
 from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
-from tests.fakes import GATE_TIMEOUT_SECONDS, FakeLLM
+from tests.fakes import GATE_TIMEOUT_SECONDS, SCHEMA_REPLY, FakeLLM
 
 litellm.suppress_debug_info = True
 
@@ -99,15 +99,6 @@ RUN_EVENTS = [
     "run_finished",
 ]
 ASK_EVENTS = ["ask_started", "reasoning_started", "reasoning_finished", "ask_finished"]
-SCHEMA_REPLY = """Thought: one row per site.
-<schema>
-class Row(BaseModel):
-    site: str
-
-
-class Parse(BaseModel):
-    rows: list[Row]
-</schema>"""
 ANSWER = {
     "answer": "Northgate",
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
@@ -120,7 +111,7 @@ def llm() -> FakeLLM:
     return FakeLLM().answers(
         relevance="A site memo.",
         schema=SCHEMA_REPLY,
-        parsing={"rows": [{"site": "Northgate"}]},
+        parsing={"memos": [{"title": "Northgate", "lines": []}]},
         reasoning=ANSWER,
     )
 

@@ -189,7 +189,7 @@ const VIEW_SLACK = [0.005, 1, 1];
 const NEW_TAB_VIEW = [1, 0, 0];
 
 const REPO_DIR = fileURLToPath(new URL('../..', import.meta.url));
-const FAKE_SERVER = ['run', 'python', 'tests/app/fake_server.py'];
+const FAKE_SERVER = ['run', 'python', '-m', 'tests.app.fake_server'];
 const KEY_VARIABLES = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY'];
 // A first uv run may have to build the environment.
 const SERVER_START_MS = 120_000;
