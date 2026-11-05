@@ -89,7 +89,14 @@ print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total.
 
 `read_documents` reads PDF and Word (`.docx`) files, and text files such as `.txt`,
 `.md`, `.csv`, `.json`, `.html` and `.xml`, and skips a folder's hidden files and folders;
-a glob's wildcards skip them too, as in the shell.
+a glob's wildcards skip them too, as in the shell. It returns each document's text by its
+name, the file's path below the folder (`{"q3/ardent.pdf": "...", ...}`), and the answer
+names the documents it quotes:
+
+```python
+quote = result.provenance["quotes"][0]
+print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
+```
 
 If you already have the documents in memory, pass them directly:
 
@@ -100,7 +107,9 @@ result = r3con.run(
 )
 ```
 
-`documents` is simply a list of strings, one per document.
+`documents` is a list of strings, one per document, or a dict of them by name, as
+`read_documents` returns. `result.document_names` lists each document's name; a list's
+documents are named by position: `"1"`, `"2"`, ….
 
 To ask another question over the same run, `r3con.ask` runs only the reasoning step
 again:
@@ -152,6 +161,7 @@ API keys a provider's error echoes are masked before r3con writes or logs them; 
 ```
 logs/<timestamp>_<hex>/          <- result.run_dir
 ├── ids.json                     <- each document's id
+├── names.json                   <- each document's name, by its id
 ├── events.jsonl                 <- each stage's start and finish, as they happened
 ├── splits.json                  <- only when a document was read in parts
 ├── relevance/

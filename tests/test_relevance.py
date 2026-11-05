@@ -25,6 +25,7 @@ TASK = "Which filing reports higher revenue?"
 PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 A, B, C = IDS
+NAMES = {A: "a.txt", B: "q3/b.txt", C: "c.pdf"}
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
 NONE = (None, None, None)
@@ -670,7 +671,7 @@ def quotes_behind(rounds, cited=()) -> list:
             for round_ in rounds
         ]
     )
-    return trail_quotes(relevance, cited, IDS)
+    return trail_quotes(relevance, cited, NAMES)
 
 
 def places(quotes: list) -> list[tuple]:
@@ -684,8 +685,14 @@ def test_the_trail_quotes_the_final_round_summaries_cited():
         snippet(C, at(4, 20, "C, it said, saw y.")),
     ]
     assert quotes_behind([final], cited=[A, C]) == [
-        {"document": A, "start": 0, "end": 9, "text": "A said x."},
-        {"document": C, "start": 4, "end": 20, "text": "C, it said, saw y."},
+        {"document": A, "name": "a.txt", "start": 0, "end": 9, "text": "A said x."},
+        {
+            "document": C,
+            "name": "c.pdf",
+            "start": 4,
+            "end": 20,
+            "text": "C, it said, saw y.",
+        },
     ]
 
 
@@ -695,7 +702,7 @@ def test_the_trail_quotes_the_earlier_summaries_its_summaries_cite_round_by_roun
     assert places(quotes) == [(A, 60, 65), (B, 40, 45), (C, 20, 25)]
 
 
-def test_a_part_is_cited_by_its_part_id_and_quoted_under_its_documents_id():
+def test_a_part_is_cited_by_its_part_id_and_quoted_under_its_documents_id_and_name():
     first = [
         snippet(A, at(0, 5)),
         snippet(f"{B}.1", at(10, 15)),
@@ -710,6 +717,7 @@ def test_a_part_is_cited_by_its_part_id_and_quoted_under_its_documents_id():
     ]
     quotes = quotes_behind([first, second], cited=[A, f"{B}.1"])
     assert places(quotes) == [(A, 30, 35), (B, 40, 45), (B, 5_000, 5_005)]
+    assert [q["name"] for q in quotes] == ["a.txt", "q3/b.txt", "q3/b.txt"]
 
 
 def test_a_quote_not_found_in_its_document_is_left_out():
@@ -730,8 +738,20 @@ def test_a_place_quoted_more_than_once_on_the_trail_is_given_once_as_first_met()
     ]
     quotes = quotes_behind([first, second], cited=[A, B, C])
     assert quotes == [
-        {"document": A, "start": 0, "end": 9, "text": "As round 2 copied it."},
-        {"document": B, "start": 0, "end": 9, "text": "A sentence."},
+        {
+            "document": A,
+            "name": "a.txt",
+            "start": 0,
+            "end": 9,
+            "text": "As round 2 copied it.",
+        },
+        {
+            "document": B,
+            "name": "q3/b.txt",
+            "start": 0,
+            "end": 9,
+            "text": "A sentence.",
+        },
     ]
 
 

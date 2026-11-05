@@ -17,7 +17,7 @@ from r3con.config import PROMPT_STAGES
 from r3con.r3con import read_documents
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
-ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS))
+ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 APP_MODULES = ("starlette", "uvicorn", "platformdirs")
@@ -78,6 +78,12 @@ def finished_run(capsys) -> Path:
     """The folder of a finished ``r3con run`` over the memos."""
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
     return path_after("artifacts: ", capsys.readouterr().err)
+
+
+def test_a_run_records_each_document_by_its_file_name(answering, capsys):
+    run_dir = finished_run(capsys)
+    names = json.loads((run_dir / "names.json").read_text())
+    assert list(names.values()) == sorted(path.name for path in MEMOS.iterdir())
 
 
 def as_written_before_ids(run_dir: Path) -> None:

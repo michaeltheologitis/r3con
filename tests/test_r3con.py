@@ -56,6 +56,8 @@ PLAIN_TEXT = b"Plain words, saved under the wrong name."
 WORD_OWNER_FILE = b"\x07Michael" + bytes(154)
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
 DOCS = ["Halloran memo", "Merrow memo", "Calder memo"]
+NAMES = ["memos/halloran.txt", "memos/merrow.txt", "calder.txt"]
+NAMED_DOCS = dict(zip(NAMES, DOCS, strict=True))
 JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 GPT_4O = "openai/gpt-4o"
@@ -190,13 +192,14 @@ def citing_the_first_summary(request) -> dict:
 
 @pytest.fixture
 def quoted_run(answering_llm, shown_ids, tmp_path) -> Answer:
-    """A finished run whose snippets quote their document in round 1 only and whose
-    answer cites the first summary, ``answering_llm`` answering so from then on."""
+    """A finished run over ``NAMED_DOCS`` whose snippets quote their document in round
+    1 only and whose answer cites the first summary, ``answering_llm`` answering so
+    from then on."""
     answering_llm.answers(
         relevance=quoting_only_in_round_one(shown_ids),
         reasoning=citing_the_first_summary,
     )
-    return finished_run(answering_llm, tmp_path)
+    return finished_run(answering_llm, tmp_path, NAMED_DOCS)
 
 
 def write_tree(root: Path) -> None:
@@ -214,7 +217,14 @@ def write_tree(root: Path) -> None:
         ("./docs", TypeError, r"not a single string or path.*\[text\].*read_documents"),
         ("just some document text", TypeError, "not a single string or path"),
         (Path("./docs"), TypeError, "not a single string or path"),
-        (42, TypeError, "must be a sequence of strings — got int"),
+        (
+            42,
+            TypeError,
+            "a sequence of strings, or a mapping of names to them — got int",
+        ),
+        ({"a.txt": "fine", "b.txt": 42}, TypeError, "item 'b.txt' is int"),
+        ({1: "a memo"}, TypeError, "names must be strings — 1 is int"),
+        ({"a.txt": "real", "b.txt": " "}, ValueError, "item 'b.txt' is blank"),
         (["fine", 42], TypeError, "item 1 is int"),
         (["real", "   ", "also real"], ValueError, "item 1 is blank"),
         (["  ", ""], ValueError, "item 0 is blank"),
@@ -390,10 +400,10 @@ def test_a_directory_is_read_recursively_in_path_order_skipping_binaries_and_bla
     tmp_path,
 ):
     write_tree(tmp_path)
-    assert read_documents(tmp_path) == [
-        "alpha document",
-        "beta document",
-        "gamma document",
+    assert list(read_documents(tmp_path).items()) == [
+        ("a.md", "alpha document"),
+        ("b.txt", "beta document"),
+        ("nested/c.md", "gamma document"),
     ]
 
 
@@ -403,9 +413,9 @@ def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
     (tmp_path / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
     (tmp_path / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
     documents = read_documents(tmp_path)
-    assert len(documents) == 2
-    assert "Incidents this quarter: 7." in documents[0]
-    assert documents[1] == "a plain memo"
+    assert list(documents) == ["a_memo.pdf", "d_plain.txt"]
+    assert "Incidents this quarter: 7." in documents["a_memo.pdf"]
+    assert documents["d_plain.txt"] == "a plain memo"
 
 
 def test_a_word_files_paragraphs_and_tables_come_out_in_order_as_markdown(tmp_path):
@@ -421,7 +431,7 @@ def test_a_word_files_paragraphs_and_tables_come_out_in_order_as_markdown(tmp_pa
         "",
         "Merrow's count is provisional.",
     ]
-    assert read_documents(docx) == ["\n".join(lines)]
+    assert read_documents(docx) == {"report.docx": "\n".join(lines)}
 
 
 @pytest.mark.parametrize(
@@ -443,13 +453,13 @@ def test_a_word_files_paragraphs_and_tables_come_out_in_order_as_markdown(tmp_pa
 def test_a_word_files_text_is_what_word_shows(tmp_path, xml, text):
     docx = tmp_path / "report.docx"
     write_docx(docx, xml=xml)
-    assert read_documents(docx) == [text]
+    assert read_documents(docx) == {"report.docx": text}
 
 
 def test_a_word_files_underscores_and_asterisks_are_kept_as_written(tmp_path):
     docx = tmp_path / "report.docx"
     write_docx(docx, ["account_id_2024 is *important* 5*3"])
-    assert read_documents(docx) == ["account_id_2024 is *important* 5*3"]
+    assert read_documents(docx) == {"report.docx": "account_id_2024 is *important* 5*3"}
 
 
 @pytest.mark.parametrize("header", [False, True], ids=["plain-rows", "header-row"])
@@ -458,7 +468,7 @@ def test_a_pipe_in_a_word_tables_cell_is_escaped_so_each_row_keeps_its_cells(
 ):
     docx = tmp_path / "report.docx"
     write_docx(docx, xml=table([["Name|Alias", "Value"], ["a|b", "7"]], header=header))
-    [text] = read_documents(docx)
+    [text] = read_documents(docx).values()
     assert text == "| Name\\|Alias | Value |\n| --- | --- |\n| a\\|b | 7 |"
     cells = {len(re.split(r"(?<!\\)\|", line)) for line in text.splitlines()}
     assert cells == {len(["", "Name|Alias", "Value", ""])}
@@ -468,7 +478,7 @@ def test_a_file_called_just_docx_is_a_word_file_to_its_path_and_hidden_to_a_walk
     tmp_path,
 ):
     write_docx(tmp_path / ".docx", ["Incidents this quarter: 7."])
-    assert read_documents(tmp_path / ".docx") == ["Incidents this quarter: 7."]
+    assert read_documents(tmp_path / ".docx") == {".docx": "Incidents this quarter: 7."}
     with pytest.raises(FileNotFoundError, match="No documents found at"):
         read_documents(tmp_path)
 
@@ -476,14 +486,14 @@ def test_a_file_called_just_docx_is_a_word_file_to_its_path_and_hidden_to_a_walk
 def test_a_table_nested_in_a_word_table_keeps_its_text(tmp_path):
     docx = tmp_path / "report.docx"
     write_docx(docx, xml=NESTED_TABLE)
-    [text] = read_documents(docx)
+    [text] = read_documents(docx).values()
     assert all(word in text for word in ["outer", "inner1", "inner2"])
 
 
 def test_a_word_files_image_leaves_none_of_its_data_in_the_text(tmp_path):
     docx = tmp_path / "report.docx"
     write_docx(docx, ["Before the chart."], image=True)
-    [text] = read_documents(docx)
+    [text] = read_documents(docx).values()
     assert text.startswith("Before the chart.")
     assert "base64," not in text
     assert base64.b64encode(PNG).decode() not in text
@@ -500,7 +510,7 @@ def test_a_word_file_that_cannot_be_read_is_logged_and_dropped_not_read_as_text(
     (tmp_path / "b_plain.txt").write_text("a plain memo", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         documents = read_documents(tmp_path)
-    assert documents == ["a plain memo"]
+    assert documents == {"b_plain.txt": "a plain memo"}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"{unreadable}: not readable as a Word file (BadZipFile); skipping it"
     ]
@@ -520,7 +530,7 @@ def test_a_file_that_cannot_be_opened_is_logged_and_skipped(tmp_path, caplog):
         pytest.skip("this user, root say, reads a file whatever its mode")
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         documents = read_documents(tmp_path)
-    assert documents == ["a plain memo"]
+    assert documents == {"d_plain.txt": "a plain memo"}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"{path}: not readable (PermissionError); skipping it" for path in locked
     ]
@@ -539,7 +549,7 @@ def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
     (tmp_path / "~$a_report.docx").write_bytes(WORD_OWNER_FILE)
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         documents = read_documents(source(tmp_path))
-    assert documents == ["Incidents this quarter: 7."]
+    assert documents == {"a_report.docx": "Incidents this quarter: 7."}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"{tmp_path / 'b_empty.docx'}: no extractable text; skipping it"
     ]
@@ -556,7 +566,7 @@ def test_a_walk_skips_what_is_hidden_or_under_macosx_below_its_folder(tmp_path):
     for name, text in texts.items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text, encoding="utf-8")
-    assert read_documents(tmp_path) == ["a memo"]
+    assert read_documents(tmp_path) == {"a_memo.md": "a memo"}
 
 
 @pytest.mark.parametrize(
@@ -591,14 +601,14 @@ def test_a_globs_wildcards_match_no_hidden_name_but_a_dot_in_the_pattern_does(
     for name, text in texts.items():
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text(text, encoding="utf-8")
-    assert read_documents(pattern) == documents
+    assert list(read_documents(pattern).values()) == documents
 
 
 def test_a_recursive_glob_reads_a_file_once_past_a_link_to_its_own_folder(tmp_path):
     (tmp_path / "d").mkdir()
     (tmp_path / "d" / "a.md").write_text("a memo", encoding="utf-8")
     (tmp_path / "d" / "loop").symlink_to(".")
-    assert read_documents("d/**/*.md") == ["a memo"]
+    assert read_documents("d/**/*.md") == {"a.md": "a memo"}
 
 
 @pytest.mark.parametrize(
@@ -618,7 +628,7 @@ def test_a_hidden_file_or_folder_you_name_is_read(
         "a hidden folder's file", encoding="utf-8"
     )
     (tmp_path / ".env.md").write_text("a hidden file", encoding="utf-8")
-    assert read_documents(source) == documents
+    assert list(read_documents(source).values()) == documents
 
 
 FOLDER_DOCUMENTS = ["a received memo", "a memo stored as a blob"]
@@ -673,14 +683,14 @@ def test_a_walk_or_a_glob_reads_every_file_inside_the_folder_and_none_outside(
     tmp_path, source: Callable[[Path], str], documents: list[str]
 ):
     write_folder_with_links(tmp_path)
-    assert read_documents(source(tmp_path)) == documents
+    assert list(read_documents(source(tmp_path)).values()) == documents
 
 
 def test_a_walk_logs_each_file_that_resolves_outside_the_folder(tmp_path, caplog):
     write_folder_with_links(tmp_path)
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         documents = read_documents("folder")
-    assert documents == FOLDER_DOCUMENTS
+    assert list(documents.values()) == FOLDER_DOCUMENTS
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"folder/link.txt: resolves outside {tmp_path / 'folder'}; skipping it"
     ]
@@ -710,7 +720,9 @@ def test_a_glob_that_leaves_its_folder_finds_nothing_and_logs_why(
 
 def test_a_file_named_directly_is_read_even_through_a_link(tmp_path):
     write_folder_with_links(tmp_path)
-    assert read_documents("folder/link.txt") == ["a secret outside the folder"]
+    assert read_documents("folder/link.txt") == {
+        "link.txt": "a secret outside the folder"
+    }
 
 
 def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_on(
@@ -720,7 +732,7 @@ def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_
     # pypdf reads a font's ToUnicode CMap with surrogatepass: D800 stays half a pair.
     write_pdf(pdf, "Memo A here", to_unicode={"A": "D800"})
     documents = read_documents(pdf)
-    assert documents == ["Memo \ufffd here"]
+    assert documents == {"memo.pdf": "Memo \ufffd here"}
     answer = finished_run(answering_llm, tmp_path, documents)
     assert answering_llm.requests_for("relevance")
     assert answer.answer == "Memo \ufffd here"
@@ -728,14 +740,17 @@ def test_half_a_surrogate_pair_in_a_pdf_reads_as_a_replacement_and_the_run_goes_
 
 def test_a_glob_is_expanded_from_the_working_directory(tmp_path):
     write_tree(tmp_path)
-    assert read_documents("*.md") == ["alpha document"]
+    assert read_documents("*.md") == {"a.md": "alpha document"}
 
 
 def test_several_sources_are_read_in_the_order_given(tmp_path):
     (tmp_path / "second.txt").write_text("second", encoding="utf-8")
     (tmp_path / "first.txt").write_text("first", encoding="utf-8")
     sources = [tmp_path / "first.txt", tmp_path / "second.txt"]
-    assert read_documents(sources) == ["first", "second"]
+    assert list(read_documents(sources).items()) == [
+        ("first.txt", "first"),
+        ("second.txt", "second"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -748,7 +763,7 @@ def test_a_source_that_matches_nothing_is_an_error_not_a_document(source):
 
 def test_undecodable_bytes_are_replaced_not_fatal(tmp_path):
     (tmp_path / "bad.txt").write_bytes(b"good text \xff\xfe more text")
-    [document] = read_documents(tmp_path / "bad.txt")
+    [document] = read_documents(tmp_path / "bad.txt").values()
     assert document.startswith("good text ")
     assert document.endswith(" more text")
 
@@ -759,6 +774,95 @@ def test_a_folder_read_with_read_documents_can_be_answered_over(
     write_tree(tmp_path / "docs")
     result = run("Who?", read_documents(tmp_path / "docs"), completion=answering_llm)
     assert result.answer == "alpha document; beta document; gamma document"
+
+
+def write_files(texts: dict[str, str]) -> None:
+    """Each of ``texts``' files, by its path from the working directory."""
+    for name, text in texts.items():
+        Path(name).parent.mkdir(parents=True, exist_ok=True)
+        Path(name).write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("source", "names"),
+    [
+        ("archive", ["2021/jan/front-page.txt", "index.md"]),
+        ("archive/*.md", ["index.md"]),
+        ("archive/**/*.txt", ["2021/jan/front-page.txt"]),
+        ("archive/2021/*/front-page.txt", ["jan/front-page.txt"]),
+        ("*/index.md", ["archive/index.md"]),
+        ("archive/2021/jan/front-page.txt", ["front-page.txt"]),
+    ],
+    ids=["walk", "glob", "recursive-glob", "glob-in-a-subfolder", "glob-here", "file"],
+)
+def test_a_document_is_named_by_its_path_below_its_folder_or_globs_folder(
+    source: str, names: list[str]
+):
+    write_files(
+        {
+            "archive/index.md": "the archive's index",
+            "archive/2021/jan/front-page.txt": "January's front page",
+        }
+    )
+    assert list(read_documents(source)) == names
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [["a", "b"], ["a/*.txt", "b/*.txt"], ["a/notes.txt", "b/notes.txt"]],
+    ids=["walks", "globs", "files"],
+)
+def test_a_name_two_sources_give_is_replaced_by_each_ones_path_as_read(
+    sources: list[str],
+):
+    write_files({"a/notes.txt": "A's notes", "b/notes.txt": "B's notes"})
+    assert list(read_documents(sources).items()) == [
+        ("a/notes.txt", "A's notes"),
+        ("b/notes.txt", "B's notes"),
+    ]
+
+
+def test_a_name_that_still_clashes_is_numbered_from_its_second_document():
+    write_files({"a/notes.txt": "A's notes", "a/plan.txt": "A's plan"})
+    assert list(read_documents(["a", "a/notes.txt", "a"]).items()) == [
+        ("a/notes.txt", "A's notes"),
+        ("a/plan.txt", "A's plan"),
+        ("a/notes.txt (2)", "A's notes"),
+        ("a/notes.txt (3)", "A's notes"),
+        ("a/plan.txt (2)", "A's plan"),
+    ]
+
+
+def test_a_dropped_file_is_left_out_and_clashes_with_no_name():
+    write_files({"a/notes.txt": " \n", "b/notes.txt": "B's notes"})
+    assert read_documents(["a", "b"]) == {"notes.txt": "B's notes"}
+
+
+@pytest.mark.parametrize(
+    ("documents", "names"),
+    [(NAMED_DOCS, NAMES), (DOCS, ["1", "2", "3"])],
+    ids=["by-name", "a-plain-list"],
+)
+def test_a_run_names_each_document_by_its_key_or_else_its_position(
+    answering_llm, tmp_path, documents, names
+):
+    events = []
+    result = finished_run(answering_llm, tmp_path, documents, on_event=events.append)
+    assert result.answer == JOINED
+    assert result.document_names == names
+    assert events[0]["document_names"] == names
+    recorded = json.loads((result.run_dir / "names.json").read_text())
+    assert recorded == dict(zip(result.document_ids, names, strict=True))
+
+
+def test_a_run_folder_without_names_can_be_asked_and_names_documents_by_position(
+    answering_llm, quoted_run
+):
+    (quoted_run.run_dir / "names.json").unlink()
+    asked = ask(quoted_run.run_dir, "Who else?", completion=answering_llm)
+    assert asked.answer == "Halloran memo"
+    assert asked.document_names == ["1", "2", "3"]
+    assert [quote["name"] for quote in asked.provenance["quotes"]] == ["2"]
 
 
 @pytest.mark.parametrize("rounds", [0, 2])
@@ -991,13 +1095,20 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         on_event=events.append,
     )
     ids = quoted_run.document_ids
-    merrow = {"document": ids[1], "start": 0, "end": 11, "text": "Merrow memo"}
+    merrow = {
+        "document": ids[1],
+        "name": "memos/merrow.txt",
+        "start": 0,
+        "end": 11,
+        "text": "Merrow memo",
+    }
     assert asked.provenance == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "quotes": [merrow],
     }
     assert asked.provenance == quoted_run.provenance
+    assert asked.document_names == quoted_run.document_names == NAMES
     folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
     assert folder["provenance"] == asked.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]

@@ -688,6 +688,38 @@ def test_a_run_streams_its_events_in_order_and_replays_them_to_a_late_reader(
     assert Path(events[-1]["run_dir"]).parent == logs_dir
 
 
+MEMO_NAMES = sorted(path.name for path in MEMOS.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("names", "named"),
+    [
+        (None, ["1", "2", "3", "4", "5"]),
+        (MEMO_NAMES, MEMO_NAMES),
+        (
+            ["notes.txt", "notes.txt", "notes.txt (2)", "a/notes.txt", "notes.txt"],
+            [
+                "notes.txt",
+                "notes.txt (3)",
+                "notes.txt (2)",
+                "a/notes.txt",
+                "notes.txt (4)",
+            ],
+        ),
+    ],
+    ids=["none", "given", "given-twice"],
+)
+def test_a_run_names_its_documents_by_the_names_sent_each_once(
+    client: TestClient, names: list[str] | None, named: list[str]
+):
+    body = run_body() if names is None else {**run_body(), "names": names}
+    response = client.post("/api/runs", json=body)
+    assert response.status_code == 202, response.text
+    events = run_events(client, response.json()["run_id"])
+    assert events[0]["document_names"] == named
+    assert events[-1]["type"] == "run_finished"
+
+
 def test_an_ask_over_a_finished_run_streams_its_own_events(client: TestClient):
     run_id = finished_run(client)
     run_dir = Path(run_events(client, run_id)[0]["run_dir"])
@@ -760,6 +792,8 @@ def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_aske
         ({"documents": ["a memo", "  "]}, "documents.1: must not be blank"),
         ({"documents": [{"text": "a memo"}]}, "documents.0: Input should be a"),
         ({"documents": "a memo"}, "documents:"),
+        ({"names": ["a.txt"]}, "names: must give one name per document"),
+        ({"names": ["a.txt", " ", "c", "d", "e"]}, "names.1: must not be blank"),
         ({"temperature": 0}, "temperature: Extra inputs are not permitted"),
         ({"endpoint": "file:///etc"}, "endpoint: String should match pattern"),
         ({"endpoint": "http://me:pw@127.0.0.1:9/v1"}, "endpoint: must not hold a user"),
@@ -822,7 +856,7 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     response = text_of(client, pdf)
     assert response.status_code == 200
     assert response.json() == {"text": extracted}
-    assert read_documents(pdf) == [extracted]
+    assert read_documents(pdf) == {"memo.pdf": extracted}
 
 
 # A Word file is read by its name's suffix, in any case, even with nothing before it.
@@ -833,7 +867,7 @@ def test_a_word_files_text_is_extracted_as_read_documents_extracts_it(
     path = tmp_path / name
     write_docx(path, REPORT)
     response = text_of(client, path)
-    [text] = read_documents(path)
+    [text] = read_documents(path).values()
     assert response.status_code == 200
     assert response.json() == {"text": text}
 
@@ -937,7 +971,8 @@ def test_a_zips_documents_come_back_by_path_as_a_folder_walk_reads_them(
     assert response.status_code == 200
     unzipped = response.json()
     assert [file["name"] for file in unzipped["files"]] == names
-    assert [file["text"] for file in unzipped["files"]] == read_documents(folder)
+    by_name = {file["name"]: file["text"] for file in unzipped["files"]}
+    assert by_name == read_documents(folder)
     assert [file["size"] for file in unzipped["files"]] == [
         path.stat().st_size for path in files
     ]
@@ -956,7 +991,10 @@ def test_a_zips_documents_come_in_the_order_read_documents_walks_a_folder(
     )
     response = unzip(client, archive.read_bytes())
     assert unzipped_names(response) == ["a/b.txt", "a-b/x.txt", "a.txt"]
-    assert [f["text"] for f in response.json()["files"]] == read_documents(folder)
+    files = response.json()["files"]
+    assert [(f["name"], f["text"]) for f in files] == list(
+        read_documents(folder).items()
+    )
 
 
 def test_a_zip_of_a_hidden_folder_reads_its_documents_as_a_walk_of_that_folder_does(
@@ -972,7 +1010,7 @@ def test_a_zip_of_a_hidden_folder_reads_its_documents_as_a_walk_of_that_folder_d
         (tmp_path / path).write_text(text)
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     assert unzipped_names(response) == ["a.txt"]
-    texts = [file["text"] for file in response.json()["files"]]
+    texts = {file["name"]: file["text"] for file in response.json()["files"]}
     assert texts == read_documents(tmp_path / ".notes")
 
 

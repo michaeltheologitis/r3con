@@ -22,9 +22,12 @@ behind the answer (:attr:`~r3con.pipeline.Answer.provenance`).
 
 :func:`ask` reruns only reasoning over a finished run, for a new question.
 
-``documents`` is a list of strings: the documents themselves. To read them off disk,
-:func:`read_documents` turns a folder, a glob or a list of files into that list —
-one job each, so nothing has to guess which you meant.
+``documents`` is the documents themselves: their texts, each under its name, or a plain
+list of them. To read them off disk, :func:`read_documents` turns a folder, a glob or a
+list of files into ``{name: text}``, each named by its path — one job each, so nothing
+has to guess which you meant. ``result.document_names`` lines up with
+``result.document_ids``, and each quote in ``result.provenance["quotes"]`` names its
+document.
 
 The pipeline itself lives in :mod:`r3con.pipeline`; this module only resolves inputs
 and hands back the answer. Reach for :func:`r3con.pipeline.run_pipeline` directly when
@@ -43,9 +46,10 @@ from __future__ import annotations
 
 import io
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from fnmatch import fnmatch
-from itertools import takewhile
+from itertools import count, takewhile
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -260,13 +264,75 @@ def _resolves_inside(path: Path, root: Path) -> bool:
     return False
 
 
-def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
-    """Read documents off the filesystem into the list of strings :func:`run` wants.
+def _files_at(src: str | Path) -> list[tuple[str, Path]]:
+    """The files the source ``src`` names, as :func:`read_documents` finds them, each
+    with its name: its path below the folder walked, or below the glob's part before
+    its first wildcard, or, for a file named directly, its file name."""
+    path = Path(src)
+    if path.is_dir():
+        root = path.resolve()
+        files = sorted(
+            p
+            for p in path.rglob("*")
+            if not _left_out_unsaid(p.relative_to(path).parts)
+            and _walk_reads(p.name)
+            and p.is_file()
+            and _resolves_inside(p, root)
+        )
+        return [(p.relative_to(path).as_posix(), p) for p in files]
+    if path.is_file():
+        return [(path.name, path)]
+    # Otherwise a glob, anchored if it is absolute.
+    pattern, anchor = str(src), path.anchor
+    base = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts))
+    root, below = base.resolve(), len(base.parts)
+    files = sorted(
+        p
+        for p in (
+            Path(anchor).glob(pattern[len(anchor) :])
+            if anchor
+            else Path().glob(pattern)
+        )
+        if not p.name.startswith(_LOCK_FILE_PREFIX)
+        and _shell_matches(path.parts[below:], p.parts[below:])
+        and p.is_file()
+        and _resolves_inside(p, root)
+    )
+    return [("/".join(p.parts[below:]), p) for p in files]
+
+
+def _unique(names: Sequence[str]) -> list[str]:
+    """``names``, each one met before numbered: the first of ``<name> (2)``, ``<name>
+    (3)``, … that is no other name."""
+    taken = set(names)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in names:
+        if name in seen:
+            name = next(n for k in count(2) if (n := f"{name} ({k})") not in taken)
+            taken.add(name)
+        seen.add(name)
+        unique.append(name)
+    return unique
+
+
+def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
+    """Read documents off the filesystem into the ``{name: text}`` mapping :func:`run`
+    takes.
 
     This is **only** a filesystem reader — it never treats its argument as document text.
     Each source may be a directory (every text file under it, recursively, sorted by
     path), a single file, or a glob such as ``"reports/*.md"``; pass several and they are
     concatenated in the order given.
+
+    Each document is named by its path below the folder you named, subfolders included,
+    with ``/`` between them (``read_documents("archive")`` gives
+    ``"2021/jan/front-page.txt"``); for a glob, below its part before its first wildcard
+    (``"reports/**/*.md"`` gives ``"q3/summary.md"``); and for a file named directly, by
+    its file name. Two documents given the same name, from two sources, are each named
+    by their path as read instead, the source as you gave it in front (``a/notes.txt``,
+    ``b/notes.txt``); a name still given twice, as when one file is read twice, is
+    numbered from its second document on (``a/notes.txt (2)``).
 
     A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files,
     PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
@@ -286,55 +352,34 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> list[str]:
     Markdown, its tables included; one that can't be read, or has no text, is logged and
     dropped. Everything else is read as UTF-8, replacing undecodable bytes rather than
     failing: one bad byte in one document should not sink a run. Empty documents are
-    dropped — an empty document contributes nothing and costs a relevance call.
+    dropped — an empty document contributes nothing and costs a relevance call. A
+    dropped file is not in the mapping, nor counted when names clash.
 
-    Document order is preserved end to end (it is what ``Document N`` refers to in the
-    structuring prompts, and ``document_ids`` aligns with it), so a stable, sorted walk
-    matters.
+    The mapping holds the documents in the order read, and that order is preserved end
+    to end (it is what ``Document N`` refers to in the structuring prompts, and
+    ``document_ids`` and ``document_names`` align with it), so a stable, sorted walk
+    matters: ``list(documents.values())[i]`` is the i-th document.
 
     Raises:
         FileNotFoundError: if a source matches nothing.
     """
     sources = [source] if isinstance(source, (str, Path)) else list(source)
-    texts: list[str] = []
+    found: list[tuple[str, Path]] = []
     for src in sources:
-        path = Path(src)
-        if path.is_dir():
-            root = path.resolve()
-            files = sorted(
-                p
-                for p in path.rglob("*")
-                if not _left_out_unsaid(p.relative_to(path).parts)
-                and _walk_reads(p.name)
-                and p.is_file()
-                and _resolves_inside(p, root)
-            )
-        elif path.is_file():
-            files = [path]
-        else:  # treat it as a glob, anchored if it is absolute
-            pattern, anchor = str(src), Path(src).anchor
-            base = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts))
-            root, below = base.resolve(), len(base.parts)
-            files = sorted(
-                p
-                for p in (
-                    Path(anchor).glob(pattern[len(anchor) :])
-                    if anchor
-                    else Path().glob(pattern)
-                )
-                if not p.name.startswith(_LOCK_FILE_PREFIX)
-                and _shell_matches(path.parts[below:], p.parts[below:])
-                and p.is_file()
-                and _resolves_inside(p, root)
-            )
+        files = _files_at(src)
         if not files:
             raise FileNotFoundError(f"No documents found at {src!r}.")
-        texts.extend(_read_one(p) for p in files)
-    return [t for t in texts if t.strip()]
+        found.extend(files)
+    read = [(name, path, _read_one(path)) for name, path in found]
+    kept = [(name, path, text) for name, path, text in read if text.strip()]
+    given = Counter(name for name, _, _ in kept)
+    names = [name if given[name] == 1 else path.as_posix() for name, path, _ in kept]
+    return dict(zip(_unique(names), [text for _, _, text in kept], strict=True))
 
 
-def _check_documents(documents: Any) -> list[str]:
-    """``documents`` is the document *texts* — a sequence of strings, and nothing else.
+def _check_documents(documents: Any) -> dict[str, str] | list[str]:
+    """``documents`` is the document *texts* — a mapping of names to strings, or a
+    sequence of strings, and nothing else.
 
     Deliberately no path-sniffing and no silent filtering. Guessing whether a string is a
     filename or a document means a one-line document that happens to match a file on disk
@@ -346,8 +391,8 @@ def _check_documents(documents: Any) -> list[str]:
     could notice.
 
     :func:`read_documents` drops blank *files*, which is a different thing: it drops them
-    before the list ever reaches the caller, where no index can shift yet. Here the list is
-    the caller's, so a blank is refused rather than quietly removed.
+    before the mapping ever reaches the caller, where no index can shift yet. Here the
+    documents are the caller's, so a blank is refused rather than quietly removed.
     """
     if isinstance(documents, (str, Path)):
         raise TypeError(
@@ -355,27 +400,40 @@ def _check_documents(documents: Any) -> list[str]:
             "For one document pass [text]; to read a folder or glob use "
             "r3con.read_documents(...) and pass its result."
         )
-    try:
-        docs = list(documents)
-    except TypeError:
-        raise TypeError(
-            f"`documents` must be a sequence of strings — got {type(documents).__name__}."
-        ) from None
-    bad = next(((i, d) for i, d in enumerate(docs) if not isinstance(d, str)), None)
+    docs: dict[str, str] | list[str]
+    if isinstance(documents, Mapping):
+        docs = dict(documents)
+        unnamed = [name for name in docs if not isinstance(name, str)]
+        if unnamed:
+            raise TypeError(
+                f"`documents` names must be strings — {unnamed[0]!r} is "
+                f"{type(unnamed[0]).__name__}."
+            )
+        entries = [(repr(name), text) for name, text in docs.items()]
+    else:
+        try:
+            docs = list(documents)
+        except TypeError:
+            raise TypeError(
+                "`documents` must be a sequence of strings, or a mapping of names to "
+                f"them — got {type(documents).__name__}."
+            ) from None
+        entries = [(str(i), text) for i, text in enumerate(docs)]
+    bad = next(((at, d) for at, d in entries if not isinstance(d, str)), None)
     if bad is not None:
         raise TypeError(
-            f"`documents` must be a sequence of strings — item {bad[0]} is {type(bad[1]).__name__}."
+            f"`documents` must hold strings — item {bad[0]} is {type(bad[1]).__name__}."
         )
     # After the type scan, so `[" ", 42]` reports the type problem rather than the blank.
-    blank = next((i for i, d in enumerate(docs) if not d.strip()), None)
+    blank = next((at for at, d in entries if not d.strip()), None)
     if blank is not None:
         raise ValueError(
             f"`documents` item {blank} is blank. Every entry must be a document — the "
             "indices are positional, so dropping it would silently renumber the rest: "
             "relevant_context[i], the source_docs indices and document_ids[i], which the "
             "answer's provenance cites, all refer to documents[i]. Drop the blanks "
-            "yourself, or build the list with r3con.read_documents(...), which skips "
-            "empty files."
+            "yourself, or build the documents with r3con.read_documents(...), which "
+            "skips empty files."
         )
     if not docs:
         raise ValueError("`documents` is empty — there is nothing to read.")
@@ -384,7 +442,7 @@ def _check_documents(documents: Any) -> list[str]:
 
 def run(
     question: str,
-    documents: Sequence[str],
+    documents: Mapping[str, str] | Sequence[str],
     *,
     model: str | None = None,
     config: str | RunConfig = DEFAULT_CONFIG,
@@ -405,10 +463,12 @@ def run(
         question: what to ask. It is the task the whole pipeline is built for — the
             schema and the reasoning are proposed *from it*, so a specific question
             gets a much better apparatus than a vague one.
-        documents: the document **texts**, as a sequence of strings; no entry may be
-            blank, so that every index the run reports refers to *your* list. To read
-            them off disk instead, call :func:`read_documents` and pass its result. A
-            document too long for the model's window is read in parts.
+        documents: the document **texts**, each under its name, as
+            :func:`read_documents` gives them, or as a sequence of strings, each then
+            named by its position from 1 (``"1"``, ``"2"``, …); no text may be blank, so
+            that every index the run reports refers to *your* documents, in their order.
+            The names are recorded, never sent to the model. A document too long for
+            the model's window is read in parts.
         model: a litellm model string (e.g. ``"openai/gpt-6-luna"``,
             ``"anthropic/claude-sonnet-5-5"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
             Defaults to the config's.
@@ -462,15 +522,17 @@ def run(
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
         it used, and the quotes behind it (``.provenance``: ids from ``.document_ids``,
-        a part's snippet as ``<id>.<k>``, whose document is the part before the dot;
-        see :attr:`~r3con.pipeline.Answer.provenance`), the relevant context
+        a part's snippet as ``<id>.<k>``, whose document is the part before the dot,
+        each quote with its document's name; see
+        :attr:`~r3con.pipeline.Answer.provenance`), each document's name
+        (``.document_names``), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
         schema proposed for this question (``.schema_code``), and where the artifacts
         were written (``.run_dir``).
 
     Raises:
-        TypeError: if ``documents`` is not a sequence of strings (a bare string or a
-            path is rejected rather than guessed at).
+        TypeError: if ``documents`` is not a mapping of names to strings or a sequence
+            of strings (a bare string or a path is rejected rather than guessed at).
         ValueError: if ``documents`` is empty or any entry is blank (a blank is refused,
             not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
