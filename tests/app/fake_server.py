@@ -21,7 +21,6 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import contextlib
 import json
-import re
 import sys
 import threading
 import time
@@ -32,7 +31,13 @@ import litellm
 from litellm.exceptions import ContextWindowExceededError
 
 from r3con.app import serve
-from tests.fakes import SCHEMA_REPLY, mock_completion, stage_of
+from tests.fakes import (
+    PARSE_HEADING,
+    SCHEMA_REPLY,
+    mock_completion,
+    stage_of,
+    unscripted,
+)
 
 litellm.suppress_debug_info = True
 
@@ -48,7 +53,6 @@ PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
-PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
 never = threading.Event()
 
 
@@ -81,6 +85,9 @@ def content(request: dict[str, Any]) -> str:
     stage = stage_of(request)
     if stage == "schema":
         return SCHEMA_REPLY
+    # Coding reasoning, which the checks never run.
+    if "response_format" not in request:
+        raise unscripted(request)
     schema = request["response_format"]["json_schema"]["schema"]
     if stage == "relevance":
         summary = summary_of(user)

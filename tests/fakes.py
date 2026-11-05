@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -29,7 +30,19 @@ class Memo(BaseModel):
 class Parse(BaseModel):
     memos: list[Memo]
 </schema>"""
+ANSWERING_SCHEMA = """Thought: one row per person.
+<schema>
+class Row(BaseModel):
+    who: str
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+</schema>"""
+# The line, and the blank one after it, that heads a parse request's user message.
+PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
 GATE_TIMEOUT_SECONDS = 10
+UNSCRIPTED_SHOWN_CHARS = 200
 
 
 class UnscriptedRequest(AssertionError):
@@ -163,11 +176,16 @@ class FakeLLM:
         if isinstance(answer, deque):
             answer = answer.popleft() if answer else None
         if answer is None:
-            last = request["messages"][-1]["content"][:200]
-            raise UnscriptedRequest(
-                f"no reply scripted for this {stage} request: {last!r}"
-            )
+            raise unscripted(request)
         return answer
+
+
+def unscripted(request: Request) -> UnscriptedRequest:
+    """The error for a ``request`` that a fake has no reply for."""
+    last = request["messages"][-1]["content"][:UNSCRIPTED_SHOWN_CHARS]
+    return UnscriptedRequest(
+        f"no reply scripted for this {stage_of(request)} request: {last!r}"
+    )
 
 
 def mock_completion(request: Request, content: str) -> Any:
