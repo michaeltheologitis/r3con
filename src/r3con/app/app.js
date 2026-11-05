@@ -109,6 +109,7 @@
    * @property {Run | null} run
    * @property {HTMLElement} chat
    * @property {boolean} chatToEnd
+   * @property {HTMLElement | null} chatAnswer the first line of the answer landed since the chat last scrolled
    * @property {HTMLElement | null} turn
    * @property {(string | Node)[]} status
    * @property {HTMLElement} drawing
@@ -901,6 +902,7 @@
       // A chat shown again isn't read out: a live region announces what changes in it, not what it holds.
       chat: h('div', { class: 'transcript', 'aria-live': 'polite', hidden: true }),
       chatToEnd: false,
+      chatAnswer: null,
       turn: null,
       status: [],
       drawing: h('div', { class: 'drawing' }, edges, nodesEl),
@@ -2090,9 +2092,9 @@
     return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
   }
 
-  /** @param {string} summary @param {Child} body @param {{ open?: boolean, className?: string }} [options] */
-  function fold(summary, body, { open = false, className = 'fold' } = {}) {
-    return h('details', { class: className, open }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
+  /** @param {string} summary @param {Child} body @param {string} [className] */
+  function fold(summary, body, className = 'fold') {
+    return h('details', { class: className }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
   }
 
   /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
@@ -2307,7 +2309,8 @@
     );
   }
 
-  // A chat goes to its newest line in the next frame it can be seen in.
+  // A chat goes to its newest line in the next frame it can be seen in, but no further than puts an answer landed
+  // since at its top, so that an answer taller than the chat keeps its start in view.
   /** @param {Tab} tab */
   function scrollChat(tab) {
     if (tab.chatToEnd) return;
@@ -2315,11 +2318,18 @@
     requestAnimationFrame(() => toNewestLine(tab));
   }
 
+  // How far `chat` scrolls to put `el` where its first line sits, under its padding.
+  /** @param {HTMLElement} chat @param {HTMLElement} el */
+  const scrollTopFor = (chat, el) =>
+    chat.scrollTop + el.getBoundingClientRect().top - chat.getBoundingClientRect().top - parseFloat(getComputedStyle(chat).paddingTop);
+
   /** @param {Tab} tab */
   function toNewestLine(tab) {
-    if (!tab.chatToEnd || !tab.chat.checkVisibility()) return;
-    tab.chat.scrollTop = tab.chat.scrollHeight;
+    const { chat, chatAnswer } = tab;
+    if (!tab.chatToEnd || !chat.checkVisibility()) return;
+    chat.scrollTop = chatAnswer ? Math.min(chat.scrollHeight, scrollTopFor(chat, chatAnswer)) : chat.scrollHeight;
     tab.chatToEnd = false;
+    tab.chatAnswer = null;
   }
 
   // In the next frame, as the status line and the composer can still change the pane's height.
@@ -2660,14 +2670,15 @@
   function showAnswer(tab, narr, id = RUN_ANSWER) {
     drawAnswer(tab, id);
     const answer = answerOf(tab.run, id);
-    if (answer.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
+    const flag = answer.simulated ? narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL)) : null;
     const said = narr.say('answer', answer.text, { node: id });
+    tab.chatAnswer = flag ?? said;
     const sentences = sentenceList(tab, id);
     if (sentences) said.after(sentences);
     updateComposer();
   }
 
-  // Under an answer, open until folded: the sentences its trail quotes, by document; each opens its document's popup there.
+  // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
   /** @param {Tab} tab @param {string} id */
   function sentenceList(tab, id) {
     const trail = trailOf(tab.run, answerLineage(tab.run, id));
@@ -2682,7 +2693,7 @@
         sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))),
       );
     const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? group(file, trail.quoted[d].sentences) : null));
-    return fold(line, groups, { open: true, className: 'fold sentences' });
+    return fold(line, groups, 'fold sentences');
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
