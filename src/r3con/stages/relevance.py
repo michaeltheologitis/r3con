@@ -125,27 +125,25 @@ class RelevantContext:
 
 
 class TrailQuote(TypedDict):
-    """A quote behind an answer, ``{document, name, start, end, text}``: the id of the
-    document it is in and that document's name, where it is in that document's text
-    (``documents[name][start:end]`` for documents given by name), and the model's copy
-    of it, which for a ``fuzzy`` match differs slightly from that slice."""
+    """A quote behind an answer, ``{document, start, end, text}``: the id of the
+    document it is in, where it is there (``documents[i][start:end]`` for the document
+    whose id is ``document``), and the model's copy of it, which for a ``fuzzy`` match
+    differs slightly from that slice."""
 
     document: str
-    name: str
     start: int
     end: int
     text: str
 
 
 def trail_quotes(
-    relevance: RelevantContext, cited: Iterable[str], names: Mapping[str, str]
+    relevance: RelevantContext, cited: Iterable[str], document_ids: Sequence[str]
 ) -> list[TrailQuote]:
     """The quotes found in their document of every snippet on the trail from the
     final-round snippets ``cited`` names, back round by round through the ids each
-    snippet on it cites (:attr:`SnippetRecord.provenance`), each with its document's
-    name from ``names``, every document's by its id, in document order. Each place is
-    given once, the first quote met there keeping its text, in document order, then by
-    ``start``."""
+    snippet on it cites (:attr:`SnippetRecord.provenance`). Each place is given once,
+    the first quote met there keeping its text, in the order of ``document_ids``, then
+    by ``start``."""
     by_place: dict[tuple[str, int, int], TrailQuote] = {}
     for record in _trail(relevance, set(cited)):
         document = record.id.partition(".")[0]
@@ -153,14 +151,10 @@ def trail_quotes(
             start, end = quote["start"], quote["end"]
             if start is not None and end is not None:
                 found = TrailQuote(
-                    document=document,
-                    name=names[document],
-                    start=start,
-                    end=end,
-                    text=quote["text"],
+                    document=document, start=start, end=end, text=quote["text"]
                 )
                 by_place.setdefault((document, start, end), found)
-    order = {id_: i for i, id_ in enumerate(names)}
+    order = {id_: i for i, id_ in enumerate(document_ids)}
     return sorted(by_place.values(), key=lambda q: (order[q["document"]], q["start"]))
 
 

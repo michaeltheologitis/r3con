@@ -109,7 +109,7 @@ result = r3con.run(
 
 `documents` is a list of strings, one per document, or a dict of them by name, as
 `read_documents` returns. `result.document_names` lists each document's name; a list's
-documents are named by position: `"1"`, `"2"`, ….
+documents are named by index, `"0"`, `"1"`, …, so `documents[int(name)]` is the document.
 
 To ask another question over the same run, `r3con.ask` runs only the reasoning step
 again:

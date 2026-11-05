@@ -132,10 +132,10 @@ def system_prompts(llm, stage) -> list[str]:
 
 
 def memos_with(registry: str) -> list[str]:
-    """The five memos, with the contractor registry (documents[3]) replaced."""
-    documents = list(read_documents(MEMOS).values())
-    documents[3] = registry
-    return documents
+    """The five memos' texts, with the contractor registry's, the fourth, replaced."""
+    documents = read_documents(MEMOS)
+    documents["04_contractor_registry.txt"] = registry
+    return list(documents.values())
 
 
 def summary_headings(llm) -> list[str]:
@@ -467,6 +467,16 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
     assert finished["provenance"] == result.provenance
+
+
+def test_documents_named_by_anything_but_strings_are_refused_before_anything(
+    llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(TypeError, match="`documents` names must be strings — 1 is int"):
+        answer(llm, logger, documents={1: "Halloran memo"})
+    assert llm.requests == []
+    assert list(logger.dir.iterdir()) == []
 
 
 def test_a_cited_parse_that_cites_no_snippet_adds_no_quotes(answering_llm, shown_ids):
@@ -1191,7 +1201,7 @@ def test_a_run_reports_each_stage_and_document_from_its_start_to_its_finish(
         "question": "Who?",
         "model": MODEL,
         "document_ids": result.document_ids,
-        "document_names": ["1", "2", "3"],
+        "document_names": ["0", "1", "2"],
         "rounds": 2,
         "run_dir": None,
     }

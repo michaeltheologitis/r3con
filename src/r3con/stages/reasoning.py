@@ -92,6 +92,13 @@ class _DirectReply(BaseModel):
         return answer
 
 
+class NamedQuote(TrailQuote):
+    """A quote behind an answer (:class:`~r3con.stages.relevance.TrailQuote`) with
+    ``name``, the name of the document it is in."""
+
+    name: str
+
+
 class Provenance(TypedDict):
     """What an answer used: the ids of the relevance snippets it cites
     (``<id>.<k>`` for a part of a document read in parts), those of the documents whose
@@ -100,7 +107,7 @@ class Provenance(TypedDict):
 
     summary_ids: list[str]
     parse_ids: list[str]
-    quotes: list[TrailQuote]
+    quotes: list[NamedQuote]
 
 
 def cites_nothing() -> Provenance:

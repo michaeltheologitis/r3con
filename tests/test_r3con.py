@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -17,7 +18,7 @@ import r3con
 from r3con import Answer, RunConfig
 from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES, REASONING_PATHS
-from r3con.r3con import ask, read_documents, run
+from r3con.r3con import ask, read_documents, run, unique_names
 from tests.documents import (
     CORRUPT_DOCX,
     PNG,
@@ -76,6 +77,9 @@ REFUSED_LINE = (
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
+# Copies of one name that took a quadratic numbering seconds to tell apart.
+MANY_COPIES = 20_000
+AT_ONCE_SECONDS = 1
 SCHEMA_REPLY = """Thought: one row per memo.
 <schema>
 class Row(BaseModel):
@@ -202,6 +206,13 @@ def quoted_run(answering_llm, shown_ids, tmp_path) -> Answer:
     return finished_run(answering_llm, tmp_path, NAMED_DOCS)
 
 
+def write_files(texts: dict[str, str]) -> None:
+    """Each of ``texts``' files, by its path from the working directory."""
+    for name, text in texts.items():
+        Path(name).parent.mkdir(parents=True, exist_ok=True)
+        Path(name).write_text(text, encoding="utf-8")
+
+
 def write_tree(root: Path) -> None:
     (root / "nested").mkdir(parents=True)
     (root / "a.md").write_text("alpha document", encoding="utf-8")
@@ -224,7 +235,6 @@ def write_tree(root: Path) -> None:
         ),
         ({"a.txt": "fine", "b.txt": 42}, TypeError, "item 'b.txt' is int"),
         ({1: "a memo"}, TypeError, "names must be strings — 1 is int"),
-        ({"a.txt": "real", "b.txt": " "}, ValueError, "item 'b.txt' is blank"),
         (["fine", 42], TypeError, "item 1 is int"),
         (["real", "   ", "also real"], ValueError, "item 1 is blank"),
         (["  ", ""], ValueError, "item 0 is blank"),
@@ -236,6 +246,17 @@ def test_documents_that_are_not_texts_are_refused_before_any_request(
 ):
     with pytest.raises(error, match=message):
         run("Who?", documents, completion=llm)
+    assert llm.requests == []
+    assert not Path("logs").exists()
+
+
+def test_a_blank_document_given_by_name_is_refused_by_its_name_alone(llm):
+    with pytest.raises(ValueError) as refused:
+        run("Who?", {"a.txt": "a memo", "b.txt": " "}, completion=llm)
+    assert str(refused.value) == (
+        "`documents` item 'b.txt' is blank: every document must have text. Leave it "
+        "out, or read the files with r3con.read_documents(...), which skips empty ones."
+    )
     assert llm.requests == []
 
 
@@ -556,16 +577,15 @@ def test_a_walk_or_a_glob_skips_office_lock_files_and_logs_a_file_with_no_text(
 
 
 def test_a_walk_skips_what_is_hidden_or_under_macosx_below_its_folder(tmp_path):
-    texts = {
-        "a_memo.md": "a memo",
-        ".notes.md": "a hidden note",
-        ".git/description.md": "a hidden folder's file",
-        "q3/.cache/b_memo.md": "a file in a hidden folder further down",
-        "__MACOSX/a_memo.md": "macOS's metadata, named like a memo",
-    }
-    for name, text in texts.items():
-        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / name).write_text(text, encoding="utf-8")
+    write_files(
+        {
+            "a_memo.md": "a memo",
+            ".notes.md": "a hidden note",
+            ".git/description.md": "a hidden folder's file",
+            "q3/.cache/b_memo.md": "a file in a hidden folder further down",
+            "__MACOSX/a_memo.md": "macOS's metadata, named like a memo",
+        }
+    )
     assert read_documents(tmp_path) == {"a_memo.md": "a memo"}
 
 
@@ -589,18 +609,17 @@ def test_a_walk_skips_what_is_hidden_or_under_macosx_below_its_folder(tmp_path):
     ],
 )
 def test_a_globs_wildcards_match_no_hidden_name_but_a_dot_in_the_pattern_does(
-    tmp_path, pattern: str, documents: list[str]
+    pattern: str, documents: list[str]
 ):
-    texts = {
-        "d/a.md": "a memo",
-        "d/.x.md": "a hidden memo",
-        "d/q3/b.md": "a memo further down",
-        "d/q3/.env.md": "a hidden file further down",
-        "d/.git/.env.md": "a hidden folder's hidden file",
-    }
-    for name, text in texts.items():
-        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / name).write_text(text, encoding="utf-8")
+    write_files(
+        {
+            "d/a.md": "a memo",
+            "d/.x.md": "a hidden memo",
+            "d/q3/b.md": "a memo further down",
+            "d/q3/.env.md": "a hidden file further down",
+            "d/.git/.env.md": "a hidden folder's hidden file",
+        }
+    )
     assert list(read_documents(pattern).values()) == documents
 
 
@@ -776,13 +795,6 @@ def test_a_folder_read_with_read_documents_can_be_answered_over(
     assert result.answer == "alpha document; beta document; gamma document"
 
 
-def write_files(texts: dict[str, str]) -> None:
-    """Each of ``texts``' files, by its path from the working directory."""
-    for name, text in texts.items():
-        Path(name).parent.mkdir(parents=True, exist_ok=True)
-        Path(name).write_text(text, encoding="utf-8")
-
-
 @pytest.mark.parametrize(
     ("source", "names"),
     [
@@ -833,6 +845,42 @@ def test_a_name_that_still_clashes_is_numbered_from_its_second_document():
     ]
 
 
+def test_a_name_a_clash_renames_to_is_renamed_again_where_it_clashes_in_turn():
+    write_files({"a/x.txt": "A's", "b/x.txt": "B's", "c/a/x.txt": "C's"})
+    assert list(read_documents(["a", "b", "c"]).items()) == [
+        ("a/x.txt", "A's"),
+        ("b/x.txt", "B's"),
+        ("c/a/x.txt", "C's"),
+    ]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a file name of any bytes is POSIX's")
+def test_a_file_name_that_is_not_utf8_reads_with_a_replacement_and_runs(
+    answering_llm, tmp_path
+):
+    Path("memos").mkdir()
+    for name in [b"caf\xe8.txt", b"caf\xe9.txt"]:
+        try:
+            (Path("memos") / os.fsdecode(name)).write_text("A memo.", encoding="utf-8")
+        except OSError:
+            pytest.skip("this file system takes UTF-8 names only")
+    documents = read_documents("memos")
+    names = ["memos/caf\ufffd.txt", "memos/caf\ufffd.txt (2)"]
+    assert list(documents) == names
+    result = finished_run(answering_llm, tmp_path, documents)
+    assert result.document_names == names
+    recorded = json.loads((result.run_dir / "names.json").read_text())
+    assert list(recorded.values()) == names
+
+
+def test_many_copies_of_one_name_are_numbered_at_once():
+    started = time.perf_counter()
+    numbered = unique_names(["notes.txt"] * MANY_COPIES)
+    assert time.perf_counter() - started < AT_ONCE_SECONDS
+    assert numbered[:3] == ["notes.txt", "notes.txt (2)", "notes.txt (3)"]
+    assert len(set(numbered)) == MANY_COPIES
+
+
 def test_a_dropped_file_is_left_out_and_clashes_with_no_name():
     write_files({"a/notes.txt": " \n", "b/notes.txt": "B's notes"})
     assert read_documents(["a", "b"]) == {"notes.txt": "B's notes"}
@@ -840,7 +888,7 @@ def test_a_dropped_file_is_left_out_and_clashes_with_no_name():
 
 @pytest.mark.parametrize(
     ("documents", "names"),
-    [(NAMED_DOCS, NAMES), (DOCS, ["1", "2", "3"])],
+    [(NAMED_DOCS, NAMES), (DOCS, ["0", "1", "2"])],
     ids=["by-name", "a-plain-list"],
 )
 def test_a_run_names_each_document_by_its_key_or_else_its_position(
@@ -855,14 +903,14 @@ def test_a_run_names_each_document_by_its_key_or_else_its_position(
     assert recorded == dict(zip(result.document_ids, names, strict=True))
 
 
-def test_a_run_folder_without_names_can_be_asked_and_names_documents_by_position(
+def test_a_run_folder_without_names_can_be_asked_and_names_documents_by_index(
     answering_llm, quoted_run
 ):
     (quoted_run.run_dir / "names.json").unlink()
     asked = ask(quoted_run.run_dir, "Who else?", completion=answering_llm)
     assert asked.answer == "Halloran memo"
-    assert asked.document_names == ["1", "2", "3"]
-    assert [quote["name"] for quote in asked.provenance["quotes"]] == ["2"]
+    assert asked.document_names == ["0", "1", "2"]
+    assert [quote["name"] for quote in asked.provenance["quotes"]] == ["1"]
 
 
 @pytest.mark.parametrize("rounds", [0, 2])

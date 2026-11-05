@@ -70,6 +70,7 @@ from r3con.pipeline import (
     Answer,
     ask_config,
     ask_pipeline,
+    names_and_texts,
     read_representation,
     run_pipeline,
 )
@@ -84,6 +85,8 @@ _LOCK_FILE_PREFIX = "~$"
 _MACOS_METADATA_FOLDER = "__MACOSX"
 _GLOB_WILDCARDS = frozenset("*?[")
 _RECURSIVE_WILDCARD = "**"
+# The number unique_names gives a name's second document.
+_FIRST_REPEAT = 2
 
 
 def _read_one(path: Path) -> str:
@@ -264,10 +267,16 @@ def _resolves_inside(path: Path, root: Path) -> bool:
     return False
 
 
+def _utf8(name: str) -> str:
+    """``name`` as UTF-8 can write it: each byte of a file's name that is not UTF-8,
+    which Python reads as half a surrogate pair, becomes U+FFFD."""
+    return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def _files_at(src: str | Path) -> list[tuple[str, Path]]:
     """The files the source ``src`` names, as :func:`read_documents` finds them, each
-    with its name: its path below the folder walked, or below the glob's part before
-    its first wildcard, or, for a file named directly, its file name."""
+    with its name (:func:`_utf8`): its path below the folder walked, or below the glob's
+    part before its first wildcard, or, for a file named directly, its file name."""
     path = Path(src)
     if path.is_dir():
         root = path.resolve()
@@ -279,9 +288,9 @@ def _files_at(src: str | Path) -> list[tuple[str, Path]]:
             and p.is_file()
             and _resolves_inside(p, root)
         )
-        return [(p.relative_to(path).as_posix(), p) for p in files]
+        return [(_utf8(p.relative_to(path).as_posix()), p) for p in files]
     if path.is_file():
-        return [(path.name, path)]
+        return [(_utf8(path.name), path)]
     # Otherwise a glob, anchored if it is absolute.
     pattern, anchor = str(src), path.anchor
     base = Path(*takewhile(_GLOB_WILDCARDS.isdisjoint, path.parts))
@@ -298,22 +307,47 @@ def _files_at(src: str | Path) -> list[tuple[str, Path]]:
         and p.is_file()
         and _resolves_inside(p, root)
     )
-    return [("/".join(p.parts[below:]), p) for p in files]
+    return [(_utf8("/".join(p.parts[below:])), p) for p in files]
 
 
-def _unique(names: Sequence[str]) -> list[str]:
-    """``names``, each one met before numbered: the first of ``<name> (2)``, ``<name>
-    (3)``, … that is no other name."""
+def unique_names(names: Sequence[str]) -> list[str]:
+    """``names``, in order, with each one already met numbered so that no two are
+    alike: the second ``notes.txt`` becomes ``notes.txt (2)``, the third ``notes.txt
+    (3)``, a number that would give a name already in ``names`` skipped.
+
+    :func:`read_documents` numbers the names of documents read from one path so, and
+    r3con app the names a page sends twice.
+    """
     taken = set(names)
     seen: set[str] = set()
+    next_number: dict[str, int] = {}
     unique: list[str] = []
     for name in names:
         if name in seen:
-            name = next(n for k in count(2) if (n := f"{name} ({k})") not in taken)
+            start = next_number.get(name, _FIRST_REPEAT)
+            number = next(k for k in count(start) if f"{name} ({k})" not in taken)
+            next_number[name] = number + 1
+            name = f"{name} ({number})"
             taken.add(name)
         seen.add(name)
         unique.append(name)
     return unique
+
+
+def _apart(names: Sequence[str], paths: Sequence[str]) -> list[str]:
+    """``names``, each that another one also is replaced by its document's path as read
+    (in ``paths``), again until none clash but those of documents read from one path,
+    which are then numbered (:func:`unique_names`)."""
+    names = list(names)
+    while True:
+        given = Counter(names)
+        clashing = [
+            i for i, name in enumerate(names) if given[name] > 1 and name != paths[i]
+        ]
+        if not clashing:
+            return unique_names(names)
+        for i in clashing:
+            names[i] = paths[i]
 
 
 def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
@@ -331,8 +365,10 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
     (``"reports/**/*.md"`` gives ``"q3/summary.md"``); and for a file named directly, by
     its file name. Two documents given the same name, from two sources, are each named
     by their path as read instead, the source as you gave it in front (``a/notes.txt``,
-    ``b/notes.txt``); a name still given twice, as when one file is read twice, is
-    numbered from its second document on (``a/notes.txt (2)``).
+    ``b/notes.txt``), and so on until no name clashes but those of documents read from
+    one path, as when one file is read twice: they are numbered from the second on
+    (``a/notes.txt (2)``, :func:`unique_names`). A byte of a file's name that is not
+    UTF-8 is named U+FFFD (``caf\ufffd.txt``).
 
     A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files,
     PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
@@ -370,74 +406,9 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
         if not files:
             raise FileNotFoundError(f"No documents found at {src!r}.")
         found.extend(files)
-    read = [(name, path, _read_one(path)) for name, path in found]
-    kept = [(name, path, text) for name, path, text in read if text.strip()]
-    given = Counter(name for name, _, _ in kept)
-    names = [name if given[name] == 1 else path.as_posix() for name, path, _ in kept]
-    return dict(zip(_unique(names), [text for _, _, text in kept], strict=True))
-
-
-def _check_documents(documents: Any) -> dict[str, str] | list[str]:
-    """``documents`` is the document *texts* — a mapping of names to strings, or a
-    sequence of strings, and nothing else.
-
-    Deliberately no path-sniffing and no silent filtering. Guessing whether a string is a
-    filename or a document means a one-line document that happens to match a file on disk
-    gets silently replaced by that file's contents. Dropping a blank entry is the same
-    mistake one step later: every index downstream is positional — ``relevant_context[i]``,
-    the ``source_docs`` indices, and ``document_ids[i]``, which the answer's
-    ``provenance`` cites — so a silent drop renumbers the caller's collection without
-    telling them, and the wrong document has already left the library by the time anyone
-    could notice.
-
-    :func:`read_documents` drops blank *files*, which is a different thing: it drops them
-    before the mapping ever reaches the caller, where no index can shift yet. Here the
-    documents are the caller's, so a blank is refused rather than quietly removed.
-    """
-    if isinstance(documents, (str, Path)):
-        raise TypeError(
-            "`documents` is a sequence of document TEXTS, not a single string or path. "
-            "For one document pass [text]; to read a folder or glob use "
-            "r3con.read_documents(...) and pass its result."
-        )
-    docs: dict[str, str] | list[str]
-    if isinstance(documents, Mapping):
-        docs = dict(documents)
-        unnamed = [name for name in docs if not isinstance(name, str)]
-        if unnamed:
-            raise TypeError(
-                f"`documents` names must be strings — {unnamed[0]!r} is "
-                f"{type(unnamed[0]).__name__}."
-            )
-        entries = [(repr(name), text) for name, text in docs.items()]
-    else:
-        try:
-            docs = list(documents)
-        except TypeError:
-            raise TypeError(
-                "`documents` must be a sequence of strings, or a mapping of names to "
-                f"them — got {type(documents).__name__}."
-            ) from None
-        entries = [(str(i), text) for i, text in enumerate(docs)]
-    bad = next(((at, d) for at, d in entries if not isinstance(d, str)), None)
-    if bad is not None:
-        raise TypeError(
-            f"`documents` must hold strings — item {bad[0]} is {type(bad[1]).__name__}."
-        )
-    # After the type scan, so `[" ", 42]` reports the type problem rather than the blank.
-    blank = next((at for at, d in entries if not d.strip()), None)
-    if blank is not None:
-        raise ValueError(
-            f"`documents` item {blank} is blank. Every entry must be a document — the "
-            "indices are positional, so dropping it would silently renumber the rest: "
-            "relevant_context[i], the source_docs indices and document_ids[i], which the "
-            "answer's provenance cites, all refer to documents[i]. Drop the blanks "
-            "yourself, or build the documents with r3con.read_documents(...), which "
-            "skips empty files."
-        )
-    if not docs:
-        raise ValueError("`documents` is empty — there is nothing to read.")
-    return docs
+    read = [(n, p, text) for n, p in found if (text := _read_one(p)).strip()]
+    names = _apart([n for n, _, _ in read], [_utf8(p.as_posix()) for _, p, _ in read])
+    return dict(zip(names, [text for _, _, text in read], strict=True))
 
 
 def run(
@@ -465,9 +436,10 @@ def run(
             gets a much better apparatus than a vague one.
         documents: the document **texts**, each under its name, as
             :func:`read_documents` gives them, or as a sequence of strings, each then
-            named by its position from 1 (``"1"``, ``"2"``, …); no text may be blank, so
-            that every index the run reports refers to *your* documents, in their order.
-            The names are recorded, never sent to the model. A document too long for
+            named by its index (``"0"``, ``"1"``, …, so ``documents[int(name)]`` is
+            the document); no text may be blank, so that every index the run reports
+            refers to *your* documents, in their order. The names are recorded, never
+            sent to the model. A document too long for
             the model's window is read in parts.
         model: a litellm model string (e.g. ``"openai/gpt-6-luna"``,
             ``"anthropic/claude-sonnet-5-5"``, ``"hosted_vllm/Qwen/Qwen3.5-35B-A3B"``).
@@ -568,11 +540,10 @@ def run(
             "them on the RunConfig instead."
         )
 
-    docs = _check_documents(documents)
-
+    # Refuse what run_pipeline would refuse, the documents and a RunConfig's prompts
+    # included, before a run folder exists.
+    names, texts = names_and_texts(documents)
     cfg = config if isinstance(config, RunConfig) else load_config(config, **given)
-    # Refuse what run_pipeline would refuse, a RunConfig's prompts included, before a
-    # run folder exists.
     check_prompts(cfg)
     settings_snapshot()
 
@@ -583,7 +554,7 @@ def run(
 
     return run_pipeline(
         task=question,
-        documents=docs,
+        documents=dict(zip(names, texts, strict=True)),
         config=cfg,
         task_logger=task_logger,
         api_base=api_base,
@@ -683,4 +654,12 @@ def ask(
     )
 
 
-__all__ = ["TEXT_SUFFIXES", "Answer", "Cancelled", "ask", "read_documents", "run"]
+__all__ = [
+    "TEXT_SUFFIXES",
+    "Answer",
+    "Cancelled",
+    "ask",
+    "read_documents",
+    "run",
+    "unique_names",
+]

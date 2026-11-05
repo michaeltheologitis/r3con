@@ -694,7 +694,7 @@ MEMO_NAMES = sorted(path.name for path in MEMOS.iterdir())
 @pytest.mark.parametrize(
     ("names", "named"),
     [
-        (None, ["1", "2", "3", "4", "5"]),
+        (None, ["0", "1", "2", "3", "4"]),
         (MEMO_NAMES, MEMO_NAMES),
         (
             ["notes.txt", "notes.txt", "notes.txt (2)", "a/notes.txt", "notes.txt"],
