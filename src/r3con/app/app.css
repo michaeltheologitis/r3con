@@ -2,6 +2,8 @@
    46ch until its edge is dragged, holds the chat and the files tab; on phones the panel stacks above
    that column. */
 :root {
+  /* Light by name, not by the default normal, so each light-dark() below takes its first colour in every engine. */
+  color-scheme: light;
   --bg: light-dark(#fcfbfa, #1a1918);
   --panel: light-dark(#f4f2ef, #141312);
   --fg: light-dark(#1f1e1c, #e8e5e1);

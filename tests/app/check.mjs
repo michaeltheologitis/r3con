@@ -152,16 +152,11 @@ const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
 const MIN_TARGET_PX = 24;
 const MIN_TEXT_CONTRAST = 4.5;
 // The page's background and accent in each color scheme, as drawn.
-const SCHEME_PAPER = {
+const SCHEME_PAGE_COLORS = {
   light: { '--bg': 'rgb(252, 251, 250)', '--accent': 'rgb(193, 95, 60)' },
   dark: { '--bg': 'rgb(26, 25, 24)', '--accent': 'rgb(215, 119, 87)' },
 };
-const paperOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
-// The tokens app.css colors per scheme with light-dark(); themeValues adds --shadow and color-scheme.
-const THEME_COLORS = [
-  '--bg', '--panel', '--fg', '--dim', '--line', '--code', '--accent', '--accent-ink', '--mark', '--mark-strong',
-  '--ok', '--err', '--warn', '--fill-orange', '--fill-yellow', '--fill-blue', '--tree-ink',
-];
+const pageColorsOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 // The page's intro, live and in the prototype, for n documents.
@@ -902,6 +897,13 @@ function noHorizontalScroll() {
   return document.documentElement.scrollWidth <= document.documentElement.clientWidth;
 }
 
+// The tokens app.css colors per scheme with light-dark(), read off the root, as a page opened from a file can't
+// read its stylesheet's rules.
+function lightDarkTokens() {
+  const root = getComputedStyle(document.documentElement);
+  return [...root].filter((name) => root.getPropertyValue(name).startsWith('light-dark('));
+}
+
 // The theme values as an element draws them: a token's own value is its light-dark() text in every scheme.
 function themeValues(colors) {
   const probe = document.body.appendChild(document.createElement('i'));
@@ -1017,26 +1019,28 @@ function recordViews([tab, ms, timeout]) {
 // ---------- areas ----------
 
 async function load() {
-  const worn = { system: {}, button: {} };
+  const seen = { system: {}, button: {} };
+  let tokens = [];
   for (const layout of Object.values(LAYOUTS)) {
     await withPage('load', { layout, sample: false }, async (page) => {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
       const scheme = layout.options.colorScheme;
       const other = scheme === 'dark' ? 'light' : 'dark';
-      worn.system[scheme] = await page.evaluate(themeValues, THEME_COLORS);
+      tokens = await page.evaluate(lightDarkTokens);
+      seen.system[scheme] = await page.evaluate(themeValues, tokens);
       await page.click('#theme-btn');
-      worn.button[other] = await page.evaluate(themeValues, THEME_COLORS);
-      const paper = { [scheme]: paperOf(worn.system[scheme]), [other]: paperOf(worn.button[other]) };
-      const paperName = `${layout.name}: the page's background and accent are its color scheme's, and the other's after the theme button`;
-      check('load', paperName, isDeepStrictEqual(paper, SCHEME_PAPER), JSON.stringify(paper));
+      seen.button[other] = await page.evaluate(themeValues, tokens);
+      const pageColors = { [scheme]: pageColorsOf(seen.system[scheme]), [other]: pageColorsOf(seen.button[other]) };
+      const pageColorsName = `${layout.name}: the page's background and accent are its color scheme's, and the other's after the theme button`;
+      check('load', pageColorsName, isDeepStrictEqual(pageColors, SCHEME_PAGE_COLORS), JSON.stringify(pageColors));
     });
   }
-  const drifted = (scheme) => Object.keys(worn.system[scheme] ?? {}).filter((name) => worn.system[scheme][name] !== worn.button[scheme]?.[name]);
+  const drifted = (scheme) => Object.keys(seen.system[scheme] ?? {}).filter((name) => seen.system[scheme][name] !== seen.button[scheme]?.[name]);
   const differing = ['light', 'dark'].flatMap((scheme) => drifted(scheme).map((name) => `${scheme} ${name}`));
-  const both = Object.keys(worn.system).length === Object.keys(LAYOUTS).length;
-  const valueCount = THEME_COLORS.length + 2;
-  const themeName = `the theme button gives all ${valueCount} theme values just as the system's color scheme does, in light and in dark`;
-  check('load', themeName, both && !differing.length, differing.join(', '));
+  const both = Object.keys(seen.system).length === Object.keys(LAYOUTS).length;
+  const valueCount = Object.keys(seen.system.light ?? {}).length;
+  const themeName = `the theme button gives all ${valueCount} theme values, ${tokens.length} of them light-dark() colors, just as the system's color scheme does, in light and in dark`;
+  check('load', themeName, both && tokens.length > 0 && !differing.length, differing.join(', '));
   // Each tab row's bottom is its line.
   await withPage('load', { sample: false }, async (page) => {
     const chat = await rect(page, '#side .tabs');
