@@ -30,8 +30,8 @@
 #     Exception → BaseException so that evaluate_python_code's own
 #     `except Exception` does not rewrap it as InterpreterError.
 #
-# See the NOTICE file distributed with this package, and LICENSE-APACHE-2.0 for a
-# copy of the License.
+# See THIRD-PARTY-NOTICES, distributed with this package, for a copy of the
+# License.
 # Behavior of evaluate_python_code, the AST walker, the authorized-imports
 # allowlist's contents and matching, the dunder/operation/while limits, and
 # BASE_PYTHON_TOOLS is otherwise unchanged from upstream.
