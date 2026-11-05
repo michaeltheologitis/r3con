@@ -315,6 +315,8 @@ const SIDE_STEP_PX = 16;
 const CHAT_DRAG_PX = 100;
 // Past the page's DRAG_THRESHOLD of 4 px, so a nudge drags.
 const NUDGE_PX = 10;
+// A spot this far in from the panel's top left, which a run's drawing leaves blank.
+const BLANK_INSET_PX = 60;
 // The separator's focus bar, and a desktop window narrow enough to hold the widest chat back.
 const FOCUS_BAR_PX = 3;
 const NARROW_DESKTOP = { width: 1000, height: 900 };
@@ -1547,6 +1549,19 @@ async function trashArea() {
   }
 
   await withPage('trash', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    const chatBefore = await count(page, '.transcript .line');
+    const removeMidDrag = async () => {
+      await removeButton(page, names[1]).evaluate((el) => el.click());
+      return canLit(page);
+    };
+    const lit = await drag(page, await centre(page, await docNodeId(page, names[1])), await boxCentre(page, '#trash'), { whileHeld: removeMidDrag });
+    const removed = { lit, docs: await docNames(page), pane: (await page.evaluate(filesPane)).names, chat: (await count(page, '.transcript .line')) - chatBefore };
+    const removedName = "a node whose file is removed by its × mid-drag ends its drag: the can unlights, and released there it removes nothing more, said once";
+    check('trash', removedName, isDeepStrictEqual(removed, { lit: false, docs: left, pane: left, chat: 1 }), JSON.stringify(removed));
+  });
+
+  await withPage('trash', { sample: false }, async (page) => {
     const spot = await boxCentre(page, '#trash');
     const id = await docNodeId(page, names[0]);
     const node = await centre(page, id);
@@ -2404,6 +2419,45 @@ async function gestures() {
     await page.mouse.move(panel.left + 500, panel.top + 500, { steps: 12 });
     const stuckName = 'a press released outside the panel ends: coming back with no button neither pans nor drags';
     check('gestures', stuckName, isDeepStrictEqual(await page.evaluate(panelSnapshot), before));
+  });
+  await withPage('gestures', {}, async (page) => {
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    const second = await page.evaluate(panelSnapshot);
+    await showRunTab(page, 0);
+    const panel = await rect(page, '#panel');
+    const starts = { drag: await centre(page, 'r2-1'), pan: { x: panel.left + BLANK_INSET_PX, y: panel.top + BLANK_INSET_PX } };
+    const changed = (now, was) => Object.keys(was).filter((key) => !isDeepStrictEqual(now[key], was[key]));
+    for (const [kind, from] of Object.entries(starts)) {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(from.x + NUDGE_PX, from.y + NUDGE_PX, { steps: DRAG_STEPS });
+      const first = await page.evaluate(panelSnapshot);
+      await page.evaluate(() => document.querySelectorAll('.run-tab')[1].click());
+      await page.mouse.move(from.x + CHAT_DRAG_PX, from.y + CHAT_DRAG_PX, { steps: DRAG_STEPS });
+      const panning = await page.$eval('#panel', (el) => el.classList.contains('panning'));
+      await page.mouse.up();
+      const shown = await page.evaluate(panelSnapshot);
+      await showRunTab(page, 0);
+      const left = await page.evaluate(panelSnapshot);
+      const moved = { shown: changed(shown, second), left: changed(left, first), panning };
+      const name = `a ${kind} still going when the tab is switched ends there: moving on moves nothing in either tab, and the panel stops panning`;
+      check('gestures', name, isDeepStrictEqual(moved, { shown: [], left: [], panning: false }), JSON.stringify(moved));
+    }
+
+    const from = await centre(page, 'r2-1');
+    const grabbed = await page.$(nodeSel('r2-1'));
+    const where = (el) => ({ at: `${el.style.left},${el.style.top}`, detached: !el.isConnected });
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + NUDGE_PX, from.y + NUDGE_PX, { steps: DRAG_STEPS });
+    await page.evaluate(() => document.getElementById('replay-btn').click());
+    const cleared = await grabbed.evaluate(where);
+    await page.mouse.move(from.x + CHAT_DRAG_PX, from.y + CHAT_DRAG_PX, { steps: DRAG_STEPS });
+    const panning = await page.$eval('#panel', (el) => el.classList.contains('panning'));
+    await page.mouse.up();
+    const replayed = { cleared, after: await grabbed.evaluate(where), panning, popup: await popup(page) };
+    const replayName = 'a drag still going when a replay clears the panel ends there: moving on moves the cleared node no further, and pans nothing';
+    check('gestures', replayName, isDeepStrictEqual(replayed, { cleared: { ...cleared, detached: true }, after: cleared, panning: false, popup: null }), JSON.stringify(replayed));
   });
   await withPage('gestures', { layout: LAYOUTS.phone }, async (page) => {
     const tap = await centre(page, 'r2-3');

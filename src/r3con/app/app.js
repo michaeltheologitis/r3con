@@ -1682,6 +1682,7 @@
   function removeNode(tab, id) {
     if (openIn(tab) === id) closeInspector();
     if (hoveredIn(tab) === id) state.hovered = null;
+    if (tab.nodes.get(id) === gesture.node) endGesture();
     tab.nodes.get(id)?.el.remove();
     tab.nodes.delete(id);
   }
@@ -1693,6 +1694,7 @@
   function clearPanel(tab) {
     cancelAnimationFrame(tab.arrangeFrame);
     if (openIn(tab)) closeInspector();
+    if (tab === state.shown) endGesture();
     for (const layer of Object.values(tab.layers)) layer.replaceChildren();
     tab.edges.clear();
     tab.nodesEl.replaceChildren();
@@ -3079,6 +3081,7 @@
     // A drawing taken out of the page mid-animation never hears the animation end.
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
+    endGesture();
     state.hovered = null;
     state.shown.chat.hidden = true;
     state.shown = tab;
@@ -3884,7 +3887,7 @@
   /** @param {PointerEvent} e */
   function overTrash(e) {
     const { node } = gesture;
-    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc' && state.shown.nodes.get(node.id) === node;
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc';
     if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
@@ -3939,19 +3942,24 @@
     }
   }
 
+  function endGesture() {
+    gesture.pointers.clear();
+    gesture.mode = null;
+    gesture.node = null;
+    trash.classList.remove('over');
+    panel.classList.remove('panning');
+  }
+
   /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
     const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node.file : null;
-    trash.classList.remove('over');
     if (gesture.mode === 'pinch') {
-      if (!gesture.pointers.size) gesture.mode = null;
+      if (!gesture.pointers.size) endGesture();
       return;
     }
     if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();
-    gesture.mode = null;
-    gesture.node = null;
-    panel.classList.remove('panning');
+    endGesture();
     if (!trashed) return;
     removeFile(trashed, { refocus: false });
     // The dragged node held the focus, and went with its file.
