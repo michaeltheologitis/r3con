@@ -321,6 +321,9 @@ const SIDE_STEP_PX = 16;
 const CHAT_DRAG_PX = 100;
 // Past the page's DRAG_THRESHOLD of 4 px, so a nudge drags.
 const NUDGE_PX = 10;
+// A finger's slip mid-pinch, and the share of the zoom it may change: a pinch's own small move, not a jump.
+const SLIP_PX = 2;
+const SLIP_ZOOM_SHARE = 0.05;
 // A spot this far in from the panel's top left, which a run's drawing leaves blank.
 const BLANK_INSET_PX = 60;
 // The separator's focus bar, and a desktop window narrow enough to hold the widest chat back.
@@ -2528,10 +2531,23 @@ async function gestures() {
     const pinched = await transform(page);
     for (let i = 1; i <= DRAG_STEPS; i += 1) await touch('touchMove', [{ ...second, x: second.x + CHAT_DRAG_PX + NUDGE_PX * i }]);
     await touch('touchEnd', []);
-    await cdp.detach();
     const lifted = { zoomed: pinched !== before, thrown: messages.find((m) => m.type === 'error')?.text ?? null, moved: (await transform(page)) !== pinched };
     const liftName = 'phone: a pinch with one finger lifted ends: moving the other finger throws nothing and moves nothing';
     check('gestures', liftName, isDeepStrictEqual(lifted, { zoomed: true, thrown: null, moved: false }), JSON.stringify(lifted));
+
+    const zoom = () => page.$eval('#world', (el) => new DOMMatrix(el.style.transform).a);
+    const third = { id: 2, x: second.x + CHAT_DRAG_PX, y: second.y + CHAT_DRAG_PX };
+    await touch('touchStart', [first]);
+    await touch('touchStart', [first, second]);
+    await touch('touchStart', [first, second, third]);
+    await touch('touchEnd', [second]);
+    const held = await zoom();
+    await touch('touchMove', [first, { ...third, x: third.x + SLIP_PX }]);
+    await touch('touchEnd', []);
+    await cdp.detach();
+    const slipped = await zoom();
+    const pairName = 'phone: a pinch that loses a finger while a third is down goes on with the two left: a slight move does not jump the zoom';
+    check('gestures', pairName, Math.abs(slipped / held - 1) < SLIP_ZOOM_SHARE, `zoom ${held} → ${slipped}`);
   });
 }
 
