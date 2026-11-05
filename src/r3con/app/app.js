@@ -2090,9 +2090,9 @@
     return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
   }
 
-  /** @param {string} summary @param {Child} body @param {{ open?: boolean, className?: string }} [options] */
-  function fold(summary, body, { open = false, className = 'fold' } = {}) {
-    return h('details', { class: className, open }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
+  /** @param {string} summary @param {Child} body */
+  function fold(summary, body, className = 'fold') {
+    return h('details', { class: className }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
   }
 
   /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
@@ -2667,7 +2667,7 @@
     updateComposer();
   }
 
-  // Under an answer, open until folded: the sentences its trail quotes, by document; each opens its document's popup there.
+  // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
   /** @param {Tab} tab @param {string} id */
   function sentenceList(tab, id) {
     const trail = trailOf(tab.run, answerLineage(tab.run, id));
@@ -2682,7 +2682,7 @@
         sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))),
       );
     const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? group(file, trail.quoted[d].sentences) : null));
-    return fold(line, groups, { open: true, className: 'fold sentences' });
+    return fold(line, groups, 'fold sentences');
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
