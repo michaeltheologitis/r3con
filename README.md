@@ -136,12 +136,7 @@ documents = {
 }
 ```
 
-`result.document_names` shows the document names. If you used a list, r3con
-names them `"0"`, `"1"`, `"2"`, etc., based on their position.
-
-To retrieve a document from that list using its name, use
-`documents[int(name)]`. The `int()` part simply converts a name like `"0"`
-into the number `0`, which Python uses to find the first document.
+Documents in a list are named by their position: `"0"`, `"1"`, `"2"`, and so on.
 
 To ask another question without repeating the earlier processing, use
 `r3con.ask`:
@@ -156,23 +151,17 @@ repeats the final reasoning step.
 
 #### Provenance
 
-`result.provenance` shows what the answer is based on, down to the sentence:
+`result.provenance["quotes"]` lists the sentences the answer is based on.
+Each has the document's `name`, the quoted `text`, and its `start` and `end`
+characters in that document:
 
 ```python
 quote = result.provenance["quotes"][0]
 print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
 ```
 
-- `quotes` are the sentences behind the answer, in document order. Each has
-  its file's `name`, its `text`, and where it is in that file:
-  `docs[quote["name"]][quote["start"]:quote["end"]]`.
-- `summary_ids` and `parse_ids` are the documents whose relevant text and
-  extracted information the answer used, by ID. `result.document_ids` lists
-  each document's ID, in the same order as `result.document_names`.
-
-An answer from `r3con.ask` has its provenance too.
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
-follows an answer back to its sources step by step.
+shows the rest of the provenance.
 
 ## Notebooks
 
