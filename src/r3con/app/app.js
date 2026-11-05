@@ -1682,6 +1682,7 @@
   function removeNode(tab, id) {
     if (openIn(tab) === id) closeInspector();
     if (hoveredIn(tab) === id) state.hovered = null;
+    if (tab.nodes.get(id) === gesture.node) endGesture();
     tab.nodes.get(id)?.el.remove();
     tab.nodes.delete(id);
   }
@@ -3885,7 +3886,7 @@
   /** @param {PointerEvent} e */
   function overTrash(e) {
     const { node } = gesture;
-    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc' && state.shown.nodes.get(node.id) === node;
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc';
     if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
@@ -3952,9 +3953,8 @@
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
     const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node.file : null;
-    trash.classList.remove('over');
     if (gesture.mode === 'pinch') {
-      if (!gesture.pointers.size) gesture.mode = null;
+      if (!gesture.pointers.size) endGesture();
       return;
     }
     if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();
