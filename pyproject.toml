@@ -8,7 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 license = "MIT AND Apache-2.0"
-license-files = ["LICENSE", "LICENSE-APACHE-2.0", "NOTICE"]
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES"]
 keywords = ["llm", "agent", "documents", "reasoning", "multi-document", "question-answering"]
 classifiers = [
     "Development Status :: 3 - Alpha",

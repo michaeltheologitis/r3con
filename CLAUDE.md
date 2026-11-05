@@ -25,6 +25,6 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 
 ## Conventions
 
-- `src/r3con/runtime/python_executor.py` is a modified copy of smolagents' `local_python_executor.py` (v1.25.0, Apache-2.0), and ruff, pyright and the guide's style rules skip it. Keep changes to it minimal, and list each one in its header and in `NOTICE`.
+- `src/r3con/runtime/python_executor.py` is a modified copy of smolagents' `local_python_executor.py` (v1.25.0, Apache-2.0), and ruff, pyright and the guide's style rules skip it. Keep changes to it minimal, and list each one in its header.
 - A prompt version (`src/r3con/prompts/<stage>/vN.yaml`) is never edited once merged, and never reused after a revert: take the next number not listed by `git log --format= --name-only -- src/r3con/prompts/<stage>/`, and bump its pin in `src/r3con/configs/default.yaml`.
 - Versions: release as patch versions (0.5.1, 0.5.2, …) and move slowly toward 1.0.0; bump the minor only when Michael asks.
