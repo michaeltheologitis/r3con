@@ -110,16 +110,6 @@ a subfolder, its name includes that subfolder.
 For example, a file at `reports/q3/ardent.pdf` is named `q3/ardent.pdf`.
 Here, `q3` is simply the subfolder name, and `ardent.pdf` is the filename.
 
-You can also see which documents and sentences support the answer:
-
-```python
-quote = result.provenance["quotes"][0]
-print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
-```
-
-`quotes[0]` selects the first supporting quote. `name` is its source file,
-and `text` is the quoted sentence.
-
 If your documents are already stored as text in Python, pass them directly
 without reading files:
 
@@ -164,6 +154,26 @@ print(other)
 This reuses the information organized during the first run and only
 repeats the final reasoning step.
 
+#### Provenance
+
+`result.provenance` shows what the answer is based on, down to the sentence:
+
+```python
+quote = result.provenance["quotes"][0]
+print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
+```
+
+- `quotes` are the sentences behind the answer, in document order. Each has
+  its file's `name`, its `text`, and where it is in that file:
+  `docs[quote["name"]][quote["start"]:quote["end"]]`.
+- `summary_ids` and `parse_ids` are the documents whose relevant text and
+  extracted information the answer used, by ID. `result.document_ids` lists
+  each document's ID, in the same order as `result.document_names`.
+
+An answer from `r3con.ask` has its provenance too.
+[`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
+follows an answer back to its sources step by step.
+
 ## Notebooks
 
 The examples use five short memos, with the information spread across them
@@ -179,15 +189,12 @@ so no single document contains the complete answer:
 `r3con.run(...)` returns the answer and the information created during the run:
 
 ```python
-result.answer              # Final answer
-result.relevant_context    # Relevant text found in the documents
+result.answer  # Final answer
+result.relevant_context  # Relevant text found in the documents
 result.structured_context  # Information extracted and organized from the documents
-result.run_dir             # Folder where this run's files are saved
+result.provenance  # What the answer is based on (see Provenance above)
+result.run_dir  # Folder where this run's files are saved
 ```
-
-r3con also keeps track of which documents and information were used to
-produce the answer. See [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
-to inspect these details.
 
 ## Run artifacts
 
