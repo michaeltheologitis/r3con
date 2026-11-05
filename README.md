@@ -1,3 +1,4 @@
+
 # r3con
 
 [![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
@@ -6,8 +7,8 @@
 
 **Context representation for large-scale reasoning with smaller, cheaper models.**
 
-Ask a question whose evidence is scattered across many documents. `r3con` builds a
-task-specific representation of the context, then reasons over it to produce an answer.
+Ask a question whose evidence is spread across many documents. `r3con` finds and
+organizes the relevant information, then reasons over it to produce an answer.
 
 ![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; the sentences it quotes unfold under the answer, a file's name there opens its memo with the same sentences marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
@@ -30,7 +31,7 @@ pip install r3context
 
 Or `uv add r3context`.
 
-Set the API key(s) for the provider(s) you use:
+Set the API key(s) for the AI provider(s) you use:
 
 ```bash
 export OPENAI_API_KEY=sk-...
@@ -41,15 +42,18 @@ You can also put them in a `.env` file in your working directory.
 
 ### Command line
 
-Pass a directory, glob, or list of files:
+Ask a question about documents in a folder:
 
 ```bash
 r3con run "Which supplier missed the most delivery windows?" ./reports \
   --model openai/gpt-6-luna
 ```
 
-`--model` accepts any [LiteLLM](https://docs.litellm.ai/docs/providers) model string, for
-example:
+`./reports` is the folder containing your documents. `--model` selects the AI
+model to use.
+
+You can use any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers),
+for example:
 
 ```
 anthropic/claude-sonnet-5-5
@@ -59,22 +63,31 @@ hosted_vllm/Qwen/Qwen3.5-35B-A3B
 
 The default is `openai/gpt-6-luna`.
 
-Directories are searched recursively. You can also use glob patterns or pass files directly:
+You can read an entire folder, select files using glob patterns, or specify
+individual files. A glob pattern uses `*` to match filenames and `**` to
+include subfolders.
 
 ```bash
+# All supported files in reports and its subfolders
+r3con run "Who approved the Q3 overspend?" ./reports
+
+# Only PDF files directly inside reports
 r3con run "Who approved the Q3 overspend?" "./reports/*.pdf"
+
+# PDF files inside reports and its subfolders
 r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"
+
+# Only these three files
 r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md
 ```
 
-Quote glob patterns so your shell passes them to `r3con` unchanged. A directory or a
-quoted glob reads only files inside that directory, or the glob's part before its first
-wildcard, and logs and skips a link that points outside it; a file you name is read as
-named.
+Keep glob patterns in quotes, as shown above. When reading a folder or using
+a glob pattern, r3con skips links to files outside the selected folder.
+Individual files can be specified directly.
 
 ### Python
 
-Load documents from a directory, glob, or list of files:
+Load documents from a folder, glob pattern, or list of files:
 
 ```python
 from r3con import r3con
@@ -87,18 +100,18 @@ result = r3con.run(
 print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total."
 ```
 
-`read_documents` reads PDF and Word (`.docx`) files, and text files such as `.txt`,
-`.md`, `.csv`, `.json`, `.html` and `.xml`, and skips a folder's hidden files and folders;
-a glob's wildcards skip them too, as in the shell. It returns each document's text by its
-name, the file's path below the folder (`{"q3/ardent.pdf": "...", ...}`), and the answer
-names the documents it quotes:
+`read_documents` supports PDF, Word (`.docx`), `.txt`, `.md`, `.csv`, `.json`,
+`.html`, and `.xml` files. It skips hidden files and folders when reading
+directories or using glob patterns.
 
-```python
-quote = result.provenance["quotes"][0]
-print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
-```
+It returns each document's text along with its filename. If a file is inside
+a subfolder, its name includes that subfolder.
 
-If you already have the documents in memory, pass them directly:
+For example, a file at `reports/q3/ardent.pdf` is named `q3/ardent.pdf`.
+Here, `q3` is simply the subfolder name, and `ardent.pdf` is the filename.
+
+If your documents are already stored as text in Python, pass them directly
+without reading files:
 
 ```python
 result = r3con.run(
@@ -107,91 +120,130 @@ result = r3con.run(
 )
 ```
 
-`documents` is a list of strings, one per document, or a dict of them by name, as
-`read_documents` returns. `result.document_names` lists each document's name; a list's
-documents are named by index, `"0"`, `"1"`, …, so `documents[int(name)]` is the document.
+You can provide documents as a list:
 
-To ask another question over the same run, `r3con.ask` runs only the reasoning step
-again:
+```python
+documents = [doc_a, doc_b, doc_c]
+```
+
+Or give them names:
+
+```python
+documents = {
+    "report_a": doc_a,
+    "report_b": doc_b,
+    "report_c": doc_c,
+}
+```
+
+`result.document_names` shows the document names. If you used a list, r3con
+names them `"0"`, `"1"`, `"2"`, etc., based on their position.
+
+To retrieve a document from that list using its name, use
+`documents[int(name)]`. The `int()` part simply converts a name like `"0"`
+into the number `0`, which Python uses to find the first document.
+
+To ask another question without repeating the earlier processing, use
+`r3con.ask`:
 
 ```python
 other = r3con.ask(result, "Which supplier delivered on time most often?")
 print(other)
 ```
 
-Pass `cancel=threading.Event()` to `run` or `ask` and set it to stop: no new model call is
-sent and it raises `r3con.Cancelled`, keeping what it did. A call already sent, and
-retries you set yourself (`completion=` or `params`), run their course.
+This reuses the information organized during the first run and only
+repeats the final reasoning step.
+
+#### Provenance
+
+`result.provenance` shows what the answer is based on, down to the sentence:
+
+```python
+quote = result.provenance["quotes"][0]
+print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
+```
+
+- `quotes` are the sentences behind the answer, in document order. Each has
+  its file's `name`, its `text`, and where it is in that file:
+  `docs[quote["name"]][quote["start"]:quote["end"]]`.
+- `summary_ids` and `parse_ids` are the documents whose relevant text and
+  extracted information the answer used, by ID. `result.document_ids` lists
+  each document's ID, in the same order as `result.document_names`.
+
+An answer from `r3con.ask` has its provenance too.
+[`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
+follows an answer back to its sources step by step.
 
 ## Notebooks
 
-The examples use five short memos arranged so that no single document contains the full
-answer:
+The examples use five short memos, with the information spread across them
+so no single document contains the complete answer:
 
-- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
-- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — checking an answer: the sentences behind it,
-  and the relevance snippets and records it used.
-- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
-  path, generation parameters, run configuration, custom connections, and artifact paths.
-- [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.
+- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — a complete example of using r3con.
+- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — checking the original sentences, snippets, and records behind an answer.
+- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — configuring models, relevance rounds, reasoning, generation settings, custom connections, and saved files.
+- [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using an AI model hosted on your own vLLM server.
 
 ## Output
 
-`r3con.run(...)` returns a result object containing the final answer and the representation
-built during the run:
+`r3con.run(...)` returns the answer and the information created during the run:
 
 ```python
-result.answer  # str       — final answer
-result.relevant_context  # list[str] — final relevance snippets
-result.structured_context  # dict      — structured representation
-result.run_dir  # Path      — directory containing run artifacts
+result.answer  # Final answer
+result.relevant_context  # Relevant text found in the documents
+result.structured_context  # Information extracted and organized from the documents
+result.provenance  # What the answer is based on (see Provenance above)
+result.run_dir  # Folder where this run's files are saved
 ```
-
-r3con also records provenance, how the answer, each relevance snippet and each parse came
-to be; see [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
 
 ## Run artifacts
 
-Every run writes each stage's output and model calls, failed ones included, with their
-tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
-API keys a provider's error echoes are masked before r3con writes or logs them; a
-`completion=` wrapper that adds its own key registers it with
-`r3con.masking.register_key(key)`.
+Every run saves its results and processing records in a folder under `./logs`.
 
-```
+These include AI requests (even failed ones), token usage, API costs,
+retries, and the time spent waiting between retries.
+
+If an AI provider accidentally includes an API key in an error message,
+r3con hides that key before saving the error.
+
+If you use your own `completion=` function with a separate API key, register
+that key using `r3con.masking.register_key(key)` so r3con can hide it too.
+
+```text
 logs/<timestamp>_<hex>/          <- result.run_dir
-├── ids.json                     <- each document's id
-├── names.json                   <- each document's name, by its id
-├── events.jsonl                 <- each stage's start and finish, as they happened
-├── splits.json                  <- only when a document was read in parts
+├── ids.json                     <- each document's ID
+├── names.json                   <- each document's filename
+├── events.jsonl                 <- when each processing step started and finished
+├── splits.json                  <- how documents were split, if necessary
 ├── relevance/
-│   ├── result.json              <- each round's snippets and their quotes
-│   └── calls.json
+│   ├── result.json              <- relevant text and supporting quotes
+│   └── calls.json               <- AI requests made during relevance checking
 ├── structuring/
 │   ├── schema/
-│   │   ├── result.json
-│   │   ├── calls.json
-│   │   └── transcript.yaml
+│   │   ├── result.json          <- structure created for organizing information
+│   │   ├── calls.json           <- AI requests
+│   │   └── transcript.yaml      <- record of the process
 │   └── parsing/
-│       ├── result.json          <- the parsed records
-│       └── calls.json
+│       ├── result.json          <- information extracted from documents
+│       └── calls.json           <- AI requests
 ├── reasoning/
-│   ├── result.json              <- the answer
-│   ├── calls.json
-│   └── transcript.yaml
-└── asks/<folder>/               <- one per r3con.ask: manifest.json, events.jsonl and reasoning/
+│   ├── result.json              <- final answer
+│   ├── calls.json               <- AI requests
+│   └── transcript.yaml          <- record of the reasoning process
+└── asks/<folder>/               <- saved results for each additional question
 ```
 
 ## Evaluation
 
-Paper: for benchmark results, baselines, and evaluation code, see
-[r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
+For benchmark results, comparisons with other methods, and evaluation code,
+see [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation).
 
 ## License
 
 MIT — see [LICENSE](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE).
 
-`src/r3con/runtime/python_executor.py` contains a modified version of the sandboxed
-interpreter from [smolagents](https://github.com/huggingface/smolagents), licensed under
-Apache-2.0 and © HuggingFace Inc. See
-[THIRD-PARTY-NOTICES](https://github.com/michaeltheologitis/r3con/blob/main/THIRD-PARTY-NOTICES).
+`src/r3con/runtime/python_executor.py` includes modified code from
+[smolagents](https://github.com/huggingface/smolagents), licensed under
+Apache-2.0 and © HuggingFace Inc.
+
+See [THIRD-PARTY-NOTICES](https://github.com/michaeltheologitis/r3con/blob/main/THIRD-PARTY-NOTICES).
