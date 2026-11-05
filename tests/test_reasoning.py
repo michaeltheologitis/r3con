@@ -9,6 +9,7 @@ from r3con import settings
 from r3con.config import REASONING_PATHS
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.reasoning import _sample_record_per_field, reason
+from tests.fakes import citable_lists
 
 MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v3", "reasoning/coding": "v3"}
@@ -37,7 +38,7 @@ THREE_DOCUMENTS = {
     "source_docs": {"rows": [0, 1]},
     "document_ids": IDS[:3],
 }
-NO_IDS = {"summary_ids": [], "parse_ids": []}
+NO_IDS = {"summary_ids": [], "parse_ids": [], "quotes": []}
 EMPTY_ANSWER = {"answer": " \n", "provenance_ids": NO_IDS}
 KEYS_WARNING = (
     "coding: provenance_ids must map summary_ids and parse_ids to lists of ids; got "
@@ -101,12 +102,6 @@ def cite(llm, path, *replies, prompts=PROMPTS, documents=TWO_DOCUMENTS):
     )
 
 
-def lists_of_ids(request) -> dict:
-    """The JSON schema of each list of ids a direct request's reply may cite."""
-    schema = request["response_format"]["json_schema"]["schema"]
-    return schema["$defs"]["ProvenanceIds"]["properties"]
-
-
 def first_turn_prompts(llm) -> list[str]:
     return [
         r["messages"][0]["content"] for r in llm.requests if len(r["messages"]) == 2
@@ -165,7 +160,7 @@ def test_the_direct_reply_cites_from_an_enum_of_summaries_and_one_of_parses_show
     schema = response_format["schema"]
     assert schema["required"] == ["answer", "provenance_ids"]
     assert schema["$defs"]["ProvenanceIds"]["required"] == ["summary_ids", "parse_ids"]
-    lists = lists_of_ids(request)
+    lists = citable_lists(request)
     summaries = [IDS[0], f"{IDS[1]}.1", f"{IDS[1]}.2"]
     assert lists["summary_ids"]["items"]["enum"] == summaries
     assert lists["parse_ids"]["items"]["enum"] == IDS[:2]
@@ -177,7 +172,7 @@ def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
     caplog.set_level(logging.WARNING, logger="r3con.provenance")
     cited = [IDS[1], f"{IDS[2]}.2"]
     result = cite(llm, path, citing(path, summary_ids=cited), documents=THREE_DOCUMENTS)
-    assert result.provenance == {"summary_ids": [f"{IDS[2]}.2"], "parse_ids": []}
+    assert result.provenance == {**NO_IDS, "summary_ids": [f"{IDS[2]}.2"]}
     assert caplog.messages == [
         (
             f"{path} summary_ids: dropped provenance id(s) the call did not show: "
@@ -185,7 +180,7 @@ def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
         )
     ]
     if path == "direct":
-        enum = lists_of_ids(llm.requests[0])["summary_ids"]["items"]["enum"]
+        enum = citable_lists(llm.requests[0])["summary_ids"]["items"]["enum"]
         assert enum == [IDS[0], f"{IDS[2]}.1", f"{IDS[2]}.2"]
 
 
@@ -194,7 +189,7 @@ def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, p
     caplog.set_level(logging.WARNING, logger="r3con.provenance")
     cited = [IDS[2], IDS[1]]
     result = cite(llm, path, citing(path, parse_ids=cited), documents=THREE_DOCUMENTS)
-    assert result.provenance == {"summary_ids": [], "parse_ids": [IDS[1]]}
+    assert result.provenance == {**NO_IDS, "parse_ids": [IDS[1]]}
     assert caplog.messages == [
         (
             f"{path} parse_ids: dropped provenance id(s) the call did not show: "
@@ -202,7 +197,7 @@ def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, p
         )
     ]
     if path == "direct":
-        assert lists_of_ids(llm.requests[0])["parse_ids"]["items"]["enum"] == IDS[:2]
+        assert citable_lists(llm.requests[0])["parse_ids"]["items"]["enum"] == IDS[:2]
 
 
 @PATHS
@@ -219,7 +214,7 @@ def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropp
         for key in ("summary_ids", "parse_ids")
     ]
     if path == "direct":
-        lists = lists_of_ids(llm.requests[0])
+        lists = citable_lists(llm.requests[0])
         assert [lists[key]["items"] for key in lists] == [{"type": "string"}] * 2
 
 
@@ -275,14 +270,14 @@ def test_a_missing_list_cites_nothing_and_an_unknown_key_is_ignored(llm, caplog)
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     given = {"summary_ids": [IDS[0]], "documents": [IDS[1]]}
     result = cite(llm, "coding", committing(f", provenance_ids={given!r}"))
-    assert result.provenance == {"summary_ids": [IDS[0]], "parse_ids": []}
+    assert result.provenance == {**NO_IDS, "summary_ids": [IDS[0]]}
     assert caplog.messages == []
 
 
 def test_a_commit_may_pass_its_provenance_ids_second_by_position(llm):
     given = {"summary_ids": [IDS[0]], "parse_ids": [IDS[1]]}
     result = cite(llm, "coding", committing(f", {given!r}"))
-    assert (result.answer, result.provenance) == ("ok", given)
+    assert (result.answer, result.provenance) == ("ok", {**given, "quotes": []})
 
 
 def test_a_coding_v2_commit_still_answers_and_its_provenance_list_cites_nothing(
@@ -403,7 +398,7 @@ def test_only_the_shown_ids_are_kept_in_order_once_each(
 ):
     caplog.set_level(logging.WARNING, logger="r3con.provenance")
     result = cite(llm, path, citing(path, summary_ids, parse_ids))
-    assert result.provenance == {"summary_ids": kept[0], "parse_ids": kept[1]}
+    assert result.provenance == {**NO_IDS, "summary_ids": kept[0], "parse_ids": kept[1]}
     assert caplog.messages == [
         f"{path} {key}: dropped provenance id(s) the call did not show: {ids}"
         for key, ids in zip(("summary_ids", "parse_ids"), dropped, strict=True)
@@ -517,10 +512,14 @@ def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
     prompts = {**PROMPTS, "reasoning/direct": version}
     reply = citing("direct", [f"{IDS[1]}.1"], [IDS[0]])
     result = cite(llm, "direct", reply, prompts=prompts)
-    assert result.provenance == {"summary_ids": [f"{IDS[1]}.1"], "parse_ids": [IDS[0]]}
+    assert result.provenance == {
+        **NO_IDS,
+        "summary_ids": [f"{IDS[1]}.1"],
+        "parse_ids": [IDS[0]],
+    }
     [request] = llm.requests
     assert request["response_format"]["json_schema"]["name"] == "ReasoningAnswer"
-    assert list(lists_of_ids(request)) == ["summary_ids", "parse_ids"]
+    assert list(citable_lists(request)) == ["summary_ids", "parse_ids"]
     assert (
         f"### Document ID: {IDS[0]}\nHalloran logged 5."
         in (request["messages"][0]["content"])
@@ -704,7 +703,7 @@ def test_a_direct_prompt_that_fits_without_the_enum_it_drops_is_sent(llm, window
     )
     assert (result.answer, result.path, result.fallback) == ("ok", "direct", None)
     [request] = llm.requests
-    assert "enum" not in lists_of_ids(request)["summary_ids"]["items"]
+    assert "enum" not in citable_lists(request)["summary_ids"]["items"]
 
 
 def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
