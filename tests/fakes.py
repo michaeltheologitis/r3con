@@ -2,7 +2,7 @@ import copy
 import json
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal
 
 import litellm
@@ -177,6 +177,19 @@ def is_later_round(request: Request) -> bool:
     summaries it shows."""
     schema = request["response_format"]["json_schema"]["schema"]
     return "provenance_ids" in schema["properties"]
+
+
+def citable_lists(request: Request) -> dict[str, Any]:
+    """The JSON schema of each list of ids a direct reasoning reply may cite."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    return schema["$defs"]["ProvenanceIds"]["properties"]
+
+
+def cited_documents(provenance: Mapping[str, Any]) -> set[str]:
+    """The ids of the documents whose snippets or records an answer's ``provenance``
+    cites."""
+    views = (provenance["summary_ids"], provenance["parse_ids"])
+    return {id_.partition(".")[0] for ids in views for id_ in ids}
 
 
 def request_tokens(request: Request) -> int:

@@ -24,6 +24,7 @@ QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
 PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
+A, B, C = IDS
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
 NONE = (None, None, None)
@@ -640,9 +641,6 @@ def test_a_parts_quotes_are_kept_where_they_are_in_its_whole_document(llm):
     assert [quotes[1] for quotes in by_round(result, "quotes")] == [halves, halves]
 
 
-A, B, C = IDS
-
-
 def snippet(id_: str, *quotes: dict, cites: tuple[str, ...] = ()) -> SnippetRecord:
     return SnippetRecord(
         id=id_, summary=f"Notes on {id_}.", quotes=list(quotes), provenance=list(cites)
@@ -654,62 +652,47 @@ def at(start: int, end: int, text: str = "A sentence.") -> dict:
     return quote(text, start, end, "exact")
 
 
-def quotes_behind(rounds, summary_ids=(), parse_ids=(), parses=None) -> list:
-    """The answer's quotes (:func:`trail_quotes`) over ``rounds``, each a round's
-    snippets, the answer citing ``summary_ids`` and ``parse_ids``, and each document's
-    parse the ids in ``parses`` (none by default)."""
+# Two rounds, each snippet quoting one place; in the second, B's cites C.
+FIRST_ROUND = [snippet(A, at(0, 5)), snippet(B, at(10, 15)), snippet(C, at(20, 25))]
+SECOND_ROUND = [
+    snippet(A, at(30, 35)),
+    snippet(B, at(40, 45), cites=(C,)),
+    snippet(C, at(50, 55)),
+]
+
+
+def quotes_behind(rounds, cited=()) -> list:
+    """The quotes (:func:`trail_quotes`) on the trail from the final-round snippets
+    ``cited`` names, over ``rounds``, each a round's snippets."""
     relevance = RelevantContext(
         records=[
             [[s for s in round_ if s.id.partition(".")[0] == id_] for id_ in IDS]
             for round_ in rounds
         ]
     )
-    provenance = {"summary_ids": list(summary_ids), "parse_ids": list(parse_ids)}
-    return trail_quotes(relevance, provenance, parses or [[], [], []], IDS)
+    return trail_quotes(relevance, cited, IDS)
 
 
 def places(quotes: list) -> list[tuple]:
     return [(q["document"], q["start"], q["end"]) for q in quotes]
 
 
-def test_the_answer_quotes_the_final_round_summaries_it_cites():
+def test_the_trail_quotes_the_final_round_summaries_cited():
     final = [
         snippet(A, at(0, 9, "A said x.")),
         snippet(B, at(3, 9)),
         snippet(C, at(4, 20, "C, it said, saw y.")),
     ]
-    assert quotes_behind([final], summary_ids=[A, C]) == [
+    assert quotes_behind([final], cited=[A, C]) == [
         {"document": A, "start": 0, "end": 9, "text": "A said x."},
         {"document": C, "start": 4, "end": 20, "text": "C, it said, saw y."},
     ]
 
 
-def test_the_answer_quotes_the_earlier_summaries_its_summaries_cite_round_by_round():
-    first = [snippet(A, at(0, 5)), snippet(B, at(10, 15)), snippet(C, at(20, 25))]
-    second = [
-        snippet(A, at(30, 35)),
-        snippet(B, at(40, 45), cites=(C,)),
-        snippet(C, at(50, 55)),
-    ]
+def test_the_trail_quotes_the_earlier_summaries_its_summaries_cite_round_by_round():
     third = [snippet(A, at(60, 65), cites=(B,)), snippet(B), snippet(C)]
-    quotes = quotes_behind([first, second, third], summary_ids=[A])
+    quotes = quotes_behind([FIRST_ROUND, SECOND_ROUND, third], cited=[A])
     assert places(quotes) == [(A, 60, 65), (B, 40, 45), (C, 20, 25)]
-
-
-def test_the_answer_quotes_what_the_parses_it_cites_cite_and_their_trail():
-    first = [snippet(A, at(0, 5)), snippet(B, at(10, 15)), snippet(C, at(20, 25))]
-    second = [
-        snippet(A, at(30, 35)),
-        snippet(B, at(40, 45), cites=(C,)),
-        snippet(C, at(50, 55)),
-    ]
-    quotes = quotes_behind([first, second], parse_ids=[A], parses=[[B], [], []])
-    assert places(quotes) == [(B, 40, 45), (C, 20, 25)]
-
-
-def test_a_cited_parse_that_cites_nothing_adds_no_quotes():
-    final = [snippet(A, at(0, 5)), snippet(B, at(10, 15)), snippet(C, at(20, 25))]
-    assert quotes_behind([final], parse_ids=[A, B]) == []
 
 
 def test_a_part_is_cited_by_its_part_id_and_quoted_under_its_documents_id():
@@ -725,7 +708,7 @@ def test_a_part_is_cited_by_its_part_id_and_quoted_under_its_documents_id():
         snippet(f"{B}.2", at(5_040, 5_045)),
         snippet(C, at(50, 55)),
     ]
-    quotes = quotes_behind([first, second], summary_ids=[A, f"{B}.1"])
+    quotes = quotes_behind([first, second], cited=[A, f"{B}.1"])
     assert places(quotes) == [(A, 30, 35), (B, 40, 45), (B, 5_000, 5_005)]
 
 
@@ -735,7 +718,7 @@ def test_a_quote_not_found_in_its_document_is_left_out():
         snippet(B, quote("Not in B.", *NONE)),
         snippet(C),
     ]
-    assert places(quotes_behind([final], summary_ids=[A, B])) == [(A, 0, 5)]
+    assert places(quotes_behind([final], cited=[A, B])) == [(A, 0, 5)]
 
 
 def test_a_place_quoted_more_than_once_on_the_trail_is_given_once_as_first_met():
@@ -745,7 +728,7 @@ def test_a_place_quoted_more_than_once_on_the_trail_is_given_once_as_first_met()
         snippet(B, at(0, 9), cites=(A,)),
         snippet(C, cites=(A,)),
     ]
-    quotes = quotes_behind([first, second], summary_ids=[A, B, C])
+    quotes = quotes_behind([first, second], cited=[A, B, C])
     assert quotes == [
         {"document": A, "start": 0, "end": 9, "text": "As round 2 copied it."},
         {"document": B, "start": 0, "end": 9, "text": "A sentence."},
@@ -758,11 +741,10 @@ def test_quotes_come_in_document_order_then_by_where_they_start():
         snippet(B, at(5, 8)),
         snippet(C, at(1, 2)),
     ]
-    quotes = quotes_behind([final], summary_ids=[C, B, A])
+    quotes = quotes_behind([final], cited=[C, B, A])
     assert places(quotes) == [(A, 0, 10), (A, 50, 60), (B, 5, 8), (C, 1, 2)]
 
 
 @pytest.mark.parametrize("n_rounds", [0, 2])
-def test_an_answer_that_cites_nothing_has_no_quotes(n_rounds):
-    a_round = [snippet(A, at(0, 5)), snippet(B, at(10, 15)), snippet(C, at(20, 25))]
-    assert quotes_behind([a_round] * n_rounds) == []
+def test_a_trail_from_no_snippet_has_no_quotes(n_rounds):
+    assert quotes_behind([FIRST_ROUND, SECOND_ROUND][:n_rounds]) == []

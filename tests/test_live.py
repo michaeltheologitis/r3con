@@ -7,6 +7,7 @@ import pytest
 
 from r3con import ask, read_documents, run
 from r3con.config import REASONING_PATHS
+from tests.fakes import cited_documents
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 QUESTION = (
@@ -28,12 +29,6 @@ def assert_cost_reported(events: list[dict[str, Any]], finished: str) -> None:
     assert events[-1]["type"] == finished
     assert events[-1]["usd"] > 0
     assert events[-1]["tokens"]["total"] > 0
-
-
-def cited_documents(provenance: dict[str, list[Any]]) -> set[str]:
-    """The ids of the documents whose snippets or records ``provenance`` cites."""
-    views = (provenance["summary_ids"], provenance["parse_ids"])
-    return {id_.split(".")[0] for ids in views for id_ in ids}
 
 
 @pytest.mark.parametrize("reasoning", REASONING_PATHS)

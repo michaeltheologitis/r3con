@@ -23,8 +23,8 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
 
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
-null or empty summary keeps no quotes. Quotes are kept for inspection only: later
-stages read the summaries alone.
+null or empty summary keeps no quotes. Later stages read the summaries alone; the quotes
+are kept for inspection and for the quotes behind an answer (:func:`trail_quotes`).
 
 Every document has an id for the run (:func:`draw_document_ids`), and each snippet
 carries its document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in
@@ -93,8 +93,9 @@ class RelevantContext:
     """Output of :func:`surface_relevance` — the relevant context.
 
     ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
-    (one for a document read whole). Earlier rounds are kept for inspection; the final
-    round is what downstream stages consume, as :attr:`snippets`.
+    (one for a document read whole). Earlier rounds are kept for inspection and for
+    :func:`trail_quotes`; the final round is what downstream stages consume, as
+    :attr:`snippets`.
     """
 
     records: list[list[list[SnippetRecord]]]
@@ -124,9 +125,10 @@ class RelevantContext:
 
 
 class TrailQuote(TypedDict):
-    """A quote behind an answer: the id of the document it is in, where it is there
-    as a slice, and its ``text`` as the model copied it, which for a ``fuzzy`` match
-    differs slightly from the slice."""
+    """A quote behind an answer, ``{document, start, end, text}``: the id of the
+    document it is in, where it is there (``documents[i][start:end]`` for the document
+    whose id is ``document``), and the model's copy of it, which for a ``fuzzy`` match
+    differs slightly from that slice."""
 
     document: str
     start: int
@@ -135,41 +137,25 @@ class TrailQuote(TypedDict):
 
 
 def trail_quotes(
-    relevance: RelevantContext,
-    provenance: Mapping[str, Sequence[str]],
-    parsing_provenance: Sequence[Sequence[str]],
-    document_ids: Sequence[str],
+    relevance: RelevantContext, cited: Iterable[str], document_ids: Sequence[str]
 ) -> list[TrailQuote]:
-    """The quotes of every snippet on an answer's trail that were found in their
-    document, each place once, in document order, then by ``start``.
-
-    The trail starts at the final-round snippets the answer's ``provenance`` cites:
-    those under ``"summary_ids"``, and those the parse of each document under
-    ``"parse_ids"`` cites, from ``parsing_provenance``, aligned with
-    ``document_ids``. It goes back round by round through the ids each snippet on it
-    cites (:attr:`SnippetRecord.provenance`). When two quotes are at one place, the
-    first met keeps its text.
-    """
-    parses = dict(zip(document_ids, parsing_provenance, strict=True))
-    cited = set(provenance["summary_ids"]).union(
-        *(parses[id_] for id_ in provenance["parse_ids"])
-    )
-    located = [
-        TrailQuote(
-            document=record.id.partition(".")[0],
-            start=quote["start"],
-            end=quote["end"],
-            text=quote["text"],
-        )
-        for record in _trail(relevance, cited)
-        for quote in record.quotes
-        if quote["start"] is not None and quote["end"] is not None
-    ]
-    once: dict[tuple[str, int, int], TrailQuote] = {}
-    for quote in located:
-        once.setdefault((quote["document"], quote["start"], quote["end"]), quote)
+    """The quotes found in their document of every snippet on the trail from the
+    final-round snippets ``cited`` names, back round by round through the ids each
+    snippet on it cites (:attr:`SnippetRecord.provenance`). Each place is given once,
+    the first quote met there keeping its text, in the order of ``document_ids``, then
+    by ``start``."""
+    by_place: dict[tuple[str, int, int], TrailQuote] = {}
+    for record in _trail(relevance, set(cited)):
+        document = record.id.partition(".")[0]
+        for quote in record.quotes:
+            start, end = quote["start"], quote["end"]
+            if start is not None and end is not None:
+                found = TrailQuote(
+                    document=document, start=start, end=end, text=quote["text"]
+                )
+                by_place.setdefault((document, start, end), found)
     order = {id_: i for i, id_ in enumerate(document_ids)}
-    return sorted(once.values(), key=lambda q: (order[q["document"]], q["start"]))
+    return sorted(by_place.values(), key=lambda q: (order[q["document"]], q["start"]))
 
 
 def _trail(relevance: RelevantContext, cited: set[str]) -> Iterator[SnippetRecord]:

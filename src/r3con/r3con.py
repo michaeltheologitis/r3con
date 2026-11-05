@@ -15,10 +15,8 @@ The answer cites its two views separately: the relevance snippets it used
 (``result.provenance["summary_ids"]``) and the documents whose parsed records it used
 (``result.provenance["parse_ids"]``). Each document's relevance snippet and its parse
 also record the snippets they used (``result.relevance_provenance``,
-``result.parsing_provenance``). ``result.provenance["quotes"]`` holds the sentences of
-the documents behind the answer, each ``{document, start, end, text}``, so that
-``documents[i][start:end]`` is the sentence when ``document`` is
-``result.document_ids[i]``.
+``result.parsing_provenance``), and ``result.provenance["quotes"]`` holds the sentences
+behind the answer (:attr:`~r3con.pipeline.Answer.provenance`).
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
@@ -463,9 +461,9 @@ def run(
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
-        it used and the quotes behind it (``.provenance``: ids from ``.document_ids``,
-        a part's snippet as ``<id>.<k>``, whose document is the part before the dot,
-        and each quote's place in its document), the relevant context
+        it used, and the quotes behind it (``.provenance``: ids from ``.document_ids``,
+        a part's snippet as ``<id>.<k>``, whose document is the part before the dot;
+        see :attr:`~r3con.pipeline.Answer.provenance`), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
         schema proposed for this question (``.schema_code``), and where the artifacts
         were written (``.run_dir``).

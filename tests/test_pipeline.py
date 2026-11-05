@@ -24,7 +24,7 @@ from r3con.config import (
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
-from tests.fakes import is_later_round
+from tests.fakes import citable_lists, is_later_round
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -64,6 +64,7 @@ SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
+TWO_LINE_MEMOS = [f"{memo}\nThe {memo} logs two sites." for memo in [*DOCS, "Calder"]]
 
 
 def answer(
@@ -134,12 +135,6 @@ def memos_with(registry: str) -> list[str]:
     documents = read_documents(MEMOS)
     documents[3] = registry
     return documents
-
-
-def citable_lists(request) -> dict:
-    """The JSON schema of each list of ids a direct reasoning reply may cite."""
-    schema = request["response_format"]["json_schema"]["schema"]
-    return schema["$defs"]["ProvenanceIds"]["properties"]
 
 
 def summary_headings(llm) -> list[str]:
@@ -419,34 +414,39 @@ def quoting_a_line_a_round(shown_ids):
     return reply
 
 
-def cites_the_first_summary_and_the_last_parse(request) -> dict:
-    lists = citable_lists(request)
-    return {
-        "answer": "Halloran memo",
-        "provenance_ids": {
-            "summary_ids": lists["summary_ids"]["items"]["enum"][:1],
-            "parse_ids": lists["parse_ids"]["items"]["enum"][-1:],
-        },
-    }
+def citing_the_first_summary(answer: str, parses_from: int):
+    """A direct reasoning reply of ``answer`` citing the first summary its schema
+    lists, and the parses it lists from ``parses_from`` on."""
+
+    def reply(request) -> dict:
+        lists = citable_lists(request)
+        return {
+            "answer": answer,
+            "provenance_ids": {
+                "summary_ids": lists["summary_ids"]["items"]["enum"][:1],
+                "parse_ids": lists["parse_ids"]["items"]["enum"][parses_from:],
+            },
+        }
+
+    return reply
 
 
 def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     answering_llm, shown_ids, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
-    documents = [f"{memo}\nThe {memo} logs two sites." for memo in [*DOCS, "Calder"]]
     llm = answering_llm.answers(
         relevance=quoting_a_line_a_round(shown_ids),
         parsing=citing_its_own_note,
-        reasoning=cites_the_first_summary_and_the_last_parse,
+        reasoning=citing_the_first_summary("Halloran memo", parses_from=-1),
     )
     events = []
-    result = answer(llm, logger, documents=documents, on_event=events.append)
+    result = answer(llm, logger, documents=TWO_LINE_MEMOS, on_event=events.append)
     ids = result.document_ids
 
     def line(i: int, k: int) -> dict:
-        text = documents[i].splitlines()[k]
-        start = documents[i].index(text)
+        text = TWO_LINE_MEMOS[i].splitlines()[k]
+        start = TWO_LINE_MEMOS[i].index(text)
         return {
             "document": ids[i],
             "start": start,
@@ -463,6 +463,14 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
     assert finished["provenance"] == result.provenance
+
+
+def test_a_cited_parse_that_cites_no_snippet_adds_no_quotes(answering_llm, shown_ids):
+    llm = answering_llm.answers(relevance=quoting_a_line_a_round(shown_ids))
+    result = answer(llm, documents=TWO_LINE_MEMOS)
+    assert result.provenance["parse_ids"] == result.document_ids
+    assert result.parsing_provenance == [[], [], []]
+    assert result.provenance["quotes"] == []
 
 
 @pytest.mark.parametrize(
@@ -561,17 +569,8 @@ def test_every_later_stage_reads_the_final_rounds_notes_only(answering_llm):
 def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     answering_llm, shows_the_notes_and_the_stamped_parse, tmp_path
 ):
-    def cites_the_first_summary_and_the_second_parse(request):
-        lists = citable_lists(request)
-        return {
-            "answer": "Halloran and Merrow.",
-            "provenance_ids": {
-                "summary_ids": lists["summary_ids"]["items"]["enum"][:1],
-                "parse_ids": lists["parse_ids"]["items"]["enum"][1:],
-            },
-        }
-
-    llm = answering_llm.answers(reasoning=cites_the_first_summary_and_the_second_parse)
+    reply = citing_the_first_summary("Halloran and Merrow.", parses_from=1)
+    llm = answering_llm.answers(reasoning=reply)
     logger, result = memos_run(llm, DOCS, MODEL, tmp_path)
     ids = result.document_ids
     [request] = llm.requests_for("reasoning")
