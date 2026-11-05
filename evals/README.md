@@ -38,6 +38,9 @@ uv run python -m evals --resume evals/runs/<folder>
 uv run python -m evals --ask-over evals/runs/<folder> --model <model>   # see below
 ```
 
+A manual CI run with `eval` on runs the full eval on GitHub's runner and uploads
+`results.jsonl` and the run folder as the `eval-run` artifact.
+
 The first run downloads the data (about 150 MB) into `evals/.cache/` and checks each file's
 SHA-256. Each run writes to `evals/runs/<UTC time>_<hex>/`: `run.json` (the commit and run
 label it started with), then per task `<benchmark>/<task id>/` with `answer.json` (r3con's
