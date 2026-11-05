@@ -156,29 +156,17 @@ repeats the final reasoning step.
 
 #### Provenance
 
-`result.provenance` shows what the answer is based on:
+`result.provenance["quotes"]` lists the sentences the answer is based on.
+Each has the document's `name`, the quoted `text`, and its `start` and `end`
+characters in that document:
 
 ```python
-{
-    "quotes": [  # the sentences behind the answer
-        {
-            "name": "q3/ardent.pdf",  # the file it is in
-            "text": "Ardent missed 8 delivery windows.",  # the sentence
-            "start": 120,  # where it is in the file's text
-            "end": 153,
-            "document": "3f9a1c",  # the file's ID
-        },
-        # ...
-    ],
-    "summary_ids": ["3f9a1c"],  # files whose relevant text the answer used
-    "parse_ids": ["3f9a1c"],  # files whose extracted information the answer used
-}
+quote = result.provenance["quotes"][0]
+print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
 ```
 
-`result.document_ids` lists each file's ID, in the same order as
-`result.document_names`. An answer from `r3con.ask` has its provenance too.
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
-follows an answer back to its sources step by step.
+shows the rest of the provenance.
 
 ## Notebooks
 
