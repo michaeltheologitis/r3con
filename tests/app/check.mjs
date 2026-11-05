@@ -168,6 +168,7 @@ const ANSWERED_RUN_COUNTS = { nodes: SAMPLE_COUNTS.nodes, answers: 1 };
 const SHORT_DESKTOP = { width: 1440, height: 450 };
 // 16:9, where the sample's answer with its sentences listed open runs past the end of the chat.
 const WIDESCREEN = { width: 1440, height: 810 };
+const LANDING_SIZES = { '1440×810': WIDESCREEN, '1440×450': SHORT_DESKTOP };
 // The page's TIMING.litDelay and ARRANGE_MS: a replay lights its answer this long after it lands, and arrange slides this long.
 const LIT_DELAY_MS = 650;
 const ARRANGE_MS = 420;
@@ -1229,20 +1230,23 @@ async function chatLog() {
     check('chat log', 'steps logged into a folded log leave the chat where it was scrolled, and the answer still scrolls it', stayed && landed, `scrolls ${scrolls}; stayed ${stayed}; scrolled on the answer ${landed}`);
   });
 
-  await withPage('chat log', { sample: false }, async (page) => {
-    await page.setViewportSize(WIDESCREEN);
-    await runSample(page);
-    const run = await newestAnswer(page);
-    check('chat log', "1440×810: once the sample's answer lands, the chat shows its whole text", inChat(run.answer, run.chat), JSON.stringify(run));
-    await send(page, recordedAsks()[0].question);
-    const ask = await newestAnswer(page);
-    check('chat log', "1440×810: once an ask's answer lands, the chat shows its whole text", inChat(ask.answer, ask.chat), JSON.stringify(ask));
-    await page.locator('.sentences > summary').last().click();
-    const opened = await newestAnswer(page);
-    const stayed = opened.top === ask.top && opened.answer.top === ask.answer.top && opened.listed?.top > opened.answer.bottom;
-    const openName = "1440×810: opening an answer's sentences leaves the chat where it was scrolled, the answer in place and the list open under it";
-    check('chat log', openName, stayed, JSON.stringify({ ask, opened }));
-  });
+  for (const [size, viewport] of Object.entries(LANDING_SIZES)) {
+    await withPage('chat log', { sample: false }, async (page) => {
+      await page.setViewportSize(viewport);
+      await runSample(page);
+      const run = await newestAnswer(page);
+      check('chat log', `${size}: once the sample's answer lands, the chat shows its whole text`, inside(run.answer, run.chat), JSON.stringify(run));
+      await send(page, recordedAsks()[0].question);
+      const ask = await newestAnswer(page);
+      check('chat log', `${size}: once an ask's answer lands, the chat shows its whole text`, inside(ask.answer, ask.chat), JSON.stringify(ask));
+      await page.locator(`${CHAT} .turn:last-child .sentences > summary`).click();
+      const opened = await newestAnswer(page);
+      const { answer, listed, chat } = opened;
+      const stayed = opened.top === ask.top && answer.top === ask.answer.top && listed?.top > answer.bottom && listed.top < chat.bottom;
+      const openName = `${size}: opening an ask's sentences leaves the chat where it was scrolled, the answer in place and the list open in view under it`;
+      check('chat log', openName, stayed, JSON.stringify({ ask, opened }));
+    });
+  }
 }
 
 async function arrange() {
@@ -2073,6 +2077,11 @@ function sentenceLists() {
   });
 }
 
+// Opens the shown chat's first list of sentences, unless it is open already.
+async function openSentences(page) {
+  if (!(await page.$eval(`${CHAT} .sentences`, (list) => list.open))) await page.click(`${CHAT} .sentences > summary`);
+}
+
 // In-page: the flashed part of the open popup's text, whether it is marked, how it is drawn, and whether it is in view
 // in its text and the popup.
 function flashed() {
@@ -2202,15 +2211,12 @@ async function quotesArea() {
 
     await page.keyboard.press('Escape');
     const lists = await page.evaluate(sentenceLists);
-    await page.click('.sentences > summary');
+    await openSentences(page);
     const openedList = await page.evaluate(sentenceLists);
-    await page.click('.sentences > summary');
-    const foldedAgain = await page.evaluate(sentenceLists);
     const foldedList = { line: SAMPLE_QUOTED.line, open: false, shown: false, marker: '"▸ "', docs: run.docs };
-    const listed = [lists, foldedAgain].every((l) => isDeepStrictEqual(l, [foldedList])) && isDeepStrictEqual(openedList, [{ ...foldedList, open: true, shown: true, marker: '"▾ "' }]);
-    const listName = "under the answer the chat lists its trail's sentences, ▸ folded: N sentences from M documents; a click opens it to each document's name and its sentences, marked, and another folds it again";
-    check('quotes', listName, listed, JSON.stringify([lists, openedList, foldedAgain].map((l) => l[0] && [l[0].open, l[0].shown, l[0].marker])));
-    await page.click('.sentences > summary');
+    const listed = isDeepStrictEqual(lists, [foldedList]) && isDeepStrictEqual(openedList, [{ ...foldedList, open: true, shown: true, marker: '"▾ "' }]);
+    const listName = "under the answer the chat lists its trail's sentences, ▸ folded: N sentences from M documents; a click opens it to each document's name and its sentences, marked";
+    check('quotes', listName, listed, JSON.stringify([lists, openedList].map((l) => l[0] && [l[0].open, l[0].shown, l[0].marker])));
     await page.click('.sentences .sentence >> nth=0');
     const fromChat = { title: (await popup(page))?.title, flash: (await page.evaluate(flashed))?.text };
     const chatName = "a sentence in the chat's list opens its document's popup at it, flashed";
@@ -2343,7 +2349,7 @@ async function quotesArea() {
     await page.click('#inspector .quote >> nth=0');
     const fromQuote = { flash: await page.evaluate(flashed), meta: (await page.evaluate(marksIn, '#inspector')).meta };
     await page.keyboard.press('Escape');
-    await page.click('.sentences > summary');
+    await openSentences(page);
     await page.click('.sentences .sentence >> nth=0');
     const fromChat = await page.evaluate(flashed);
     const sentence = sample.r2[0].quotes[0].text;
@@ -2858,23 +2864,19 @@ function chatState(page) {
   return page.evaluate(read, CHAT);
 }
 
-// The shown chat's box and scroll, and its newest answer's text and the first document listed under it, if shown, in the
-// next frame, once the page has scrolled it.
-function newestAnswer(page) {
-  const read = (selector) => new Promise((resolve) => requestAnimationFrame(() => {
+// chatState, and the boxes of the shown chat, its newest answer's text and the first document listed under that answer,
+// or null where none is shown.
+async function newestAnswer(page) {
+  const state = await chatState(page);
+  const boxes = (selector) => {
     const chat = document.querySelector(selector);
     const line = [...chat.querySelectorAll('.line.answer')].at(-1);
-    const box = (el) => {
-      const { top, bottom } = el.getBoundingClientRect();
-      return { top: Math.round(top), bottom: Math.round(bottom) };
-    };
-    const listed = line.nextElementSibling.querySelector('.quoted');
-    resolve({ answer: box(line.querySelector('.t')), listed: listed.checkVisibility() ? box(listed) : null, chat: box(chat), top: chat.scrollTop });
-  }));
-  return page.evaluate(read, CHAT);
+    const listed = line.nextElementSibling?.querySelector('.quoted');
+    const box = (el) => el.getBoundingClientRect().toJSON();
+    return { chat: box(chat), answer: box(line.querySelector('.t')), listed: listed?.checkVisibility() ? box(listed) : null };
+  };
+  return { ...state, ...(await page.evaluate(boxes, CHAT)) };
 }
-
-const inChat = (box, chat) => box.top >= chat.top && box.bottom <= chat.bottom;
 
 // Tab i's × enables once its run has ended.
 function tabEnded(i) {
@@ -2986,9 +2988,9 @@ async function tabs() {
     await page.click('#tab-files');
     const ended = await becomes(page, statusIs, SAMPLE_STATUS, REPLAY_MS);
     await page.click('#tab-chat');
-    const landed = await chatState(page);
-    const landedName = 'a run that ends while the files pane is shown leaves its chat at its newest line once the chat is shown';
-    check('tabs', landedName, ended && landed.end > 0 && landed.top === landed.end, `ended ${ended}; at ${landed.top} of ${landed.end}`);
+    const landed = await newestAnswer(page);
+    const landedName = 'a run that ends while the files pane is shown scrolls its chat to its answer once the chat is shown';
+    check('tabs', landedName, ended && landed.top > 0 && inside(landed.answer, landed.chat), `ended ${ended}; at ${landed.top} of ${landed.end}`);
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const left = await scrollChatTo(page, 1 / 2);
