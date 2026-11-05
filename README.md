@@ -1,3 +1,4 @@
+
 # r3con
 
 [![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
@@ -41,7 +42,7 @@ You can also put them in a `.env` file in your working directory.
 
 ### Command line
 
-Pass a directory, glob, or list of files:
+Pass a folder containing documents:
 
 ```bash
 r3con run "Which supplier missed the most delivery windows?" ./reports \
@@ -59,22 +60,33 @@ hosted_vllm/Qwen/Qwen3.5-35B-A3B
 
 The default is `openai/gpt-6-luna`.
 
-Directories are searched recursively. You can also use glob patterns or pass files directly:
+You can read an entire folder, select files using patterns, or specify individual files:
 
 ```bash
+# All supported files in the reports folder and its subfolders
+r3con run "Who approved the Q3 overspend?" ./reports
+
+# Only PDF files directly inside reports
 r3con run "Who approved the Q3 overspend?" "./reports/*.pdf"
+
+# PDF files inside reports and its subfolders
 r3con run "Who approved the Q3 overspend?" "./reports/**/*.pdf"
+
+# Only these three files
 r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md
 ```
 
-Quote glob patterns so your shell passes them to `r3con` unchanged. A directory or a
-quoted glob reads only files inside that directory, or the glob's part before its first
-wildcard, and logs and skips a link that points outside it; a file you name is read as
-named.
+Put file patterns containing `*` in quotes, as shown above. `*` matches filenames,
+while `**` also lets you search subfolders.
+
+When you select a folder or use a file pattern, r3con only reads files inside
+that folder. If a link points to a file outside it, r3con skips it and records
+that it was skipped. You can also specify individual files directly, like
+`q1.md q2.md q3.md`, to read exactly those files.
 
 ### Python
 
-Load documents from a directory, glob, or list of files:
+Load documents from a directory, glob pattern, or list of files:
 
 ```python
 from r3con import r3con
@@ -88,10 +100,12 @@ print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total.
 ```
 
 `read_documents` reads PDF and Word (`.docx`) files, and text files such as `.txt`,
-`.md`, `.csv`, `.json`, `.html` and `.xml`, and skips a folder's hidden files and folders;
-a glob's wildcards skip them too, as in the shell. It returns each document's text by its
-name, the file's path below the folder (`{"q3/ardent.pdf": "...", ...}`), and the answer
-names the documents it quotes:
+`.md`, `.csv`, `.json`, `.html` and `.xml`. It skips hidden files and folders
+when reading a directory or using file patterns.
+
+It returns the text of each document, using its path within the folder as its
+name (`{"q3/ardent.pdf": "...", ...}`). The answer also identifies the documents
+it quotes:
 
 ```python
 quote = result.provenance["quotes"][0]
@@ -107,21 +121,26 @@ result = r3con.run(
 )
 ```
 
-`documents` is a list of strings, one per document, or a dict of them by name, as
-`read_documents` returns. `result.document_names` lists each document's name; a list's
-documents are named by index, `"0"`, `"1"`, …, so `documents[int(name)]` is the document.
+`documents` can be a list of strings (one per document) or a dictionary mapping
+document names to their text, as returned by `read_documents`.
 
-To ask another question over the same run, `r3con.ask` runs only the reasoning step
-again:
+`result.document_names` lists each document's name. If you pass a list, the
+documents are named by their position: `"0"`, `"1"`, and so on. You can access
+the original document using `documents[int(name)]`.
+
+To ask another question over the same run, `r3con.ask` reuses the existing
+representation and only runs the reasoning step again:
 
 ```python
 other = r3con.ask(result, "Which supplier delivered on time most often?")
 print(other)
 ```
 
-Pass `cancel=threading.Event()` to `run` or `ask` and set it to stop: no new model call is
-sent and it raises `r3con.Cancelled`, keeping what it did. A call already sent, and
-retries you set yourself (`completion=` or `params`), run their course.
+You can stop `run` or `ask` using `cancel=threading.Event()`. When you set that
+event, r3con stops sending new requests to the model and raises
+`r3con.Cancelled`. Work already completed is kept. Requests already sent to
+the model will still finish, including any retries you configured yourself
+through `completion=` or `params`.
 
 ## Notebooks
 
@@ -147,18 +166,21 @@ result.structured_context  # dict      — structured representation
 result.run_dir  # Path      — directory containing run artifacts
 ```
 
-r3con also records provenance, how the answer, each relevance snippet and each parse came
-to be; see [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
+r3con also records where the answer, each relevance snippet, and each parsed
+record came from; see [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb).
 
 ## Run artifacts
 
-Every run writes each stage's output and model calls, failed ones included, with their
-tokens, cost, and any resends and the wait between them, to a folder under `./logs`.
-API keys a provider's error echoes are masked before r3con writes or logs them; a
-`completion=` wrapper that adds its own key registers it with
-`r3con.masking.register_key(key)`.
+Every run saves the output of each stage and records of its model calls, including
+failed calls, to a folder under `./logs`. These records include token usage,
+cost, retries, and how long r3con waited between retries.
 
-```
+If a provider includes an API key in an error message, r3con masks it before
+saving or logging the error. If you use a custom `completion=` wrapper that
+adds its own API key, register it with `r3con.masking.register_key(key)` so
+r3con can mask that key too.
+
+```text
 logs/<timestamp>_<hex>/          <- result.run_dir
 ├── ids.json                     <- each document's id
 ├── names.json                   <- each document's name, by its id
