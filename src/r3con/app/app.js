@@ -8,6 +8,7 @@
   /** @typedef {{ x: number, y: number }} Point */
   /** @typedef {{ x: number, y: number, k: number }} View */
   /** @typedef {{ left: number, top: number }} Offset */
+  /** @typedef {{ dist: number, mid: Point, view: View }} Pinch */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
   // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
   /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
@@ -95,11 +96,10 @@
    *   provenance: Provenance, totals: Totals }} RecordedAsk
    */
   /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement }} PanelNode */
-  /** @typedef {PanelNode & { file: LoadedFile }} DocNode */
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
   /**
    * @typedef {object} Tab
-   * @property {number | null} id
+   * @property {number} id
    * @property {LoadedFile[]} files
    * @property {string} filesSaid
    * @property {string} filesError
@@ -126,7 +126,6 @@
    * @property {number} arrangeFrame
    * @property {Trail | null} trail the lit answer's, while the panel has one lit
    */
-  /** @typedef {Omit<Tab, 'button' | 'close'> & { button: HTMLButtonElement | null, close: HTMLButtonElement | null }} NewTab A tab openTab hasn't listed yet. */
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
@@ -172,7 +171,7 @@
    * @property {(tab: RunTab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
    * @property {(tab: Tab) => void} stop
-   * @property {(question: string) => void} ask over the shown tab's run, which has answered
+   * @property {(tab: RunTab, question: string) => void} ask
    * @property {(provider: string, key: string) => Promise<KeyStatus>} saveKey
    * @property {(endpoint: string, key: string) => Promise<KeyStatus>} saveServer
    * @property {(provider: string) => Promise<KeyStatus>} forgetKey
@@ -869,6 +868,7 @@
   }
 
   let nextUid = 0;
+  let nextTab = 1;
 
   /** @param {Omit<LoadedFile, 'bytes' | 'uid'>} file @returns {LoadedFile} */
   function loaded(file) {
@@ -884,9 +884,12 @@
   // A node the caller knows the tab has drawn.
   /** @param {Tab} tab @param {string} id */
   const drawnNode = (tab, id) => /** @type {PanelNode} */ (tab.nodes.get(id));
+  // A tab the caller knows has a run.
+  /** @param {Tab} tab */
+  const runTab = (tab) => /** @type {RunTab} */ (tab);
 
   // A tab's files are only ever reassigned, never changed in place, so tabs can share a list.
-  /** @param {LoadedFile[]} files @param {View} [view] @returns {NewTab} */
+  /** @param {LoadedFile[]} files @param {View} [view] */
   function newTab(files, view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
     const layers = { base: group(), mid: group(), lit: group() };
@@ -895,15 +898,18 @@
     edges.setAttribute('aria-hidden', 'true');
     edges.append(layers.base, layers.mid, layers.lit);
     const nodesEl = h('div');
-    return {
-      id: null,
+    const id = nextTab++;
+    /** @type {Tab} */
+    const tab = {
+      id,
       files,
       filesSaid: '',
       filesError: '',
       draft: '',
       adding: Promise.resolve(),
-      button: null,
-      close: null,
+      button: h('button', { class: 'btn run-tab', id: `run-tab-${id}`, type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) }, h('span', { class: 'num' }, `${id} `)),
+      // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
+      close: h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×'),
       run: null,
       // A chat shown again isn't read out: a live region announces what changes in it, not what it holds.
       chat: h('div', { class: 'transcript', 'aria-live': 'polite', hidden: true }),
@@ -924,17 +930,17 @@
       arrangeFrame: 0,
       trail: null,
     };
+    return tab;
   }
 
   /**
-   * @type {{ tabs: Tab[], shown: Tab, nextTab: number, streams: Set<Stream>,
+   * @type {{ tabs: Tab[], shown: Tab, streams: Set<Stream>,
    *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
    */
   const state = {
     // Every tab, in order; init lists the first, the shown tab, with the sample memos.
     tabs: [],
-    shown: /** @type {Tab} */ (newTab(SAMPLE_FILES)),
-    nextTab: 1,
+    shown: newTab(SAMPLE_FILES),
     // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
     streams: new Set(),
@@ -1065,9 +1071,9 @@
   /** @param {Tab} tab @param {string} id */
   function nodeName(tab, id) {
     const [kind, d] = splitId(id);
-    if (kind === 'doc') return /** @type {DocNode | undefined} */ (tab.nodes.get(id))?.file.name ?? 'document';
+    if (kind === 'doc') return tab.nodes.get(id)?.file?.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    const run = /** @type {Run} */ (tab.run);
+    const { run } = runTab(tab);
     if (kind === 'answer') return answerLabel(answerAt(run, id));
     return `${docLabel(run, d)} · ${KIND_SUFFIX[kind]}`;
   }
@@ -1151,7 +1157,7 @@
         });
         if (done) return;
         const frames = (buffer + value).split(/\r?\n\r?\n/);
-        buffer = /** @type {string} */ (frames.pop());
+        buffer = frames.pop() ?? '';
         for (const data of frames.map(frameData).filter(Boolean)) yield JSON.parse(data);
       }
     } finally {
@@ -1430,7 +1436,7 @@
     /** @type {Map<string, string>} */
     const citedBy = new Map();
     for (const id of nodes) {
-      for (const from of /** @type {string[]} */ ([ownDocument(run, id), ...cites(run, id)].filter(Boolean))) {
+      for (const from of [ownDocument(run, id), ...cites(run, id)].filter((from) => from !== null)) {
         if (/** @type {NodeKind[]} */ (SUMMARY_KINDS).includes(splitId(from)[0]) && !nodes.has(from)) citedBy.set(from, id);
         nodes.add(from);
         edges.add(`${from}>${id}`);
@@ -1475,7 +1481,7 @@
   function citerName(tab, id) {
     const [kind, d] = splitId(id);
     if (kind === 'answer') return 'the answer';
-    return kind === 'parsed' ? `the ${docLabel(/** @type {Run} */ (tab.run), d)} parse` : nodeName(tab, id);
+    return kind === 'parsed' ? `the ${docLabel(runTab(tab).run, d)} parse` : nodeName(tab, id);
   }
 
   // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary.
@@ -1570,9 +1576,8 @@
   /** @param {Tab} tab @param {Origin} origin */
   function plan(tab, origin) {
     const layout = gridLayout(tab.files, origin);
-    if (!tab.run) return layout;
-    // A run has files, so the grid has its answer.
-    const first = /** @type {Point} */ (layout.get(RUN_ANSWER));
+    const first = layout.get(RUN_ANSWER);
+    if (!tab.run || !first) return layout;
     tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
   }
@@ -1646,7 +1651,7 @@
   function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = answerAt(/** @type {Run} */ (tab.run), node.id);
+      const { question, model } = answerAt(runTab(tab).run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
@@ -2090,7 +2095,7 @@
   function markedFile(tab, file, at = null) {
     const shown = shownPart(file, at);
     /** @param {Trail | null} trail */
-    const quotedOf = (trail) => trail?.quoted[/** @type {Run} */ (tab.run).docs.indexOf(file)];
+    const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
@@ -2099,7 +2104,7 @@
     };
     const meta = trailPart(tab, h('div', { class: 'k' }), line);
     if (!file.text) return [meta, h('p', { class: 'k' }, 'This file has no readable text.')];
-    // Only a trail has spans, so a span is titled only with one.
+    // Spans come only with a trail.
     /** @param {Trail | null} trail */
     const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at);
     return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
@@ -2143,14 +2148,14 @@
     return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
   }
 
-  /** @param {DocNode} node @param {TextRange | null} at */
-  function docBody(node, at) {
+  /** @param {LoadedFile} file @param {TextRange | null} at */
+  function docBody(file, at) {
     const { run, nodes } = state.shown;
-    const index = run ? run.docs.indexOf(node.file) : -1;
+    const index = run ? run.docs.indexOf(file) : -1;
     return [
-      markedFile(state.shown, node.file, at),
+      markedFile(state.shown, file, at),
       index >= 0 && nodes.has(`r1-${index}`) ? row('relevance snippet', refs([`r1-${index}`])) : null,
-      openFileButton(node.file, 'open in files ›'),
+      openFileButton(file, 'open in files ›'),
     ];
   }
 
@@ -2174,8 +2179,8 @@
   function inspectorBody(id, at) {
     const [kind, d] = splitId(id);
     const node = drawnNode(state.shown, id);
-    if (kind === 'doc') return docBody(/** @type {DocNode} */ (node), at);
-    const tab = /** @type {RunTab} */ (state.shown);
+    if (kind === 'doc') return docBody(/** @type {LoadedFile} */ (node.file), at);
+    const tab = runTab(state.shown);
     const { run } = tab;
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
@@ -2252,7 +2257,7 @@
     inspector.hidden = false;
     inspector.scrollTop = 0;
     renderInspector(at);
-    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(/** @type {RunTab} */ (state.shown), id);
+    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(runTab(state.shown), id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
   }
@@ -2539,7 +2544,7 @@
       return;
     }
     if (asks) {
-      mode.ask(question);
+      mode.ask(runTab(state.shown), question);
     } else if (!state.shown.files.length) {
       addTurn(state.shown, question).append(line('main', 'Add files in the files tab first, then ask again.', { dim: true }));
     } else {
@@ -3048,22 +3053,15 @@
     return tab.files.length ? `new · ${plural(tab.files.length, 'file')}` : 'new';
   }
 
-  /** @param {Tab} tab */
-  const tabButtonId = (tab) => `run-tab-${tab.id}`;
   // A tab can't close while its run or an ask over it is going.
   /** @param {Tab} tab */
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
-  // Lists the tab. The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
-  /** @param {NewTab} unlisted */
-  function openTab(unlisted) {
-    // Its buttons are made below, before anything reads them.
-    const tab = /** @type {Tab} */ (unlisted);
-    tab.id = state.nextTab++;
+  // Lists the tab.
+  /** @param {Tab} tab */
+  function openTab(tab) {
     state.tabs.push(tab);
-    const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
-    tab.button = h('button', props, h('span', { class: 'num' }, `${tab.id} `), tabLabel(tab));
-    tab.close = h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×');
+    tab.button.append(tabLabel(tab));
     $('run-tabs').append(tab.button, tab.close);
     $('ask-form').before(tab.chat);
     if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab)}.`);
@@ -3074,10 +3072,10 @@
     for (const tab of state.tabs) {
       const shown = tab === state.shown;
       const label = tabLabel(tab);
-      const labelText = /** @type {ChildNode} */ (tab.button.lastChild);
+      const labelNode = /** @type {ChildNode} */ (tab.button.lastChild);
       // A label grows as files are added, which can push the shown tab out of the row's view.
-      if (labelText.textContent !== label) {
-        labelText.textContent = label;
+      if (labelNode.textContent !== label) {
+        labelNode.textContent = label;
         if (shown) revealTab(tab);
       }
       tab.button.setAttribute('aria-selected', String(shown));
@@ -3087,7 +3085,7 @@
       tab.button.ariaKeyShortcuts = tab.close.hidden || tab.close.disabled ? null : 'Delete';
     }
     panel.setAttribute('role', 'tabpanel');
-    panel.setAttribute('aria-labelledby', tabButtonId(state.shown));
+    panel.setAttribute('aria-labelledby', state.shown.button.id);
   }
 
   /** @param {Tab} tab */
@@ -3199,11 +3197,11 @@
   // In place, so that a focused file stays focused: how many sentences the lit answer's trail quotes of each file, and
   // the files off it dimmed.
   function markFiles() {
-    const { run, trail } = state.shown;
+    const { files, trail } = state.shown;
     $('file-list').querySelectorAll('.file').forEach((button, d) => {
       const sentences = trail?.quoted[d].sentences.length ?? 0;
       const named = plural(sentences, 'highlighted sentence');
-      button.classList.toggle('off', Boolean(trail && !trail.nodes.has(docId(/** @type {Run} */ (run).docs[d]))));
+      button.classList.toggle('off', Boolean(trail && !trail.nodes.has(docId(files[d]))));
       fill(/** @type {Element} */ (button.querySelector('.used')), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
     });
   }
@@ -3449,7 +3447,7 @@
   // What is dropped is taken as it is; what is in a dropped folder, as folderTakes says.
   /** @param {DataTransfer} dataTransfer @returns {Promise<Picked>} */
   async function filesFromDrop(dataTransfer) {
-    const entries = /** @type {FileSystemEntry[]} */ ([...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean));
+    const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter((entry) => entry != null);
     if (!entries.length) return { files: [...dataTransfer.files], skipped: 0, failed: [] };
     /** @type {Picked} */
     const dropped = { files: [], skipped: 0, failed: [] };
@@ -3547,7 +3545,7 @@
     for (const provider of Object.keys(PROVIDERS)) {
       const { text, removable } = keyState(provider, status);
       $(`state-${provider}`).textContent = text;
-      /** @type {HTMLElement} */ ($(`state-${provider}`).parentElement).hidden = !text;
+      $(`key-state-${provider}`).hidden = !text;
       $(`remove-${provider}`).hidden = !removable;
     }
     renderServers(serversOf(status));
@@ -3759,7 +3757,7 @@
       const marker = h('span', { id: `state-${provider}` });
       const forgetIt = () => forget(() => mode.forgetKey(provider), label, `key-${provider}`);
       const remove = h('button', { class: 'btn remove', id: `remove-${provider}`, type: 'button', 'aria-label': `remove ${label} key`, onclick: forgetIt }, 'remove');
-      const state = h('div', { class: 'k key-state', hidden: true }, marker, remove);
+      const state = h('div', { class: 'k key-state', id: `key-state-${provider}`, hidden: true }, marker, remove);
       const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
       return [h('label', { for: key.id }, `${label} API key`), key, state];
     });
@@ -3865,7 +3863,7 @@
 
   /**
    * @type {{ pointers: Map<number, Point>, mode: 'pinch' | 'drag' | 'pan' | null, moved: boolean, origin: Point,
-   *   from: Point, node: PanelNode | null, pinch: { dist: number, mid: Point, view: View } | null }}
+   *   from: Point, node: PanelNode | null, pinch: Pinch | null }}
    */
   const gesture = { pointers: new Map(), mode: null, moved: false, origin: { x: 0, y: 0 }, from: { x: 0, y: 0 }, node: null, pinch: null };
 
@@ -3886,7 +3884,7 @@
   function updatePinch() {
     const { view } = state.shown;
     const [a, b] = [...gesture.pointers.values()];
-    const p = /** @type {NonNullable<typeof gesture.pinch>} */ (gesture.pinch);
+    const p = /** @type {Pinch} */ (gesture.pinch);
     const k = clamp((p.view.k * Math.hypot(a.x - b.x, a.y - b.y)) / p.dist, ZOOM.min, ZOOM.max);
     const mid = panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
     const wx = (p.mid.x - p.view.x) / p.view.k;
@@ -3902,7 +3900,7 @@
   /** @param {PointerEvent} e */
   function overTrash(e) {
     const { node } = gesture;
-    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && /** @type {PanelNode} */ (node).kind === 'doc';
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node?.kind === 'doc';
     if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
@@ -3968,7 +3966,7 @@
   /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
-    const trashed = e.type === 'pointerup' && overTrash(e) ? /** @type {PanelNode} */ (gesture.node).file : null;
+    const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node?.file : null;
     if (gesture.mode === 'pinch') {
       if (!gesture.pointers.size) endGesture();
       return;
@@ -4175,7 +4173,7 @@
       saveSettings();
     });
     $('fit-btn').addEventListener('click', refit);
-    $('replay-btn').addEventListener('click', () => state.shown.run && playRun(/** @type {RunTab} */ (state.shown)));
+    $('replay-btn').addEventListener('click', () => state.shown.run && playRun(runTab(state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
     $('new-tab-btn').addEventListener('click', () => {
       const tab = openTab(newTab([]));
@@ -4304,7 +4302,7 @@
       const narr = /** @type {Narrator} */ (tab.narr);
       failRun(tab, narr, { outcome: inStage('stopped', narr.stage), error: '' });
     },
-    ask: (question) => prototypeAsk(/** @type {RunTab} */ (state.shown), question, pickedModel()),
+    ask: (tab, question) => prototypeAsk(tab, question, pickedModel()),
     async saveKey(provider, key) {
       keyed.set(provider, { source: 'here', hint: hintOf(key) });
       return prototypeStatus();
@@ -4360,7 +4358,7 @@
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
-    ask: (question) => askOver(/** @type {RunTab} */ (state.shown), question, pickedModel(), pickedEndpoint()),
+    ask: (tab, question) => askOver(tab, question, pickedModel(), pickedEndpoint()),
     saveKey: async (provider, key) => (await api('/api/keys', { method: 'POST', body: { provider, key } })).json(),
     saveServer: async (endpoint, key) => (await api('/api/keys', { method: 'POST', body: { provider: 'other', endpoint, key: key || undefined } })).json(),
     forgetKey: async (provider) => (await api('/api/keys', { method: 'DELETE', body: { provider } })).json(),
