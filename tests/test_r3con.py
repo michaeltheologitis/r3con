@@ -26,6 +26,7 @@ from tests.documents import (
     write_docx,
     write_pdf,
 )
+from tests.fakes import is_later_round
 
 # A paragraph whose second run Word tracks as inserted, and third as deleted.
 TRACKED_CHANGES = (
@@ -164,6 +165,28 @@ def bad_key() -> litellm.AuthenticationError:
     return litellm.AuthenticationError(
         message="bad key", llm_provider="openai", model="gpt-6-luna"
     )
+
+
+def quoting_only_in_round_one(shown_ids):
+    """A relevance reply quoting the whole document in round 1, and later quoting
+    nothing and citing the first id shown."""
+
+    def reply(request):
+        if not is_later_round(request):
+            document = request["messages"][1]["content"]
+            return {"summary": f"Notes on {document}.", "quotes": [document]}
+        cites = shown_ids(request)[:1]
+        return {"summary": "Later notes.", "quotes": [], "provenance_ids": cites}
+
+    return reply
+
+
+def citing_the_first_summary(request) -> dict:
+    """A direct reasoning reply citing the first summary its prompt shows."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    shown = schema["$defs"]["ProvenanceIds"]["properties"]["summary_ids"]
+    provenance_ids = {"summary_ids": shown["items"]["enum"][:1], "parse_ids": []}
+    return {"answer": "Halloran memo", "provenance_ids": provenance_ids}
 
 
 def write_tree(root: Path) -> None:
@@ -305,7 +328,11 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         logs_dir=tmp_path,
     )
     assert result.answer == "Halloran memo; Merrow memo"
-    assert result.provenance == {"summary_ids": [], "parse_ids": result.document_ids}
+    assert result.provenance == {
+        "summary_ids": [],
+        "parse_ids": result.document_ids,
+        "quotes": [],
+    }
     assert result.relevance_provenance == [[], []]
     assert result.parsing_provenance == [[], []]
     folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
@@ -731,7 +758,8 @@ def test_an_ask_answers_over_the_runs_representation_citing_only_its_ids(
     result = finished_run(answering_llm, tmp_path, relevance_rounds=rounds)
     asked = ask(result, "Who else?", completion=answering_llm)
     assert asked.answer == JOINED
-    cited = {id_.partition(".")[0] for ids in asked.provenance.values() for id_ in ids}
+    views = (asked.provenance["summary_ids"], asked.provenance["parse_ids"])
+    cited = {id_.partition(".")[0] for ids in views for id_ in ids}
     assert cited
     assert cited <= set(result.document_ids)
     assert asked.run_dir.parent == result.run_dir / "asks"
@@ -943,15 +971,46 @@ def test_a_run_folder_an_older_r3con_wrote_is_refused_in_one_line(
     assert not (result.run_dir / "asks").exists()
 
 
-def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked(
-    answering_llm, tmp_path
+def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citations(
+    answering_llm, shown_ids, tmp_path
 ):
-    result = finished_run(answering_llm, tmp_path)
+    llm = answering_llm.answers(
+        relevance=quoting_only_in_round_one(shown_ids),
+        reasoning=citing_the_first_summary,
+    )
+    result = finished_run(llm, tmp_path)
+    events = []
+    asked = ask(result.run_dir, "Who else?", completion=llm, on_event=events.append)
+    ids = result.document_ids
+    merrow = {"document": ids[1], "start": 0, "end": 11, "text": "Merrow memo"}
+    assert asked.provenance == {
+        "summary_ids": [ids[0]],
+        "parse_ids": [],
+        "quotes": [merrow],
+    }
+    assert asked.provenance == result.provenance
+    folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
+    assert folder["provenance"] == asked.provenance
+    [finished] = [e for e in events if e["type"] == "reasoning_finished"]
+    assert finished["provenance"] == asked.provenance
+
+
+def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_nothing(
+    answering_llm, shown_ids, tmp_path
+):
+    llm = answering_llm.answers(
+        relevance=quoting_only_in_round_one(shown_ids),
+        reasoning=citing_the_first_summary,
+    )
+    result = finished_run(llm, tmp_path)
+    assert result.provenance["quotes"]
     in_json("relevance/result.json", snippets_without_quotes)(result.run_dir)
-    asked = ask(result.run_dir, "Who else?", completion=answering_llm)
-    assert asked.answer == JOINED
-    ran, asked_request = answering_llm.requests_for("reasoning")
+    asked = ask(result.run_dir, "Who else?", completion=llm)
+    assert asked.answer == "Halloran memo"
+    ran, asked_request = llm.requests_for("reasoning")
     assert asked_request["messages"][0] == ran["messages"][0]
+    ids = result.document_ids
+    assert asked.provenance == {"summary_ids": [ids[0]], "parse_ids": [], "quotes": []}
 
 
 def test_a_run_that_never_finished_parsing_cannot_be_asked(answering_llm, tmp_path):

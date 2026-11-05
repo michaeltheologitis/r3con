@@ -74,6 +74,7 @@ from r3con.stages.relevance import (
     draw_document_ids,
     join_parts,
     surface_relevance,
+    trail_quotes,
 )
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
@@ -96,6 +97,10 @@ def _sources_as_ids(
     }
 
 
+def _cites_nothing() -> dict[str, list[Any]]:
+    return {**reasoning.cites_nothing(), "quotes": []}
+
+
 @dataclass(frozen=True)
 class Answer:
     """What a run produced: the answer, and the two views it was derived from.
@@ -106,10 +111,16 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
-    - ``provenance`` — the ids the answer used, by view: ``provenance["summary_ids"]``,
-      those of the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of
-      a document read in parts), and ``provenance["parse_ids"]``, those of the
-      documents whose records in ``structured_context`` it used. An id can be in both.
+    - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
+      the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of a
+      document read in parts), ``provenance["parse_ids"]``, those of the documents
+      whose records in ``structured_context`` it used (an id can be in both), and
+      ``provenance["quotes"]``, the sentences of the documents behind it, each
+      ``{document, start, end, text}``: its document's id, its place there
+      (``documents[i][start:end]``) and the model's copy of it. They are the quotes
+      found in their document of every snippet on the answer's trail: those it cites,
+      those the parses it cites cite, and back through what each of these cites, round
+      by round (:func:`r3con.stages.relevance.trail_quotes`).
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
@@ -154,7 +165,7 @@ class Answer:
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
-    provenance: dict[str, list[str]] = field(default_factory=reasoning.cites_nothing)
+    provenance: dict[str, list[Any]] = field(default_factory=_cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
 
@@ -319,7 +330,8 @@ def run_pipeline(
       parts' records in order), and the ids of the relevance snippets the parse used,
       ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
-      ``answer``, ``provenance`` (``{summary_ids, parse_ids}``), ``path``, ``fallback``.
+      ``answer``, ``provenance`` (``{summary_ids, parse_ids, quotes}``, as
+      :attr:`Answer.provenance`), ``path``, ``fallback``.
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
@@ -517,12 +529,16 @@ def run_pipeline(
             len(result.turns),
             _preview(result.answer),
         )
-        record.result = _reasoning_record(result)
+        provenance = _with_quotes(
+            result.provenance, relevance, extraction.provenance, document_ids
+        )
+        record.result = _reasoning_record(result, provenance)
     stage_runs.append(record.run)
-    emit("reasoning_finished", **_reasoning_outcome(result))
+    emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs))
     return _answer(
         result,
+        provenance=provenance,
         relevance=relevance,
         schema_code=proposal.schema_code,
         parsed=parsed,
@@ -571,7 +587,7 @@ def _read_built(run_dir: Path) -> Representation:
         run_dir=run_dir,
         config=RunConfig.model_validate({**manifest["config"], "model": model}),
         document_ids=sorted(ids, key=ids.__getitem__),
-        relevance=_final_round(rounds, ids),
+        relevance=_relevance(rounds, ids),
         schema_code=schema["schema_code"],
         parsed=parsing["parsed"],
         source_docs=parsing["source_docs"],
@@ -579,16 +595,17 @@ def _read_built(run_dir: Path) -> Representation:
     )
 
 
-def _final_round(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
-    """The last of ``rounds``, each document's snippets in a list, one per part, a
+def _relevance(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
+    """Every one of ``rounds``, each document's snippets in a list, one per part, a
     snippet without quotes, as r3context 0.6.4 wrote one, quoting nothing."""
-    if not rounds:
-        return RelevantContext(records=[])
-    final_round: list[list[SnippetRecord]] = [[] for _ in ids]
-    for snippet in rounds[-1]["snippets"]:
-        document = ids[snippet["id"].partition(".")[0]]
-        final_round[document].append(SnippetRecord(**{"quotes": [], **snippet}))
-    return RelevantContext(records=[final_round])
+    records: list[list[list[SnippetRecord]]] = []
+    for round_ in rounds:
+        per_document: list[list[SnippetRecord]] = [[] for _ in ids]
+        for snippet in round_["snippets"]:
+            document = ids[snippet["id"].partition(".")[0]]
+            per_document[document].append(SnippetRecord(**{"quotes": [], **snippet}))
+        records.append(per_document)
+    return RelevantContext(records=records)
 
 
 def _in_one_line(error: Exception) -> str:
@@ -692,11 +709,18 @@ def ask_pipeline(
             run=record.run,
             **llm_kwargs,
         )
-        record.result = _reasoning_record(result)
-    emit("reasoning_finished", **_reasoning_outcome(result))
+        provenance = _with_quotes(
+            result.provenance,
+            built.relevance,
+            built.parsing_provenance,
+            built.document_ids,
+        )
+        record.result = _reasoning_record(result, provenance)
+    emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
     return _answer(
         result,
+        provenance=provenance,
         relevance=built.relevance,
         schema_code=built.schema_code,
         parsed=built.parsed,
@@ -734,21 +758,37 @@ def _llm_kwargs(
     return llm_kwargs
 
 
-def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:
-    """What reasoning concluded: its answer, provenance, path and fallback, as its
-    ``result.json`` and its ``reasoning_finished`` event both give them."""
+def _with_quotes(
+    provenance: dict[str, list[str]],
+    relevance: RelevantContext,
+    parsing_provenance: list[list[str]],
+    document_ids: list[str],
+) -> dict[str, list[Any]]:
+    """The answer's ``provenance`` with its ``quotes`` (:func:`trail_quotes`)."""
+    quotes = trail_quotes(relevance, provenance, parsing_provenance, document_ids)
+    return {**provenance, "quotes": quotes}
+
+
+def _reasoning_outcome(
+    result: reasoning.ReasoningResult, provenance: dict[str, list[Any]]
+) -> dict[str, Any]:
+    """What reasoning concluded: its answer, ``provenance`` (:func:`_with_quotes`), path
+    and fallback, as its ``result.json`` and its ``reasoning_finished`` event both give
+    them."""
     return {
         "answer": result.answer,
-        "provenance": result.provenance,
+        "provenance": provenance,
         "path": result.path,
         "fallback": result.fallback,
     }
 
 
-def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
+def _reasoning_record(
+    result: reasoning.ReasoningResult, provenance: dict[str, list[Any]]
+) -> dict[str, Any]:
     """The fields of the reasoning stage's ``result.json``."""
     return {
-        **_reasoning_outcome(result),
+        **_reasoning_outcome(result, provenance),
         "terminated_by": result.terminated_by,
         "n_turns": len(result.turns),
         "turns": [
@@ -768,6 +808,7 @@ def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
 def _answer(
     result: reasoning.ReasoningResult,
     *,
+    provenance: dict[str, list[Any]],
     relevance: RelevantContext,
     schema_code: str,
     parsed: BaseModel | dict[str, Any],
@@ -776,8 +817,8 @@ def _answer(
     document_ids: list[str],
     run_dir: Path | None,
 ) -> Answer:
-    """The :class:`Answer` that reasoning's ``result`` makes with what it reasoned
-    over."""
+    """The :class:`Answer` that reasoning's ``result`` and its ``provenance``
+    (:func:`_with_quotes`) make with what it reasoned over."""
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance.snippets],
@@ -791,7 +832,7 @@ def _answer(
         source_docs=source_docs,
         run_dir=run_dir,
         document_ids=document_ids,
-        provenance=result.provenance,
+        provenance=provenance,
         relevance_provenance=relevance.provenance,
         parsing_provenance=parsing_provenance,
     )

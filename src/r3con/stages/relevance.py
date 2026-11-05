@@ -34,8 +34,8 @@ the document it is reading.
 Round k reads the *frozen* round-(k-1) set, so within a round the per-document calls
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`). Downstream stages consume the
-**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept only
-for inspection.
+**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept for
+inspection and for :func:`trail_quotes`, the quotes behind an answer.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import BaseModel
 
@@ -121,6 +121,64 @@ class RelevantContext:
 
     def _final_round(self) -> list[list[SnippetRecord]]:
         return self.records[-1] if self.records else []
+
+
+class TrailQuote(TypedDict):
+    """A quote behind an answer: the id of the document it is in, where it is there
+    as a slice, and its ``text`` as the model copied it, which for a ``fuzzy`` match
+    differs slightly from the slice."""
+
+    document: str
+    start: int
+    end: int
+    text: str
+
+
+def trail_quotes(
+    relevance: RelevantContext,
+    provenance: Mapping[str, Sequence[str]],
+    parsing_provenance: Sequence[Sequence[str]],
+    document_ids: Sequence[str],
+) -> list[TrailQuote]:
+    """The quotes of every snippet on an answer's trail that were found in their
+    document, each place once, in document order, then by ``start``.
+
+    The trail starts at the final-round snippets the answer's ``provenance`` cites:
+    those under ``"summary_ids"``, and those the parse of each document under
+    ``"parse_ids"`` cites, from ``parsing_provenance``, aligned with
+    ``document_ids``. It goes back round by round through the ids each snippet on it
+    cites (:attr:`SnippetRecord.provenance`). When two quotes are at one place, the
+    first met keeps its text.
+    """
+    parses = dict(zip(document_ids, parsing_provenance, strict=True))
+    cited = set(provenance["summary_ids"]).union(
+        *(parses[id_] for id_ in provenance["parse_ids"])
+    )
+    located = [
+        TrailQuote(
+            document=record.id.partition(".")[0],
+            start=quote["start"],
+            end=quote["end"],
+            text=quote["text"],
+        )
+        for record in _trail(relevance, cited)
+        for quote in record.quotes
+        if quote["start"] is not None and quote["end"] is not None
+    ]
+    once: dict[tuple[str, int, int], TrailQuote] = {}
+    for quote in located:
+        once.setdefault((quote["document"], quote["start"], quote["end"]), quote)
+    order = {id_: i for i, id_ in enumerate(document_ids)}
+    return sorted(once.values(), key=lambda q: (order[q["document"]], q["start"]))
+
+
+def _trail(relevance: RelevantContext, cited: set[str]) -> Iterator[SnippetRecord]:
+    """The final-round snippets ``cited`` names, then, round by round back, those the
+    snippets just given cite."""
+    for round_ in reversed(relevance.records):
+        records = [record for parts in round_ for record in parts if record.id in cited]
+        yield from records
+        cited = {id_ for record in records for id_ in record.provenance}
 
 
 def draw_document_ids(n: int) -> list[str]:
