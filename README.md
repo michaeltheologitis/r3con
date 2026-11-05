@@ -156,21 +156,27 @@ repeats the final reasoning step.
 
 #### Provenance
 
-`result.provenance` shows what the answer is based on, down to the sentence:
+`result.provenance` shows what the answer is based on:
 
 ```python
-quote = result.provenance["quotes"][0]
-print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
+{
+    "quotes": [  # the sentences behind the answer
+        {
+            "name": "q3/ardent.pdf",  # the file it is in
+            "text": "Ardent missed 8 delivery windows.",  # the sentence
+            "start": 120,  # where it is in the file's text
+            "end": 153,
+            "document": "3f9a1c",  # the file's ID
+        },
+        # ...
+    ],
+    "summary_ids": ["3f9a1c"],  # files whose relevant text the answer used
+    "parse_ids": ["3f9a1c"],  # files whose extracted information the answer used
+}
 ```
 
-- `quotes` are the sentences behind the answer, in document order. Each has
-  its file's `name`, its `text`, and where it is in that file:
-  `docs[quote["name"]][quote["start"]:quote["end"]]`.
-- `summary_ids` and `parse_ids` are the documents whose relevant text and
-  extracted information the answer used, by ID. `result.document_ids` lists
-  each document's ID, in the same order as `result.document_names`.
-
-An answer from `r3con.ask` has its provenance too.
+`result.document_ids` lists each file's ID, in the same order as
+`result.document_names`. An answer from `r3con.ask` has its provenance too.
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
 follows an answer back to its sources step by step.
 
