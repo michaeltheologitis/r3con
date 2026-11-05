@@ -2,25 +2,28 @@
    46ch until its edge is dragged, holds the chat and the files tab; on phones the panel stacks above
    that column. */
 :root {
-  --bg: #fcfbfa;
-  --panel: #f4f2ef;
-  --fg: #1f1e1c;
-  --dim: #736b62;
-  --line: #e5e0d9;
-  --code: #f0ece7;
-  --accent: #c15f3c;
+  /* Light by name, not by the default normal, so each light-dark() below takes its first colour in every engine. */
+  color-scheme: light;
+  --bg: light-dark(#fcfbfa, #1a1918);
+  --panel: light-dark(#f4f2ef, #141312);
+  --fg: light-dark(#1f1e1c, #e8e5e1);
+  --dim: light-dark(#736b62, #968e84);
+  --line: light-dark(#e5e0d9, #2e2b28);
+  --code: light-dark(#f0ece7, #232120);
+  --accent: light-dark(#c15f3c, #d77757);
   /* Small accent text, and text on accent, at 4.5:1 or more; the accent itself falls short in light. */
-  --accent-ink: #b65534;
-  --mark: rgba(193, 95, 60, 0.2);
-  --mark-strong: rgba(193, 95, 60, 0.38);
-  --ok: #3f7d4e;
-  --err: #b1452f;
-  --warn: #8f6113;
-  --fill-orange: #f27b45;
-  --fill-yellow: #f5cd55;
-  --fill-blue: #40bde8;
-  --tree-ink: #1f1e1c;
+  --accent-ink: light-dark(#b65534, #d77757);
+  --mark: light-dark(rgba(193, 95, 60, 0.2), rgba(215, 119, 87, 0.24));
+  --mark-strong: light-dark(rgba(193, 95, 60, 0.38), rgba(215, 119, 87, 0.45));
+  --ok: light-dark(#3f7d4e, #7fb38a);
+  --err: light-dark(#b1452f, #e2806d);
+  --warn: light-dark(#8f6113, #d6a54c);
+  --fill-orange: light-dark(#f27b45, #d96d3e);
+  --fill-yellow: light-dark(#f5cd55, #d8b24c);
+  --fill-blue: light-dark(#40bde8, #3aa4cd);
+  --tree-ink: light-dark(#1f1e1c, #0e0d0c);
   --shadow: 0 10px 30px rgba(31, 30, 28, 0.12), 0 1px 3px rgba(31, 30, 28, 0.06);
+  --shadow-dark: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
   --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --gutter: 16px;
   --tab-row-height: 2.55em;
@@ -29,50 +32,12 @@
   --trash-size: 32px;
   --trash-icon-size: 24px;
 }
+/* Dark, by the system's scheme or the theme button: color-scheme makes each light-dark() above take its
+   second colour, and --shadow, which is not a colour, takes its dark value. */
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #1a1918;
-    --panel: #141312;
-    --fg: #e8e5e1;
-    --dim: #968e84;
-    --line: #2e2b28;
-    --code: #232120;
-    --accent: #d77757;
-    --accent-ink: #d77757;
-    --mark: rgba(215, 119, 87, 0.24);
-    --mark-strong: rgba(215, 119, 87, 0.45);
-    --ok: #7fb38a;
-    --err: #e2806d;
-    --warn: #d6a54c;
-    --fill-orange: #d96d3e;
-    --fill-yellow: #d8b24c;
-    --fill-blue: #3aa4cd;
-    --tree-ink: #0e0d0c;
-    --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-    color-scheme: dark;
-  }
+  :root:not([data-theme="light"]) { color-scheme: dark; --shadow: var(--shadow-dark); }
 }
-:root[data-theme="dark"] {
-  --bg: #1a1918;
-  --panel: #141312;
-  --fg: #e8e5e1;
-  --dim: #968e84;
-  --line: #2e2b28;
-  --code: #232120;
-  --accent: #d77757;
-  --accent-ink: #d77757;
-  --mark: rgba(215, 119, 87, 0.24);
-  --mark-strong: rgba(215, 119, 87, 0.45);
-  --ok: #7fb38a;
-  --err: #e2806d;
-  --warn: #d6a54c;
-  --fill-orange: #d96d3e;
-  --fill-yellow: #d8b24c;
-  --fill-blue: #3aa4cd;
-  --tree-ink: #0e0d0c;
-  --shadow: 0 12px 34px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.4);
-  color-scheme: dark;
-}
+:root[data-theme="dark"] { color-scheme: dark; --shadow: var(--shadow-dark); }
 
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
