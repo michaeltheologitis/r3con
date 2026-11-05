@@ -105,9 +105,7 @@ print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total.
 directories or using glob patterns.
 
 It returns each document's text along with its filename. If a file is inside
-a subfolder, its name includes that subfolder.
-
-For example, a file at `reports/q3/ardent.pdf` is named `q3/ardent.pdf`.
+a subfolder, its name includes that subfolder. For example, a file at `reports/q3/ardent.pdf` is named `q3/ardent.pdf`.
 Here, `q3` is simply the subfolder name, and `ardent.pdf` is the filename.
 
 If your documents are already stored as text in Python, pass them directly
@@ -136,7 +134,7 @@ documents = {
 }
 ```
 
-Documents in a list are named by their position: `"0"`, `"1"`, `"2"`, and so on.
+#### Re-use Representation
 
 To ask another question without repeating the earlier processing, use
 `r3con.ask`:
@@ -188,15 +186,6 @@ result.run_dir  # Folder where this run's files are saved
 ## Run artifacts
 
 Every run saves its results and processing records in a folder under `./logs`.
-
-These include AI requests (even failed ones), token usage, API costs,
-retries, and the time spent waiting between retries.
-
-If an AI provider accidentally includes an API key in an error message,
-r3con hides that key before saving the error.
-
-If you use your own `completion=` function with a separate API key, register
-that key using `r3con.masking.register_key(key)` so r3con can hide it too.
 
 ```text
 logs/<timestamp>_<hex>/          <- result.run_dir
