@@ -136,12 +136,7 @@ documents = {
 }
 ```
 
-`result.document_names` shows the document names. If you used a list, r3con
-names them `"0"`, `"1"`, `"2"`, etc., based on their position.
-
-To retrieve a document from that list using its name, use
-`documents[int(name)]`. The `int()` part simply converts a name like `"0"`
-into the number `0`, which Python uses to find the first document.
+Documents in a list are named by their position: `"0"`, `"1"`, `"2"`, and so on.
 
 To ask another question without repeating the earlier processing, use
 `r3con.ask`:
