@@ -3967,8 +3967,10 @@
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
     const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node?.file : null;
+    // A pinch goes on while two fingers are left, measured afresh: they may be another pair.
     if (gesture.mode === 'pinch') {
       if (gesture.pointers.size < 2) endGesture();
+      else startPinch();
       return;
     }
     if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();

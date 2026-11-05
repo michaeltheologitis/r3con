@@ -321,6 +321,9 @@ const SIDE_STEP_PX = 16;
 const CHAT_DRAG_PX = 100;
 // Past the page's DRAG_THRESHOLD of 4 px, so a nudge drags.
 const NUDGE_PX = 10;
+// A finger's slip mid-pinch, and the share of the zoom it may change: a pinch's own small move, not a jump.
+const SLIP_PX = 2;
+const SLIP_ZOOM_SHARE = 0.05;
 // A spot this far in from the panel's top left, which a run's drawing leaves blank.
 const BLANK_INSET_PX = 60;
 // The separator's focus bar, and a desktop window narrow enough to hold the widest chat back.
@@ -406,6 +409,7 @@ const answerIds = (page) => page.$$eval('.node.answer', (els) => els.map((el) =>
 const docIdsOf = (page) => page.$$eval('.node.doc', (els) => els.map((el) => el.dataset.id));
 const rect = (page, selector) => page.$eval(selector, (el) => el.getBoundingClientRect().toJSON());
 const transform = (page) => page.$eval('#world', (el) => el.style.transform);
+const zoom = (page) => page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
 const sameSpot = (a, b) => Boolean(a && b) && a.left === b.left && a.top === b.top;
 const focusedId = (page) => page.evaluate(() => document.activeElement.id);
 const shownTab = async (page) => (await page.evaluate(tabRow)).findIndex((tab) => tab.selected);
@@ -2528,10 +2532,22 @@ async function gestures() {
     const pinched = await transform(page);
     for (let i = 1; i <= DRAG_STEPS; i += 1) await touch('touchMove', [{ ...second, x: second.x + CHAT_DRAG_PX + NUDGE_PX * i }]);
     await touch('touchEnd', []);
-    await cdp.detach();
     const lifted = { zoomed: pinched !== before, thrown: messages.find((m) => m.type === 'error')?.text ?? null, moved: (await transform(page)) !== pinched };
     const liftName = 'phone: a pinch with one finger lifted ends: moving the other finger throws nothing and moves nothing';
     check('gestures', liftName, isDeepStrictEqual(lifted, { zoomed: true, thrown: null, moved: false }), JSON.stringify(lifted));
+
+    const third = { id: 2, x: second.x + CHAT_DRAG_PX, y: second.y + CHAT_DRAG_PX };
+    await touch('touchStart', [first]);
+    await touch('touchStart', [first, second]);
+    await touch('touchStart', [first, second, third]);
+    await touch('touchEnd', [second]);
+    const held = await zoom(page);
+    await touch('touchMove', [first, { ...third, x: third.x + SLIP_PX }]);
+    await touch('touchEnd', []);
+    await cdp.detach();
+    const slipped = await zoom(page);
+    const pairName = 'phone: a pinch that loses a finger while a third is down goes on with the two left: a slight move does not jump the zoom';
+    check('gestures', pairName, slipped !== held && Math.abs(slipped / held - 1) < SLIP_ZOOM_SHARE, `zoom ${held} → ${slipped}`);
   });
 }
 
@@ -2911,8 +2927,7 @@ async function answersInView(asks) {
   });
   await withPage('answers', {}, async (page) => {
     await send(page, asks[0].question);
-    const zoom = await page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
-    await dragNode(page, 'answer-0', 0, -ROW_GAP * zoom);
+    await dragNode(page, 'answer-0', 0, -ROW_GAP * (await zoom(page)));
     for (const question of [NEW_QUESTION, 'Who manages Eastfield?']) await send(page, question);
     const placed = await page.evaluate(answerNodes);
     const apart = placed.length === 4 && placed.every((a, i) => placed.slice(i + 1).every((b) => !overlap(a.box, b.box)));
