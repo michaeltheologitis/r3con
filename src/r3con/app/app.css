@@ -9,6 +9,8 @@
   --line: #e5e0d9;
   --code: #f0ece7;
   --accent: #c15f3c;
+  /* Small accent text, and text on accent, at 4.5:1 or more; the accent itself falls short in light. */
+  --accent-ink: #b65534;
   --mark: rgba(193, 95, 60, 0.2);
   --mark-strong: rgba(193, 95, 60, 0.38);
   --ok: #3f7d4e;
@@ -36,6 +38,7 @@
     --line: #2e2b28;
     --code: #232120;
     --accent: #d77757;
+    --accent-ink: #d77757;
     --mark: rgba(215, 119, 87, 0.24);
     --mark-strong: rgba(215, 119, 87, 0.45);
     --ok: #7fb38a;
@@ -57,6 +60,7 @@
   --line: #2e2b28;
   --code: #232120;
   --accent: #d77757;
+  --accent-ink: #d77757;
   --mark: rgba(215, 119, 87, 0.24);
   --mark-strong: rgba(215, 119, 87, 0.45);
   --ok: #7fb38a;
@@ -254,7 +258,7 @@ p { margin: 0; }
   font-weight: 700;
   line-height: 1.5;
   text-align: center;
-  background: var(--accent);
+  background: var(--accent-ink);
   border-radius: 1em;
 }
 .node.void { opacity: 0.45; }
@@ -400,7 +404,8 @@ p { margin: 0; }
 }
 .code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .code.json > span { display: block; padding-left: var(--indent); text-indent: calc(-1 * var(--indent)); }
-.used { color: var(--accent); }
+.used { color: var(--accent-ink); }
+.trail-line:empty { display: none; }
 mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--accent); }
 mark.multi { background: var(--mark-strong); }
 mark[title] { cursor: help; }
@@ -592,6 +597,7 @@ mark[title] { cursor: help; }
 }
 .file .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file .size { grid-column: 3; color: var(--dim); }
+.file.off .name { color: var(--dim); }
 .file:hover .name { text-decoration: underline; text-decoration-color: var(--dim); text-underline-offset: 3px; }
 .file-actions { display: flex; flex-wrap: wrap; gap: 0.3em 3ch; }
 .file-actions label { cursor: pointer; }

@@ -29,11 +29,13 @@
    * @typedef {{ text: string, start: number | null, end: number | null }} Quote
    */
   /** @typedef {{ summary: string, provenance: number[], quotes: Quote[] }} Summary */
-  /** @typedef {{ start: number, end: number }} Range A part of a document's text, in UTF-16 code units. */
-  /** @typedef {Range & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
+  /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
+  /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
+  /** @typedef {{ spans: Span[], sentences: TextRange[] }} Quoted What a trail quotes of one document. */
   /**
-   * An answer's trail: every node on its lineage, and each summary on it, with the first node on it that cites the summary.
-   * @typedef {{ nodes: Set<string>, citedBy: Map<string, string> }} Trail
+   * An answer's trail: every node on its lineage; each summary on it, with the first node on it that cites the
+   * summary; and what it quotes of each document, by index.
+   * @typedef {{ nodes: Set<string>, citedBy: Map<string, string>, quoted: Quoted[] }} Trail
    */
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
@@ -120,6 +122,7 @@
    * @property {number[]} timers
    * @property {Narrator | null} narr
    * @property {number} arrangeFrame
+   * @property {Trail | null} trail the lit answer's, while the panel has one lit
    */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
@@ -133,7 +136,8 @@
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
    *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
-   *   | { type: 'reasoning_finished', answer: string, provenance: { summary_ids: string[], parse_ids: string[] } }
+   *   | { type: 'reasoning_finished', answer: string,
+   *       provenance: { summary_ids: string[], parse_ids: string[], quotes: { document: string, start: number, end: number, text: string }[] } }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
    * } ServerEvent
@@ -748,7 +752,6 @@
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
-  // The relevance summaries' kinds, whose nodes hold quotes.
   /** @type {('r1' | 'r2')[]} */
   const SUMMARY_KINDS = ['r1', 'r2'];
   const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
@@ -911,12 +914,13 @@
       timers: [],
       narr: null,
       arrangeFrame: 0,
+      trail: null,
     };
   }
 
   /**
    * @type {{ tabs: Tab[], shown: Tab, nextTab: number, streams: Set<Stream>,
-   *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null, fileShown: LoadedFile | null }}
+   *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
    */
   const state = {
     // Every tab, in order; init lists the first, the shown tab, with the sample memos.
@@ -929,8 +933,6 @@
     selected: null,
     hovered: null,
     inspectorDroppedAt: null,
-    // The file the files pane has open, if any.
-    fileShown: null,
   };
 
   // The recorded replay needs the whole sample set.
@@ -1257,18 +1259,25 @@
 
   // ---------- runs ----------
 
+  /** @param {Quote} quote */
+  const located = (quote) => quote.start !== null;
+
+  // Where each of `ranges` starts or ends, in order, once each.
+  /** @param {{ start: number, end: number }[]} ranges */
+  const cutsOf = (ranges) => [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
+
   // `quotes`, found in `text`, with their places in UTF-16 code units, walking the text once up to the last of them.
   /** @param {string} text @param {Quote[]} quotes @returns {Quote[]} */
   function quotesInUnits(text, quotes) {
-    const points = [...new Set(quotes.flatMap((q) => (q.start === null ? [] : [q.start, q.end])))].sort((a, b) => a - b);
+    /** @type {Map<number, number>} */
     const units = new Map();
     let point = 0;
     let unit = 0;
-    for (const target of points) {
-      for (; point < target && unit < text.length; point += 1) unit += text.codePointAt(unit) > 0xffff ? 2 : 1;
+    for (const target of cutsOf(quotes.filter(located))) {
+      for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(text.codePointAt(unit)).length;
       units.set(target, unit);
     }
-    return quotes.map((q) => (q.start === null ? q : { ...q, start: units.get(q.start), end: units.get(q.end) }));
+    return quotes.map((q) => (located(q) ? { ...q, start: units.get(q.start), end: units.get(q.end) } : q));
   }
 
   /** @returns {Run} */
@@ -1403,82 +1412,66 @@
     return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
+  // Walked from the answer, so the first node on it to cite a summary is the nearest the answer.
   /** @param {Run} run @param {string} answerId */
   function answerLineage(run, answerId) {
     const nodes = new Set([answerId]);
     const edges = new Set();
+    /** @type {Map<string, string>} */
+    const citedBy = new Map();
     for (const id of nodes) {
       for (const from of [ownDocument(run, id), ...cites(run, id)].filter(Boolean)) {
+        if (/** @type {NodeKind[]} */ (SUMMARY_KINDS).includes(splitId(from)[0]) && !nodes.has(from)) citedBy.set(from, id);
         nodes.add(from);
         edges.add(`${from}>${id}`);
       }
     }
-    return { nodes, edges };
+    return { nodes, edges, citedBy };
   }
 
-  // The lineage is walked from the answer, so a summary's first edge out is from what cites it nearest the answer.
-  /** @param {Run} run @param {string} answerId @returns {Trail} */
-  function trailOf(run, answerId) {
-    const { nodes, edges } = answerLineage(run, answerId);
-    /** @type {Map<string, string>} */
-    const citedBy = new Map();
-    for (const edge of edges) {
-      const [from, to] = edge.split('>');
-      if (SUMMARY_KINDS.some((kind) => from.startsWith(`${kind}-`)) && !citedBy.has(from)) citedBy.set(from, to);
-    }
-    return { nodes, citedBy };
+  /** @param {Run} run @param {ReturnType<typeof answerLineage>} lineage @returns {Trail} */
+  function trailOf(run, { nodes, citedBy }) {
+    return { nodes, citedBy, quoted: run.docs.map((_, d) => quotedIn(run, citedBy, d)) };
   }
 
-  // The lit answer's trail, while the panel shows one lit.
-  /** @param {Tab} tab */
-  const litTrail = (tab) => (tab.drawing.classList.contains('is-lit') ? trailOf(tab.run, tab.run.lit) : null);
-
-  // The parts of document d's text that the trail's summaries quote, cut wherever a quote starts or ends.
-  /** @param {Run} run @param {Trail | null} trail @param {number} d @returns {Span[]} */
-  function quotedSpans(run, trail, d) {
-    const quoted = SUMMARY_KINDS.filter((kind) => trail?.citedBy.has(`${kind}-${d}`)).flatMap((kind) =>
-      run[kind][d].quotes.filter((q) => q.start !== null).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
+  // What the summaries in `citedBy` quote of document d: its parts, cut where a quote starts or ends, each with the
+  // summaries quoting it; and its sentences, where quotes that overlap are one, and quotes that only meet are two.
+  /** @param {Run} run @param {Map<string, string>} citedBy @param {number} d @returns {Quoted} */
+  function quotedIn(run, citedBy, d) {
+    const quotes = SUMMARY_KINDS.filter((kind) => citedBy.has(`${kind}-${d}`)).flatMap((kind) =>
+      run[kind][d].quotes.filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
     );
-    const cuts = [...new Set(quoted.flatMap((q) => [q.start, q.end]))].sort((a, b) => a - b);
-    const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quoted.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
-    return spans.filter((span) => span.by.length);
-  }
-
-  // Quoted spans that meet are one sentence; cut where quotes start and end, they never overlap.
-  /** @param {Span[]} spans @returns {Range[]} */
-  function sentencesOf(spans) {
-    /** @type {Range[]} */
+    const cuts = cutsOf(quotes);
+    const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
+    /** @type {TextRange[]} */
     const sentences = [];
-    for (const { start, end } of spans) {
+    for (const { start, end } of quotes.toSorted((a, b) => a.start - b.start)) {
       const last = sentences.at(-1);
-      if (last?.end === start) last.end = end;
+      if (last && start < last.end) last.end = Math.max(last.end, end);
       else sentences.push({ start, end });
     }
-    return sentences;
+    return { spans: spans.filter((span) => span.by.length), sentences };
   }
 
-  // Each document the trail quotes, with the sentences it quotes.
-  /** @param {Run} run @param {Trail | null} trail */
-  function quotedDocuments(run, trail) {
-    return run.docs.map((file, d) => ({ file, sentences: sentencesOf(quotedSpans(run, trail, d)) })).filter(({ sentences }) => sentences.length);
-  }
-
-  /** @param {ReturnType<typeof quotedDocuments>} quoted */
-  function sentencesFrom(quoted) {
-    const sentences = quoted.reduce((sum, { sentences }) => sum + sentences.length, 0);
+  /** @param {Trail} trail */
+  function sentencesFrom(trail) {
+    const quoted = trail.quoted.filter(({ sentences }) => sentences.length);
+    if (!quoted.length) return null;
+    const sentences = quoted.reduce((sum, q) => sum + q.sentences.length, 0);
     return `${plural(sentences, 'sentence')} from ${plural(quoted.length, 'document')}`;
+  }
+
+  /** @param {Tab} tab @param {string} id */
+  function citerName(tab, id) {
+    const [kind, d] = splitId(id);
+    if (kind === 'answer') return 'the answer';
+    return kind === 'parsed' ? `the ${docLabel(tab.run, d)} parse` : nodeName(tab, id);
   }
 
   // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary.
   /** @param {Tab} tab @param {Trail} trail @param {Span} span */
   function quotedBy(tab, trail, span) {
-    /** @param {string} id */
-    const citer = (id) => {
-      const [kind, d] = splitId(id);
-      if (kind === 'answer') return 'the answer';
-      return kind === 'parsed' ? `the ${docLabel(tab.run, d)} parse` : nodeName(tab, id);
-    };
-    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citer(trail.citedBy.get(id))})`)].join('\n');
+    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citerName(tab, trail.citedBy.get(id))})`)].join('\n');
   }
 
   // ---------- panel: view ----------
@@ -1637,8 +1630,8 @@
     return kind === 'doc' || kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
-  /** @param {Tab} tab @param {PanelNode} node */
-  function ariaName(tab, node) {
+  /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
+  function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
       const { question, model } = answerAt(tab.run, node.id);
@@ -1646,8 +1639,7 @@
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
-    const pill = node.el.querySelector('.pill');
-    return `${node.file.name}, ${ARIA_KIND.doc}${pill ? `, ${pill.getAttribute('title')}` : ''}`;
+    return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${plural(sentences, 'highlighted sentence')}` : ''}`;
   }
 
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {Point} pos @param {{ working?: boolean, file?: LoadedFile | null, enter?: boolean }} [options] */
@@ -1659,6 +1651,7 @@
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
       nodeLabels(tab, id, kind, file).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      kind === 'doc' ? h('span', { class: 'pill', hidden: true }) : null,
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
     tab.nodes.set(id, node);
@@ -1703,6 +1696,7 @@
     tab.nodesEl.replaceChildren();
     tab.nodes.clear();
     tab.drawing.classList.remove('is-lit');
+    tab.trail = null;
     if (hoveredIn(tab)) state.hovered = null;
     showTrail(tab);
   }
@@ -1938,13 +1932,13 @@
   function lightPath(tab) {
     const { run } = tab;
     const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
+    tab.trail = path && trailOf(run, path);
     tab.drawing.classList.toggle('is-lit', Boolean(path));
-    const trail = litTrail(tab);
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
-      if (n.kind === 'doc') countSentences(tab, n, trail);
     }
+    run.docs.forEach((file, d) => countSentences(tab, tab.nodes.get(docId(file)), tab.trail?.quoted[d].sentences.length ?? 0));
     for (const e of tab.edges.values()) {
       const on = Boolean(path?.edges.has(e.key));
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
@@ -1954,23 +1948,34 @@
     showTrail(tab);
   }
 
-  // A document node counts the sentences the lit answer's trail quotes from it, in a pill, if any.
-  /** @param {Tab} tab @param {PanelNode} node @param {Trail | null} trail */
-  function countSentences(tab, node, trail) {
-    const d = tab.run.docs.indexOf(node.file);
-    const sentences = d < 0 ? 0 : sentencesOf(quotedSpans(tab.run, trail, d)).length;
-    node.el.querySelector('.pill')?.remove();
-    if (sentences) node.el.append(h('span', { class: 'pill', title: plural(sentences, 'highlighted sentence') }, String(sentences)));
-    node.el.setAttribute('aria-label', ariaName(tab, node));
+  /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
+  function countSentences(tab, node, sentences) {
+    const pill = /** @type {HTMLElement} */ (node.el.querySelector('.pill'));
+    pill.hidden = !sentences;
+    pill.textContent = String(sentences);
+    pill.title = plural(sentences, 'highlighted sentence');
+    node.el.setAttribute('aria-label', ariaName(tab, node, sentences));
   }
 
-  // What the lit answer's trail marks beside the panel, drawn again as it changes.
+  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
+  const trailParts = new Map();
+
+  // Fills `el` from the tab's trail now, and again in place as the trail changes, so that what is open, scrolled or
+  // focused in it stays.
+  /** @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw @returns {T} */
+  function trailPart(tab, el, draw) {
+    trailParts.set(el, { tab, draw });
+    fill(el, draw(tab.trail));
+    return el;
+  }
+
   /** @param {Tab} tab */
   function showTrail(tab) {
-    if (tab !== state.shown) return;
-    renderFiles();
-    if (state.fileShown) renderFileView(state.fileShown);
-    if (state.selected) renderInspector();
+    for (const [el, part] of trailParts) {
+      if (!el.isConnected) trailParts.delete(el);
+      else if (part.tab === tab) fill(el, part.draw(tab.trail));
+    }
+    if (tab === state.shown) markFiles();
   }
 
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
@@ -2039,64 +2044,83 @@
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
   }
 
-  /** @param {LoadedFile} file */
-  function fileMeta(file) {
+  /** @param {LoadedFile} file @param {TextRange} shown */
+  function fileMeta(file, shown) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (file.text.length > PREVIEW_CHARS) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
+    if (shown.start) meta.push(`characters ${fmtInt(shown.start + 1)}–${fmtInt(shown.end)} shown`);
+    else if (shown.end < file.text.length) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
     return meta.join(' · ');
   }
 
-  // The text's preview, each span in `spans` marked, titled by `title`, and `at` flashed.
-  /** @param {LoadedFile} file @param {{ spans?: Span[], title?: (span: Span) => string, at?: Range | null }} [marking] */
-  function fileText(file, { spans = [], title, at = null } = {}) {
-    if (!file.text) return h('p', { class: 'k' }, 'This file has no readable text.');
-    const text = file.text.slice(0, PREVIEW_CHARS);
-    const bounds = [0, text.length, ...[...spans, ...(at ? [at] : [])].flatMap((r) => [r.start, r.end])];
-    const cuts = [...new Set(bounds)].filter((cut) => cut <= text.length).sort((a, b) => a - b);
-    const parts = cuts.slice(1).map((end, i) => {
+  // A file's first PREVIEW_CHARS, or as many around a sentence past them, so that every sentence counted can be shown.
+  /** @param {LoadedFile} file @param {TextRange | null} at */
+  function shownPart(file, at) {
+    const start = at && at.end > PREVIEW_CHARS ? Math.max(0, Math.min(at.start - PREVIEW_CHARS / 2, file.text.length - PREVIEW_CHARS)) : 0;
+    return { start, end: Math.min(file.text.length, start + PREVIEW_CHARS) };
+  }
+
+  // The shown part of `text`, each span in `spans` marked, titled by `title`, and `at` flashed.
+  /** @param {string} text @param {TextRange} shown @param {Span[]} spans @param {(span: Span) => string} title @param {TextRange | null} at */
+  function markedText(text, shown, spans, title, at) {
+    const cuts = cutsOf([shown, ...spans, ...(at ? [at] : [])]).filter((cut) => cut >= shown.start && cut <= shown.end);
+    return cuts.slice(1).map((end, i) => {
       const span = spans.find((r) => r.start <= cuts[i] && r.end >= end);
       const flash = at && at.start <= cuts[i] && at.end >= end;
       if (!span && !flash) return text.slice(cuts[i], end);
       const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
       return h(span ? 'mark' : 'span', { class: classes || null, title: span ? title(span) : null }, text.slice(cuts[i], end));
     });
-    return h('pre', { class: 'code wrap' }, parts);
   }
 
-  // A file's line and its text, with what the lit answer's trail uses of it: the sentences it quotes, marked, or only
-  // that the file is on it. `at` is a sentence to show.
-  /** @param {Tab} tab @param {LoadedFile} file @param {Range | null} [at] */
+  /** @param {Tab} tab @param {LoadedFile} file @param {TextRange | null} [at] a sentence to show */
   function markedFile(tab, file, at = null) {
-    const trail = tab.run && litTrail(tab);
-    const d = trail ? tab.run.docs.indexOf(file) : -1;
-    const spans = d < 0 ? [] : quotedSpans(tab.run, trail, d);
-    const sentences = sentencesOf(spans).length;
-    const used = sentences ? `${plural(sentences, 'sentence')} used` : trail?.nodes.has(docId(file)) && 'used';
-    return [
-      h('div', { class: 'k' }, fileMeta(file), used && [' · ', h('span', { class: 'used' }, used)]),
-      fileText(file, { spans, title: (span) => quotedBy(tab, trail, span), at }),
-    ];
+    const shown = shownPart(file, at);
+    /** @param {Trail | null} trail */
+    const quotedOf = (trail) => trail?.quoted[tab.run.docs.indexOf(file)];
+    /** @param {Trail | null} trail */
+    const line = (trail) => {
+      const sentences = quotedOf(trail)?.sentences.length;
+      const used = sentences ? `${plural(sentences, 'sentence')} used` : trail?.nodes.has(docId(file)) && 'used';
+      return [fileMeta(file, shown), used && [' · ', h('span', { class: 'used' }, used)]];
+    };
+    const meta = trailPart(tab, h('div', { class: 'k' }), line);
+    if (!file.text) return [meta, h('p', { class: 'k' }, 'This file has no readable text.')];
+    /** @param {Trail | null} trail */
+    const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, trail, span), at);
+    return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
   }
 
-  // Closed until opened; its summary names what it holds, and how many.
-  /** @param {string} name @param {number} n @param {...Child} body */
-  function fold(name, n, ...body) {
-    return h('details', { class: 'fold' }, h('summary', {}, `${name} ${n}`), h('div', { class: 'fold-body' }, body));
+  /** @param {string} summary @param {Child} body @param {{ open?: boolean, className?: string }} [options] */
+  function fold(summary, body, { open = false, className = 'fold' } = {}) {
+    return h('details', { class: className, open }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
+  }
+
+  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
+  function sentenceButton(file, at, className, text = null) {
+    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, text);
   }
 
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
-  /** @param {Run} run @param {'r1' | 'r2'} kind @param {number} d */
-  function quotesFold(run, kind, d) {
-    const { quotes } = run[kind][d];
+  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  function quotesFold(tab, kind, d) {
+    const id = `${kind}-${d}`;
+    const { quotes } = tab.run[kind][d];
     if (!quotes.length) return null;
-    const marked = Boolean(litTrail(state.shown)?.citedBy.has(`${kind}-${d}`));
     /** @param {Quote} quote */
     const item = (quote) => {
-      if (quote.start === null) return h('p', {}, quote.text);
-      const show = () => jumpTo(docId(run.docs[d]), quote);
-      return h('button', { class: 'ref quote', type: 'button', title: 'show in the document', onclick: show }, marked ? h('mark', {}, quote.text) : quote.text);
+      if (!located(quote)) return h('p', {}, quote.text);
+      return trailPart(tab, sentenceButton(tab.run.docs[d], quote, 'quote'), (trail) => (trail?.citedBy.has(id) ? h('mark', {}, quote.text) : quote.text));
     };
-    return fold('quotes', quotes.length, h('div', { class: 'quotes' }, quotes.map(item)));
+    return fold(`quotes ${quotes.length}`, h('div', { class: 'quotes' }, quotes.map(item)));
+  }
+
+  /** @param {Tab} tab @param {string} id */
+  function trailLine(tab, id) {
+    return trailPart(tab, h('div', { class: 'trail-line' }), (trail) => {
+      if (!trail) return null;
+      const citer = trail.citedBy.get(id);
+      return citer ? h('span', { class: 'used' }, `on the answer's trail · cited by ${citerName(tab, citer)}`) : h('span', { class: 'k' }, "not on the answer's trail");
+    });
   }
 
   /** @param {LoadedFile} file @param {string} label */
@@ -2104,7 +2128,7 @@
     return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
   }
 
-  /** @param {PanelNode} node @param {Range | null} at */
+  /** @param {PanelNode} node @param {TextRange | null} at */
   function docBody(node, at) {
     const { run, nodes } = state.shown;
     const index = run ? run.docs.indexOf(node.file) : -1;
@@ -2115,21 +2139,23 @@
     ];
   }
 
-  /** @param {Run} run @param {'r1' | 'r2'} kind @param {number} d */
-  function snippetBody(run, kind, d) {
+  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  function snippetBody(tab, kind, d) {
+    const { run } = tab;
     const id = `${kind}-${d}`;
     const provenance = cites(run, id);
     return [
       textBlock(run[kind][d].summary),
+      trailLine(tab, id),
       row('read', refs([docId(run.docs[d])])),
-      quotesFold(run, kind, d),
-      kind === 'r2' ? fold('provenance', provenance.length, refs(provenance)) : null,
+      quotesFold(tab, kind, d),
+      kind === 'r2' ? fold(`provenance ${provenance.length}`, refs(provenance)) : null,
       callMeta(run, id),
       openFileButton(run.docs[d], 'open document ›'),
     ];
   }
 
-  /** @param {string} id @param {Range | null} at */
+  /** @param {string} id @param {TextRange | null} at */
   function inspectorBody(id, at) {
     const { run, nodes } = state.shown;
     const [kind, d] = splitId(id);
@@ -2137,7 +2163,7 @@
     if (kind === 'doc') return docBody(node, at);
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
-    if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
+    if (kind === 'r1' || kind === 'r2') return snippetBody(state.shown, kind, d);
     if (kind === 'schema') {
       return [
         run.schema.thought ? row('reasoning', run.schema.thought) : null,
@@ -2151,20 +2177,20 @@
       return [
         filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
-        fold('provenance', provenance.length, refs(provenance)),
+        fold(`provenance ${provenance.length}`, refs(provenance)),
         row('used', refs(['schema'])),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
       ];
     }
     const answer = answerOf(run, id);
-    const quoted = quotedDocuments(run, trailOf(run, id));
+    const quoted = sentencesFrom(trailOf(run, answerLineage(run, id)));
     return [
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
       row('provenance', refs(cites(run, id))),
-      quoted.length ? h('div', { class: 'used' }, sentencesFrom(quoted)) : null,
+      quoted && h('div', { class: 'used' }, quoted),
       h('div', { class: 'k' }, answer.summary),
     ];
   }
@@ -2179,7 +2205,7 @@
     box.scrollTo({ top, behavior: reduceMotion() ? 'auto' : 'smooth' });
   }
 
-  /** @param {Range | null} [at] a sentence to show, if the popup is a document's */
+  /** @param {TextRange | null} [at] a sentence to show, if the popup is a document's */
   function renderInspector(at = null) {
     const id = state.selected;
     if (!id || !state.shown.nodes.has(id)) return;
@@ -2202,14 +2228,14 @@
     if (flashed) scrollToMiddle(flashed);
   }
 
-  // Selecting an answer that has landed also lights it.
-  /** @param {string} id @param {{ focus?: boolean, at?: Range | null }} [options] */
+  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
+  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null }} [options] */
   function openInspector(id, { focus = false, at = null } = {}) {
-    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
     renderInspector(at);
+    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
   }
@@ -2247,7 +2273,7 @@
     inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
-  /** @param {string} id @param {Range | null} [at] */
+  /** @param {string} id @param {TextRange | null} [at] */
   function jumpTo(id, at = null) {
     const { view } = state.shown;
     const node = state.shown.nodes.get(id);
@@ -2328,12 +2354,12 @@
     const latest = h('span', { class: 't', id: `${id}-latest` }, first);
     const asked = body.parentElement.querySelector('.line.user .t');
     asked.id ||= `${id}-asked`;
-    const fold = () => {
+    const toggleLines = () => {
       lines.hidden = !lines.hidden;
       toggle.ariaExpanded = String(!lines.hidden);
     };
     const labels = `${asked.id} ${latest.id}`;
-    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: fold });
+    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: toggleLines });
     const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, MARK);
     body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
@@ -2644,15 +2670,19 @@
   // Under an answer, open until folded: the sentences its trail quotes, by document; each opens its document's popup there.
   /** @param {Tab} tab @param {string} id */
   function sentenceList(tab, id) {
-    const quoted = quotedDocuments(tab.run, trailOf(tab.run, id));
-    if (!quoted.length) return null;
-    /** @param {LoadedFile} file @param {Range} at */
-    const sentence = (file, at) =>
-      h('button', { class: 'ref sentence', type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, h('mark', {}, file.text.slice(at.start, at.end)));
-    /** @param {ReturnType<typeof quotedDocuments>[number]} doc */
-    const group = ({ file, sentences }) =>
-      h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name), sentences.map((at) => sentence(file, at)));
-    return h('details', { class: 'fold sentences', open: true }, h('summary', {}, sentencesFrom(quoted)), quoted.map(group));
+    const trail = trailOf(tab.run, answerLineage(tab.run, id));
+    const line = sentencesFrom(trail);
+    if (!line) return null;
+    /** @param {LoadedFile} file @param {TextRange[]} sentences */
+    const group = (file, sentences) =>
+      h(
+        'div',
+        { class: 'quoted' },
+        h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name),
+        sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))),
+      );
+    const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? group(file, trail.quoted[d].sentences) : null));
+    return fold(line, groups, { open: true, className: 'fold sentences' });
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
@@ -3117,20 +3147,15 @@
 
   function renderFiles() {
     const { files, run } = state.shown;
-    const trail = run && litTrail(state.shown);
-    /** @param {number} d */
-    const sentences = (d) => (trail ? sentencesOf(quotedSpans(run, trail, d)).length : 0);
-    /** @param {number} n */
-    const used = (n) => h('span', { class: 'used', title: plural(n, 'highlighted sentence') }, h('span', { 'aria-hidden': 'true' }, `${n} ¶`), h('span', { class: 'vh' }, plural(n, 'highlighted sentence')));
     const sampleOnly = files.length > 0 && files.every((f) => f.sample);
     const head = `${fileCount()} · ${fmtBytes(totalBytes(files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
     $('files-head').textContent = files.length ? head : NO_FILES;
     $('file-list').replaceChildren(
-      ...files.map((f, d) =>
+      ...files.map((f) =>
         h(
           'li',
           {},
-          h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), sentences(d) ? used(sentences(d)) : null, h('span', { class: 'size' }, fmtBytes(f.size))),
+          h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'used' }), h('span', { class: 'size' }, fmtBytes(f.size))),
           run ? null : h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${f.name}`, onclick: () => removeFile(f) }, 'remove'),
         ),
       ),
@@ -3139,6 +3164,19 @@
     $('files-locked').hidden = !run;
     $('file-actions').hidden = $('drop-hint').hidden = Boolean(run);
     $('drop-overlay').textContent = run ? DROP_LOCKED : DROP_ADDS;
+    markFiles();
+  }
+
+  // In place, so that a focused file stays focused: how many sentences the lit answer's trail quotes of each file, and
+  // the files off it dimmed.
+  function markFiles() {
+    const { run, trail } = state.shown;
+    $('file-list').querySelectorAll('.file').forEach((button, d) => {
+      const sentences = trail?.quoted[d].sentences.length ?? 0;
+      const named = plural(sentences, 'highlighted sentence');
+      button.classList.toggle('off', Boolean(trail) && !trail.nodes.has(docId(run.docs[d])));
+      fill(button.querySelector('.used'), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
+    });
   }
 
   // Lines restored on switching to their tab were said already, so they are written with the live regions off.
@@ -3158,15 +3196,6 @@
   /** @param {LoadedFile} file */
   function openFile(file) {
     showTab('files');
-    state.fileShown = file;
-    renderFileView(file);
-    $('file-list-view').hidden = true;
-    $('file-view').hidden = false;
-    $('file-view').scrollTop = 0;
-  }
-
-  /** @param {LoadedFile} file */
-  function renderFileView(file) {
     const node = state.shown.nodes.get(docId(file));
     fill(
       $('file-view'),
@@ -3175,10 +3204,12 @@
       markedFile(state.shown, file),
       node ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(node.id) }, 'show in panel ›') : null,
     );
+    $('file-list-view').hidden = true;
+    $('file-view').hidden = false;
+    $('file-view').scrollTop = 0;
   }
 
   function closeFile() {
-    state.fileShown = null;
     $('file-view').hidden = true;
     $('file-list-view').hidden = false;
   }
