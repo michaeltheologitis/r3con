@@ -95,6 +95,7 @@
    *   provenance: Provenance, totals: Totals }} RecordedAsk
    */
   /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement }} PanelNode */
+  /** @typedef {PanelNode & { file: LoadedFile }} DocNode */
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
   /**
    * @typedef {object} Tab
@@ -104,8 +105,8 @@
    * @property {string} filesError
    * @property {string} draft
    * @property {Promise<void>} adding
-   * @property {HTMLButtonElement | null} button
-   * @property {HTMLButtonElement | null} close
+   * @property {HTMLButtonElement} button
+   * @property {HTMLButtonElement} close
    * @property {Run | null} run
    * @property {HTMLElement} chat
    * @property {boolean} chatToEnd
@@ -125,6 +126,8 @@
    * @property {number} arrangeFrame
    * @property {Trail | null} trail the lit answer's, while the panel has one lit
    */
+  /** @typedef {Omit<Tab, 'button' | 'close'> & { button: HTMLButtonElement | null, close: HTMLButtonElement | null }} NewTab A tab openTab hasn't listed yet. */
+  /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
   /**
@@ -166,10 +169,10 @@
    * @property {(file: File, noText: string) => Promise<FileRead>} extract
    * @property {(file: File, limit: number) => Promise<Unpacked>} unzip
    * @property {(question: string, files: LoadedFile[]) => Run} newRun
-   * @property {(tab: Tab, narr: Narrator) => void} play
+   * @property {(tab: RunTab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
    * @property {(tab: Tab) => void} stop
-   * @property {(question: string) => void} ask
+   * @property {(question: string) => void} ask over the shown tab's run, which has answered
    * @property {(provider: string, key: string) => Promise<KeyStatus>} saveKey
    * @property {(endpoint: string, key: string) => Promise<KeyStatus>} saveServer
    * @property {(provider: string) => Promise<KeyStatus>} forgetKey
@@ -878,9 +881,12 @@
   const docId = (file) => `doc-${file.uid}`;
   /** @param {NodeKind} kind */
   const iconHalf = (kind) => (kind === 'doc' ? DOC_ICON_HALF : ICON_HALF);
+  // A node the caller knows the tab has drawn.
+  /** @param {Tab} tab @param {string} id */
+  const drawnNode = (tab, id) => /** @type {PanelNode} */ (tab.nodes.get(id));
 
   // A tab's files are only ever reassigned, never changed in place, so tabs can share a list.
-  /** @param {LoadedFile[]} files @param {View} [view] @returns {Tab} */
+  /** @param {LoadedFile[]} files @param {View} [view] @returns {NewTab} */
   function newTab(files, view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
     const layers = { base: group(), mid: group(), lit: group() };
@@ -927,7 +933,7 @@
   const state = {
     // Every tab, in order; init lists the first, the shown tab, with the sample memos.
     tabs: [],
-    shown: newTab(SAMPLE_FILES),
+    shown: /** @type {Tab} */ (newTab(SAMPLE_FILES)),
     nextTab: 1,
     // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
@@ -1059,10 +1065,11 @@
   /** @param {Tab} tab @param {string} id */
   function nodeName(tab, id) {
     const [kind, d] = splitId(id);
-    if (kind === 'doc') return tab.nodes.get(id)?.file.name ?? 'document';
+    if (kind === 'doc') return /** @type {DocNode | undefined} */ (tab.nodes.get(id))?.file.name ?? 'document';
     if (kind === 'schema') return 'structure';
-    if (kind === 'answer') return answerLabel(answerAt(tab.run, id));
-    return `${docLabel(tab.run, d)} · ${KIND_SUFFIX[kind]}`;
+    const run = /** @type {Run} */ (tab.run);
+    if (kind === 'answer') return answerLabel(answerAt(run, id));
+    return `${docLabel(run, d)} · ${KIND_SUFFIX[kind]}`;
   }
 
   /** @param {string} code */
@@ -1144,7 +1151,7 @@
         });
         if (done) return;
         const frames = (buffer + value).split(/\r?\n\r?\n/);
-        buffer = frames.pop();
+        buffer = /** @type {string} */ (frames.pop());
         for (const data of frames.map(frameData).filter(Boolean)) yield JSON.parse(data);
       }
     } finally {
@@ -1160,11 +1167,11 @@
     const response = await api(path);
     /** @type {ServerEvent | null} */
     let last = null;
-    for await (const event of serverEvents(response.body)) {
+    for await (const event of serverEvents(/** @type {ReadableStream<BufferSource>} */ (response.body))) {
       last = event;
       onEvent(event);
     }
-    if (!ENDINGS.has(last?.type)) throw lostConnection();
+    if (!last || !ENDINGS.has(last.type)) throw lostConnection();
   }
 
   /** @param {Tab} tab */
@@ -1222,7 +1229,7 @@
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
   /** @param {Run} run @param {string[]} ids */
   function docIndices(run, ids) {
-    return [...new Set(ids.map((id) => run.ids.indexOf(id.split('.')[0])))];
+    return [...new Set(ids.map((id) => /** @type {string[]} */ (run.ids).indexOf(id.split('.')[0])))];
   }
 
   /** @param {Run} run @param {{ summary_ids: string[], parse_ids: string[] }} provenance */
@@ -1261,7 +1268,7 @@
 
   // ---------- runs ----------
 
-  /** @param {Quote} quote */
+  /** @param {Quote} quote @returns {quote is Quote & TextRange} */
   const located = (quote) => quote.start !== null;
 
   // Where each of `ranges` starts or ends, in order, once each.
@@ -1276,10 +1283,10 @@
     let point = 0;
     let unit = 0;
     for (const target of cutsOf(quotes.filter(located))) {
-      for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(text.codePointAt(unit)).length;
+      for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(/** @type {number} */ (text.codePointAt(unit))).length;
       units.set(target, unit);
     }
-    return quotes.map((q) => (located(q) ? { ...q, start: units.get(q.start), end: units.get(q.end) } : q));
+    return quotes.map((q) => (located(q) ? /** @type {Quote} */ ({ ...q, start: units.get(q.start), end: units.get(q.end) }) : q));
   }
 
   /** @returns {Run} */
@@ -1400,7 +1407,8 @@
   function cites(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'answer') {
-      const { summary_ids, parse_ids } = answerAt(run, id).provenance;
+      // Only an answer that has landed is asked what it cites.
+      const { summary_ids, parse_ids } = /** @type {Provenance} */ (answerAt(run, id).provenance);
       return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
@@ -1422,7 +1430,7 @@
     /** @type {Map<string, string>} */
     const citedBy = new Map();
     for (const id of nodes) {
-      for (const from of [ownDocument(run, id), ...cites(run, id)].filter(Boolean)) {
+      for (const from of /** @type {string[]} */ ([ownDocument(run, id), ...cites(run, id)].filter(Boolean))) {
         if (/** @type {NodeKind[]} */ (SUMMARY_KINDS).includes(splitId(from)[0]) && !nodes.has(from)) citedBy.set(from, id);
         nodes.add(from);
         edges.add(`${from}>${id}`);
@@ -1467,13 +1475,13 @@
   function citerName(tab, id) {
     const [kind, d] = splitId(id);
     if (kind === 'answer') return 'the answer';
-    return kind === 'parsed' ? `the ${docLabel(tab.run, d)} parse` : nodeName(tab, id);
+    return kind === 'parsed' ? `the ${docLabel(/** @type {Run} */ (tab.run), d)} parse` : nodeName(tab, id);
   }
 
   // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary.
   /** @param {Tab} tab @param {Trail} trail @param {Span} span */
   function quotedBy(tab, trail, span) {
-    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citerName(tab, trail.citedBy.get(id))})`)].join('\n');
+    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citerName(tab, /** @type {string} */ (trail.citedBy.get(id)))})`)].join('\n');
   }
 
   // ---------- panel: view ----------
@@ -1535,7 +1543,7 @@
   /** @param {Tab} tab @returns {Origin} */
   function nodeOrigin(tab) {
     return (i, file) => {
-      const node = tab.nodes.get(docId(file));
+      const node = drawnNode(tab, docId(file));
       return { x: node.x, y: node.y };
     };
   }
@@ -1550,7 +1558,7 @@
   // The first spot around the run's answer, where it is now, that no answer node holds.
   /** @param {Tab} tab */
   function freeAnswerSpot(tab) {
-    const first = tab.nodes.get(RUN_ANSWER);
+    const first = drawnNode(tab, RUN_ANSWER);
     const answers = [...tab.nodes.values()].filter((n) => n.kind === 'answer');
     /** @param {Point} spot */
     const taken = (spot) => answers.some((n) => Math.abs(n.x - spot.x) < GRID.colGap / 2 && Math.abs(n.y - spot.y) < GRID.rowGap / 2);
@@ -1563,7 +1571,8 @@
   function plan(tab, origin) {
     const layout = gridLayout(tab.files, origin);
     if (!tab.run) return layout;
-    const first = layout.get(RUN_ANSWER);
+    // A run has files, so the grid has its answer.
+    const first = /** @type {Point} */ (layout.get(RUN_ANSWER));
     tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
   }
@@ -1629,14 +1638,15 @@
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {LoadedFile | null} file */
   function nodeLabels(tab, id, kind, file) {
     if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
-    return kind === 'doc' || kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
+    const label = fileLabel(/** @type {LoadedFile} */ (file));
+    return kind === 'doc' || kind === 'parsed' ? [label] : [label, KIND_SUFFIX[kind]];
   }
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
   function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
-      const { question, model } = answerAt(tab.run, node.id);
+      const { question, model } = answerAt(/** @type {Run} */ (tab.run), node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
@@ -1663,10 +1673,10 @@
     return node;
   }
 
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function addNode(tab, id) {
     const [kind, d] = splitId(id);
-    return createNode(tab, id, kind, tab.layout.get(id), { working: true, file: PER_DOCUMENT.has(kind) ? tab.run.docs[d] : null });
+    return createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: PER_DOCUMENT.has(kind) ? tab.run.docs[d] : null });
   }
 
   /** @param {Tab} tab @param {LoadedFile} file @param {Point} [pos] */
@@ -1794,20 +1804,20 @@
 
   /** @param {Tab} tab @param {string} id */
   function markWorking(tab, id) {
-    tab.nodes.get(id).el.classList.add('working');
+    drawnNode(tab, id).el.classList.add('working');
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
   /** @param {Tab} tab @param {string} id */
   function settleNode(tab, id, { empty = false, failed = false } = {}) {
-    const node = tab.nodes.get(id);
+    const node = drawnNode(tab, id);
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
     node.el.classList.toggle('failed', failed);
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = MARK;
     });
-    if (node.kind === 'parsed' && !empty && !failed) node.el.querySelector('.icon').innerHTML = iconFor('parsed', true);
+    if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = iconFor('parsed', true);
     node.el.setAttribute('aria-label', ariaName(tab, node));
     rerenderIfOpen(tab, id);
   }
@@ -1827,7 +1837,7 @@
   /** @param {Tab} tab @param {string} id */
   function landed(tab, id) {
     const classes = tab.nodes.get(id)?.el.classList;
-    return Boolean(classes) && !classes.contains('working') && !classes.contains('failed');
+    return Boolean(classes && !classes.contains('working') && !classes.contains('failed'));
   }
 
   /** @param {Tab} tab @param {PanelNode} a @param {PanelNode} b @param {(node: PanelNode) => Point} at */
@@ -1908,7 +1918,7 @@
     edge.kind = kind;
     edge.el.classList.add(kind);
     layerFor(tab, kind).append(edge.el);
-    edge.el.setAttribute('d', edgePath(tab, tab.nodes.get(from), tab.nodes.get(to)));
+    edge.el.setAttribute('d', edgePath(tab, drawnNode(tab, from), drawnNode(tab, to)));
     if (how) animateEdge(tab, edge.el, how);
     edge.el.classList.toggle('hl', lightsWith(tab, edge));
     return edge;
@@ -1922,7 +1932,7 @@
 
   /** @param {Tab} tab @param {(node: PanelNode) => Point} [at] */
   function redrawEdges(tab, at) {
-    for (const e of tab.edges.values()) e.el.setAttribute('d', edgePath(tab, tab.nodes.get(e.from), tab.nodes.get(e.to), at));
+    for (const e of tab.edges.values()) e.el.setAttribute('d', edgePath(tab, drawnNode(tab, e.from), drawnNode(tab, e.to), at));
   }
 
   function refreshHighlight() {
@@ -1932,7 +1942,7 @@
   }
 
   // Lights the lineage of the tab's lit answer; an answer that cites nothing lights nothing.
-  /** @param {Tab} tab */
+  /** @param {RunTab} tab */
   function lightPath(tab) {
     const { run } = tab;
     const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
@@ -1942,7 +1952,7 @@
       n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    run.docs.forEach((file, d) => countSentences(tab, tab.nodes.get(docId(file)), tab.trail?.quoted[d].sentences.length ?? 0));
+    run.docs.forEach((file, d) => countSentences(tab, drawnNode(tab, docId(file)), tab.trail?.quoted[d].sentences.length ?? 0));
     for (const e of tab.edges.values()) {
       const on = Boolean(path?.edges.has(e.key));
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
@@ -1983,7 +1993,7 @@
   }
 
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function lightAnswer(tab, id) {
     for (const e of [...tab.edges.values()]) {
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
@@ -1996,7 +2006,7 @@
   }
 
   // A landing ask is the newest answer, so it is lit, unless another answer that has landed is open there.
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function lightLanded(tab, id) {
     const open = openIn(tab);
     if (open && open !== id && splitId(open)[0] === 'answer' && landed(tab, open)) return;
@@ -2004,7 +2014,7 @@
   }
 
   // A run lights its own answer, or again the one lit before a replay.
-  /** @param {Tab} tab */
+  /** @param {RunTab} tab */
   const lightRun = (tab) => lightAnswer(tab, tab.run.lit ?? RUN_ANSWER);
 
   // ---------- inspector ----------
@@ -2080,7 +2090,7 @@
   function markedFile(tab, file, at = null) {
     const shown = shownPart(file, at);
     /** @param {Trail | null} trail */
-    const quotedOf = (trail) => trail?.quoted[tab.run.docs.indexOf(file)];
+    const quotedOf = (trail) => trail?.quoted[/** @type {Run} */ (tab.run).docs.indexOf(file)];
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
@@ -2089,8 +2099,9 @@
     };
     const meta = trailPart(tab, h('div', { class: 'k' }), line);
     if (!file.text) return [meta, h('p', { class: 'k' }, 'This file has no readable text.')];
+    // Only a trail has spans, so a span is titled only with one.
     /** @param {Trail | null} trail */
-    const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, trail, span), at);
+    const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at);
     return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
   }
 
@@ -2105,7 +2116,7 @@
   }
 
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
-  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  /** @param {RunTab} tab @param {'r1' | 'r2'} kind @param {number} d */
   function quotesFold(tab, kind, d) {
     const id = `${kind}-${d}`;
     const { quotes } = tab.run[kind][d];
@@ -2132,7 +2143,7 @@
     return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
   }
 
-  /** @param {PanelNode} node @param {TextRange | null} at */
+  /** @param {DocNode} node @param {TextRange | null} at */
   function docBody(node, at) {
     const { run, nodes } = state.shown;
     const index = run ? run.docs.indexOf(node.file) : -1;
@@ -2143,7 +2154,7 @@
     ];
   }
 
-  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  /** @param {RunTab} tab @param {'r1' | 'r2'} kind @param {number} d */
   function snippetBody(tab, kind, d) {
     const { run } = tab;
     const id = `${kind}-${d}`;
@@ -2161,17 +2172,19 @@
 
   /** @param {string} id @param {TextRange | null} at */
   function inspectorBody(id, at) {
-    const { run, nodes } = state.shown;
     const [kind, d] = splitId(id);
-    const node = nodes.get(id);
-    if (kind === 'doc') return docBody(node, at);
+    const node = drawnNode(state.shown, id);
+    if (kind === 'doc') return docBody(/** @type {DocNode} */ (node), at);
+    const tab = /** @type {RunTab} */ (state.shown);
+    const { run } = tab;
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
-    if (kind === 'r1' || kind === 'r2') return snippetBody(state.shown, kind, d);
+    if (kind === 'r1' || kind === 'r2') return snippetBody(tab, kind, d);
     if (kind === 'schema') {
+      const schema = /** @type {Schema} */ (run.schema);
       return [
-        run.schema.thought ? row('reasoning', run.schema.thought) : null,
-        h('pre', { class: 'code' }, run.schema.code),
+        schema.thought ? row('reasoning', schema.thought) : null,
+        h('pre', { class: 'code' }, schema.code),
         callMeta(run, 'schema'),
       ];
     }
@@ -2203,7 +2216,7 @@
   // scroll the panel, which only the view moves.
   /** @param {HTMLElement} el */
   function scrollToMiddle(el) {
-    const box = el.parentElement;
+    const box = /** @type {HTMLElement} */ (el.parentElement);
     const r = el.getBoundingClientRect();
     const top = box.scrollTop + r.top - box.getBoundingClientRect().top - (box.clientHeight - r.height) / 2;
     box.scrollTo({ top, behavior: reduceMotion() ? 'auto' : 'smooth' });
@@ -2239,7 +2252,7 @@
     inspector.hidden = false;
     inspector.scrollTop = 0;
     renderInspector(at);
-    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
+    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(/** @type {RunTab} */ (state.shown), id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
   }
@@ -2247,7 +2260,7 @@
   function closeInspector(restoreFocus = false) {
     if (inspector.hidden) return;
     const had = inspector.contains(document.activeElement);
-    const node = state.shown.nodes.get(state.selected);
+    const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     inspector.hidden = true;
     state.selected = null;
     refreshHighlight();
@@ -2258,7 +2271,7 @@
     const { view } = state.shown;
     if (inspector.hidden) return;
     if (state.inspectorDroppedAt) return placeInspector(state.inspectorDroppedAt);
-    const node = state.shown.nodes.get(state.selected);
+    const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     if (!node) return;
     const w = inspector.offsetWidth;
     const halfW = (node.el.offsetWidth / 2) * view.k;
@@ -2364,7 +2377,7 @@
     const id = `log-${nextLog++}`;
     const lines = h('div', { class: 'log-lines', id, hidden: true, 'aria-live': 'off' });
     const latest = h('span', { class: 't', id: `${id}-latest` }, first);
-    const asked = body.parentElement.querySelector('.line.user .t');
+    const asked = /** @type {Element} */ (body.parentElement?.querySelector('.line.user .t'));
     asked.id ||= `${id}-asked`;
     const toggleLines = () => {
       lines.hidden = !lines.hidden;
@@ -2394,7 +2407,7 @@
       /** @param {string} key @param {string} kind @param {string} text @param {LineOptions} [opts] */
       logAs(key, kind, text, opts) {
         const said = named.get(key);
-        if (said) said.querySelector('.t').textContent = text;
+        if (said) /** @type {Element} */ (said.querySelector('.t')).textContent = text;
         else named.set(key, log(kind, text, opts));
       },
       /** @param {string} kind @param {Child} text @param {LineOptions} [opts] */
@@ -2430,7 +2443,7 @@
   const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
   /** @param {string} text */
   const errorStatus = (text) => setStatus(...errorLine(text));
-  /** @param {Narrator} narr @param {string} model @param {boolean} simulated @param {Totals | null} totals */
+  /** @param {Narrator} narr @param {string} model @param {boolean} simulated @param {Totals | null | undefined} totals */
   function sayReady(narr, model, simulated, totals) {
     // The cost alone, or the tokens where it is unknown, keeps the line short.
     const spend = spendOf(simulated, totals).slice(-1);
@@ -2585,14 +2598,14 @@
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
-  /** @param {Tab} tab @param {string} to */
+  /** @param {RunTab} tab @param {string} to */
   function showInputs(tab, to) {
     const own = ownDocument(tab.run, to);
     if (own) addEdge(tab, own, to, 'self', 'fade');
     for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context', 'fade');
   }
 
-  /** @param {Tab} tab @param {string} to */
+  /** @param {RunTab} tab @param {string} to */
   function showCites(tab, to) {
     for (const from of cites(tab.run, to)) addEdge(tab, from, to, 'cite', 'draw');
   }
@@ -2605,13 +2618,13 @@
   /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
 
-  /** @param {Tab} tab @param {StageKind} kind */
+  /** @param {RunTab} tab @param {StageKind} kind */
   function showProgress(tab, kind) {
     const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
     tabStatus(tab, `running · ${STAGE_PHASE[kind]}${progress}`);
   }
 
-  /** @param {Tab} tab @param {Narrator} narr @param {StageKind} kind */
+  /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
     /** @type {Record<StageKind, string>} */
     const steps = {
@@ -2626,7 +2639,7 @@
     showProgress(tab, kind);
   }
 
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function appear(tab, id) {
     const [kind, i] = splitId(id);
     addNode(tab, id);
@@ -2646,12 +2659,12 @@
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
     if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'snippet ready' : 'nothing relevant'}`;
-    if (kind === 'schema') return schemaClasses(run.schema.code).join(', ') || 'structure ready';
+    if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'structure ready';
     return `${docLabel(run, i)} — ${hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed'}`;
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
-  /** @param {Tab} tab @param {Narrator} narr @param {string} id */
+  /** @param {RunTab} tab @param {Narrator} narr @param {string} id */
   function settle(tab, narr, id) {
     const { run } = tab;
     const [kind] = /** @type {[StageKind, number | null]} */ (splitId(id));
@@ -2662,13 +2675,13 @@
   }
 
   // An answer's node settles, with solid lines from what it cites.
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function drawAnswer(tab, id) {
     settleNode(tab, id);
     showCites(tab, id);
   }
 
-  /** @param {Tab} tab @param {Narrator} narr */
+  /** @param {RunTab} tab @param {Narrator} narr */
   function showAnswer(tab, narr, id = RUN_ANSWER) {
     drawAnswer(tab, id);
     const answer = answerOf(tab.run, id);
@@ -2681,7 +2694,7 @@
   }
 
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function sentenceList(tab, id) {
     const trail = trailOf(tab.run, answerLineage(tab.run, id));
     const line = sentencesFrom(trail);
@@ -2698,7 +2711,7 @@
     return fold(line, groups, 'fold sentences');
   }
 
-  /** @param {Tab} tab @param {Narrator} narr */
+  /** @param {RunTab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
     const { run } = tab;
     sayReady(narr, run.answers[0].model, run.simulated, run.totals);
@@ -2717,7 +2730,7 @@
     tabStatus(tab, ...errorLine(status));
   }
 
-  /** @param {Tab} tab @param {Narrator} narr */
+  /** @param {RunTab} tab @param {Narrator} narr */
   function buildTimeline(tab, narr) {
     const { run } = tab;
     /** @type {{ at: number, run: () => void }[]} */
@@ -2726,7 +2739,7 @@
     const at = (t, fn) => steps.push({ at: t, run: fn });
     const n = run.docs.length;
     /** @param {number} t0 @param {PerDocumentKind} kind */
-    const perDocument = (t0, kind) => stage(at, t0, run.order[kind], n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
+    const perDocument = (t0, kind) => stage(at, t0, /** @type {Record<PerDocumentKind, number[]>} */ (run.order)[kind], n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
     let t = TIMING.start;
 
     at(t, () => {
@@ -2783,7 +2796,7 @@
     return steps;
   }
 
-  /** @param {Tab} tab @param {Narrator} narr */
+  /** @param {RunTab} tab @param {Narrator} narr */
   function playTimeline(tab, narr) {
     const steps = buildTimeline(tab, narr);
     if (reduceMotion()) {
@@ -2796,7 +2809,7 @@
   // ---------- live ----------
 
   // Fills in the tab's run from one of its events and draws it, in that tab whether or not it is shown.
-  /** @param {Tab} tab @param {Narrator} narr @param {ServerEvent} event */
+  /** @param {RunTab} tab @param {Narrator} narr @param {ServerEvent} event */
   function drawEvent(tab, narr, event) {
     const { run } = tab;
     /** @param {string} id */
@@ -2851,7 +2864,7 @@
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
   // quotes are placed in the whole document, so they add up as they are.
-  /** @param {Tab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance @param {Quote[]} quotes */
+  /** @param {RunTab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance @param {Quote[]} quotes */
   function addSnippet(tab, narr, id, summary, provenance, quotes) {
     const { run } = tab;
     const [kind, i] = /** @type {['r1' | 'r2', number]} */ (splitId(id));
@@ -2864,7 +2877,7 @@
     settle(tab, narr, id);
   }
 
-  /** @param {Tab} tab @param {Narrator} narr */
+  /** @param {RunTab} tab @param {Narrator} narr */
   async function streamRun(tab, narr) {
     const { run } = tab;
     const stream = openStream('run', tab, run);
@@ -2883,7 +2896,7 @@
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
-  /** @param {Tab} tab @param {string} question @param {string} model @param {string | null} endpoint */
+  /** @param {RunTab} tab @param {string} question @param {string} model @param {string | null} endpoint */
   async function askOver(tab, question, model, endpoint) {
     const { run } = tab;
     /** @type {Answer} */
@@ -2934,7 +2947,7 @@
   const docPositions = (tab) => new Map([...tab.nodes.values()].filter((n) => n.kind === 'doc').map((n) => [n.id, { x: n.x, y: n.y }]));
 
   // Plays the shown tab's run, its document nodes starting from `at`.
-  /** @param {Tab} tab */
+  /** @param {RunTab} tab */
   function playRun(tab, at = docPositions(tab)) {
     cancelTimers(tab);
     clearPanel(tab);
@@ -2953,9 +2966,8 @@
   function startRun(question) {
     const from = state.shown;
     const at = docPositions(from);
-    const tab = from.run ? openTab(newTab(from.files, from.view)) : from;
-    tab.run = { ...mode.newRun(question, tab.files), lit: null };
-    tab.turn = addTurn(tab, question);
+    const opened = from.run ? openTab(newTab(from.files, from.view)) : from;
+    const tab = Object.assign(opened, { run: { ...mode.newRun(question, opened.files), lit: null }, turn: addTurn(opened, question) });
     if (tab === from) renderFiles();
     else showTabContents(tab);
     playRun(tab, at);
@@ -2972,7 +2984,7 @@
     return narr;
   }
 
-  /** @param {Tab} tab @param {Answer} ask */
+  /** @param {RunTab} tab @param {Answer} ask */
   function addAsk(tab, ask) {
     const id = answerId(tab.run.answers.push(ask) - 1);
     tab.layout.set(id, freeAnswerSpot(tab));
@@ -2982,7 +2994,7 @@
   }
 
   // Draws a landed ask again, as a replay does, without saying it in the chat again.
-  /** @param {Tab} tab @param {string} id */
+  /** @param {RunTab} tab @param {string} id */
   function redrawAsk(tab, id) {
     addNode(tab, id);
     drawAnswer(tab, id);
@@ -2995,7 +3007,7 @@
   }
 
   // A recorded answer when one has this question and model over the recorded run, else a simulated one.
-  /** @param {Tab} tab @param {string} question @param {string} model */
+  /** @param {RunTab} tab @param {string} question @param {string} model */
   function prototypeAsk(tab, question, model) {
     const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
@@ -3043,8 +3055,10 @@
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
   // Lists the tab. The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
-  /** @param {Tab} tab */
-  function openTab(tab) {
+  /** @param {NewTab} unlisted */
+  function openTab(unlisted) {
+    // Its buttons are made below, before anything reads them.
+    const tab = /** @type {Tab} */ (unlisted);
     tab.id = state.nextTab++;
     state.tabs.push(tab);
     const props = { class: 'btn run-tab', id: tabButtonId(tab), type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) };
@@ -3060,9 +3074,10 @@
     for (const tab of state.tabs) {
       const shown = tab === state.shown;
       const label = tabLabel(tab);
+      const labelText = /** @type {ChildNode} */ (tab.button.lastChild);
       // A label grows as files are added, which can push the shown tab out of the row's view.
-      if (tab.button.lastChild.textContent !== label) {
-        tab.button.lastChild.textContent = label;
+      if (labelText.textContent !== label) {
+        labelText.textContent = label;
         if (shown) revealTab(tab);
       }
       tab.button.setAttribute('aria-selected', String(shown));
@@ -3188,8 +3203,8 @@
     $('file-list').querySelectorAll('.file').forEach((button, d) => {
       const sentences = trail?.quoted[d].sentences.length ?? 0;
       const named = plural(sentences, 'highlighted sentence');
-      button.classList.toggle('off', Boolean(trail) && !trail.nodes.has(docId(run.docs[d])));
-      fill(button.querySelector('.used'), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
+      button.classList.toggle('off', Boolean(trail && !trail.nodes.has(docId(/** @type {Run} */ (run).docs[d]))));
+      fill(/** @type {Element} */ (button.querySelector('.used')), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
     });
   }
 
@@ -3434,7 +3449,7 @@
   // What is dropped is taken as it is; what is in a dropped folder, as folderTakes says.
   /** @param {DataTransfer} dataTransfer @returns {Promise<Picked>} */
   async function filesFromDrop(dataTransfer) {
-    const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean);
+    const entries = /** @type {FileSystemEntry[]} */ ([...dataTransfer.items].map((item) => item.webkitGetAsEntry?.()).filter(Boolean));
     if (!entries.length) return { files: [...dataTransfer.files], skipped: 0, failed: [] };
     /** @type {Picked} */
     const dropped = { files: [], skipped: 0, failed: [] };
@@ -3532,7 +3547,7 @@
     for (const provider of Object.keys(PROVIDERS)) {
       const { text, removable } = keyState(provider, status);
       $(`state-${provider}`).textContent = text;
-      $(`state-${provider}`).parentElement.hidden = !text;
+      /** @type {HTMLElement} */ ($(`state-${provider}`).parentElement).hidden = !text;
       $(`remove-${provider}`).hidden = !removable;
     }
     renderServers(serversOf(status));
@@ -3594,7 +3609,7 @@
   /** @returns {SavedModel[]} */
   function readSavedModels() {
     try {
-      const saved = JSON.parse(readStored(SAVED_MODELS_KEY));
+      const saved = JSON.parse(readStored(SAVED_MODELS_KEY) ?? '[]');
       /** @param {SavedModel} entry */
       const valid = (entry) => typeof entry?.model === 'string' && entry.model.trim() && ['string', 'undefined'].includes(typeof entry.endpoint);
       return Array.isArray(saved) ? saved.filter(valid) : [];
@@ -3621,7 +3636,7 @@
     const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
     const labels = serverLabels(servers);
     const [rememberedModel, rememberedEndpoint] = parseModelId(readStored(MODEL_KEY) || DEFAULT_MODEL);
-    const gone = keysRead && !servers.includes(rememberedEndpoint);
+    const gone = keysRead && !/** @type {(string | null)[]} */ (servers).includes(rememberedEndpoint);
     const remembered = modelId(rememberedModel, gone ? null : rememberedEndpoint);
     /** @param {string} model @param {string | null} [endpoint] @returns {[string, string]} */
     const entry = (model, endpoint, text = model) => [modelId(model, endpoint), text];
@@ -3849,10 +3864,10 @@
   // ---------- gestures ----------
 
   /**
-   * @type {{ pointers: Map<number, Point>, mode: 'pinch' | 'drag' | 'pan' | null, moved: boolean, origin: Point | null,
-   *   from: Point | null, node: PanelNode | null, pinch: { dist: number, mid: Point, view: View } | null }}
+   * @type {{ pointers: Map<number, Point>, mode: 'pinch' | 'drag' | 'pan' | null, moved: boolean, origin: Point,
+   *   from: Point, node: PanelNode | null, pinch: { dist: number, mid: Point, view: View } | null }}
    */
-  const gesture = { pointers: new Map(), mode: null, moved: false, origin: null, from: null, node: null, pinch: null };
+  const gesture = { pointers: new Map(), mode: null, moved: false, origin: { x: 0, y: 0 }, from: { x: 0, y: 0 }, node: null, pinch: null };
 
   /** @param {number} x @param {number} y */
   function panelPoint(x, y) {
@@ -3871,7 +3886,7 @@
   function updatePinch() {
     const { view } = state.shown;
     const [a, b] = [...gesture.pointers.values()];
-    const p = gesture.pinch;
+    const p = /** @type {NonNullable<typeof gesture.pinch>} */ (gesture.pinch);
     const k = clamp((p.view.k * Math.hypot(a.x - b.x, a.y - b.y)) / p.dist, ZOOM.min, ZOOM.max);
     const mid = panelPoint((a.x + b.x) / 2, (a.y + b.y) / 2);
     const wx = (p.mid.x - p.view.x) / p.view.k;
@@ -3887,7 +3902,7 @@
   /** @param {PointerEvent} e */
   function overTrash(e) {
     const { node } = gesture;
-    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node.kind === 'doc';
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && /** @type {PanelNode} */ (node).kind === 'doc';
     if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
@@ -3901,9 +3916,8 @@
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
-    /** @type {HTMLElement | null} */
-    const nodeEl = targetOf(e).closest('.node');
-    gesture.node = nodeEl ? state.shown.nodes.get(nodeEl.dataset.id) : null;
+    const id = hoverFrom(e);
+    gesture.node = id ? drawnNode(state.shown, id) : null;
     gesture.mode = gesture.node ? 'drag' : 'pan';
     gesture.moved = false;
     gesture.origin = { x: e.clientX, y: e.clientY };
@@ -3927,11 +3941,12 @@
     if (!gesture.moved) panel.setPointerCapture(e.pointerId);
     gesture.moved = true;
     if (gesture.mode === 'drag') {
-      gesture.node.x = gesture.from.x + dx / view.k;
-      gesture.node.y = gesture.from.y + dy / view.k;
-      placeNode(gesture.node);
+      const node = /** @type {PanelNode} */ (gesture.node);
+      node.x = gesture.from.x + dx / view.k;
+      node.y = gesture.from.y + dy / view.k;
+      placeNode(node);
       redrawEdges(state.shown);
-      if (state.selected === gesture.node.id) positionInspector();
+      if (state.selected === node.id) positionInspector();
       trash.classList.toggle('over', overTrash(e));
     } else {
       panel.classList.add('panning');
@@ -3953,7 +3968,7 @@
   /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
-    const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node.file : null;
+    const trashed = e.type === 'pointerup' && overTrash(e) ? /** @type {PanelNode} */ (gesture.node).file : null;
     if (gesture.mode === 'pinch') {
       if (!gesture.pointers.size) endGesture();
       return;
@@ -4008,7 +4023,7 @@
   function hoverFrom(e) {
     /** @type {HTMLElement | null} */
     const el = targetOf(e).closest('.node');
-    return el ? el.dataset.id : null;
+    return el ? /** @type {string} */ (el.dataset.id) : null;
   }
 
   // ---------- side column: its width, from the line between it and the panel ----------
@@ -4160,7 +4175,7 @@
       saveSettings();
     });
     $('fit-btn').addEventListener('click', refit);
-    $('replay-btn').addEventListener('click', () => state.shown.run && playRun(state.shown));
+    $('replay-btn').addEventListener('click', () => state.shown.run && playRun(/** @type {RunTab} */ (state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
     $('new-tab-btn').addEventListener('click', () => {
       const tab = openTab(newTab([]));
@@ -4213,12 +4228,13 @@
       const input = $(id, HTMLInputElement);
       input.addEventListener('change', () => {
         // Copied now: a file input's list empties once its value is reset.
-        if (input.files.length) addFiles(fromFolders([...input.files]));
+        const files = /** @type {FileList} */ (input.files);
+        if (files.length) addFiles(fromFolders([...files]));
         input.value = '';
       });
     }
 
-    /** @param {DragEvent} e */
+    /** @param {DragEvent} e @returns {e is DragEvent & { dataTransfer: DataTransfer }} */
     const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
     // The panel and the side column take files alike. A node dragged in the panel is pointer events, never a drag of files.
     // The overlay is on while the drag is over any element in the frame, counted, as WebKit sends no relatedTarget.
@@ -4285,9 +4301,10 @@
     // It stops where it is, as a live run does once its call in flight is back.
     stop(tab) {
       cancelTimers(tab);
-      failRun(tab, tab.narr, { outcome: inStage('stopped', tab.narr.stage), error: '' });
+      const narr = /** @type {Narrator} */ (tab.narr);
+      failRun(tab, narr, { outcome: inStage('stopped', narr.stage), error: '' });
     },
-    ask: (question) => prototypeAsk(state.shown, question, pickedModel()),
+    ask: (question) => prototypeAsk(/** @type {RunTab} */ (state.shown), question, pickedModel()),
     async saveKey(provider, key) {
       keyed.set(provider, { source: 'here', hint: hintOf(key) });
       return prototypeStatus();
@@ -4343,7 +4360,7 @@
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
-    ask: (question) => askOver(state.shown, question, pickedModel(), pickedEndpoint()),
+    ask: (question) => askOver(/** @type {RunTab} */ (state.shown), question, pickedModel(), pickedEndpoint()),
     saveKey: async (provider, key) => (await api('/api/keys', { method: 'POST', body: { provider, key } })).json(),
     saveServer: async (endpoint, key) => (await api('/api/keys', { method: 'POST', body: { provider: 'other', endpoint, key: key || undefined } })).json(),
     forgetKey: async (provider) => (await api('/api/keys', { method: 'DELETE', body: { provider } })).json(),
