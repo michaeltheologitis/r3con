@@ -2443,6 +2443,21 @@ async function gestures() {
       const name = `a ${kind} still going when the tab is switched ends there: moving on moves nothing in either tab, and the panel stops panning`;
       check('gestures', name, isDeepStrictEqual(moved, { shown: [], left: [], panning: false }), JSON.stringify(moved));
     }
+
+    const from = await centre(page, 'r2-1');
+    const grabbed = await page.$(nodeSel('r2-1'));
+    const where = (el) => ({ at: `${el.style.left},${el.style.top}`, detached: !el.isConnected });
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    await page.mouse.move(from.x + NUDGE_PX, from.y + NUDGE_PX, { steps: DRAG_STEPS });
+    await page.evaluate(() => document.getElementById('replay-btn').click());
+    const cleared = await grabbed.evaluate(where);
+    await page.mouse.move(from.x + CHAT_DRAG_PX, from.y + CHAT_DRAG_PX, { steps: DRAG_STEPS });
+    const panning = await page.$eval('#panel', (el) => el.classList.contains('panning'));
+    await page.mouse.up();
+    const replayed = { cleared, after: await grabbed.evaluate(where), panning, popup: await popup(page) };
+    const replayName = 'a drag still going when a replay clears the panel ends there: moving on moves the cleared node no further, and pans nothing';
+    check('gestures', replayName, isDeepStrictEqual(replayed, { cleared: { ...cleared, detached: true }, after: cleared, panning: false, popup: null }), JSON.stringify(replayed));
   });
   await withPage('gestures', { layout: LAYOUTS.phone }, async (page) => {
     const tap = await centre(page, 'r2-3');

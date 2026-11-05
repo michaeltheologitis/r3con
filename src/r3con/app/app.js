@@ -1694,6 +1694,7 @@
   function clearPanel(tab) {
     cancelAnimationFrame(tab.arrangeFrame);
     if (openIn(tab)) closeInspector();
+    if (tab === state.shown) endGesture();
     for (const layer of Object.values(tab.layers)) layer.replaceChildren();
     tab.edges.clear();
     tab.nodesEl.replaceChildren();
