@@ -45,6 +45,10 @@ answer, or its error), r3con's run folder, the judge's `judge/calls.json`, and
 `record.json` (the score, the judge's rationale, tokens and cost). Both folders are
 git-ignored.
 
+A manual CI run with `eval` on runs it on GitHub's runner: the job summary shows its line,
+and the `eval-run` artifact (kept 90 days) holds the run folder and `results.jsonl` with
+that line added.
+
 A task is left without a record when its r3con run raises an error r3con resends (a
 failed connection, a server error, a timeout or a rate limit) once its resends are
 spent, a refused key, access or quota, or a model the provider does not know, and when

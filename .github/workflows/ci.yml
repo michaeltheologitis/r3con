@@ -14,6 +14,10 @@ on:
         description: Also run the experiments, once (bills OPENAI_API_KEY)
         type: boolean
         default: false
+      eval:
+        description: Also run the eval, r3con on 75 pinned tasks (about $3, bills OPENAI_API_KEY)
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       live:
@@ -144,4 +148,42 @@ jobs:
         with:
           name: experiment-run
           path: ${{ runner.temp }}/experiment
+          if-no-files-found: warn
+
+  eval:
+    if: inputs.eval
+    needs: [checks, test, lowest, wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Require the key
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::OPENAI_API_KEY is not set; the eval must run, not skip."
+            exit 1
+          fi
+      - name: The eval
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: uv run --locked python -m evals
+      - name: The results line
+        run: |
+          {
+            echo '```'
+            tail -n 1 evals/results.jsonl
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: eval-run
+          path: |
+            evals/results.jsonl
+            evals/runs/
           if-no-files-found: warn
