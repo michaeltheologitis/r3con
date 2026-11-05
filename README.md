@@ -183,5 +183,5 @@ MIT — see [LICENSE](https://github.com/michaeltheologitis/r3con/blob/main/LICE
 
 `src/r3con/runtime/python_executor.py` contains a modified version of the sandboxed
 interpreter from [smolagents](https://github.com/huggingface/smolagents), licensed under
-Apache-2.0 and © HuggingFace Inc. See [NOTICE](https://github.com/michaeltheologitis/r3con/blob/main/NOTICE) and
-[LICENSE-APACHE-2.0](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE-APACHE-2.0).
+Apache-2.0 and © HuggingFace Inc. See
+[THIRD-PARTY-NOTICES](https://github.com/michaeltheologitis/r3con/blob/main/THIRD-PARTY-NOTICES).

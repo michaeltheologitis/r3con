@@ -39,7 +39,7 @@ import threading
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,7 @@ from r3con.stages.relevance import (
     draw_document_ids,
     join_parts,
     surface_relevance,
+    trail_quotes,
 )
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
@@ -106,10 +107,14 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
-    - ``provenance`` — the ids the answer used, by view: ``provenance["summary_ids"]``,
-      those of the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of
-      a document read in parts), and ``provenance["parse_ids"]``, those of the
-      documents whose records in ``structured_context`` it used. An id can be in both.
+    - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
+      the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of a
+      document read in parts), ``provenance["parse_ids"]``, those of the documents
+      whose records in ``structured_context`` it used (an id can be in both), and
+      ``provenance["quotes"]``, the sentences behind it
+      (:class:`~r3con.stages.relevance.TrailQuote`): the quotes of the snippets it
+      cites and of those the parses it cites cite, followed back round by round
+      (:func:`~r3con.stages.relevance.trail_quotes`).
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
@@ -154,7 +159,7 @@ class Answer:
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
-    provenance: dict[str, list[str]] = field(default_factory=reasoning.cites_nothing)
+    provenance: reasoning.Provenance = field(default_factory=reasoning.cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
 
@@ -319,7 +324,8 @@ def run_pipeline(
       parts' records in order), and the ids of the relevance snippets the parse used,
       ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
-      ``answer``, ``provenance`` (``{summary_ids, parse_ids}``), ``path``, ``fallback``.
+      ``answer``, ``provenance`` (``{summary_ids, parse_ids, quotes}``, as
+      :attr:`Answer.provenance`), ``path``, ``fallback``.
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
@@ -517,6 +523,12 @@ def run_pipeline(
             len(result.turns),
             _preview(result.answer),
         )
+        result = replace(
+            result,
+            provenance=_with_quotes(
+                result.provenance, relevance, extraction.provenance, document_ids
+            ),
+        )
         record.result = _reasoning_record(result)
     stage_runs.append(record.run)
     emit("reasoning_finished", **_reasoning_outcome(result))
@@ -571,7 +583,7 @@ def _read_built(run_dir: Path) -> Representation:
         run_dir=run_dir,
         config=RunConfig.model_validate({**manifest["config"], "model": model}),
         document_ids=sorted(ids, key=ids.__getitem__),
-        relevance=_final_round(rounds, ids),
+        relevance=_relevance(rounds, ids),
         schema_code=schema["schema_code"],
         parsed=parsing["parsed"],
         source_docs=parsing["source_docs"],
@@ -579,16 +591,17 @@ def _read_built(run_dir: Path) -> Representation:
     )
 
 
-def _final_round(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
-    """The last of ``rounds``, each document's snippets in a list, one per part, a
+def _relevance(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
+    """Every one of ``rounds``, each document's snippets in a list, one per part, a
     snippet without quotes, as r3context 0.6.4 wrote one, quoting nothing."""
-    if not rounds:
-        return RelevantContext(records=[])
-    final_round: list[list[SnippetRecord]] = [[] for _ in ids]
-    for snippet in rounds[-1]["snippets"]:
-        document = ids[snippet["id"].partition(".")[0]]
-        final_round[document].append(SnippetRecord(**{"quotes": [], **snippet}))
-    return RelevantContext(records=[final_round])
+    records: list[list[list[SnippetRecord]]] = []
+    for round_ in rounds:
+        per_document: list[list[SnippetRecord]] = [[] for _ in ids]
+        for snippet in round_["snippets"]:
+            document = ids[snippet["id"].partition(".")[0]]
+            per_document[document].append(SnippetRecord(**{"quotes": [], **snippet}))
+        records.append(per_document)
+    return RelevantContext(records=records)
 
 
 def _in_one_line(error: Exception) -> str:
@@ -692,6 +705,15 @@ def ask_pipeline(
             run=record.run,
             **llm_kwargs,
         )
+        result = replace(
+            result,
+            provenance=_with_quotes(
+                result.provenance,
+                built.relevance,
+                built.parsing_provenance,
+                built.document_ids,
+            ),
+        )
         record.result = _reasoning_record(result)
     emit("reasoning_finished", **_reasoning_outcome(result))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
@@ -732,6 +754,22 @@ def _llm_kwargs(
         llm_kwargs["cancel"] = cancel
     register_credentials(llm_kwargs, completion)
     return llm_kwargs
+
+
+def _with_quotes(
+    provenance: reasoning.Provenance,
+    relevance: RelevantContext,
+    parsing_provenance: list[list[str]],
+    document_ids: list[str],
+) -> reasoning.Provenance:
+    """The answer's ``provenance`` with its ``quotes``: those on the trail
+    (:func:`trail_quotes`) from the snippets it cites and those the parses it cites
+    cite."""
+    parses = dict(zip(document_ids, parsing_provenance, strict=True))
+    cited = set(provenance["summary_ids"]).union(
+        *(parses[id_] for id_ in provenance["parse_ids"])
+    )
+    return {**provenance, "quotes": trail_quotes(relevance, cited, document_ids)}
 
 
 def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:

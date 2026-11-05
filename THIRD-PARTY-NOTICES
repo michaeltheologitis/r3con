@@ -1,3 +1,23 @@
+Third-party notices for r3con (distributed on PyPI as r3context)
+
+r3con is licensed under the MIT License (see LICENSE). It includes one file from
+another project, under that project's licence.
+
+--------------------------------------------------------------------------------
+src/r3con/runtime/python_executor.py
+--------------------------------------------------------------------------------
+
+A modified copy of `local_python_executor.py` from smolagents v1.25.0,
+Copyright 2024 The HuggingFace Inc. team, licensed under the Apache License,
+Version 2.0, whose text follows. The file keeps its original copyright and
+licence notice, and its header lists every change made to it.
+
+    Upstream: https://github.com/huggingface/smolagents/blob/v1.25.0/src/smolagents/local_python_executor.py
+
+--------------------------------------------------------------------------------
+Apache License, Version 2.0
+--------------------------------------------------------------------------------
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
