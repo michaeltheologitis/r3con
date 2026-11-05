@@ -151,6 +151,12 @@ const OTHER_RECORDED_MODEL = 'openai/gpt-6.1-terra';
 // WCAG 2.2's minimum target size, and its minimum contrast for text.
 const MIN_TARGET_PX = 24;
 const MIN_TEXT_CONTRAST = 4.5;
+// The page's background and accent in each color scheme, as drawn.
+const SCHEME_PAGE_COLORS = {
+  light: { '--bg': 'rgb(252, 251, 250)', '--accent': 'rgb(193, 95, 60)' },
+  dark: { '--bg': 'rgb(26, 25, 24)', '--accent': 'rgb(215, 119, 87)' },
+};
+const pageColorsOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 // The page's intro, live and in the prototype, for n documents.
@@ -893,6 +899,27 @@ function noHorizontalScroll() {
   return document.documentElement.scrollWidth <= document.documentElement.clientWidth;
 }
 
+// The tokens app.css colors per scheme with light-dark(), read off the root, as a page opened from a file can't
+// read its stylesheet's rules.
+function lightDarkTokens() {
+  const root = getComputedStyle(document.documentElement);
+  return [...root].filter((name) => root.getPropertyValue(name).startsWith('light-dark('));
+}
+
+// The theme values as an element draws them: a token's own value is its light-dark() text in every scheme.
+function themeValues(colors) {
+  const probe = document.body.appendChild(document.createElement('i'));
+  const values = { 'color-scheme': getComputedStyle(document.documentElement).colorScheme };
+  for (const name of colors) {
+    probe.style.color = `var(${name})`;
+    values[name] = getComputedStyle(probe).color;
+  }
+  probe.style.boxShadow = 'var(--shadow)';
+  values['--shadow'] = getComputedStyle(probe).boxShadow;
+  probe.remove();
+  return values;
+}
+
 // Only the animations a node or line plays as it appears count, not transitions such as the view's glide.
 function panelStill() {
   const world = document.getElementById('world');
@@ -994,11 +1021,28 @@ function recordViews([tab, ms, timeout]) {
 // ---------- areas ----------
 
 async function load() {
+  const seen = { system: {}, button: {} };
+  let tokens = [];
   for (const layout of Object.values(LAYOUTS)) {
     await withPage('load', { layout, sample: false }, async (page) => {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
+      const scheme = layout.options.colorScheme;
+      const other = scheme === 'dark' ? 'light' : 'dark';
+      tokens = await page.evaluate(lightDarkTokens);
+      seen.system[scheme] = await page.evaluate(themeValues, tokens);
+      await page.click('#theme-btn');
+      seen.button[other] = await page.evaluate(themeValues, tokens);
+      const pageColors = { [scheme]: pageColorsOf(seen.system[scheme]), [other]: pageColorsOf(seen.button[other]) };
+      const pageColorsName = `${layout.name}: the page's background and accent are its color scheme's, and the other's after the theme button`;
+      check('load', pageColorsName, isDeepStrictEqual(pageColors, SCHEME_PAGE_COLORS), JSON.stringify(pageColors));
     });
   }
+  const drifted = (scheme) => Object.keys(seen.system[scheme] ?? {}).filter((name) => seen.system[scheme][name] !== seen.button[scheme]?.[name]);
+  const differing = ['light', 'dark'].flatMap((scheme) => drifted(scheme).map((name) => `${scheme} ${name}`));
+  const both = Object.keys(seen.system).length === Object.keys(LAYOUTS).length;
+  const valueCount = Object.keys(seen.system.light ?? {}).length;
+  const themeName = `the theme button gives all ${valueCount} theme values, ${tokens.length} of them light-dark() colors, just as the system's color scheme does, in light and in dark`;
+  check('load', themeName, both && tokens.length > 0 && !differing.length, differing.join(', '));
   // Each tab row's bottom is its line.
   await withPage('load', { sample: false }, async (page) => {
     const chat = await rect(page, '#side .tabs');
