@@ -1,5 +1,6 @@
-"""Serve the app with a scripted model, for ``check.mjs``: ``fake_server.py LOGS_DIR``
-prints the URL that opens the page, with its token, then serves until killed.
+"""Serve the app with a scripted model, for ``check.mjs``: from the repo root,
+``python -m tests.app.fake_server LOGS_DIR`` prints the URL that opens the page, with
+its token, then serves until killed.
 
 The model answers every stage as one would, citing real ids, so a run draws its whole
 panel: each summary is its document's first line that is not ``QUIET`` (none if all
@@ -31,6 +32,7 @@ import litellm
 from litellm.exceptions import ContextWindowExceededError
 
 from r3con.app import serve
+from tests.fakes import SCHEMA_REPLY, mock_completion, stage_of
 
 litellm.suppress_debug_info = True
 
@@ -43,24 +45,9 @@ OFF_SCHEMA = "(the model answers off schema)"
 EMPTY_REPLY = "{}"
 QUIET = "(nothing relevant here)"
 PART_CHARS = 2000
-READS_A_DOCUMENT = frozenset({"RelevanceSummary", "ParseReply"})
+READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
-USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
-SCHEMA_REPLY = """Thought: one row per memo, with its lines.
-<schema>
-class Line(BaseModel):
-    text: str
-
-
-class Memo(BaseModel):
-    title: str
-    lines: list[Line]
-
-
-class Parse(BaseModel):
-    memos: list[Memo]
-</schema>"""
 PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
 never = threading.Event()
 
@@ -88,23 +75,14 @@ def summary_of(text: str) -> str:
     return next((line for line in lines if line.strip() and QUIET not in line), "")
 
 
-def reply_name(request: dict[str, Any]) -> str:
-    """The reply ``request`` asks for: its response format's name, or without one, the
-    schema."""
-    response_format = request.get("response_format")
-    if response_format is None:
-        return "schema"
-    return response_format["json_schema"]["name"]
-
-
 def content(request: dict[str, Any]) -> str:
     """The reply to ``request``, by the stage that sent it."""
     user = request["messages"][-1]["content"]
-    name = reply_name(request)
-    if name == "schema":
+    stage = stage_of(request)
+    if stage == "schema":
         return SCHEMA_REPLY
     schema = request["response_format"]["json_schema"]["schema"]
-    if name == "RelevanceSummary":
+    if stage == "relevance":
         summary = summary_of(user)
         reply = {
             "summary": summary,
@@ -112,7 +90,7 @@ def content(request: dict[str, Any]) -> str:
             "provenance_ids": citable(schema, "provenance_ids")[:1],
         }
         return json.dumps({field: reply[field] for field in schema["properties"]})
-    if name == "ParseReply":
+    if stage == "parsing":
         heading = PARSE_HEADING.match(user)
         own = [heading[1]] if heading else []
         text = PARSE_HEADING.sub("", user)
@@ -135,24 +113,15 @@ def scripted_model(**request: Any) -> Any:
     while STALLS in sent and not Path(sys.argv[1], RELEASE).exists():
         time.sleep(RELEASE_POLL_SECONDS)
     part = request["messages"][-1]["content"]
-    if reply_name(request) in READS_A_DOCUMENT and len(part) > PART_CHARS:
+    if stage_of(request) in READS_A_DOCUMENT and len(part) > PART_CHARS:
         raise ContextWindowExceededError(
             message=f"{len(part)} characters, over the scripted model's {PART_CHARS}",
             model=request["model"],
             llm_provider="openai",
         )
-    choice = {
-        "index": 0,
-        "finish_reason": "stop",
-        "message": {
-            "content": EMPTY_REPLY
-            if OFF_SCHEMA in sent and request.get("response_format")
-            else content(request)
-        },
-    }
-    return litellm.completion(
-        **request, mock_response={"choices": [choice], "usage": USAGE}
-    )
+    if OFF_SCHEMA in sent and request.get("response_format"):
+        return mock_completion(request, EMPTY_REPLY)
+    return mock_completion(request, content(request))
 
 
 def main() -> None:

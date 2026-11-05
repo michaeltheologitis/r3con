@@ -15,6 +15,20 @@ Request = dict[str, Any]
 Content = str | dict[str, Any]
 Reply = Content | BaseException | Callable[[Request], Content]
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+SCHEMA_REPLY = """Thought: one row per memo, with its lines.
+<schema>
+class Line(BaseModel):
+    text: str
+
+
+class Memo(BaseModel):
+    title: str
+    lines: list[Line]
+
+
+class Parse(BaseModel):
+    memos: list[Memo]
+</schema>"""
 GATE_TIMEOUT_SECONDS = 10
 
 
@@ -136,15 +150,7 @@ class FakeLLM:
                 content = {"parse": content, "provenance_ids": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
-            # The dict form, because litellm treats mock_response="" as absent.
-            choice = {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"content": content},
-            }
-            return _completion(
-                **request, mock_response={"choices": [choice], "usage": USAGE}
-            )
+            return mock_completion(request, content)
         finally:
             with self._lock:
                 self._in_flight -= 1
@@ -162,6 +168,13 @@ class FakeLLM:
                 f"no reply scripted for this {stage} request: {last!r}"
             )
         return answer
+
+
+def mock_completion(request: Request, content: str) -> Any:
+    """litellm's response to ``request`` when its own mock replies ``content``."""
+    # The dict form, because litellm treats mock_response="" as absent.
+    choice = {"index": 0, "finish_reason": "stop", "message": {"content": content}}
+    return _completion(**request, mock_response={"choices": [choice], "usage": USAGE})
 
 
 def _summary_reply(summary: str, request: Request) -> dict[str, Any]:
