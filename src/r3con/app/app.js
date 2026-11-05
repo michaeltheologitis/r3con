@@ -22,7 +22,21 @@
    * Files to add; how many files in their folders were left out by their suffix, and those the browser couldn't read.
    * @typedef {{ files: File[], skipped: number, failed: string[] }} Picked
    */
-  /** @typedef {{ summary: string, provenance: number[] }} Summary */
+  /**
+   * A sentence a summary quotes from its document, and where it is in the document's text, or null where r3con didn't
+   * find it. r3con counts code points, as Python indexes text; a run on the page holds UTF-16 code units, as a string
+   * here is indexed, while SAMPLE and an event hold r3con's own.
+   * @typedef {{ text: string, start: number | null, end: number | null }} Quote
+   */
+  /** @typedef {{ summary: string, provenance: number[], quotes: Quote[] }} Summary */
+  /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
+  /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
+  /** @typedef {{ spans: Span[], sentences: TextRange[] }} Quoted What a trail quotes of one document. */
+  /**
+   * An answer's trail: every node on its lineage; each summary on it, with the first node on it that cites the
+   * summary; and what it quotes of each document, by index.
+   * @typedef {{ nodes: Set<string>, citedBy: Map<string, string>, quoted: Quoted[] }} Trail
+   */
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
   /** @typedef {{ summary_ids: number[], parse_ids: number[] }} Provenance */
@@ -108,6 +122,7 @@
    * @property {number[]} timers
    * @property {Narrator | null} narr
    * @property {number} arrangeFrame
+   * @property {Trail | null} trail the lit answer's, while the panel has one lit
    */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
@@ -116,12 +131,13 @@
    * them all). A round is 1 or 2, since the page refuses a run with more.
    * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
    *   | { type: 'relevance_started', round: 1 | 2, doc_id: string }
-   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, summary: string, provenance: string[] }
+   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, summary: string, quotes: Quote[], provenance: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
    *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
-   *   | { type: 'reasoning_finished', answer: string, provenance: { summary_ids: string[], parse_ids: string[] } }
+   *   | { type: 'reasoning_finished', answer: string,
+   *       provenance: { summary_ids: string[], parse_ids: string[], quotes: { document: string, start: number, end: number, text: string }[] } }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
    * } ServerEvent
@@ -164,9 +180,9 @@
   const SAMPLE = {
  "question": "Which maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many?",
  "model": "gpt-6-luna",
- "version": "0.6.3",
- "runFolder": "20261031T212320Z_0df4cb0a",
- "created": "2026-10-31T21:23:20+00:00",
+ "version": "0.6.4",
+ "runFolder": "20261105T173546Z_bb4f0c37",
+ "created": "2026-11-05T17:35:46+00:00",
  "docs": [
   {
    "name": "01_northgate.txt",
@@ -196,112 +212,216 @@
  ],
  "r1": [
   {
-   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents; planned maintenance is handled by contractor CT-118. The memo does not identify the contractor by name or provide totals for other sites.",
-   "provenance": []
-  },
-  {
-   "summary": "A site operations memo for Eastfield’s Q3 review. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; it does not provide the contractor’s name or totals for other sites.",
-   "provenance": []
-  },
-  {
-   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor CT-118; this contributes 6 incidents for CT-118 toward the contractor-wide total.",
-   "provenance": []
-  },
-  {
-   "summary": "An approved contractor registry extract, which maps site paperwork codes to contractors. It identifies CT-118 as Halloran Services Ltd (mechanical and electrical maintenance), CT-204 as Merrow Facilities Group (HVAC and compressed air), and CT-311 as Bellweather Grounds (landscaping); it contains no Q3 equipment-incident counts.",
-   "provenance": []
-  },
-  {
-   "summary": "A cafeteria refurbishment memo describing planned October work and temporary service reductions. It provides no information about maintenance contractors, equipment incidents, or Q3 incident totals.",
-   "provenance": []
-  }
- ],
- "r2": [
-  {
-   "summary": "A Northgate Q3 operations memo reports 5 equipment incidents under contractor code CT-118, which the registry identifies as Halloran Services Ltd. Combined with Riverside’s 6 incidents, Halloran has 11 incidents in the sites reported so far; Eastfield, under CT-204, reports 9.",
-   "provenance": [
-    2,
-    3,
-    1
+   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies contractor code CT-118 as responsible for planned maintenance at the site, contributing Northgate’s incident count to the contractor comparison.",
+   "provenance": [],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 5.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "start": 141,
+     "end": 218
+    }
    ]
   },
   {
-   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and lists maintenance contractor code CT-204, which the contractor registry identifies as Merrow Facilities Group; this contributes 9 incidents to that contractor’s total.",
-   "provenance": [
-    3
+   "summary": "A Q3 operations review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; this is one site's contribution to the overall contractor comparison.",
+   "provenance": [],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 9.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "start": 136,
+     "end": 213
+    }
    ]
   },
   {
-   "summary": "A Riverside site Q3 operations memo reporting 6 equipment incidents and maintenance contractor code CT-118. The registry maps CT-118 to Halloran Services Ltd; combined with Northgate’s 5 incidents under the same code, the two documented sites total 11 incidents for Halloran Services.",
-   "provenance": [
-    0,
-    3
+   "summary": "A Q3 operations review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118, contributing a total of 6 incidents for that contractor in this document.",
+   "provenance": [],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 6.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "start": 164,
+     "end": 241
+    }
    ]
   },
   {
-   "summary": "An approved contractor registry extract mapping site-paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd and CT-204 as Merrow Facilities Group; the site memos report 11 Q3 incidents across CT-118 sites and 9 for CT-204, so the registry identifies Halloran as the contractor associated with the higher total.",
-   "provenance": [
-    0,
-    1,
-    2
+   "summary": "An approved contractor registry excerpt mapping contractor codes to names and maintenance scopes. It may help identify contractors in site paperwork: CT-118 is Halloran Services Ltd (mechanical and electrical maintenance), and CT-204 is Merrow Facilities Group (HVAC and compressed air). It provides no Q3 equipment-incident counts, so it cannot establish which contractor had the most incidents.",
+   "provenance": [],
+   "quotes": [
+    {
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "start": 54,
+     "end": 127
+    },
+    {
+     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+     "start": 128,
+     "end": 189
+    },
+    {
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "start": 248,
+     "end": 328
+    }
    ]
   },
   {
    "summary": "",
-   "provenance": []
+   "provenance": [],
+   "quotes": []
+  }
+ ],
+ "r2": [
+  {
+   "summary": "A Q3 operations memo for the Northgate site, reporting 5 equipment incidents under contractor code CT-118. The registry identifies CT-118 as Halloran Services Ltd; these incidents add to that contractor’s overall tally.",
+   "provenance": [
+    2,
+    3
+   ],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 5.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "start": 141,
+     "end": 218
+    }
+   ]
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204 for planned maintenance; the contractor registry maps CT-204 to Merrow Facilities Group. This adds 9 incidents to that contractor’s total.",
+   "provenance": [
+    3
+   ],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 9.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "start": 136,
+     "end": 213
+    }
+   ]
+  },
+  {
+   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents under maintenance contractor code CT-118, identified in the contractor registry as Halloran Services Ltd; this is Riverside’s contribution to the contractor comparison.",
+   "provenance": [
+    3
+   ],
+   "quotes": [
+    {
+     "text": "Equipment incidents logged this quarter: 6.",
+     "start": 45,
+     "end": 88
+    },
+    {
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "start": 164,
+     "end": 241
+    }
+   ]
+  },
+  {
+   "summary": "An approved contractor-registry extract that maps site paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd; the site reports show CT-118 sites logged 11 incidents in total, more than CT-204’s 9, so this document supplies the contractor name for the leading total.",
+   "provenance": [
+    0,
+    1,
+    2
+   ],
+   "quotes": [
+    {
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "start": 54,
+     "end": 127
+    },
+    {
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "start": 248,
+     "end": 328
+    }
+   ]
+  },
+  {
+   "summary": "",
+   "provenance": [],
+   "quotes": []
   }
  ],
  "schema": {
-  "code": "from pydantic import BaseModel, Field\n\nclass SiteIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count for a reporting period.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period for the incident count\")\n    equipment_incident_count: int | None = Field(description=\"The incident count reported for this site and period\")\n    contractor_code: str | None = Field(description=\"The maintenance contractor code associated with the site\")\n\nclass ContractorCodeMapping(BaseModel):\n    \"\"\"A mapping from a contractor code to the contractor's name.\"\"\"\n    contractor_code: str | None = Field(description=\"The contractor code as written\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    site_incident_reports: list[SiteIncidentReport]\n    contractor_code_mappings: list[ContractorCodeMapping]",
-  "thought": "The answer requires combining incident counts from separate site memos by contractor, then comparing contractor totals. Capture each site’s Q3 incident count and contractor code, plus registry mappings from codes to contractor names; aggregation happens downstream."
+  "code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count associated with a contractor.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period\")\n    incident_type: str | None = Field(description=\"The incident category as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(description=\"The contractor code associated with the incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping from a paperwork code to a contractor name.\"\"\"\n    contractor_code: str | None = Field(description=\"The code shown in the registry\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
+  "thought": "The comparison must be computed across site-level reports, then linked to contractor names using registry mappings. Capture each report’s site, period, incident type, count, and contractor code, plus each code-to-name mapping; do not precompute totals."
  },
  "parsed": [
   {
    "parse": {
-    "site_incident_reports": [
+    "equipment_incident_reports": [
      {
       "site": "Northgate",
       "period": "Q3",
-      "equipment_incident_count": 5,
+      "incident_type": "equipment incidents",
+      "incident_count": 5,
       "contractor_code": "CT-118"
      }
     ],
-    "contractor_code_mappings": []
+    "contractor_mappings": []
    },
    "provenance": []
   },
   {
    "parse": {
-    "site_incident_reports": [
+    "equipment_incident_reports": [
      {
       "site": "Eastfield",
       "period": "Q3",
-      "equipment_incident_count": 9,
+      "incident_type": "equipment incidents",
+      "incident_count": 9,
       "contractor_code": "CT-204"
      }
     ],
-    "contractor_code_mappings": []
+    "contractor_mappings": []
    },
    "provenance": []
   },
   {
    "parse": {
-    "site_incident_reports": [
+    "equipment_incident_reports": [
      {
       "site": "Riverside",
       "period": "Q3",
-      "equipment_incident_count": 6,
+      "incident_type": "equipment incidents",
+      "incident_count": 6,
       "contractor_code": "CT-118"
      }
     ],
-    "contractor_code_mappings": []
+    "contractor_mappings": []
    },
    "provenance": []
   },
   {
    "parse": {
-    "site_incident_reports": [],
-    "contractor_code_mappings": [
+    "equipment_incident_reports": [],
+    "contractor_mappings": [
      {
       "contractor_code": "CT-118",
       "contractor_name": "Halloran Services Ltd"
@@ -320,8 +440,8 @@
   },
   {
    "parse": {
-    "site_incident_reports": [],
-    "contractor_code_mappings": []
+    "equipment_incident_reports": [],
+    "contractor_mappings": []
    },
    "provenance": []
   }
@@ -331,108 +451,108 @@
   "provenance": {
    "summary_ids": [
     0,
-    1,
     2,
+    1,
     3
    ],
    "parse_ids": [
     0,
-    1,
     2,
+    1,
     3
    ]
   }
  },
  "calls": {
-  "r1-1": {
-   "step": 1,
-   "tokens": 845,
-   "usd": 0.00011609999999999999
-  },
-  "r1-0": {
-   "step": 2,
-   "tokens": 852,
-   "usd": 0.0001192
-  },
   "r1-4": {
-   "step": 3,
-   "tokens": 825,
-   "usd": 0.0001065
+   "step": 1,
+   "tokens": 1011,
+   "usd": 0.0001263
   },
   "r1-2": {
+   "step": 2,
+   "tokens": 1077,
+   "usd": 0.00015729999999999997
+  },
+  "r1-0": {
+   "step": 3,
+   "tokens": 1071,
+   "usd": 0.00015549999999999999
+  },
+  "r1-1": {
    "step": 4,
-   "tokens": 872,
-   "usd": 0.000128
+   "tokens": 1074,
+   "usd": 0.00015739999999999998
   },
   "r1-3": {
    "step": 5,
-   "tokens": 911,
-   "usd": 0.0001423
+   "tokens": 1158,
+   "usd": 0.00019259999999999997
   },
   "r2-4": {
    "step": 6,
-   "tokens": 1377,
-   "usd": 0.000191925
+   "tokens": 1508,
+   "usd": 0.0002128
   },
   "r2-1": {
    "step": 7,
-   "tokens": 1452,
-   "usd": 0.000234675
+   "tokens": 1657,
+   "usd": 0.00030605
   },
   "r2-3": {
    "step": 8,
-   "tokens": 1634,
-   "usd": 0.000328675
+   "tokens": 1668,
+   "usd": 0.000319425
   },
   "r2-2": {
    "step": 9,
-   "tokens": 1628,
-   "usd": 0.00031967499999999995
+   "tokens": 1752,
+   "usd": 0.0003543
   },
   "r2-0": {
    "step": 10,
-   "tokens": 1705,
-   "usd": 0.00036117500000000004
+   "tokens": 1740,
+   "usd": 0.0003498
   },
   "parsed-4": {
    "step": 1,
-   "tokens": 2344,
-   "usd": 0.000317675
-  },
-  "parsed-1": {
-   "step": 2,
-   "tokens": 2408,
-   "usd": 9.4285e-05
-  },
-  "parsed-2": {
-   "step": 3,
-   "tokens": 2470,
-   "usd": 0.000124535
+   "tokens": 2305,
+   "usd": 5.3335e-05
   },
   "parsed-3": {
-   "step": 4,
-   "tokens": 2521,
-   "usd": 0.00014516
+   "step": 2,
+   "tokens": 2512,
+   "usd": 0.000402425
+  },
+  "parsed-1": {
+   "step": 3,
+   "tokens": 2496,
+   "usd": 0.000148835
   },
   "parsed-0": {
+   "step": 4,
+   "tokens": 2656,
+   "usd": 0.00022846
+  },
+  "parsed-2": {
    "step": 5,
-   "tokens": 2653,
-   "usd": 0.000471425
+   "tokens": 2987,
+   "usd": 0.000392085
   },
   "schema": {
    "step": 1,
-   "tokens": 2484,
-   "usd": 0.000533925
+   "tokens": 2382,
+   "usd": 0.0004960499999999999
   },
   "answer": {
    "step": 1,
-   "tokens": 3389,
-   "usd": 0.0004910499999999999
+   "tokens": 3346,
+   "usd": 0.00047705
   }
  },
  "totals": {
-  "tokens": 30370,
-  "usd": 0.00422628
+  "tokens": 32400,
+  "usd": 0.004529715
  }
 };
 
@@ -442,31 +562,8 @@
  {
   "question": "Which sites does Halloran Services maintain?",
   "model": "openai/gpt-6-luna",
-  "folder": "20261031T212425Z_7fc5f679",
-  "created": "2026-10-31T21:24:25+00:00",
-  "text": "Halloran Services Ltd maintains the Northgate and Riverside sites; both report contractor code CT-118, which the registry maps to Halloran.",
-  "provenance": {
-   "summary_ids": [
-    0,
-    2,
-    3
-   ],
-   "parse_ids": [
-    0,
-    2,
-    3
-   ]
-  },
-  "totals": {
-   "tokens": 3340,
-   "usd": 0.00010604000000000001
-  }
- },
- {
-  "question": "Which sites does Halloran Services maintain?",
-  "model": "openai/gpt-6.1-terra",
-  "folder": "20261031T212428Z_105ab6ed",
-  "created": "2026-10-31T21:24:28+00:00",
+  "folder": "20261105T173751Z_fffbcd10",
+  "created": "2026-11-05T17:37:51+00:00",
   "text": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
   "provenance": {
    "summary_ids": [
@@ -481,16 +578,39 @@
    ]
   },
   "totals": {
-   "tokens": 3342,
-   "usd": 0.004720500000000001
+   "tokens": 3313,
+   "usd": 0.00010234
+  }
+ },
+ {
+  "question": "Which sites does Halloran Services maintain?",
+  "model": "openai/gpt-6.1-terra",
+  "folder": "20261105T173754Z_6af5ac2f",
+  "created": "2026-11-05T17:37:54+00:00",
+  "text": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
+  "provenance": {
+   "summary_ids": [
+    0,
+    2,
+    3
+   ],
+   "parse_ids": [
+    0,
+    2,
+    3
+   ]
+  },
+  "totals": {
+   "tokens": 3288,
+   "usd": 0.004525500000000001
   }
  },
  {
   "question": "How many incidents did Merrow Facilities Group's sites log?",
   "model": "openai/gpt-6-luna",
-  "folder": "20261031T212431Z_8edc3a51",
-  "created": "2026-10-31T21:24:31+00:00",
-  "text": "Merrow Facilities Group’s documented site logged 9 incidents in Q3.",
+  "folder": "20261105T173756Z_3d3170c2",
+  "created": "2026-11-05T17:37:56+00:00",
+  "text": "Merrow Facilities Group's site(s) logged 9 equipment incidents in Q3.",
   "provenance": {
    "summary_ids": [
     1,
@@ -502,8 +622,8 @@
    ]
   },
   "totals": {
-   "tokens": 3364,
-   "usd": 0.00011653999999999999
+   "tokens": 3353,
+   "usd": 0.00012084
   }
  }
 ];
@@ -632,6 +752,8 @@
   // The node kinds made once per document, in its row.
   /** @type {Set<NodeKind>} */
   const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
+  /** @type {('r1' | 'r2')[]} */
+  const SUMMARY_KINDS = ['r1', 'r2'];
   const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
   // The relevance rounds the panel has columns for, as r3con's default config runs them.
   const ROUNDS = 2;
@@ -792,6 +914,7 @@
       timers: [],
       narr: null,
       arrangeFrame: 0,
+      trail: null,
     };
   }
 
@@ -1136,16 +1259,39 @@
 
   // ---------- runs ----------
 
+  /** @param {Quote} quote */
+  const located = (quote) => quote.start !== null;
+
+  // Where each of `ranges` starts or ends, in order, once each.
+  /** @param {{ start: number, end: number }[]} ranges */
+  const cutsOf = (ranges) => [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
+
+  // `quotes`, found in `text`, with their places in UTF-16 code units, walking the text once up to the last of them.
+  /** @param {string} text @param {Quote[]} quotes @returns {Quote[]} */
+  function quotesInUnits(text, quotes) {
+    /** @type {Map<number, number>} */
+    const units = new Map();
+    let point = 0;
+    let unit = 0;
+    for (const target of cutsOf(quotes.filter(located))) {
+      for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(text.codePointAt(unit)).length;
+      units.set(target, unit);
+    }
+    return quotes.map((q) => (located(q) ? { ...q, start: units.get(q.start), end: units.get(q.end) } : q));
+  }
+
   /** @returns {Run} */
   function sampleRun() {
     /** @param {PerDocumentKind} prefix */
     const finishOrder = (prefix) =>
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
+    /** @param {Summary[]} round */
+    const inUnits = (round) => round.map((s, i) => ({ ...s, quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes) }));
     return {
       simulated: false,
       docs: SAMPLE_FILES,
-      r1: SAMPLE.r1,
-      r2: SAMPLE.r2,
+      r1: inUnits(SAMPLE.r1),
+      r2: inUnits(SAMPLE.r2),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
       answers: [{ question: SAMPLE.question, model: SAMPLE.model, ...SAMPLE.answer }],
@@ -1194,8 +1340,8 @@
     const run = {
       simulated: true,
       docs: files,
-      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]) })),
-      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)) })),
+      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]), quotes: /** @type {Quote[]} */ ([]) })),
+      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)), quotes: /** @type {Quote[]} */ ([]) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
       calls: null,
@@ -1266,17 +1412,66 @@
     return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
+  // Walked from the answer, so the first node on it to cite a summary is the nearest the answer.
   /** @param {Run} run @param {string} answerId */
   function answerLineage(run, answerId) {
     const nodes = new Set([answerId]);
     const edges = new Set();
+    /** @type {Map<string, string>} */
+    const citedBy = new Map();
     for (const id of nodes) {
       for (const from of [ownDocument(run, id), ...cites(run, id)].filter(Boolean)) {
+        if (/** @type {NodeKind[]} */ (SUMMARY_KINDS).includes(splitId(from)[0]) && !nodes.has(from)) citedBy.set(from, id);
         nodes.add(from);
         edges.add(`${from}>${id}`);
       }
     }
-    return { nodes, edges };
+    return { nodes, edges, citedBy };
+  }
+
+  /** @param {Run} run @param {ReturnType<typeof answerLineage>} lineage @returns {Trail} */
+  function trailOf(run, { nodes, citedBy }) {
+    return { nodes, citedBy, quoted: run.docs.map((_, d) => quotedIn(run, citedBy, d)) };
+  }
+
+  // What the summaries in `citedBy` quote of document d: its parts, cut where a quote starts or ends, each with the
+  // summaries quoting it; and its sentences, where quotes that overlap are one, and quotes that only meet are two.
+  /** @param {Run} run @param {Map<string, string>} citedBy @param {number} d @returns {Quoted} */
+  function quotedIn(run, citedBy, d) {
+    const quotes = SUMMARY_KINDS.filter((kind) => citedBy.has(`${kind}-${d}`)).flatMap((kind) =>
+      run[kind][d].quotes.filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
+    );
+    const cuts = cutsOf(quotes);
+    const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
+    /** @type {TextRange[]} */
+    const sentences = [];
+    for (const { start, end } of quotes.toSorted((a, b) => a.start - b.start)) {
+      const last = sentences.at(-1);
+      if (last && start < last.end) last.end = Math.max(last.end, end);
+      else sentences.push({ start, end });
+    }
+    return { spans: spans.filter((span) => span.by.length), sentences };
+  }
+
+  /** @param {Trail} trail */
+  function sentencesFrom(trail) {
+    const quoted = trail.quoted.filter(({ sentences }) => sentences.length);
+    if (!quoted.length) return null;
+    const sentences = quoted.reduce((sum, q) => sum + q.sentences.length, 0);
+    return `${plural(sentences, 'sentence')} from ${plural(quoted.length, 'document')}`;
+  }
+
+  /** @param {Tab} tab @param {string} id */
+  function citerName(tab, id) {
+    const [kind, d] = splitId(id);
+    if (kind === 'answer') return 'the answer';
+    return kind === 'parsed' ? `the ${docLabel(tab.run, d)} parse` : nodeName(tab, id);
+  }
+
+  // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary.
+  /** @param {Tab} tab @param {Trail} trail @param {Span} span */
+  function quotedBy(tab, trail, span) {
+    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citerName(tab, trail.citedBy.get(id))})`)].join('\n');
   }
 
   // ---------- panel: view ----------
@@ -1435,8 +1630,8 @@
     return kind === 'doc' || kind === 'parsed' ? [fileLabel(file)] : [fileLabel(file), KIND_SUFFIX[kind]];
   }
 
-  /** @param {Tab} tab @param {PanelNode} node */
-  function ariaName(tab, node) {
+  /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
+  function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
     if (node.kind === 'answer') {
       const { question, model } = answerAt(tab.run, node.id);
@@ -1444,7 +1639,7 @@
     }
     if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
-    return `${node.file.name}, ${ARIA_KIND.doc}`;
+    return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${plural(sentences, 'highlighted sentence')}` : ''}`;
   }
 
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {Point} pos @param {{ working?: boolean, file?: LoadedFile | null, enter?: boolean }} [options] */
@@ -1456,6 +1651,7 @@
       h('span', { class: 'icon', html: iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
       nodeLabels(tab, id, kind, file).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
+      kind === 'doc' ? h('span', { class: 'pill', hidden: true }) : null,
     );
     const node = { id, kind, file, x: pos.x, y: pos.y, el };
     tab.nodes.set(id, node);
@@ -1500,7 +1696,9 @@
     tab.nodesEl.replaceChildren();
     tab.nodes.clear();
     tab.drawing.classList.remove('is-lit');
+    tab.trail = null;
     if (hoveredIn(tab)) state.hovered = null;
+    showTrail(tab);
   }
 
   // A slide left going in a tab that is no longer shown jumps to where it was going.
@@ -1734,17 +1932,50 @@
   function lightPath(tab) {
     const { run } = tab;
     const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
+    tab.trail = path && trailOf(run, path);
     tab.drawing.classList.toggle('is-lit', Boolean(path));
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
+    run.docs.forEach((file, d) => countSentences(tab, tab.nodes.get(docId(file)), tab.trail?.quoted[d].sentences.length ?? 0));
     for (const e of tab.edges.values()) {
       const on = Boolean(path?.edges.has(e.key));
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
       e.el.classList.toggle('lit', on);
       if (e.el.parentNode !== layer) layer.append(e.el);
     }
+    showTrail(tab);
+  }
+
+  /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
+  function countSentences(tab, node, sentences) {
+    const pill = /** @type {HTMLElement} */ (node.el.querySelector('.pill'));
+    pill.hidden = !sentences;
+    pill.textContent = String(sentences);
+    pill.title = plural(sentences, 'highlighted sentence');
+    node.el.setAttribute('aria-label', ariaName(tab, node, sentences));
+  }
+
+  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
+  const trailParts = new Map();
+
+  // Fills `el` from the tab's trail now, and again in place as the trail changes, so that what is open, scrolled or
+  // focused in it stays.
+  /** @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw @returns {T} */
+  function trailPart(tab, el, draw) {
+    trailParts.set(el, { tab, draw });
+    fill(el, draw(tab.trail));
+    return el;
+  }
+
+  /** @param {Tab} tab */
+  function showTrail(tab) {
+    for (const [el, part] of trailParts) {
+      if (!el.isConnected) trailParts.delete(el);
+      else if (part.tab === tab) fill(el, part.draw(tab.trail));
+    }
+    if (tab === state.shown) markFiles();
   }
 
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
@@ -1813,16 +2044,83 @@
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
   }
 
-  /** @param {LoadedFile} file */
-  function fileMeta(file) {
+  /** @param {LoadedFile} file @param {TextRange} shown */
+  function fileMeta(file, shown) {
     const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (file.text.length > PREVIEW_CHARS) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
+    if (shown.start) meta.push(`characters ${fmtInt(shown.start + 1)}–${fmtInt(shown.end)} shown`);
+    else if (shown.end < file.text.length) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
     return meta.join(' · ');
   }
 
-  /** @param {LoadedFile} file */
-  function fileText(file) {
-    return file.text ? h('pre', { class: 'code wrap' }, file.text.slice(0, PREVIEW_CHARS)) : h('p', { class: 'k' }, 'This file has no readable text.');
+  // A file's first PREVIEW_CHARS, or as many around a sentence past them, so that every sentence counted can be shown.
+  /** @param {LoadedFile} file @param {TextRange | null} at */
+  function shownPart(file, at) {
+    const start = at && at.end > PREVIEW_CHARS ? Math.max(0, Math.min(at.start - PREVIEW_CHARS / 2, file.text.length - PREVIEW_CHARS)) : 0;
+    return { start, end: Math.min(file.text.length, start + PREVIEW_CHARS) };
+  }
+
+  // The shown part of `text`, each span in `spans` marked, titled by `title`, and `at` flashed.
+  /** @param {string} text @param {TextRange} shown @param {Span[]} spans @param {(span: Span) => string} title @param {TextRange | null} at */
+  function markedText(text, shown, spans, title, at) {
+    const cuts = cutsOf([shown, ...spans, ...(at ? [at] : [])]).filter((cut) => cut >= shown.start && cut <= shown.end);
+    return cuts.slice(1).map((end, i) => {
+      const span = spans.find((r) => r.start <= cuts[i] && r.end >= end);
+      const flash = at && at.start <= cuts[i] && at.end >= end;
+      if (!span && !flash) return text.slice(cuts[i], end);
+      const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
+      return h(span ? 'mark' : 'span', { class: classes || null, title: span ? title(span) : null }, text.slice(cuts[i], end));
+    });
+  }
+
+  /** @param {Tab} tab @param {LoadedFile} file @param {TextRange | null} [at] a sentence to show */
+  function markedFile(tab, file, at = null) {
+    const shown = shownPart(file, at);
+    /** @param {Trail | null} trail */
+    const quotedOf = (trail) => trail?.quoted[tab.run.docs.indexOf(file)];
+    /** @param {Trail | null} trail */
+    const line = (trail) => {
+      const sentences = quotedOf(trail)?.sentences.length;
+      const used = sentences ? `${plural(sentences, 'sentence')} used` : trail?.nodes.has(docId(file)) && 'used';
+      return [fileMeta(file, shown), used && [' · ', h('span', { class: 'used' }, used)]];
+    };
+    const meta = trailPart(tab, h('div', { class: 'k' }), line);
+    if (!file.text) return [meta, h('p', { class: 'k' }, 'This file has no readable text.')];
+    /** @param {Trail | null} trail */
+    const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, trail, span), at);
+    return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
+  }
+
+  /** @param {string} summary @param {Child} body @param {{ open?: boolean, className?: string }} [options] */
+  function fold(summary, body, { open = false, className = 'fold' } = {}) {
+    return h('details', { class: className, open }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
+  }
+
+  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
+  function sentenceButton(file, at, className, text = null) {
+    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, text);
+  }
+
+  // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
+  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  function quotesFold(tab, kind, d) {
+    const id = `${kind}-${d}`;
+    const { quotes } = tab.run[kind][d];
+    if (!quotes.length) return null;
+    /** @param {Quote} quote */
+    const item = (quote) => {
+      if (!located(quote)) return h('p', {}, quote.text);
+      return trailPart(tab, sentenceButton(tab.run.docs[d], quote, 'quote'), (trail) => (trail?.citedBy.has(id) ? h('mark', {}, quote.text) : quote.text));
+    };
+    return fold(`quotes ${quotes.length}`, h('div', { class: 'quotes' }, quotes.map(item)));
+  }
+
+  /** @param {Tab} tab @param {string} id */
+  function trailLine(tab, id) {
+    return trailPart(tab, h('div', { class: 'trail-line' }), (trail) => {
+      if (!trail) return null;
+      const citer = trail.citedBy.get(id);
+      return citer ? h('span', { class: 'used' }, `on the answer's trail · cited by ${citerName(tab, citer)}`) : h('span', { class: 'k' }, "not on the answer's trail");
+    });
   }
 
   /** @param {LoadedFile} file @param {string} label */
@@ -1830,39 +2128,42 @@
     return h('button', { class: 'btn', type: 'button', onclick: () => openFile(file) }, label);
   }
 
-  /** @param {PanelNode} node */
-  function docBody(node) {
+  /** @param {PanelNode} node @param {TextRange | null} at */
+  function docBody(node, at) {
     const { run, nodes } = state.shown;
     const index = run ? run.docs.indexOf(node.file) : -1;
     return [
-      h('div', { class: 'k' }, fileMeta(node.file)),
-      fileText(node.file),
+      markedFile(state.shown, node.file, at),
       index >= 0 && nodes.has(`r1-${index}`) ? row('relevance snippet', refs([`r1-${index}`])) : null,
       openFileButton(node.file, 'open in files ›'),
     ];
   }
 
-  /** @param {Run} run @param {'r1' | 'r2'} kind @param {number} d */
-  function snippetBody(run, kind, d) {
+  /** @param {Tab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  function snippetBody(tab, kind, d) {
+    const { run } = tab;
     const id = `${kind}-${d}`;
+    const provenance = cites(run, id);
     return [
       textBlock(run[kind][d].summary),
+      trailLine(tab, id),
       row('read', refs([docId(run.docs[d])])),
-      kind === 'r2' ? row('provenance', refs(cites(run, id))) : null,
+      quotesFold(tab, kind, d),
+      kind === 'r2' ? fold(`provenance ${provenance.length}`, refs(provenance)) : null,
       callMeta(run, id),
       openFileButton(run.docs[d], 'open document ›'),
     ];
   }
 
-  /** @param {string} id */
-  function inspectorBody(id) {
+  /** @param {string} id @param {TextRange | null} at */
+  function inspectorBody(id, at) {
     const { run, nodes } = state.shown;
     const [kind, d] = splitId(id);
     const node = nodes.get(id);
-    if (kind === 'doc') return docBody(node);
+    if (kind === 'doc') return docBody(node, at);
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
-    if (kind === 'r1' || kind === 'r2') return snippetBody(run, kind, d);
+    if (kind === 'r1' || kind === 'r2') return snippetBody(state.shown, kind, d);
     if (kind === 'schema') {
       return [
         run.schema.thought ? row('reasoning', run.schema.thought) : null,
@@ -1872,26 +2173,40 @@
     }
     if (kind === 'parsed') {
       const filled = Object.entries(run.parsed[d].parse).filter(([, records]) => records.length > 0);
+      const provenance = cites(run, id);
       return [
         filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
-        row('provenance', refs(cites(run, id))),
+        fold(`provenance ${provenance.length}`, refs(provenance)),
         row('used', refs(['schema'])),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
       ];
     }
     const answer = answerOf(run, id);
+    const quoted = sentencesFrom(trailOf(run, answerLineage(run, id)));
     return [
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
       row('provenance', refs(cites(run, id))),
+      quoted && h('div', { class: 'used' }, quoted),
       h('div', { class: 'k' }, answer.summary),
     ];
   }
 
-  function renderInspector() {
+  // Scrolls the text `el` is in, which the popup shrinks to fit, to put `el` in its middle; scrollIntoView would also
+  // scroll the panel, which only the view moves.
+  /** @param {HTMLElement} el */
+  function scrollToMiddle(el) {
+    const box = el.parentElement;
+    const r = el.getBoundingClientRect();
+    const top = box.scrollTop + r.top - box.getBoundingClientRect().top - (box.clientHeight - r.height) / 2;
+    box.scrollTo({ top, behavior: reduceMotion() ? 'auto' : 'smooth' });
+  }
+
+  /** @param {TextRange | null} [at] a sentence to show, if the popup is a document's */
+  function renderInspector(at = null) {
     const id = state.selected;
     if (!id || !state.shown.nodes.has(id)) return;
     const [kind] = splitId(id);
@@ -1905,19 +2220,22 @@
         h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)),
         h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
       ),
-      inspectorBody(id),
+      inspectorBody(id, at),
     );
     positionInspector();
+    /** @type {HTMLElement | null} */
+    const flashed = inspector.querySelector('.flash');
+    if (flashed) scrollToMiddle(flashed);
   }
 
-  // Selecting an answer that has landed also lights it.
-  /** @param {string} id */
-  function openInspector(id, { focus = false } = {}) {
-    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
+  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
+  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null }} [options] */
+  function openInspector(id, { focus = false, at = null } = {}) {
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
-    renderInspector();
+    renderInspector(at);
+    if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(state.shown, id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
   }
@@ -1955,8 +2273,8 @@
     inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
-  /** @param {string} id */
-  function jumpTo(id) {
+  /** @param {string} id @param {TextRange | null} [at] */
+  function jumpTo(id, at = null) {
     const { view } = state.shown;
     const node = state.shown.nodes.get(id);
     if (!node) return;
@@ -1971,7 +2289,7 @@
       glide();
       applyView();
     }
-    openInspector(id);
+    openInspector(id, { at });
     node.el.focus({ preventScroll: true });
   }
 
@@ -2036,12 +2354,12 @@
     const latest = h('span', { class: 't', id: `${id}-latest` }, first);
     const asked = body.parentElement.querySelector('.line.user .t');
     asked.id ||= `${id}-asked`;
-    const fold = () => {
+    const toggleLines = () => {
       lines.hidden = !lines.hidden;
       toggle.ariaExpanded = String(!lines.hidden);
     };
     const labels = `${asked.id} ${latest.id}`;
-    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: fold });
+    const toggle = h('button', { class: 'btn log-toggle', type: 'button', 'aria-expanded': 'false', 'aria-controls': id, 'aria-labelledby': labels, html: ICONS.chevron, onclick: toggleLines });
     const mark = h('span', { class: 'log-spin', 'aria-hidden': 'true' }, MARK);
     body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
@@ -2343,8 +2661,28 @@
     drawAnswer(tab, id);
     const answer = answerOf(tab.run, id);
     if (answer.simulated) narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL));
-    narr.say('answer', answer.text, { node: id });
+    const said = narr.say('answer', answer.text, { node: id });
+    const sentences = sentenceList(tab, id);
+    if (sentences) said.after(sentences);
     updateComposer();
+  }
+
+  // Under an answer, open until folded: the sentences its trail quotes, by document; each opens its document's popup there.
+  /** @param {Tab} tab @param {string} id */
+  function sentenceList(tab, id) {
+    const trail = trailOf(tab.run, answerLineage(tab.run, id));
+    const line = sentencesFrom(trail);
+    if (!line) return null;
+    /** @param {LoadedFile} file @param {TextRange[]} sentences */
+    const group = (file, sentences) =>
+      h(
+        'div',
+        { class: 'quoted' },
+        h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name),
+        sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))),
+      );
+    const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? group(file, trail.quoted[d].sentences) : null));
+    return fold(line, groups, { open: true, className: 'fold sentences' });
   }
 
   /** @param {Tab} tab @param {Narrator} narr */
@@ -2461,7 +2799,7 @@
         appear(tab, `r${event.round}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
-        addSnippet(tab, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance));
+        addSnippet(tab, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance), event.quotes);
         break;
       case 'schema_started':
         beginStage(tab, narr, 'schema');
@@ -2498,15 +2836,17 @@
     }
   }
 
-  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them.
-  /** @param {Tab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance */
-  function addSnippet(tab, narr, id, summary, provenance) {
+  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
+  // quotes are placed in the whole document, so they add up as they are.
+  /** @param {Tab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance @param {Quote[]} quotes */
+  function addSnippet(tab, narr, id, summary, provenance, quotes) {
     const { run } = tab;
     const [kind, i] = /** @type {['r1' | 'r2', number]} */ (splitId(id));
-    const earlier = run[kind][i] ?? { summary: '', provenance: [] };
+    const earlier = run[kind][i] ?? { summary: '', provenance: [], quotes: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
       provenance: [...new Set([...earlier.provenance, ...provenance])],
+      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes)],
     };
     settle(tab, narr, id);
   }
@@ -2815,7 +3155,7 @@
         h(
           'li',
           {},
-          h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'size' }, fmtBytes(f.size))),
+          h('button', { class: 'file', type: 'button', onclick: () => openFile(f) }, h('span', { class: 'name' }, f.name), h('span', { class: 'used' }), h('span', { class: 'size' }, fmtBytes(f.size))),
           run ? null : h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${f.name}`, onclick: () => removeFile(f) }, 'remove'),
         ),
       ),
@@ -2824,6 +3164,19 @@
     $('files-locked').hidden = !run;
     $('file-actions').hidden = $('drop-hint').hidden = Boolean(run);
     $('drop-overlay').textContent = run ? DROP_LOCKED : DROP_ADDS;
+    markFiles();
+  }
+
+  // In place, so that a focused file stays focused: how many sentences the lit answer's trail quotes of each file, and
+  // the files off it dimmed.
+  function markFiles() {
+    const { run, trail } = state.shown;
+    $('file-list').querySelectorAll('.file').forEach((button, d) => {
+      const sentences = trail?.quoted[d].sentences.length ?? 0;
+      const named = plural(sentences, 'highlighted sentence');
+      button.classList.toggle('off', Boolean(trail) && !trail.nodes.has(docId(run.docs[d])));
+      fill(button.querySelector('.used'), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
+    });
   }
 
   // Lines restored on switching to their tab were said already, so they are written with the live regions off.
@@ -2843,19 +3196,17 @@
   /** @param {LoadedFile} file */
   function openFile(file) {
     showTab('files');
-    const fileView = $('file-view');
     const node = state.shown.nodes.get(docId(file));
     fill(
-      fileView,
+      $('file-view'),
       h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
       h('div', { class: 'insp-title' }, h('span', { class: 'g' }, '● '), file.name),
-      h('div', { class: 'k' }, fileMeta(file)),
-      fileText(file),
+      markedFile(state.shown, file),
       node ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(node.id) }, 'show in panel ›') : null,
     );
     $('file-list-view').hidden = true;
-    fileView.hidden = false;
-    fileView.scrollTop = 0;
+    $('file-view').hidden = false;
+    $('file-view').scrollTop = 0;
   }
 
   function closeFile() {

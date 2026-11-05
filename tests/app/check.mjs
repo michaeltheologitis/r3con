@@ -44,14 +44,41 @@ const COUNTED = {
   flow: '.edge.flow',
   onPath: '.node.on-path',
 };
-const SAMPLE_COUNTS = { nodes: 22, edges: 79, lit: 29, dotted: 10, faint: 42, cited: 17, flow: 10, onPath: 17 };
-const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 30,370 tokens · $0.0042';
+const SAMPLE_COUNTS = { nodes: 22, edges: 75, lit: 27, dotted: 10, faint: 40, cited: 15, flow: 10, onPath: 17 };
+const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 32,400 tokens · $0.0045';
+// What the sample's answer quotes: each document's marks, as code points in its memo and whether both rounds' summaries
+// quote them; its pills, its line in the chat, one mark's hover text, summaries' trail lines, and the files off its trail.
+const SAMPLE_QUOTED = {
+  marks: [
+    [[45, 88, true], [141, 218, true]],
+    [[45, 88, true], [136, 213, true]],
+    [[45, 88, true], [164, 241, true]],
+    [[54, 127, true], [128, 189, false], [248, 328, true]],
+    [],
+  ],
+  pills: [2, 2, 2, 3, 0],
+  line: '9 sentences from 4 documents',
+  title: [0, 'quoted by\n01_northgate · round 1 (cited by 04_contractor_registry · round 2)\n01_northgate · round 2 (cited by the answer)'],
+  lines: {
+    'r2-0': "on the answer's trail · cited by the answer",
+    'r1-0': "on the answer's trail · cited by 04_contractor_registry · round 2",
+    'r2-4': "not on the answer's trail",
+  },
+  off: [false, false, false, false, true],
+};
+// The same of the first recorded ask, whose trail reaches Eastfield's round-1 summary but not its round-2 one.
+const ASK_QUOTED = {
+  marks: [SAMPLE_QUOTED.marks[0], [[45, 88, false], [136, 213, false]], ...SAMPLE_QUOTED.marks.slice(2)],
+  pills: SAMPLE_QUOTED.pills,
+  line: SAMPLE_QUOTED.line,
+  title: [1, 'quoted by\n02_eastfield · round 1 (cited by 04_contractor_registry · round 2)'],
+};
 const POPUP_ROWS = {
   'doc-0': ['relevance snippet'],
   'r1-0': ['read'],
-  'r2-3': ['read', 'provenance'],
+  'r2-3': ['read'],
   schema: ['reasoning'],
-  'parsed-0': ['read', 'provenance', 'used'],
+  'parsed-0': ['read', 'used'],
   'answer-0': ['question', 'provenance'],
 };
 const MODEL_KEY = 'r3con-proto-model';
@@ -102,7 +129,7 @@ const STRUCTURE_READY = 'structure ready';
 const NOTHING_PARSED = 'nothing parsed';
 const ASK_LABEL = 'Which sites does… · gpt-6-luna';
 const RECORDED_ASK = 'recorded ask over this run';
-const SAMPLE_READY = 'ready · gpt-6-luna · $0.0042';
+const SAMPLE_READY = 'ready · gpt-6-luna · $0.0045';
 // Each document's line, linked to its node, under each step that makes one per document.
 const perDocument = (kind) => Array(SAMPLE_DOCS).fill(kind).join(' ');
 // A run's log opened, as stepsOf gives it: each step, how many lines are nested under it, and the kinds of node they link to.
@@ -181,6 +208,8 @@ const SCRIPTED_CITES = {
   parsed: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i] })),
   answer: { provenance: { summary_ids: [0, 1], parse_ids: [0, 1] } },
 };
+// The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
+const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
 const LIVE_READY = /^ready · openai\/gpt-6-luna · \$[\d.]+$/;
 const LIVE_ERROR = "RuntimeError: the check's model is down";
@@ -461,31 +490,29 @@ function recordedAsks() {
   return match ? JSON.parse(match[1]) : [];
 }
 
-// app.js as it would be shipped with a sample of fewer memos, or with no recorded asks.
-function withFewerMemos(script) {
-  const sample = recordedSample();
-  if (!sample) throw new Error('app.js has no SAMPLE literal for the checks to cut down');
-  const fewer = `const SAMPLE = ${JSON.stringify({ ...sample, docs: sample.docs.slice(0, FEWER_MEMOS) })};`;
-  return script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => fewer);
+// app.js with its SAMPLE passed through `change`.
+const withSample = (change) => (script) => script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => `const SAMPLE = ${JSON.stringify(change(structuredClone(recordedSample())))};`);
+// Serves app.js passed through `edit`, as a withPage `before`.
+function serving(edit) {
+  const body = edit(readFileSync(SCRIPT_FILE, 'utf8'));
+  return (page) => page.route('**/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body }));
 }
+
+// app.js as it would be shipped with a sample of fewer memos, or with no recorded asks.
+const withFewerMemos = withSample((sample) => ({ ...sample, docs: sample.docs.slice(0, FEWER_MEMOS) }));
 const withNoAsks = (script) => script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, 'const RECORDED_ASKS = [];');
 
 // app.js with the sample's first parse holding its first record over and over, past PREVIEW_LINES lines of JSON.
-function withLongParse(script) {
-  const sample = recordedSample();
-  const [record] = sample.parsed[0].parse.site_incident_reports;
-  const parsed = [{ ...sample.parsed[0], parse: { site_incident_reports: Array(PREVIEW_LINES).fill(record) } }, ...sample.parsed.slice(1)];
-  return script.replace(/const SAMPLE = \{[\s\S]*?\n\};/, () => `const SAMPLE = ${JSON.stringify({ ...sample, parsed })};`);
-}
+const withLongParse = withSample((sample) => {
+  const [field, [record]] = Object.entries(sample.parsed[0].parse).find(([, records]) => records.length);
+  sample.parsed[0].parse = { [field]: Array(PREVIEW_LINES).fill(record) };
+  return sample;
+});
 
 // What `read` finds on the page as shipped, then on the page with app.js passed through `edit`.
 async function shippedAndEdited(area, options, edit, read) {
-  const serveEdited = (page) => {
-    const body = edit(readFileSync(SCRIPT_FILE, 'utf8'));
-    return page.route('**/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body }));
-  };
   const found = [];
-  for (const before of [undefined, serveEdited]) await withPage(area, { ...options, before }, async (page) => found.push(await read(page)));
+  for (const before of [undefined, serving(edit)]) await withPage(area, { ...options, before }, async (page) => found.push(await read(page)));
   return found;
 }
 
@@ -663,7 +690,7 @@ function lastTurnSays(starts) {
 
 // The shown tab's last turn's log: its button's name, from what labels it, whether the button controls it and has it
 // open, its folded line and the mark before it, each step in view with the lines nested under it and the nodes they
-// link to, and the lines in view outside the log.
+// link to, and the lines in view outside the log, a list of sentences as its own line.
 function logOf() {
   const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
   const log = turn.querySelector('.log');
@@ -677,6 +704,7 @@ function logOf() {
     if (el.dataset.node) steps.at(-1).links.push(el.dataset.node);
   }
   const outside = [...turn.querySelector('.turn-body').children].filter((el) => el !== log && el.checkVisibility());
+  const lineOf = (el) => (el.matches('details') ? el.querySelector('summary').textContent : textOf(el));
   return {
     logs: turn.querySelectorAll('.log').length,
     name: toggle.getAttribute('aria-labelledby').split(' ').map((id) => document.getElementById(id).textContent).join(' '),
@@ -686,7 +714,7 @@ function logOf() {
     folded: textOf(log.querySelector('.log-head')),
     mark: log.querySelector('.log-head > span[aria-hidden]').className,
     steps,
-    after: outside.map(textOf),
+    after: outside.map(lineOf),
   };
 }
 
@@ -1110,8 +1138,9 @@ async function chatLog() {
     const quiet = !folded.open && folded.folded === SAMPLE_READY && folded.mark === 'ok' && folded.steps.length === 0;
     check('chat log', 'once the replay ends its log is folded under one line: ready, the model and the cost', quiet, folded.folded);
     const offers = [ASKS_HEADER, ...recordedAsks().map(offerLabel)];
-    const underName = 'outside the log the turn shows only the answer, then the recorded asks on offer: nothing about the answer';
-    check('chat log', underName, isDeepStrictEqual(folded.after, [sample.answer.text, ...offers]), folded.after.slice(0, 2).join(' | '));
+    const quoted = SAMPLE_QUOTED.line;
+    const underName = "outside the log the turn shows only the answer and its sentences' line, then the recorded asks on offer";
+    check('chat log', underName, isDeepStrictEqual(folded.after, [sample.answer.text, quoted, ...offers]), folded.after.slice(0, 2).join(' | '));
 
     await page.click('.log-toggle');
     const opened = await page.evaluate(logOf);
@@ -1911,14 +1940,417 @@ async function popupArea() {
     check('popup', 'Escape closes it', (await popup(page)) === null);
   });
 
-  const body = withLongParse(readFileSync(SCRIPT_FILE, 'utf8'));
-  const before = (page) => page.route('**/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body }));
-  await withPage('popup', { before }, async (page) => {
+  await withPage('popup', { before: serving(withLongParse) }, async (page) => {
     await inspect(page, 'parsed-0');
     const lines = await count(page, '#inspector pre.code > span');
     const notes = await page.$$eval('#inspector > .k', (els) => els.map((el) => el.textContent));
     const capName = `a parse of more than ${PREVIEW_LINES} lines shows its first ${PREVIEW_LINES} and says so`;
     check('popup', capName, lines === PREVIEW_LINES && notes.includes(PREVIEW_LINES_NOTE), `${lines} lines; ${notes.join(' | ')}`);
+  });
+}
+
+// ---------- quotes: the sentences the lit answer's trail is based on ----------
+
+const counted = (n, one) => `${n} ${n === 1 ? one : `${one}s`}`;
+
+// What pinned quotes, SAMPLE_QUOTED or ASK_QUOTED, show of the recorded sample: each document's marks, as their text
+// sliced from its memo by code points and whether two summaries quote them; the pills by document node; the files
+// list's counts; and the chat's list, whose sentences are the marks in this sample.
+function quotesShown(sample, docIds, { marks, pills }) {
+  const textOf = (d, [start, end]) => Array.from(sample.docs[d].text).slice(start, end).join('');
+  const shown = marks.map((doc, d) => doc.map((mark) => ({ text: textOf(d, mark), multi: mark[2] })));
+  const named = (n) => counted(n, 'highlighted sentence');
+  return {
+    marks: shown,
+    pills: Object.fromEntries(pills.flatMap((n, d) => (n ? [[docIds[d], [String(n), named(n), `${sample.docs[d].name}, document, ${named(n)}`]]] : []))),
+    counts: pills.map((n) => (n ? [`${n} ¶`, named(n)] : null)),
+    docs: sample.docs.flatMap((doc, d) => (pills[d] ? [[doc.name, ...shown[d].map(({ text }) => text)]] : [])),
+  };
+}
+
+// The sample with `prefix` before its first memo, its quotes moved by the prefix's code points, as r3con would place them.
+const prefixed = (prefix) => (sample) => {
+  const shift = Array.from(prefix).length;
+  sample.docs[0].text = prefix + sample.docs[0].text;
+  for (const kind of ['r1', 'r2']) sample[kind][0].quotes = sample[kind][0].quotes.map((q) => ({ ...q, start: q.start + shift, end: q.end + shift }));
+  return sample;
+};
+// An emoji, two UTF-16 code units and one code point, then lines enough to scroll the memo's popup.
+const EMOJI_PREFIX = `🚧🚧 Roadworks notice.\n${Array.from({ length: 60 }, (_, i) => `Filler line ${i + 1}.`).join('\n')}\n`;
+// Lines enough that all of the memo's quotes fall past its preview.
+const PAST_PREVIEW = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(PREVIEW_CHARS / 30));
+
+// The sample with nothing located in its first memo: round 1 quotes nothing, and round 2 one sentence r3con didn't find.
+function unlocatedFirstMemo(sample) {
+  sample.r1[0].quotes = [];
+  sample.r2[0].quotes = [{ text: sample.r2[0].quotes[0].text, start: null, end: null }];
+  return sample;
+}
+
+// The sample with its first memo's first sentence quoted by round 2 alone, in two halves that meet.
+function touchingHalves(sample) {
+  const [first, ...rest] = sample.r2[0].quotes;
+  const chars = Array.from(sample.docs[0].text);
+  const half = (start, end) => ({ text: chars.slice(start, end).join(''), start, end });
+  const middle = Math.floor((first.start + first.end) / 2);
+  sample.r1[0].quotes = [];
+  sample.r2[0].quotes = [half(first.start, middle), half(middle, first.end), ...rest];
+  return sample;
+}
+
+// Asks `question` on the page's default model, gpt-6-luna, with the focus left where it is, as an ask landing live does.
+function landAsk(page, question) {
+  return page.evaluate((text) => {
+    document.getElementById('question').value = text;
+    document.getElementById('ask-form').requestSubmit();
+  }, question);
+}
+
+// Opens node `id`'s popup and its quotes fold, and returns its quotes as [text, a button, marked].
+async function quotesOf(page, id) {
+  await inspect(page, id);
+  await page.click('#inspector details:has(.quotes) > summary');
+  return (await page.evaluate(foldsIn)).find((f) => f.name.startsWith('quotes')).quotes;
+}
+
+// In-page: a document's text in `selector`: its line above it, each mark as its text, whether it is strong and its
+// hover text, and the flashed part, if any.
+function marksIn(selector) {
+  const pre = document.querySelector(`${selector} pre`);
+  if (!pre) return null;
+  const marks = [...pre.querySelectorAll('mark')].map((m) => ({ text: m.textContent, multi: m.classList.contains('multi'), title: m.title }));
+  return { meta: pre.previousElementSibling.textContent, marks, scrollTop: pre.scrollTop };
+}
+
+// In-page: the pill on each document node that shows one, as its text, its title and its node's name.
+function pillsOn() {
+  const nodes = [...document.querySelectorAll('.node.doc')].filter((el) => el.querySelector('.pill:not([hidden])'));
+  return Object.fromEntries(nodes.map((el) => [el.dataset.id, [el.querySelector('.pill').textContent, el.querySelector('.pill').title, el.getAttribute('aria-label')]]));
+}
+
+// In-page: each file's count in the files list, as shown and as read out, or null, and whether the file is dimmed.
+function fileCounts() {
+  return [...document.querySelectorAll('#file-list .file')].map((el) => {
+    const shown = el.querySelector('.used [aria-hidden]');
+    return { count: shown ? [shown.textContent, el.querySelector('.used .vh').textContent] : null, off: el.classList.contains('off') };
+  });
+}
+
+// In-page: the open popup's folds: each one's summary, whether it is open, the marker before it, what it holds, and its
+// quotes as [text, a button, marked].
+function foldsIn() {
+  return [...document.querySelectorAll('#inspector details')].map((d) => {
+    const summary = d.querySelector('summary');
+    const quotes = [...d.querySelectorAll('.quotes > *')].map((el) => [el.textContent, el.tagName === 'BUTTON', Boolean(el.querySelector('mark'))]);
+    return { name: summary.textContent, open: d.open, marker: getComputedStyle(summary, '::before').content, body: d.querySelector('.fold-body').innerText, quotes };
+  });
+}
+
+// In-page: each answer's list of sentences in the shown chat, in order: its line, whether it is open and shown, the
+// marker before its line, and each document's name, then its sentences, marked.
+function sentenceLists() {
+  return [...document.querySelectorAll('.transcript:not([hidden]) details.sentences')].map((d) => {
+    const summary = d.querySelector('summary');
+    const docs = [...d.querySelectorAll('.quoted')].map((g) => [g.querySelector('.quoted-name').textContent, ...[...g.querySelectorAll('.sentence mark')].map((m) => m.textContent)]);
+    return { line: summary.textContent, open: d.open, shown: d.querySelector('.quoted').checkVisibility(), marker: getComputedStyle(summary, '::before').content, docs };
+  });
+}
+
+// In-page: the flashed part of the open popup's text, whether it is marked, how it is drawn, and whether it is in view
+// in its text and the popup.
+function flashed() {
+  const el = document.querySelector('#inspector .flash');
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  const within = (box) => r.top >= box.top && r.bottom <= box.bottom;
+  const { animationName, outlineStyle } = getComputedStyle(el);
+  const inView = within(el.closest('pre').getBoundingClientRect()) && within(document.getElementById('inspector').getBoundingClientRect());
+  return { text: el.textContent, marked: el.tagName === 'MARK', animationName, outlineStyle, inView };
+}
+
+// In-page: whether any text in view says null or undefined, where a field was empty.
+function saysNull() {
+  return /\b(null|undefined)\b/.test(document.body.innerText);
+}
+
+// In-page: the lowest contrast of the text each of `selectors` finds with what is painted behind it, as tabColors reads it.
+function lowestContrasts(selectors) {
+  const painted = (el) => {
+    for (; el; el = el.parentElement) {
+      const color = getComputedStyle(el).backgroundColor;
+      if (color !== 'rgba(0, 0, 0, 0)') return color;
+    }
+    return null;
+  };
+  const pixel = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  const luminance = (color) => {
+    pixel.fillStyle = color;
+    pixel.fillRect(0, 0, 1, 1);
+    const [r, g, b] = [...pixel.getImageData(0, 0, 1, 1).data.slice(0, 3)].map((byte) => {
+      const c = byte / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (el) => {
+    const [high, low] = [luminance(getComputedStyle(el).color), luminance(painted(el))].sort((a, b) => b - a);
+    return (high + 0.05) / (low + 0.05);
+  };
+  return Object.fromEntries(selectors.map((selector) => [selector, Math.min(...[...document.querySelectorAll(selector)].map(contrast))]));
+}
+
+// In-page: counts each time the popup is built from scratch, in window.popupBuilds.
+function countPopupBuilds() {
+  window.popupBuilds = 0;
+  new MutationObserver((records) => (window.popupBuilds += records.length)).observe(document.getElementById('inspector'), { childList: true });
+}
+
+const trailLine = (page) => page.evaluate(() => document.querySelector('#inspector .trail-line')?.textContent ?? null);
+
+async function quotesArea() {
+  const sample = recordedSample();
+  const asks = recordedAsks();
+  await withPage('quotes', {}, async (page) => {
+    const docIds = await docIdsOf(page);
+    const run = quotesShown(sample, docIds, SAMPLE_QUOTED);
+    const ask = quotesShown(sample, docIds, ASK_QUOTED);
+
+    const pills = await page.evaluate(pillsOn);
+    const pillName = "each document on the lit answer's trail with quoted sentences has a pill counting them, named and titled for them; no other document has one";
+    check('quotes', pillName, isDeepStrictEqual(pills, run.pills), JSON.stringify(pills));
+
+    const popups = [];
+    for (const d of sample.docs.keys()) {
+      await inspect(page, docIds[d]);
+      popups.push(await page.evaluate(marksIn, '#inspector'));
+    }
+    const lineOk = (meta, d) => (SAMPLE_QUOTED.pills[d] ? meta.endsWith(` · ${counted(SAMPLE_QUOTED.pills[d], 'sentence')} used`) : !meta.includes('used'));
+    const marked = popups.every((p, d) => isDeepStrictEqual(p.marks.map(({ text, multi }) => ({ text, multi })), run.marks[d]));
+    const [titled, title] = SAMPLE_QUOTED.title;
+    const docName = "a document's popup marks the trail's sentences, strong where two summaries quote them, titled with who quotes each and what cites them, and its line says how many are used";
+    check('quotes', docName, marked && popups[titled].marks[0]?.title === title && popups.every((p, d) => lineOk(p.meta, d)), popups.map((p) => p.meta).join(' | '));
+
+    await inspect(page, docIds[0]);
+    const contrasts = await page.evaluate(lowestContrasts, ['.node .pill:not([hidden])', '#inspector .used', '#file-list .used [aria-hidden]']);
+    const legible = Object.values(contrasts).every((ratio) => Number.isFinite(ratio) && ratio >= MIN_TEXT_CONTRAST);
+    check('quotes', `${LAYOUTS.desktop.name}: the pills' text, and the accent's counts in a popup and the files list, meet ${MIN_TEXT_CONTRAST}:1`, legible, JSON.stringify(contrasts));
+
+    await inspect(page, 'answer-0');
+    const answerLine = await page.evaluate(() => document.querySelector('#inspector .used')?.textContent ?? null);
+    check('quotes', "the answer's popup says how many sentences from how many documents its trail quotes", answerLine === SAMPLE_QUOTED.line, answerLine);
+
+    const lines = {};
+    for (const id of Object.keys(SAMPLE_QUOTED.lines)) {
+      await inspect(page, id);
+      lines[id] = await trailLine(page);
+    }
+    check('quotes', "a summary's popup says whether it is on the lit answer's trail, and what cites it there", isDeepStrictEqual(lines, SAMPLE_QUOTED.lines), JSON.stringify(lines));
+
+    await inspect(page, 'r2-3');
+    const closed = await page.evaluate(foldsIn);
+    for (const summary of await page.$$('#inspector summary')) await summary.click();
+    const opened = await page.evaluate(foldsIn);
+    const quoteRows = sample.r2[3].quotes.map((q) => [q.text, true, true]);
+    const provenance = sample.r2[3].provenance.map((i) => `${stem(i)} · round 1`).join(' · ');
+    const names = [`quotes ${sample.r2[3].quotes.length}`, `provenance ${sample.r2[3].provenance.length}`];
+    const folded = isDeepStrictEqual(closed.map((f) => [f.name, f.open, f.marker]), names.map((name) => [name, false, '"▸ "']));
+    const unfolded = isDeepStrictEqual(opened.map((f) => [f.name, f.open, f.marker]), names.map((name) => [name, true, '"▾ "']));
+    const held = isDeepStrictEqual(opened[0]?.quotes, quoteRows) && opened[1]?.body === provenance;
+    const r2Name = "a round-2 summary's popup folds its quotes and its provenance, each counted, ▸ closed until opened, ▾ open: its quotes marked while it is on the trail, and the summaries it cites";
+    check('quotes', r2Name, folded && unfolded && held, JSON.stringify(opened.map((f) => [f.name, f.marker, f.body.slice(0, 40)])));
+    await inspect(page, 'r1-0');
+    const roundOne = (await page.evaluate(foldsIn)).map((f) => f.name);
+    check('quotes', "a round-1 summary's popup folds its quotes, and has no provenance", isDeepStrictEqual(roundOne, [`quotes ${sample.r1[0].quotes.length}`]), roundOne.join(', '));
+    await inspect(page, 'parsed-0');
+    const parseFolds = await page.evaluate(foldsIn);
+    await page.click('#inspector summary');
+    const parseOpened = await page.evaluate(foldsIn);
+    const cited = sample.parsed[0].provenance.map((i) => `${stem(i)} · round 2`).join(' · ') || 'none';
+    const parseName = "a parse's popup folds its provenance, counted and closed until opened, and an empty one opens to just none";
+    const parseOk = isDeepStrictEqual(parseFolds.map((f) => [f.name, f.open]), [[`provenance ${sample.parsed[0].provenance.length}`, false]]) && parseOpened[0].open && parseOpened[0].body === cited;
+    check('quotes', parseName, parseOk, JSON.stringify(parseOpened));
+
+    const target = sample.r2[3].quotes.at(-1);
+    await quotesOf(page, 'r2-3');
+    await page.click('#inspector .quote >> nth=-1');
+    const shown = { title: (await popup(page))?.title, flash: await page.evaluate(flashed) };
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await quotesOf(page, 'r2-3');
+    await page.click('#inspector .quote >> nth=-1');
+    const moving = await page.evaluate(flashed);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const atSentence = shown.title === `● ${sample.docs[3].name}` && shown.flash?.text === target.text && shown.flash.inView;
+    const flashName = "a quote clicked in a summary's popup opens its document's popup at that sentence and flashes it, standing still with reduced motion";
+    check('quotes', flashName, atSentence && shown.flash.outlineStyle === 'solid' && moving?.animationName === 'flash', JSON.stringify([shown, moving]));
+
+    await page.keyboard.press('Escape');
+    const lists = await page.evaluate(sentenceLists);
+    const listed = isDeepStrictEqual(lists, [{ line: SAMPLE_QUOTED.line, open: true, shown: true, marker: '"▾ "', docs: run.docs }]);
+    await page.click('.sentences > summary');
+    const foldedList = (await page.evaluate(sentenceLists))[0];
+    await page.click('.sentences > summary');
+    const listName = "under the answer the chat lists its trail's sentences, ▾ open until folded: N sentences from M documents, then each document's name and its sentences, marked";
+    check('quotes', listName, listed && !foldedList.open && !foldedList.shown && foldedList.marker === '"▸ "', JSON.stringify(lists[0]?.docs?.[0]));
+    await page.click('.sentences .sentence >> nth=0');
+    const fromChat = { title: (await popup(page))?.title, flash: (await page.evaluate(flashed))?.text };
+    const chatName = "a sentence in the chat's list opens its document's popup at it, flashed";
+    check('quotes', chatName, isDeepStrictEqual(fromChat, { title: `● ${run.docs[0][0]}`, flash: run.docs[0][1] }), JSON.stringify(fromChat));
+
+    await page.keyboard.press('Escape');
+    await page.click('#tab-files');
+    const files = await page.evaluate(fileCounts);
+    await page.click('#file-list .file >> nth=3');
+    const fileView = await page.evaluate(marksIn, '#file-view');
+    await page.click('#file-back');
+    await page.click('#tab-chat');
+    const filesName = "the files list shows N ¶ by each file on the trail with quoted sentences, read out as highlighted sentences, dims the files off it, and a file's view marks and counts them as its popup does";
+    const viewOk = isDeepStrictEqual(fileView.marks, popups[3].marks) && lineOk(fileView.meta, 3);
+    const listOk = isDeepStrictEqual(files.map((f) => f.count), run.counts) && isDeepStrictEqual(files.map((f) => f.off), SAMPLE_QUOTED.off);
+    check('quotes', filesName, listOk && viewOk, JSON.stringify(files));
+
+    await send(page, asks[0].question);
+    await page.click('#tab-files');
+    const askFiles = (await page.evaluate(fileCounts)).map((f) => f.count);
+    await page.click('#tab-chat');
+    const askPills = await page.evaluate(pillsOn);
+    const askList = (await page.evaluate(sentenceLists)).at(-1);
+    const ownName = "an ask lit shows its own trail's pills and file counts, and its chat lists its own sentences";
+    const own = isDeepStrictEqual(askPills, ask.pills) && isDeepStrictEqual(askFiles, ask.counts) && isDeepStrictEqual(askList, { line: ASK_QUOTED.line, open: true, shown: true, marker: '"▾ "', docs: ask.docs });
+    check('quotes', ownName, own, JSON.stringify({ askPills, askList: askList?.line }));
+    await inspect(page, docIds[ASK_QUOTED.title[0]]);
+    const askMarks = (await page.evaluate(marksIn, '#inspector')).marks;
+    const askMarksName = `an ask lit marks its own trail in a document's text: ${sample.docs[ASK_QUOTED.title[0]].name}, quoted by both rounds for the answer, by round 1 alone for the ask`;
+    const askMarked = isDeepStrictEqual(askMarks.map(({ text, multi }) => ({ text, multi })), ask.marks[ASK_QUOTED.title[0]]) && askMarks[0]?.title === ASK_QUOTED.title[1];
+    check('quotes', askMarksName, !isDeepStrictEqual(run.marks, ask.marks) && askMarked, JSON.stringify(askMarks.map(({ multi }) => multi)));
+    const offTrail = await quotesOf(page, 'r2-1');
+    await page.evaluate(countPopupBuilds);
+    await page.focus(nodeSel('answer-0'));
+    await page.keyboard.press('Enter');
+    const builds = await page.evaluate(() => window.popupBuilds);
+    const relit = isDeepStrictEqual(await litAnswers(page), ['answer-0']);
+    const onTrailAgain = await quotesOf(page, 'r2-1');
+    const followName = "a summary off an ask's trail lists its quotes unmarked, and lighting the run's answer marks them again";
+    check('quotes', followName, offTrail.length > 0 && offTrail.every(([, button, mark]) => button && !mark) && onTrailAgain.every(([, , mark]) => mark), JSON.stringify([offTrail, onTrailAgain].map((q) => q.map(([, , mark]) => mark))));
+    check('quotes', 'an answer opened while another popup is open lights it and builds its popup once', relit && builds === 1, `${builds} builds`);
+  });
+
+  await withPage('quotes', { before: serving(withSample(prefixed(EMOJI_PREFIX))) }, async (page) => {
+    await quotesOf(page, 'r2-1');
+    await page.focus('#inspector .quote >> nth=0');
+    const before = { line: await trailLine(page), quotes: (await page.evaluate(foldsIn))[0].quotes };
+    await landAsk(page, asks[0].question);
+    const landed = await becomes(page, landedNode, 'answer-1');
+    const after = {
+      line: await trailLine(page),
+      folds: await page.evaluate(foldsIn),
+      focused: await page.evaluate(() => document.activeElement === document.querySelectorAll('#inspector .quote')[0]),
+    };
+    const keptName = "an ask landing while a summary's popup is open redraws what the trail changes in it, in place: its quotes fold stays open, and the focused quote keeps the focus";
+    const redrawn = before.quotes.every(([, , mark]) => mark) && after.folds[0]?.quotes.every(([, , mark]) => !mark) && after.line !== before.line;
+    check('quotes', keptName, landed && redrawn && after.folds[0]?.open && after.focused, JSON.stringify({ before: before.line, after: after.line, open: after.folds[0]?.open, focused: after.focused }));
+
+    const docId = (await docIdsOf(page))[0];
+    await inspect(page, docId);
+    await page.$eval('#inspector pre', (el) => (el.scrollTop = el.scrollHeight / 3));
+    const { scrollTop: scrolled, marks } = await page.evaluate(marksIn, '#inspector');
+    const strong = marks.map((m) => m.multi);
+    await landAsk(page, asks[2].question);
+    const later = await page.evaluate(marksIn, '#inspector');
+    const scrollName = "an ask landing while a long document's popup is scrolled redraws its marks in place, at the same scroll";
+    const remarked = !isDeepStrictEqual(strong, later.marks.map((m) => m.multi));
+    check('quotes', scrollName, scrolled > 0 && remarked && later.scrollTop === scrolled, `scrolled ${scrolled} → ${later.scrollTop}; strong ${strong} → ${later.marks.map((m) => m.multi)}`);
+
+    await page.keyboard.press('Escape');
+    await page.click('#tab-files');
+    await page.focus('#file-list .file >> nth=2');
+    await landAsk(page, NEW_QUESTION);
+    const fileFocused = await page.evaluate(() => document.activeElement === document.querySelectorAll('#file-list .file')[2]);
+    const answers = (await answerIds(page)).length;
+    check('quotes', 'an answer lit while a file in the files list has the focus leaves the focus on it', answers === 4 && fileFocused, `${answers} answers; focus on ${await page.evaluate(() => document.activeElement.className)}`);
+  });
+
+  await withPage('quotes', { layout: LAYOUTS.phone }, async (page) => {
+    const lists = (await page.evaluate(sentenceLists)).length;
+    const fits = (await page.evaluate(noHorizontalScroll)) && (await page.$eval(CHAT, (el) => el.scrollWidth <= el.clientWidth));
+    check('quotes', `${LAYOUTS.phone.name}: the chat's list of sentences fits, with no horizontal scroll in the page or the chat`, lists === 1 && fits, `${lists} lists`);
+  });
+
+  await withPage('quotes', {}, async (page) => {
+    const opened = [];
+    for (const id of await page.$$eval('.node', (els) => els.map((el) => el.dataset.id))) {
+      await inspect(page, id);
+      for (const summary of await page.$$('#inspector summary')) await summary.click();
+      opened.push(...(await page.evaluate(foldsIn)).filter((f) => f.open));
+      if (await page.evaluate(saysNull)) opened.push({ name: `null in ${id}` });
+    }
+    await page.keyboard.press('Escape');
+    await page.click('#tab-files');
+    await page.click('#file-list .file >> nth=0');
+    const nowhere = !(await page.evaluate(saysNull)) && !opened.some((f) => f.name.startsWith('null'));
+    check('quotes', "every node's popup, its folds opened, the chat and the files pane: quotes and provenance shown, and no null or undefined anywhere", opened.length > 0 && nowhere, opened.filter((f) => f.name.startsWith('null')).map((f) => f.name).join(', '));
+  });
+
+  await withPage('quotes', {}, async (page) => {
+    const recorded = Object.keys(await page.evaluate(pillsOn)).length;
+    await page.fill('#question', NEW_QUESTION);
+    await page.click('#new-run-btn');
+    await waitLit(page);
+    const pills = Object.keys(await page.evaluate(pillsOn)).length;
+    await inspect(page, (await docIdsOf(page))[0]);
+    const marks = await page.evaluate(marksIn, '#inspector');
+    await inspect(page, 'r2-0');
+    const folds = (await page.evaluate(foldsIn)).map((f) => f.name.split(' ')[0]);
+    const lists = (await page.evaluate(sentenceLists)).length;
+    const none = pills === 0 && marks.marks.length === 0 && !marks.meta.includes('sentence') && isDeepStrictEqual(folds, ['provenance']) && lists === 0;
+    const simulatedName = 'a simulated run, which has no quotes, marks nothing: no pill, no mark, no sentence used, no quotes fold and no list in the chat, where the recorded run had pills';
+    check('quotes', simulatedName, recorded > 0 && none, JSON.stringify({ recorded, pills, meta: marks.meta, folds, lists }));
+  });
+
+  await withPage('quotes', { before: serving(withSample(prefixed(EMOJI_PREFIX))) }, async (page) => {
+    await inspect(page, (await docIdsOf(page))[0]);
+    const marks = (await page.evaluate(marksIn, '#inspector')).marks.map(({ text, multi }) => ({ text, multi }));
+    await quotesOf(page, 'r2-0');
+    await page.click('#inspector .quote >> nth=0');
+    const flash = await page.evaluate(flashed);
+    const unitsName = 'a memo with an emoji before its quotes, one code point to r3con and two UTF-16 units here, marks its sentences where they are, and a quote clicked scrolls its long popup to the flashed sentence';
+    const unitsOk = isDeepStrictEqual(marks, quotesShown(sample, [], SAMPLE_QUOTED).marks[0]) && flash?.text === sample.r2[0].quotes[0].text && flash.inView;
+    check('quotes', unitsName, unitsOk, `${JSON.stringify(marks)}; flashed ${JSON.stringify(flash?.text)} in view ${flash?.inView}`);
+  });
+
+  await withPage('quotes', { before: serving(withSample(prefixed(PAST_PREVIEW))) }, async (page) => {
+    const pill = (await page.evaluate(pillsOn))[(await docIdsOf(page))[0]]?.[0];
+    await quotesOf(page, 'r2-0');
+    await page.click('#inspector .quote >> nth=0');
+    const fromQuote = { flash: await page.evaluate(flashed), meta: (await page.evaluate(marksIn, '#inspector')).meta };
+    await page.keyboard.press('Escape');
+    await page.click('.sentences .sentence >> nth=0');
+    const fromChat = await page.evaluate(flashed);
+    const sentence = sample.r2[0].quotes[0].text;
+    const windowed = /characters [\d,]+–[\d,]+ shown/.test(fromQuote.meta);
+    const pastName = 'a sentence past the preview is counted, and a quote or a chat sentence opens its popup at it, the text around it shown, marked and flashed';
+    const shownThere = [fromQuote.flash, fromChat].every((f) => f?.text === sentence && f.marked && f.inView);
+    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && shownThere && windowed, `${fromQuote.meta}; ${JSON.stringify([fromQuote.flash, fromChat])}`);
+  });
+
+  await withPage('quotes', { before: serving(withSample(touchingHalves)) }, async (page) => {
+    const pill = (await page.evaluate(pillsOn))[(await docIdsOf(page))[0]]?.[0];
+    const first = (await page.evaluate(sentenceLists))[0]?.docs[0];
+    const halves = String(SAMPLE_QUOTED.pills[0] + 1);
+    check('quotes', 'two quotes that only meet count as two sentences, in the pill and the chat; quotes that overlap still count as one', pill === halves && first?.length === SAMPLE_QUOTED.pills[0] + 2, `pill ${pill}; ${JSON.stringify(first)}`);
+  });
+
+  await withPage('quotes', { before: serving(withSample(unlocatedFirstMemo)) }, async (page) => {
+    const docIds = await docIdsOf(page);
+    await inspect(page, docIds[0]);
+    const doc = await page.evaluate(marksIn, '#inspector');
+    const quotes = await quotesOf(page, 'r2-0');
+    const nothingNull = !(await page.evaluate(saysNull));
+    const pill = (await page.evaluate(pillsOn))[docIds[0]] ?? null;
+    await page.click('#tab-files');
+    const count = (await page.evaluate(fileCounts))[0].count;
+    const plain = isDeepStrictEqual(quotes, [[sample.r2[0].quotes[0].text, false, false]]);
+    const usedName = "a document on the trail with no sentence located says used, with no pill and no count, and a quote r3con didn't find is listed plain, with no null anywhere";
+    check('quotes', usedName, doc.meta.endsWith(' · used') && doc.marks.length === 0 && pill === null && count === null && plain && nothingNull, `${doc.meta}; ${JSON.stringify(quotes)}`);
   });
 }
 
@@ -2194,11 +2626,12 @@ async function answersOnTheRun(sample, asks) {
     const askLog = await page.evaluate(logOf);
     const { summary_ids, parse_ids } = asks[0].provenance;
     const summary = `${RECORDED_ASK} · ${asks[0].model} · ${asks[0].totals.tokens.toLocaleString('en-US')} tokens · $`;
-    const told = isDeepStrictEqual(askLog.after, [asks[0].text]) && !askLog.open && askLog.folded.startsWith(`ready · ${asks[0].model} · $`);
+    const quoted = ASK_QUOTED.line;
+    const told = isDeepStrictEqual(askLog.after, [asks[0].text, quoted]) && !askLog.open && askLog.folded.startsWith(`ready · ${asks[0].model} · $`);
     const shown = await inspect(page, 'answer-1');
     const rows = await page.$$eval('#inspector .row', (els) => els.map((r) => r.firstChild.textContent));
     const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']);
-    const toldName = "a recorded ask's chat gives its real answer with nothing under it, its folded log its model and cost, and its popup its citations and source";
+    const toldName = "a recorded ask's chat gives its real answer with only its sentences' line under it, its folded log its model and cost, and its popup its citations and source";
     check('answers', toldName, told && inPopup, `${askLog.folded}; ${askLog.after.join(' | ')}`);
     const label = await page.textContent(`${nodeSel('answer-1')} .label`);
     check('answers', 'an answer node is labelled with a short form of its question, and its model', label === ASK_LABEL, label);
@@ -3300,8 +3733,8 @@ async function liveSession(url) {
     await page.click('#run-btn');
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, `ready · ${DEFAULT_MODEL} · $`], LIVE_RUN_MS);
     const askLog = await page.evaluate(logOf);
-    const told = isDeepStrictEqual(askLog.after, [SCRIPTED_ANSWER]) && !askLog.open && askLog.mark === 'ok';
-    const askName = 'a follow-up runs an ask and shows its answer in the chat with nothing under it, and its model and cost on its folded log';
+    const told = isDeepStrictEqual(askLog.after, [SCRIPTED_ANSWER, SCRIPTED_SENTENCES]) && !askLog.open && askLog.mark === 'ok';
+    const askName = "a follow-up runs an ask and shows its answer in the chat with only its sentences' line under it, and its model and cost on its folded log";
     check('live', askName, answered && told, `${askLog.folded}; ${askLog.after.join(' | ')}`);
 
     const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
@@ -3467,6 +3900,35 @@ async function liveParts(url) {
   });
 }
 
+// Its one relevant line comes after emoji, a code point each to r3con and two UTF-16 code units each here.
+const ROADWORKS_LINE = 'The 🚧 Westgate site logged 4 equipment incidents in Q3.';
+const roadworksMemo = () => memo('00_roadworks.txt', `🚧🚧 ${QUIET} Roadworks notice.\n${ROADWORKS_LINE}\nSite manager: Ana Ruiz.\n`);
+
+async function liveQuotes(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const memos = [roadworksMemo(), ...sampleMemos(), splitMemo()];
+    await page.setInputFiles('#file-input', memos);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const docIds = await docIdsOf(page);
+    await inspect(page, docIds[0]);
+    const roadworks = (await page.evaluate(marksIn, '#inspector')).marks.map(({ text }) => text);
+    const pills = Object.entries(await page.evaluate(pillsOn)).map(([id, [n]]) => [id, n]);
+    const [list] = await page.evaluate(sentenceLists);
+    const quoted = [memos[0], memos[1]].map((m) => [m.name, scriptedSummary(m.buffer.toString())]);
+    await inspect(page, `r2-${memos.length - 1}`);
+    await page.click('#inspector summary');
+    await page.click('#inspector .quote');
+    const flash = (await page.evaluate(flashed))?.text;
+    const partLine = scriptedSummary(splitMemo().buffer.toString());
+    const marked = isDeepStrictEqual(roadworks, [ROADWORKS_LINE]) && isDeepStrictEqual(pills, [[docIds[0], '1'], [docIds[1], '1']]);
+    const listed = list?.line === SCRIPTED_SENTENCES && isDeepStrictEqual(list.docs, quoted);
+    const name = "each quote lands on its sentence however its document was read: past emoji, a code point each to r3con and two code units here, and in a document read in parts, in its second part";
+    check('live', name, done && marked && listed && flash === partLine, `${JSON.stringify(roadworks)}; ${JSON.stringify(pills)}; ${list?.line}; flashed ${JSON.stringify(flash)}`);
+  });
+}
+
 // Holds the ask's last event until its popup is open.
 async function liveAnswers(url) {
   const before = (page) => page.addInitScript(holdFrom, 'ask_finished');
@@ -3529,8 +3991,8 @@ async function liveLog(url) {
     await page.evaluate(() => (window.release = true));
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const ended = await page.evaluate(logOf);
-    const endedName = 'once it ends its folded line says ready, the model and the cost, and nothing is under its answer';
-    check('live', endedName, !ended.open && ended.mark === 'ok' && LIVE_READY.test(ended.folded) && isDeepStrictEqual(ended.after, [SCRIPTED_ANSWER]), `${ended.folded}; ${ended.after.join(' | ')}`);
+    const endedName = "once it ends its folded line says ready, the model and the cost, and only its sentences' line is under its answer";
+    check('live', endedName, !ended.open && ended.mark === 'ok' && LIVE_READY.test(ended.folded) && isDeepStrictEqual(ended.after, [SCRIPTED_ANSWER, SCRIPTED_SENTENCES]), `${ended.folded}; ${ended.after.join(' | ')}`);
     await page.focus('.log-toggle');
     await page.keyboard.press('Enter');
     const opened = await page.evaluate(logOf);
@@ -4363,6 +4825,7 @@ async function live() {
     await liveTabs(url);
     await liveWhileGoing(url);
     await liveParts(url);
+    await liveQuotes(url);
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);
@@ -4391,7 +4854,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
