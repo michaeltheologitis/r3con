@@ -83,7 +83,7 @@ def test_a_document_read_in_parts_still_answers(
     tmp_path, grown_registry, events_in, parts, seed
 ):
     documents = read_documents(MEMOS)
-    documents[3] = grown_registry(40_000, at=0.6)
+    documents["04_contractor_registry.txt"] = grown_registry(40_000, at=0.6)
     started = time.perf_counter()
     result = run(
         QUESTION,

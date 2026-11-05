@@ -40,7 +40,8 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(
     assert "halloran" in result.answer.lower()
     assert re.search(r"\b11\b", result.answer)
     used = cited_documents(result.provenance)
-    cited = [documents[result.document_ids.index(id_)] for id_ in used]
+    texts = dict(zip(result.document_ids, documents.values(), strict=True))
+    cited = [texts[id_] for id_ in used]
     assert cited
     assert not any("Cafeteria refurbishment" in document for document in cited)
     assert result.run_dir is not None

@@ -2857,7 +2857,7 @@
     const stream = openStream('run', tab, run);
     try {
       const { question, model, endpoint } = run.answers[0];
-      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text) };
+      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) };
       const started = await api('/api/runs', { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));

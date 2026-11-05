@@ -65,6 +65,7 @@ LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
 TWO_LINE_MEMOS = [f"{memo}\nThe {memo} logs two sites." for memo in [*DOCS, "Calder"]]
+MEMO_NAMES = ["q3/halloran.txt", "q3/merrow.txt", "calder.pdf"]
 
 
 def answer(
@@ -131,10 +132,10 @@ def system_prompts(llm, stage) -> list[str]:
 
 
 def memos_with(registry: str) -> list[str]:
-    """The five memos, with the contractor registry (documents[3]) replaced."""
+    """The five memos' texts, with the contractor registry's, the fourth, replaced."""
     documents = read_documents(MEMOS)
-    documents[3] = registry
-    return documents
+    documents["04_contractor_registry.txt"] = registry
+    return list(documents.values())
 
 
 def summary_headings(llm) -> list[str]:
@@ -309,6 +310,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
     assert written == {
         "manifest.json",
         "ids.json",
+        "names.json",
         "events.jsonl",
         "relevance/calls.json",
         "relevance/result.json",
@@ -441,7 +443,8 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
         reasoning=citing_the_first_summary("Halloran memo", parses_from=-1),
     )
     events = []
-    result = answer(llm, logger, documents=TWO_LINE_MEMOS, on_event=events.append)
+    documents = dict(zip(MEMO_NAMES, TWO_LINE_MEMOS, strict=True))
+    result = answer(llm, logger, documents=documents, on_event=events.append)
     ids = result.document_ids
 
     def line(i: int, k: int) -> dict:
@@ -449,6 +452,7 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
         start = TWO_LINE_MEMOS[i].index(text)
         return {
             "document": ids[i],
+            "name": MEMO_NAMES[i],
             "start": start,
             "end": start + len(text),
             "text": text,
@@ -463,6 +467,16 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
     assert finished["provenance"] == result.provenance
+
+
+def test_documents_named_by_anything_but_strings_are_refused_before_anything(
+    llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    with pytest.raises(TypeError, match="`documents` names must be strings — 1 is int"):
+        answer(llm, logger, documents={1: "Halloran memo"})
+    assert llm.requests == []
+    assert list(logger.dir.iterdir()) == []
 
 
 def test_a_cited_parse_that_cites_no_snippet_adds_no_quotes(answering_llm, shown_ids):
@@ -1140,7 +1154,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     answering_llm, quiet_sites, window, tmp_path, monkeypatch
 ):
     counting_ids(monkeypatch)
-    documents = read_documents(MEMOS) + quiet_sites(55)
+    documents = [*read_documents(MEMOS).values(), *quiet_sites(55)]
     llm = answering_llm.answers(relevance=memo_note, parsing=whole_document_row)
     logger, result = memos_run(llm, documents, window(8_192), tmp_path)
     assert result.answer == "; ".join(documents)
@@ -1161,7 +1175,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
 def test_a_refused_first_turn_goes_again_once_with_samples(
     answering_llm, quiet_sites, tmp_path
 ):
-    documents = read_documents(MEMOS) + quiet_sites(55)
+    documents = [*read_documents(MEMOS).values(), *quiet_sites(55)]
     llm = answering_llm.answers(
         relevance=memo_note, parsing=whole_document_row
     ).refuses_over(tokens=8_192)
@@ -1187,6 +1201,7 @@ def test_a_run_reports_each_stage_and_document_from_its_start_to_its_finish(
         "question": "Who?",
         "model": MODEL,
         "document_ids": result.document_ids,
+        "document_names": ["0", "1", "2"],
         "rounds": 2,
         "run_dir": None,
     }
