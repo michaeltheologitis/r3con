@@ -9,7 +9,7 @@
 Ask a question whose evidence is scattered across many documents. `r3con` builds a
 task-specific representation of the context, then reasons over it to produce an answer.
 
-![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; a click on a sentence quoted under the answer opens its memo there, with the quoted sentences marked](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
+![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; the sentences it quotes unfold under the answer, a file's name there opens its memo with the same sentences marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
 ## App
 
@@ -129,8 +129,8 @@ The examples use five short memos arranged so that no single document contains t
 answer:
 
 - [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — an end-to-end example.
-- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — tracing an answer back to the documents and
-  relevance snippets it came from.
+- [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — checking an answer: the sentences behind it,
+  and the relevance snippets and records it used.
 - [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — models, relevance rounds, the reasoning
   path, generation parameters, run configuration, custom connections, and artifact paths.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using a self-hosted vLLM endpoint.

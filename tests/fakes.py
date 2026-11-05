@@ -1,5 +1,6 @@
 import copy
 import json
+import re
 import threading
 from collections import deque
 from collections.abc import Callable, Mapping
@@ -15,7 +16,33 @@ Request = dict[str, Any]
 Content = str | dict[str, Any]
 Reply = Content | BaseException | Callable[[Request], Content]
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+SCHEMA_REPLY = """Thought: one row per memo, with its lines.
+<schema>
+class Line(BaseModel):
+    text: str
+
+
+class Memo(BaseModel):
+    title: str
+    lines: list[Line]
+
+
+class Parse(BaseModel):
+    memos: list[Memo]
+</schema>"""
+ANSWERING_SCHEMA = """Thought: one row per person.
+<schema>
+class Row(BaseModel):
+    who: str
+
+
+class Parse(BaseModel):
+    rows: list[Row]
+</schema>"""
+# The line, and the blank one after it, that heads a parse request's user message.
+PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
 GATE_TIMEOUT_SECONDS = 10
+UNSCRIPTED_SHOWN_CHARS = 200
 
 
 class UnscriptedRequest(AssertionError):
@@ -136,15 +163,7 @@ class FakeLLM:
                 content = {"parse": content, "provenance_ids": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
-            # The dict form, because litellm treats mock_response="" as absent.
-            choice = {
-                "index": 0,
-                "finish_reason": "stop",
-                "message": {"content": content},
-            }
-            return _completion(
-                **request, mock_response={"choices": [choice], "usage": USAGE}
-            )
+            return mock_completion(request, content)
         finally:
             with self._lock:
                 self._in_flight -= 1
@@ -157,11 +176,23 @@ class FakeLLM:
         if isinstance(answer, deque):
             answer = answer.popleft() if answer else None
         if answer is None:
-            last = request["messages"][-1]["content"][:200]
-            raise UnscriptedRequest(
-                f"no reply scripted for this {stage} request: {last!r}"
-            )
+            raise unscripted(request)
         return answer
+
+
+def unscripted(request: Request) -> UnscriptedRequest:
+    """The error for a ``request`` that a fake has no reply for."""
+    last = request["messages"][-1]["content"][:UNSCRIPTED_SHOWN_CHARS]
+    return UnscriptedRequest(
+        f"no reply scripted for this {stage_of(request)} request: {last!r}"
+    )
+
+
+def mock_completion(request: Request, content: str) -> Any:
+    """litellm's response to ``request`` when its own mock replies ``content``."""
+    # The dict form, because litellm treats mock_response="" as absent.
+    choice = {"index": 0, "finish_reason": "stop", "message": {"content": content}}
+    return _completion(**request, mock_response={"choices": [choice], "usage": USAGE})
 
 
 def _summary_reply(summary: str, request: Request) -> dict[str, Any]:
