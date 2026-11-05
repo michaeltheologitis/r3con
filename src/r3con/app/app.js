@@ -3968,7 +3968,7 @@
     if (!gesture.pointers.delete(e.pointerId)) return;
     const trashed = e.type === 'pointerup' && overTrash(e) ? gesture.node?.file : null;
     if (gesture.mode === 'pinch') {
-      if (!gesture.pointers.size) endGesture();
+      if (gesture.pointers.size < 2) endGesture();
       return;
     }
     if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();

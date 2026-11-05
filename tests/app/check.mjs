@@ -2503,7 +2503,7 @@ async function gestures() {
     const replayName = 'a drag still going when a replay clears the panel ends there: moving on moves the cleared node no further, and pans nothing';
     check('gestures', replayName, isDeepStrictEqual(replayed, { cleared: { ...cleared, detached: true }, after: cleared, panning: false, popup: null }), JSON.stringify(replayed));
   });
-  await withPage('gestures', { layout: LAYOUTS.phone }, async (page) => {
+  await withPage('gestures', { layout: LAYOUTS.phone }, async (page, messages) => {
     const tap = await centre(page, 'r2-3');
     await page.touchscreen.tap(tap.x, tap.y);
     await becomes(page, () => !document.getElementById('inspector').hidden);
@@ -2513,6 +2513,25 @@ async function gestures() {
     });
     const tapName = 'phone: a tap opens the tapped node, not a link that appears under the finger';
     check('gestures', tapName, opened?.title === '● 04_contractor_registry · round 2' && !fileView, opened?.title);
+    await page.keyboard.press('Escape');
+
+    const panel = await rect(page, '#panel');
+    const first = { id: 0, x: panel.left + BLANK_INSET_PX, y: panel.top + BLANK_INSET_PX };
+    const second = { id: 1, x: first.x + CHAT_DRAG_PX, y: first.y + CHAT_DRAG_PX };
+    const cdp = await page.context().newCDPSession(page);
+    const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points });
+    const before = await transform(page);
+    await touch('touchStart', [first]);
+    await touch('touchStart', [first, second]);
+    await touch('touchMove', [first, { ...second, x: second.x + CHAT_DRAG_PX }]);
+    await touch('touchEnd', [first]);
+    const pinched = await transform(page);
+    for (let i = 1; i <= DRAG_STEPS; i += 1) await touch('touchMove', [{ ...second, x: second.x + CHAT_DRAG_PX + NUDGE_PX * i }]);
+    await touch('touchEnd', []);
+    await cdp.detach();
+    const lifted = { zoomed: pinched !== before, thrown: messages.find((m) => m.type === 'error')?.text ?? null, moved: (await transform(page)) !== pinched };
+    const liftName = 'phone: a pinch with one finger lifted ends: moving the other finger throws nothing and moves nothing';
+    check('gestures', liftName, isDeepStrictEqual(lifted, { zoomed: true, thrown: null, moved: false }), JSON.stringify(lifted));
   });
 }
 
