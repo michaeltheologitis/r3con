@@ -3079,6 +3079,7 @@
     // A drawing taken out of the page mid-animation never hears the animation end.
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
+    endGesture();
     state.hovered = null;
     state.shown.chat.hidden = true;
     state.shown = tab;
@@ -3939,6 +3940,14 @@
     }
   }
 
+  function endGesture() {
+    gesture.pointers.clear();
+    gesture.mode = null;
+    gesture.node = null;
+    trash.classList.remove('over');
+    panel.classList.remove('panning');
+  }
+
   /** @param {PointerEvent} e */
   function onPointerEnd(e) {
     if (!gesture.pointers.delete(e.pointerId)) return;
@@ -3949,9 +3958,7 @@
       return;
     }
     if (e.type === 'pointerup' && !gesture.moved && gesture.mode === 'pan') closeInspector();
-    gesture.mode = null;
-    gesture.node = null;
-    panel.classList.remove('panning');
+    endGesture();
     if (!trashed) return;
     removeFile(trashed, { refocus: false });
     // The dragged node held the focus, and went with its file.

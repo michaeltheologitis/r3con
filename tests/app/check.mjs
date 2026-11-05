@@ -2405,6 +2405,29 @@ async function gestures() {
     const stuckName = 'a press released outside the panel ends: coming back with no button neither pans nor drags';
     check('gestures', stuckName, isDeepStrictEqual(await page.evaluate(panelSnapshot), before));
   });
+  await withPage('gestures', {}, async (page) => {
+    await send(page, NEW_QUESTION, 'Control+Enter');
+    const second = await page.evaluate(panelSnapshot);
+    await showRunTab(page, 0);
+    const panel = await rect(page, '#panel');
+    const starts = { drag: await centre(page, 'r2-1'), pan: { x: panel.left + 60, y: panel.top + 60 } };
+    for (const [kind, from] of Object.entries(starts)) {
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(from.x + NUDGE_PX, from.y + NUDGE_PX, { steps: DRAG_STEPS });
+      const first = await page.evaluate(panelSnapshot);
+      await page.evaluate(() => document.querySelectorAll('.run-tab')[1].click());
+      await page.mouse.move(from.x + CHAT_DRAG_PX, from.y + CHAT_DRAG_PX, { steps: DRAG_STEPS });
+      await page.mouse.up();
+      const shown = await page.evaluate(panelSnapshot);
+      await showRunTab(page, 0);
+      const left = await page.evaluate(panelSnapshot);
+      const changed = (now, was) => Object.keys(was).filter((key) => !isDeepStrictEqual(now[key], was[key]));
+      const moved = { shown: changed(shown, second), left: changed(left, first) };
+      const name = `a ${kind} still going when the tab is switched ends there: moving on moves nothing in either tab`;
+      check('gestures', name, isDeepStrictEqual(moved, { shown: [], left: [] }), JSON.stringify(moved));
+    }
+  });
   await withPage('gestures', { layout: LAYOUTS.phone }, async (page) => {
     const tap = await centre(page, 'r2-3');
     await page.touchscreen.tap(tap.x, tap.y);
