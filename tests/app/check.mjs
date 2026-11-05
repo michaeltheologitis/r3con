@@ -4368,6 +4368,33 @@ async function liveZip(url) {
   });
 }
 
+// The first event of the run `runId`, as r3con app replays its stream to a late reader.
+async function runStarted(url, runId) {
+  const response = await fetch(new URL(`/api/runs/${runId}/events`, url), { headers: { Authorization: `Bearer ${tokenOf(url)}` } });
+  const first = (await response.text()).split('\n').find((line) => line.startsWith('data: '));
+  return JSON.parse(first.slice('data: '.length));
+}
+
+// Two files of one name, and a third: each is sent with its name, and r3con app names the run's documents by them.
+async function liveNames(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const memos = [memo('notes.txt', 'A memo.\n'), memo('notes.txt', 'Another memo.\n'), memo('plan.txt', 'A plan.\n')];
+    await page.setInputFiles('#file-input', memos);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
+    const posted = startedJob(page, '/api/runs');
+    await page.click('#run-btn');
+    const response = await posted;
+    const sent = response.request().postDataJSON();
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const named = (await runStarted(url, (await response.json()).run_id)).document_names;
+    const pairs = sent.names?.map((name, i) => [name, sent.documents[i]]);
+    const paired = isDeepStrictEqual(pairs, memos.map((m) => [m.name, m.buffer.toString()]));
+    const numbered = isDeepStrictEqual(named, ['notes.txt', 'notes.txt (2)', 'plan.txt']);
+    const name = "a run is sent each file's name beside its text, and r3con app names the run's documents by them, a name sent twice numbered the second time";
+    check('live', name, done && paired && numbered, `${JSON.stringify(sent.names)}; ${JSON.stringify(named)}`);
+  });
+}
+
 // A + tab's run and ask are sent its own files, and tab 1 keeps the sample memos, not run.
 async function liveTabFiles(url) {
   await withPage('live', { url, sample: false }, async (page) => {
@@ -4878,6 +4905,7 @@ async function live() {
     await liveStopLate(url);
     await liveRemoveKeepsProblem(url);
     await liveTabFiles(url);
+    await liveNames(url);
     await liveTrash(url);
     await liveZip(url);
     await liveLockedWhileReading(url);

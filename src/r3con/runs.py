@@ -19,6 +19,8 @@ Layout per ``logs/<run-folder>/``:
   block (:meth:`r3con.config.RunConfig.label`).
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
+- ``names.json`` — each document's id mapped to its name
+  (:attr:`r3con.pipeline.Answer.document_names`). Written with the manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
   rounds: [{round, snippets: [{id, summary, quotes, provenance}]}], totals}`` — within
   a round every relevance snippet in document order, a document read in parts as one

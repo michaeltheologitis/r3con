@@ -51,10 +51,12 @@ opened URL's fragment, ``#token=...``.
   which are never opened; ``unread``, the documents not read. A zip that is corrupt,
   encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
   unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
-- ``POST /api/runs`` (``{question, model, endpoint?, documents: [text, ...]}``) starts
-  ``r3con.run`` and answers ``{run_id}``; ``GET /api/runs/{run_id}/events`` streams its
-  events as ``text/event-stream``, from the first, until ``run_finished`` or
-  ``run_failed``.
+- ``POST /api/runs`` (``{question, model, endpoint?, documents: [text, ...], names?:
+  [name, ...]}``) starts ``r3con.run`` and answers ``{run_id}``; ``GET
+  /api/runs/{run_id}/events`` streams its events as ``text/event-stream``, from the
+  first, until ``run_finished`` or ``run_failed``. ``names``, one per document, are the
+  documents' names, a name given again numbered (``r3con.unique_names``: ``notes.txt
+  (2)``); without them, r3con names the documents by index.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model, endpoint?}``) starts
   ``r3con.ask`` over a run that has ended and answers ``{ask_id}``;
   ``GET /api/asks/{ask_id}/events`` streams its events until ``ask_finished`` or
@@ -117,6 +119,8 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
+    field_validator,
 )
 from pydantic_core import PydanticCustomError
 from starlette.applications import Starlette
@@ -192,6 +196,7 @@ KEYLESS_SERVER_KEY = SecretStr("EMPTY")
 UNKNOWN_SERVER = "This model's server isn't in settings: add it there first."
 CREDENTIALS_IN_URL = "must not hold a user or password: put the key in its key field"
 NO_HOST_IN_URL = "must name a host"
+ONE_NAME_PER_DOCUMENT = "must give one name per document"
 NOT_SELF_HOSTED = (
     "isn't a self-hosted model, so it can't run on a server: pick other model… for it."
 )
@@ -237,6 +242,17 @@ class RunRequest(BaseModel):
     model: Text
     endpoint: Endpoint | None = None
     documents: list[Text] = Field(min_length=1)
+    names: list[Text] | None = None
+
+    @field_validator("names")
+    @classmethod
+    def _one_per_document(
+        cls, names: list[str] | None, info: ValidationInfo
+    ) -> list[str] | None:
+        documents = info.data.get("documents")
+        if names is not None and documents is not None and len(names) != len(documents):
+            raise PydanticCustomError("names", ONE_NAME_PER_DOCUMENT)
+        return names
 
 
 class DocumentQuery(BaseModel):
@@ -595,13 +611,20 @@ async def document_zip(request: Request) -> Response:
     return JSONResponse(unzipped)
 
 
+def _named(body: RunRequest) -> dict[str, str] | list[str]:
+    """The run's documents, by the names the page gave them, if it did."""
+    if body.names is None:
+        return body.documents
+    return dict(zip(r3con.unique_names(body.names), body.documents, strict=True))
+
+
 async def start_run(request: Request) -> Response:
     state = _state(request)
     body = await _read(request, RunRequest.model_validate_json)
     run = partial(
         r3con.run,
         body.question,
-        body.documents,
+        _named(body),
         logs_dir=state.logs_dir,
         **_model_options(state, body.model, body.endpoint),
     )

@@ -87,6 +87,71 @@ _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
 _UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValidationError)
 
 
+def names_and_texts(documents: Any) -> tuple[list[str], list[str]]:
+    """Each document's name and its text: a mapping's keys and values, or a sequence's
+    indices (``"0"``, ``"1"``, …) and its strings. Refused unless ``documents`` is the
+    document *texts* — a mapping of names to strings, or a sequence of strings — and
+    each text is not blank.
+
+    Deliberately no path-sniffing and no silent filtering. Guessing whether a string is
+    a filename or a document means a one-line document that happens to match a file on
+    disk gets silently replaced by that file's contents. Dropping a blank entry is the
+    same mistake one step later: every index downstream is positional —
+    ``relevant_context[i]``, the ``source_docs`` indices, and ``document_ids[i]``, which
+    the answer's ``provenance`` cites — so a silent drop renumbers the caller's
+    collection without telling them. :func:`r3con.read_documents` drops blank *files*,
+    before the mapping ever reaches the caller, where no index can shift yet.
+    """
+    if isinstance(documents, (str, Path)):
+        raise TypeError(
+            "`documents` is the document TEXTS — a list of strings, or a {name: text} "
+            "dict — not a single string or path. For one document pass [text]; to read "
+            "a folder or glob use r3con.read_documents(...) and pass its result."
+        )
+    by_name = isinstance(documents, Mapping)
+    if by_name:
+        names, texts = list(documents), list(documents.values())
+        unnamed = [name for name in names if not isinstance(name, str)]
+        if unnamed:
+            raise TypeError(
+                f"`documents` names must be strings — {unnamed[0]!r} is "
+                f"{type(unnamed[0]).__name__}."
+            )
+    else:
+        try:
+            texts = list(documents)
+        except TypeError:
+            raise TypeError(
+                "`documents` must be a sequence of strings, or a mapping of names to "
+                f"them — got {type(documents).__name__}."
+            ) from None
+        names = [str(i) for i in range(len(texts))]
+    items = [repr(name) for name in names] if by_name else names
+    bad = next(((at, t) for at, t in zip(items, texts) if not isinstance(t, str)), None)
+    if bad is not None:
+        raise TypeError(
+            f"`documents` must hold strings — item {bad[0]} is {type(bad[1]).__name__}."
+        )
+    # After the type scan, so `[" ", 42]` reports the type problem rather than the blank.
+    blank = next((at for at, text in zip(items, texts) if not text.strip()), None)
+    if blank is not None:
+        raise ValueError(
+            f"`documents` item {blank} is blank: every document must have text. Leave "
+            "it out, or read the files with r3con.read_documents(...), which skips "
+            "empty ones."
+            if by_name
+            else f"`documents` item {blank} is blank. Every entry must be a document — "
+            "the indices are positional, so dropping it would silently renumber the "
+            "rest: relevant_context[i], the source_docs indices and document_ids[i], "
+            "which the answer's provenance cites, all refer to documents[i]. Drop the "
+            "blanks yourself, or build the documents with r3con.read_documents(...), "
+            "which skips empty files."
+        )
+    if not texts:
+        raise ValueError("`documents` is empty — there is nothing to read.")
+    return names, texts
+
+
 def _sources_as_ids(
     source_docs: dict[str, list[int]], document_ids: list[str]
 ) -> dict[str, list[str]]:
@@ -112,12 +177,14 @@ class Answer:
       document read in parts), ``provenance["parse_ids"]``, those of the documents
       whose records in ``structured_context`` it used (an id can be in both), and
       ``provenance["quotes"]``, the sentences behind it
-      (:class:`~r3con.stages.relevance.TrailQuote`): the quotes of the snippets it
-      cites and of those the parses it cites cite, followed back round by round
+      (:class:`~r3con.stages.reasoning.NamedQuote`), each naming its document by id
+      and by name: the quotes of the snippets it cites and of those the parses it
+      cites cite, followed back round by round
       (:func:`~r3con.stages.relevance.trail_quotes`).
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
-      (``relevant_context[i]`` describes ``documents[i]``); a document read in parts has
+      (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
+      name is ``list(documents.values())[i]``); a document read in parts has
       its parts' notes joined. A document that contributes nothing is an empty string,
       which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every document,
@@ -133,6 +200,11 @@ class Answer:
     - ``document_ids`` — each document's id in this run, aligned 1:1 with
       ``documents``: random, drawn afresh for each run, and recorded in the run folder's
       ``ids.json``.
+    - ``document_names`` — each document's name, aligned 1:1 with ``document_ids``:
+      its key in the ``documents`` given by name (:func:`r3con.read_documents` names
+      each by its path), or, for a plain list, its index (``"0"``, ``"1"``, …, so
+      ``documents[int(name)]`` is the document), as for a run folder written before
+      names were recorded; recorded in the run folder's ``names.json``.
     - ``relevance_provenance`` — for each document, aligned 1:1 with
       ``relevant_context``, the ids of the previous round's relevance snippets its
       final-round snippet used: each a document's id, or ``<id>.<k>`` for part ``k`` of
@@ -159,6 +231,7 @@ class Answer:
     source_docs: dict[str, list[int]]
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
+    document_names: list[str] = field(default_factory=list)
     provenance: reasoning.Provenance = field(default_factory=reasoning.cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
@@ -177,7 +250,8 @@ class Representation:
 
     run_dir: Path
     config: RunConfig
-    document_ids: list[str]
+    names: dict[str, str]
+    """Each document's name by its id, in document order."""
     relevance: RelevantContext
     schema_code: str
     parsed: dict[str, Any]
@@ -263,7 +337,7 @@ def _preview(text: str, n: int = 100) -> str:
 def run_pipeline(
     *,
     task: str,
-    documents: list[str],
+    documents: Mapping[str, str] | Sequence[str],
     config: RunConfig,
     max_reasoning_turns: int | None = None,
     reasoning_timeout_s: float | None = DEFAULT_EXEC_TIMEOUT_S,
@@ -278,6 +352,9 @@ def run_pipeline(
 
     Returns an :class:`Answer` — the answer text plus the relevant context,
     the structured parse, and the schema that was proposed for this question.
+
+    ``documents`` is the document texts, by name or in a list, as :func:`r3con.run`
+    takes them and :func:`names_and_texts` checks them, before anything else.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
     output — model, relevance rounds, the reasoning path, the prompt version of each
@@ -307,8 +384,9 @@ def run_pipeline(
     The run reports its progress as events, each a dict of JSON values with its
     ``type``, its wall-clock ``time`` in ISO 8601, and these fields:
 
-    - ``run_started``: ``question``, ``model``, ``document_ids``, ``rounds`` and
-      ``run_dir``, the run folder (``None`` without one).
+    - ``run_started``: ``question``, ``model``, ``document_ids``, ``document_names``
+      (as :attr:`Answer.document_names`), ``rounds`` and ``run_dir``, the run folder
+      (``None`` without one).
     - ``relevance_started``, before a document is read in a round: ``round``,
       ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
       read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
@@ -341,6 +419,7 @@ def run_pipeline(
     on. A model call that is resent (a rate limit, a reply that did not fit) is no
     event: ``calls.json`` records it.
     """
+    document_names, texts = names_and_texts(documents)
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
     model = config.model
@@ -353,22 +432,24 @@ def run_pipeline(
         cancel=cancel,
     )
 
-    document_ids = draw_document_ids(len(documents))
+    document_ids = draw_document_ids(len(texts))
+    names = dict(zip(document_ids, document_names, strict=True))
     # The identity card first, so even a run that dies in stage 1 says what it was.
     if task_logger is not None:
         write_manifest(
             task_logger,
             task=task,
             config=config,
-            n_docs=len(documents),
-            context_chars=sum(len(d) for d in documents),
+            n_docs=len(texts),
+            context_chars=sum(len(d) for d in texts),
             settings=caps,
         )
         task_logger.write_json("ids", {id_: i for i, id_ in enumerate(document_ids)})
+        task_logger.write_json("names", names)
 
     # Where each document is cut into parts, shared by every stage that reads one.
     splits = Splits(
-        documents,
+        texts,
         model=model,
         margin_percent=caps["window_margin_percent"],
         task_logger=task_logger,
@@ -380,6 +461,7 @@ def run_pipeline(
         question=task,
         model=model,
         document_ids=document_ids,
+        document_names=document_names,
         rounds=rounds,
         run_dir=run_dir,
     )
@@ -389,14 +471,14 @@ def run_pipeline(
     _log.info(
         "stage 1/3 · surfacing relevance (%d round(s), %d doc(s))",
         rounds,
-        len(documents),
+        len(texts),
     )
     with _recorded_stage(
         task_logger, "relevance", model, transcript=False, emit=emit, cancel=cancel
     ) as record:
         relevance = surface_relevance(
             task=task,
-            documents=documents,
+            documents=texts,
             document_ids=document_ids,
             model=model,
             prompts=config.prompts,
@@ -410,7 +492,7 @@ def run_pipeline(
         )
         record.result = {
             "n_rounds": rounds,
-            "n_docs": len(documents),
+            "n_docs": len(texts),
             "rounds": [
                 {
                     "round": k + 1,
@@ -459,7 +541,7 @@ def run_pipeline(
     )
 
     # --- Stage 2b: structuring — parse every document, in parallel. ---
-    _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(documents))
+    _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(texts))
     with _recorded_stage(
         task_logger,
         "structuring/parsing",
@@ -469,7 +551,7 @@ def run_pipeline(
         cancel=cancel,
     ) as record:
         extraction = parse_documents(
-            documents=documents,
+            documents=texts,
             schema_code=proposal.schema_code,
             parse_cls=proposal.parse_cls,
             task=task,
@@ -526,7 +608,7 @@ def run_pipeline(
         result = replace(
             result,
             provenance=_with_quotes(
-                result.provenance, relevance, extraction.provenance, document_ids
+                result.provenance, relevance, extraction.provenance, names
             ),
         )
         record.result = _reasoning_record(result)
@@ -540,7 +622,7 @@ def run_pipeline(
         parsed=parsed,
         source_docs=extraction.source_docs,
         parsing_provenance=extraction.provenance,
-        document_ids=document_ids,
+        names=names,
         run_dir=run_dir,
     )
 
@@ -576,13 +658,16 @@ def _read_built(run_dir: Path) -> Representation:
     manifest = _read_json(run_dir / "manifest.json")
     model = manifest.get("litellm_model") or manifest["config"]["model"]
     ids: dict[str, int] = _read_json(run_dir / "ids.json")
+    names_file = run_dir / "names.json"
+    # A run folder written before names.json existed: its names are positions.
+    recorded = _read_json(names_file) if names_file.is_file() else ids
     rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
     parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
     schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
     return Representation(
         run_dir=run_dir,
         config=RunConfig.model_validate({**manifest["config"], "model": model}),
-        document_ids=sorted(ids, key=ids.__getitem__),
+        names={id_: str(recorded[id_]) for id_ in sorted(ids, key=ids.__getitem__)},
         relevance=_relevance(rounds, ids),
         schema_code=schema["schema_code"],
         parsed=parsing["parsed"],
@@ -672,7 +757,7 @@ def ask_pipeline(
         task_logger,
         task=task,
         config=config,
-        n_docs=len(built.document_ids),
+        n_docs=len(built.names),
         settings=caps,
         ask_of=built.run_dir.name,
     )
@@ -699,7 +784,7 @@ def ask_pipeline(
             model=config.model,
             prompts=config.prompts,
             path=config.reasoning,
-            document_ids=built.document_ids,
+            document_ids=list(built.names),
             max_attempts=caps["reasoning_max_attempts"],
             max_turns=caps["reasoning_max_turns"],
             run=record.run,
@@ -711,7 +796,7 @@ def ask_pipeline(
                 result.provenance,
                 built.relevance,
                 built.parsing_provenance,
-                built.document_ids,
+                built.names,
             ),
         )
         record.result = _reasoning_record(result)
@@ -724,7 +809,7 @@ def ask_pipeline(
         parsed=built.parsed,
         source_docs=built.source_docs,
         parsing_provenance=built.parsing_provenance,
-        document_ids=built.document_ids,
+        names=built.names,
         run_dir=task_logger.dir,
     )
 
@@ -760,16 +845,21 @@ def _with_quotes(
     provenance: reasoning.Provenance,
     relevance: RelevantContext,
     parsing_provenance: list[list[str]],
-    document_ids: list[str],
+    names: dict[str, str],
 ) -> reasoning.Provenance:
     """The answer's ``provenance`` with its ``quotes``: those on the trail
     (:func:`trail_quotes`) from the snippets it cites and those the parses it cites
-    cite."""
-    parses = dict(zip(document_ids, parsing_provenance, strict=True))
+    cite, each with its document's name from ``names``, each document's by its id in
+    document order."""
+    parses = dict(zip(names, parsing_provenance, strict=True))
     cited = set(provenance["summary_ids"]).union(
         *(parses[id_] for id_ in provenance["parse_ids"])
     )
-    return {**provenance, "quotes": trail_quotes(relevance, cited, document_ids)}
+    quotes = [
+        reasoning.NamedQuote(**quote, name=names[quote["document"]])
+        for quote in trail_quotes(relevance, cited, list(names))
+    ]
+    return {**provenance, "quotes": quotes}
 
 
 def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:
@@ -811,11 +901,11 @@ def _answer(
     parsed: BaseModel | dict[str, Any],
     source_docs: dict[str, list[int]],
     parsing_provenance: list[list[str]],
-    document_ids: list[str],
+    names: dict[str, str],
     run_dir: Path | None,
 ) -> Answer:
     """The :class:`Answer` that reasoning's ``result`` makes with what it reasoned
-    over."""
+    over, ``names`` giving each document's name by its id, in document order."""
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance.snippets],
@@ -823,12 +913,13 @@ def _answer(
         structured_context=reasoning.tag_source_documents(
             parsed.model_dump(mode="json") if isinstance(parsed, BaseModel) else parsed,
             source_docs,
-            document_ids,
+            list(names),
         ),
         schema_code=schema_code,
         source_docs=source_docs,
         run_dir=run_dir,
-        document_ids=document_ids,
+        document_ids=list(names),
+        document_names=list(names.values()),
         provenance=result.provenance,
         relevance_provenance=relevance.provenance,
         parsing_provenance=parsing_provenance,
