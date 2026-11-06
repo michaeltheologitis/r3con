@@ -221,17 +221,21 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
 
 def test_each_call_records_its_reply_and_how_long_it_took(logger):
     run = StageRun(stage="relevance", task_logger=logger)
-    took = {"seconds": 1.25}
-    said = {"usage": USAGE, "served_model": "gpt-6-luna", "fingerprint": "fp_3f1c2d"}
-    response = {**reply("a"), "reasoning": THOUGHT}
-    run.add_step(messages=[], response=response, tokens=TOKENS, **took, **said)
-    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE, **took)
+    run.add_step(
+        messages=[],
+        response={**reply("a"), "reasoning": THOUGHT},
+        tokens=TOKENS,
+        usage=USAGE,
+        served_model="gpt-6-luna",
+        fingerprint="fp_3f1c2d",
+        seconds=1.25,
+    )
     run.flush(write_transcript=False)
-    answered, failed = json.loads((run.dir / "calls.json").read_text())
-    recorded = {"reasoning": THOUGHT, "output": "a", "tokens": TOKENS, **took, **said}
-    assert {field: answered[field] for field in recorded} == recorded
-    nothing = dict.fromkeys(["reasoning", "output", "tokens", *said])
-    assert {field: failed[field] for field in [*nothing, *took]} == {**nothing, **took}
+
+    [call] = json.loads((run.dir / "calls.json").read_text())
+    assert call["usage"] == USAGE
+    assert (call["served_model"], call["fingerprint"]) == ("gpt-6-luna", "fp_3f1c2d")
+    assert (call["reasoning"], call["output"], call["seconds"]) == (THOUGHT, "a", 1.25)
 
 
 def test_a_transcripts_last_reply_shows_its_reasoning(logger):

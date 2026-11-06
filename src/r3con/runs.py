@@ -11,11 +11,13 @@ fact by reading each manifest (e.g. by the config's run label,
 Layout per ``logs/<run-folder>/``:
 
 - ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
-  snapshot — the task, a ``config`` block (the resolved :class:`RunConfig` — model,
+  snapshot — ``r3con_version`` and ``litellm_version``, the installed versions, the
+  task, ``n_docs``, ``context_chars`` (the documents' characters together),
+  ``run_folder``, a ``config`` block (the resolved :class:`RunConfig` — model,
   relevance_rounds, prompts, params, …), ``litellm_model`` (the model string exactly as
-  litellm was called with it, where ``config`` keeps only the bare name), a
-  ``settings`` block (the runtime knobs), and ``r3con_version`` and
-  ``litellm_version``, the installed versions. Written first, so a crashed task is
+  litellm was called with it, where ``config`` keeps only the bare name), ``sources``
+  (the file the config and each prompt came from), a ``settings`` block (the runtime
+  knobs), and ``created``, when it was written. Written first, so a crashed task is
   still discoverable. The run label is **not** stored — it is recomputed from the
   ``config`` block (:meth:`r3con.config.RunConfig.label`).
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
@@ -405,17 +407,18 @@ class StepRecord:
     step: int
     kind: str  # "llm_call" | "retry" | "turn-N" | "relevance-r2-d3" | "parse-d0" | ...
     messages: list[dict[str, Any]]
-    response: dict[str, Any]  # {"role": ..., "content": ..., "finish_reason": ...}
+    # {"role", "content", "finish_reason"}, and "reasoning" when the reply has some
+    response: dict[str, Any]
     # {"prompt": int, "completion": int, "total": int}
     tokens: dict[str, int] | None = None
-    # The provider's JSON, as it sent it: usage, served_model and fingerprint.
+    # The provider's JSON, as it sent it.
     usage: Any = None
+    served_model: Any = None
+    fingerprint: Any = None
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
     seconds: float | None = None
-    served_model: Any = None
-    fingerprint: Any = None
     error: str | None = None
 
 

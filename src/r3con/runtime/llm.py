@@ -236,14 +236,13 @@ def litellm_chat_completion_full(
 
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
-    If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
-    to it with the request messages, the response content and reasoning, tokens and
-    the provider's usage report, cost in USD, the model and fingerprint the reply
-    names, the seconds the call took, and ``kind`` label. Pass ``kind="retry"`` (or
-    another custom label) on retry attempts so the transcript renders them as a
-    labeled block. A call that raises an error is
-    recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
-    error is raised unchanged.
+    If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended to it with the
+    request messages, the response content and reasoning, tokens and the provider's
+    usage report, cost in USD, the model and fingerprint the reply names, the seconds
+    the call took, and ``kind`` label. Pass ``kind="retry"`` (or another custom label)
+    on retry attempts so the transcript renders them as a labeled block. A call that
+    raises an error is recorded with it, no reply and a cost of 0, as r3con got no
+    reply to price, and the error is raised unchanged.
 
     If ``cancel`` is set, :class:`Cancelled` is raised before the request is sent, and
     nothing is recorded; if it is set while r3con waits to resend, the wait ends at

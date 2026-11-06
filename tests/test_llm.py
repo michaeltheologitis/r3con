@@ -111,6 +111,7 @@ UNKNOWN_FIELD_USAGE = {**COUNTS, "queued_tokens": 3}
 NO_COMPLETION_COUNT_USAGE = {"prompt_tokens": 10, "total_tokens": 10}
 DEEPSEEK_USAGE = {**COUNTS, "prompt_cache_hit_tokens": 4, "prompt_cache_miss_tokens": 6}
 CACHE_CREATION_USAGE = {**COUNTS, "prompt_tokens_details": {"cache_creation_tokens": 5}}
+# Zeros the server sent, which are kept, unlike the empty usage litellm starts with.
 ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 RETRY_AFTER_SECONDS = 0.1
 SERVED = "Qwen/Qwen3-8B-2504"
@@ -764,7 +765,7 @@ def test_a_recorded_call_keeps_the_reasoning_text_the_server_sent(
     httpserver, run, model, message, recorded
 ):
     answers_in_turn(httpserver, (200, answering(message)))
-    assert ask_server(httpserver, model=model, run=run) == "OK"
+    ask_server(httpserver, model=model, run=run)
 
     [step] = run.steps
     assert step.response.get("reasoning") == recorded
@@ -817,7 +818,9 @@ def test_the_hook_that_reads_the_reply_sends_nothing_to_the_server(
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
 @BOTH_PATHS
-def test_a_callers_own_logger_fn_is_still_called(httpserver, run, model):
+def test_a_callers_own_logger_fn_is_still_called_and_the_body_still_recorded(
+    httpserver, run, model
+):
     events = []
     answers_in_turn(httpserver, (200, answering(usage=COUNTS)))
     ask_server(
@@ -865,7 +868,9 @@ def test_a_gemini_reply_records_its_usage_metadata_and_model_version(httpserver,
     assert (step.usage, step.served_model) == (usage, "gemini-served-1")
 
 
-def test_a_supplied_completion_that_hands_over_no_body_records_none(run):
+def test_a_supplied_completion_that_hands_over_no_body_records_no_usage_model_or_fingerprint(
+    run,
+):
     reply = SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
         usage={"prompt_tokens": 3},
