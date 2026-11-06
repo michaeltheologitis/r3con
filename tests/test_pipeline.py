@@ -52,9 +52,10 @@ CONFIG = {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
         "relevance/first-round": "v2",
         "relevance/later-rounds": "v3",
-        "structuring/parsing": "v3",
-        "reasoning/direct": "v3",
-        "reasoning/coding": "v3",
+        "structuring/schema": "v2",
+        "structuring/parsing": "v4",
+        "reasoning/direct": "v4",
+        "reasoning/coding": "v4",
     },
 }
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
@@ -1166,7 +1167,7 @@ def test_a_parse_too_big_for_the_direct_prompt_is_read_with_code_from_samples(
     assert reasoning["path"] == "coding"
     assert reasoning["fallback"] == {
         "cause": "estimate",
-        "estimate": 10_698,
+        "estimate": 10_663,
         "line": LINE_8192,
     }
     assert (logger.dir / "reasoning" / "transcript.yaml").is_file()

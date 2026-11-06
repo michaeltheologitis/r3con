@@ -20,10 +20,10 @@ reasoning: direct
 prompts:
   relevance/first-round: v2
   relevance/later-rounds: v3
-  structuring/schema: v1
-  structuring/parsing: v3
-  reasoning/direct: v3
-  reasoning/coding: v3
+  structuring/schema: v2
+  structuring/parsing: v4
+  reasoning/direct: v4
+  reasoning/coding: v4
 
 # Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
 # it accepts. Empty means provider defaults.

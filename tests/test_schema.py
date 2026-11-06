@@ -27,7 +27,7 @@ def propose(llm, **kwargs):
     return propose_schema(
         task="Where is the cake?",
         model=MODEL,
-        prompt_version="v1",
+        prompt_version="v2",
         completion=llm,
         **kwargs,
     )

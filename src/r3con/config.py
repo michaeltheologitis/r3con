@@ -152,7 +152,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v2,rel2=v3,schema=v1,parse=v3,direct=v3,coding=v3)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v2,rel2=v3,schema=v2,parse=v4,direct=v4,coding=v4)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
