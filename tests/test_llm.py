@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import re
@@ -80,6 +81,33 @@ BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 LONG_RETRY_AFTER_SECONDS = 60
 STOPPED_WITHIN_SECONDS = 5
+SLOW_SEND_SECONDS = 0.05
+COUNTS = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+DETAILED_USAGE = {
+    **COUNTS,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 7},
+}
+# As OpenAI sends it: litellm's copy of cache_write_tokens must not be recorded.
+OPENAI_USAGE = {
+    **COUNTS,
+    "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+    },
+    "completion_tokens_details": {
+        "reasoning_tokens": 6,
+        "audio_tokens": 0,
+        "accepted_prediction_tokens": 0,
+        "rejected_prediction_tokens": 0,
+    },
+}
+# A field litellm has no name for, as a newer server might send.
+UNKNOWN_FIELD_USAGE = {**COUNTS, "queued_tokens": 3}
+SERVED = "Qwen/Qwen3-8B-2504"
+FINGERPRINT = "fp_3f1c2d"
+THOUGHT = "The user wants OK."
 
 
 class Flat(BaseModel):
@@ -166,6 +194,27 @@ def answers_in_turn(httpserver, *replies: tuple) -> None:
             earlier_body, earlier_status, *earlier_headers
         )
     httpserver.expect_request(CHAT).respond_with_json(body, status, *headers)
+
+
+def answering(message: dict | None = None, **reply) -> dict:
+    """A server's reply of OK, its message with ``message``'s fields too, and with
+    ``reply``'s fields."""
+    [choice] = ANSWER["choices"]
+    said = {**choice["message"], **(message or {})}
+    return {**ANSWER, "choices": [{**choice, "message": said}], **reply}
+
+
+def slowly(reply: str | BaseException):
+    """A reply that takes ``SLOW_SEND_SECONDS`` to arrive: ``reply``, or ``reply``
+    raised."""
+
+    def answer(request: dict) -> str:
+        time.sleep(SLOW_SEND_SECONDS)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    return answer
 
 
 def rate_limited(retry_after: int) -> tuple[int, dict, dict[str, str]]:
@@ -626,6 +675,142 @@ def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm
 
     [step] = run.steps
     assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("reply", "recorded"),
+    [
+        (answering(usage=COUNTS), COUNTS),
+        (answering(usage={**COUNTS, "prompt_tokens_details": None}), COUNTS),
+        (answering(usage=DETAILED_USAGE), DETAILED_USAGE),
+        (answering(usage=OPENAI_USAGE), OPENAI_USAGE),
+        (answering(usage=UNKNOWN_FIELD_USAGE), UNKNOWN_FIELD_USAGE),
+        (ANSWER, None),
+    ],
+    ids=[
+        "counts-only",
+        "null-details",
+        "details",
+        "openais-cache-write",
+        "unknown-field",
+        "no-usage",
+    ],
+)
+def test_a_recorded_call_keeps_each_usage_field_the_server_sent_and_no_other(
+    httpserver, run, model, reply, recorded
+):
+    answers_in_turn(httpserver, (200, reply))
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert step.usage == recorded
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("reply", "recorded"),
+    [
+        (
+            answering(model=SERVED, system_fingerprint=FINGERPRINT),
+            (SERVED, FINGERPRINT),
+        ),
+        (answering(model=SERVED), (SERVED, None)),
+    ],
+    ids=["fingerprinted", "no-fingerprint"],
+)
+def test_a_recorded_call_names_the_model_and_fingerprint_the_server_answered_with(
+    httpserver, run, model, reply, recorded
+):
+    answers_in_turn(httpserver, (200, reply))
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert (step.served_model, step.fingerprint) == recorded
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("message", "recorded"),
+    [
+        ({"reasoning_content": THOUGHT}, THOUGHT),
+        ({"reasoning": THOUGHT}, THOUGHT),
+        ({"content": f"<think>{THOUGHT}</think>OK"}, THOUGHT),
+        ({}, None),
+    ],
+    ids=["reasoning_content", "reasoning", "think-block", "none"],
+)
+def test_a_recorded_call_keeps_the_reasoning_text_the_server_sent(
+    httpserver, run, model, message, recorded
+):
+    answers_in_turn(httpserver, (200, answering(message)))
+    assert ask_server(httpserver, model=model, run=run) == "OK"
+
+    [step] = run.steps
+    assert step.response.get("reasoning") == recorded
+
+
+def test_a_recorded_call_keeps_what_was_sent_but_the_messages_and_the_schema(llm, run):
+    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        schema=Number,
+        completion=llm.replies('{"x": 1}'),
+        run=run,
+        temperature=0.3,
+        reasoning_effort="low",
+        extra_body=extra_body,
+    )
+
+    [step] = run.steps
+    assert step.params == {
+        "model": VLLM,
+        "temperature": 0.3,
+        "reasoning_effort": "low",
+        "extra_body": extra_body,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "Number", "strict": True},
+        },
+    }
+
+
+def test_the_params_a_call_records_mask_the_key_it_sent(llm, run):
+    ask(llm.replies("ok"), run=run, api_key=PLAIN_KEY)
+    run.flush(write_transcript=False)
+
+    [call] = json.loads((run.dir / "calls.json").read_text())
+    assert call["params"] == {"model": MODEL, "api_key": "REDACTED"}
+
+
+@pytest.mark.parametrize("rate_limits", [0, 1], ids=["first-time", "after-a-resend"])
+def test_a_recorded_call_says_how_long_it_took_resends_included(
+    llm, monkeypatch, run, rate_limits
+):
+    errors = [slowly(slowed_down(retry_after="0")) for _ in range(rate_limits)]
+    monkeypatch.setattr(litellm, "completion", llm.replies(*errors, slowly("ok")))
+
+    litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL, run=run)
+
+    [step] = run.steps
+    assert (rate_limits + 1) * SLOW_SEND_SECONDS <= step.seconds
+    assert step.seconds < STOPPED_WITHIN_SECONDS
+    assert step.seconds == round(step.seconds, 2)
+
+
+def test_a_call_that_raises_keeps_what_it_sent_and_how_long_it_took(llm, run):
+    with pytest.raises(litellm.BadRequestError):
+        ask(llm.replies(slowly(refused("no"))), run=run, max_tokens=50)
+
+    [step] = run.steps
+    assert step.params == {"model": MODEL, "max_tokens": 50}
+    assert SLOW_SEND_SECONDS <= step.seconds
+    assert (step.usage, step.served_model, step.fingerprint) == (None, None, None)
 
 
 @pytest.mark.parametrize("supplied", [False, True], ids=["litellm", "supplied"])

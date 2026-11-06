@@ -13,10 +13,11 @@ Layout per ``logs/<run-folder>/``:
 - ``manifest.json`` (:func:`write_manifest`) — the identity card + the full parameter
   snapshot — the task, a ``config`` block (the resolved :class:`RunConfig` — model,
   relevance_rounds, prompts, params, …), ``litellm_model`` (the model string exactly as
-  litellm was called with it, where ``config`` keeps only the bare name), and a
-  ``settings`` block (the runtime knobs). Written first, so a crashed task is still
-  discoverable. The run label is **not** stored — it is recomputed from the ``config``
-  block (:meth:`r3con.config.RunConfig.label`).
+  litellm was called with it, where ``config`` keeps only the bare name), a
+  ``settings`` block (the runtime knobs), and ``r3con_version`` and
+  ``litellm_version``, the installed versions. Written first, so a crashed task is
+  still discoverable. The run label is **not** stored — it is recomputed from the
+  ``config`` block (:meth:`r3con.config.RunConfig.label`).
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
 - ``names.json`` — each document's id mapped to its name
@@ -67,9 +68,10 @@ one) and ``error.txt``, the traceback.
 Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
 ``error``, ``error.txt``, the ``error`` of ``run_failed`` and ``ask_failed`` in
 ``events.jsonl``, each split's ``error`` in ``splits.json`` and the ``error`` of
-reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key, as does
-``manifest.json``'s ``config`` in place of a credential in the run's ``params``, an
-extra header say. Prompts, replies and documents are written as they are.
+reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key, as do
+``manifest.json``'s ``config`` and each call's ``params`` in ``calls.json`` in place of
+a credential among the parameters, an ``api_key`` or an extra header say. Prompts,
+replies and documents are written as they are.
 
 Two layers in code:
 
@@ -78,24 +80,51 @@ Two layers in code:
   — so callers spell stage paths inline (``"structuring/schema/result"``,
   ``"reasoning/result"``).
 - ``StageRun`` accumulates per-LLM-call ``StepRecord`` instances and on ``flush()``
-  writes ``calls.json`` (the full per-call record — ``{step, kind, doc, chunk,
-  tokens, usd, sends, resend_wait_seconds, finish_reason, error, prompt, output}``,
-  where ``chunk`` is the part index of a document read in parts, ``usd`` is litellm's
-  price for the call, or ``null`` when it cannot price it, ``sends`` is the times the
-  request was sent, more than 1 when a temporary error made r3con resend it, and
-  ``resend_wait_seconds`` the seconds, to hundredths, waited between those sends, both
-  ``null`` when r3con did not resend it itself, and ``error`` is ``null``, or, for a
-  call that raised one, the error's class and the first non-empty line of its message,
-  keys masked: such a call has ``tokens``, ``finish_reason`` and ``output`` ``null``
-  and ``usd`` 0, as r3con got no reply to price) and, unless skipped,
-  ``transcript.yaml`` (the readable message thread). Aggregate token and cost totals
-  are available via ``compute_totals()`` so callers fold them into the stage's
-  ``result.json``; their ``n_steps`` counts only the calls that answered.
+  writes ``calls.json``, the full record of each call, and, unless skipped,
+  ``transcript.yaml`` (the readable message thread, its last reply with its
+  ``reasoning`` when it has one). Aggregate token and cost totals are available via
+  ``compute_totals()`` so callers fold them into the stage's ``result.json``; their
+  ``n_steps`` counts only the calls that answered.
+
+Each call in ``calls.json`` has:
+
+- ``step``, ``kind``, ``doc`` and ``chunk``, the part index of a document read in
+  parts;
+- ``tokens``, ``{prompt, completion, total}``, and ``usage``, the provider's own usage
+  report: each field it sent, such as ``prompt_tokens_details.cached_tokens`` or
+  ``completion_tokens_details.reasoning_tokens``, and none litellm adds (the ``None``
+  it fills into a field the provider did not send, the ``cache_creation_tokens`` it
+  copies from ``cache_write_tokens``), or ``null`` when the reply has none; for a
+  provider whose report litellm rewrites into OpenAI's form, such as Anthropic's,
+  the rewritten one;
+- ``usd``, litellm's price for the call, or ``null`` when it cannot price it;
+- ``sends``, the times the request was sent, more than 1 when a temporary error made
+  r3con resend it, and ``resend_wait_seconds``, the seconds, to hundredths, waited
+  between those sends, both ``null`` when r3con did not resend it itself;
+- ``seconds``, the wall-clock seconds, to hundredths, from the call's first send to its
+  reply or its error, any resends and the waits before them included;
+- ``finish_reason``, and ``error``, ``null``, or, for a call that raised one, the
+  error's class and the first non-empty line of its message, keys masked;
+- ``served_model``, the model the reply says answered (``response.model``), and
+  ``fingerprint``, its ``system_fingerprint``, each ``null`` when the reply has none;
+- ``params``, what r3con handed litellm for the call but its messages: the litellm
+  model string, the sampling and token settings, ``extra_body`` and the like, and the
+  response format by its name, without its schema; ``num_retries=0``, which r3con
+  adds when it resends a call itself, is not listed;
+- ``prompt``, the messages sent, ``reasoning``, the reasoning text the reply carries
+  (litellm's ``reasoning_content``, from the provider's ``reasoning_content`` or
+  ``reasoning``, its thinking blocks, or a ``<think>`` block litellm moves out of the
+  content), else ``null``, and ``output``, the reply's content.
+
+A call that raised an error has ``tokens``, ``usage``, ``served_model``,
+``fingerprint``, ``finish_reason``, ``reasoning`` and ``output`` ``null`` and ``usd``
+0, as r3con got no reply to price; its ``params`` and ``seconds`` are kept.
 """
 
 from __future__ import annotations
 
 import datetime
+import importlib.metadata
 import json
 import logging
 import re
@@ -280,8 +309,8 @@ def write_manifest(
     what the run was: the question, the resolved :class:`~r3con.config.RunConfig`, the
     model string litellm is called with (``litellm_model``), the runtime caps it ran
     under (``settings``, else :func:`r3con.settings.settings_snapshot` taken now), and
-    the package version; for an ask (:func:`r3con.ask`), ``ask_of``, the name of the
-    run folder it answered over.
+    the package versions, r3con's and litellm's; for an ask (:func:`r3con.ask`),
+    ``ask_of``, the name of the run folder it answered over.
     Written before the first stage, so even a crashed run is identifiable.
 
     ``r3con_version`` matters more than it looks: the prompts ship *inside* the
@@ -307,6 +336,7 @@ def write_manifest(
     config_block = _masked_values(config_block)
     manifest = {
         "r3con_version": __version__,
+        "litellm_version": importlib.metadata.version("litellm"),
         "task": task,
         "n_docs": n_docs,
         "context_chars": context_chars,
@@ -373,9 +403,14 @@ class StepRecord:
     schema: dict[str, Any] | None = None
     # {"prompt": int, "completion": int, "total": int}
     tokens: dict[str, int] | None = None
+    usage: dict[str, Any] | None = None
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
+    seconds: float | None = None
+    served_model: str | None = None
+    fingerprint: str | None = None
+    params: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -433,9 +468,14 @@ class StageRun:
         response: dict[str, Any],
         schema: dict[str, Any] | None = None,
         tokens: dict[str, int] | None = None,
+        usage: dict[str, Any] | None = None,
         usd: float | None = None,
         sends: int | None = None,
         resend_wait_seconds: float | None = None,
+        seconds: float | None = None,
+        served_model: str | None = None,
+        fingerprint: str | None = None,
+        params: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
@@ -449,9 +489,14 @@ class StageRun:
                 response=dict(response),
                 schema=schema,
                 tokens=tokens,
+                usage=usage,
                 usd=usd,
                 sends=sends,
                 resend_wait_seconds=resend_wait_seconds,
+                seconds=seconds,
+                served_model=served_model,
+                fingerprint=fingerprint,
+                params=params,
                 error=error,
             )
             self.steps.append(step)
@@ -493,12 +538,18 @@ class StageRun:
                     "doc": int(m.group(1)) if m else None,
                     "chunk": int(m.group(2)) if (m and m.group(2)) else None,
                     "tokens": s.tokens,
+                    "usage": s.usage,
                     "usd": s.usd,
                     "sends": s.sends,
                     "resend_wait_seconds": s.resend_wait_seconds,
+                    "seconds": s.seconds,
                     "finish_reason": resp.get("finish_reason"),
                     "error": s.error,
+                    "served_model": s.served_model,
+                    "fingerprint": s.fingerprint,
+                    "params": _masked_values(s.params),
                     "prompt": s.messages,
+                    "reasoning": resp.get("reasoning"),
                     "output": resp.get("content"),
                 }
             )

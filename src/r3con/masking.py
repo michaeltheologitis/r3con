@@ -6,9 +6,9 @@ it as the provider sent it, and every traceback holds it through the chained SDK
 So each error r3con writes (``calls.json``'s ``error``, ``error.txt``, the ``error`` of
 ``run_failed`` and ``ask_failed``, ``splits.json``, reasoning's ``fallback``) goes
 through :func:`masked` or :func:`one_line` first, as do the run's ``params`` in
-``manifest.json`` and every record an r3con logger logs
-(:func:`r3con.logging_setup.get_logger`). Prompts, replies and documents are data, and
-are written as they are: a document may well say ``api_key=…``.
+``manifest.json``, each call's ``params`` in ``calls.json`` and every record an r3con
+logger logs (:func:`r3con.logging_setup.get_logger`). Prompts, replies and documents
+are data, and are written as they are: a document may well say ``api_key=…``.
 
 :func:`masked` replaces each known key with ``REDACTED``, the longest first, and nothing
 else, so it never garbles a path or a name that merely looks like a key. The known keys

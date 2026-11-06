@@ -104,12 +104,16 @@ _TEMPORARY_CLIENT_ERRORS = frozenset({408, 409, 429})
 _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
-_WAIT_DIGITS = 2
+_SECONDS_DIGITS = 2
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
+# litellm keeps this a copy of cache_write_tokens, OpenAI's name for the same count.
+_LITELLMS_COPY = {"prompt_tokens_details": {"cache_creation_tokens"}}
+# Zero counts and nothing else: litellm's own usage, which no real reply reports.
+_EMPTY_USAGE = litellm.Usage().model_dump(mode="json", exclude_none=True)
 
 
 class Cancelled(Exception):
@@ -224,8 +228,10 @@ def litellm_chat_completion_full(
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
     If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
-    to it with the request messages, response content, tokens, cost in USD, and
-    ``kind`` label. Pass ``kind="retry"`` (or another custom label) on retry attempts
+    to it with the request messages and the rest of what r3con sent, the response
+    content and reasoning, tokens and the provider's usage report, cost in USD, the
+    model and fingerprint the reply names, the seconds the call took, and ``kind``
+    label. Pass ``kind="retry"`` (or another custom label) on retry attempts
     so the transcript renders them as a labeled block. A call that raises an error is
     recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
     error is raised unchanged.
@@ -272,6 +278,8 @@ def litellm_chat_completion_full(
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
     register_credentials(request, completion)
+    raise_if_cancelled(cancel)
+    started = time.monotonic()
 
     def record(**outcome: Any) -> None:
         if run is not None:
@@ -279,11 +287,12 @@ def litellm_chat_completion_full(
                 kind=kind,
                 messages=request_messages,
                 schema=request.get("response_format"),
+                params=_params_sent(request),
+                seconds=round(time.monotonic() - started, _SECONDS_DIGITS),
                 **resends,
                 **outcome,
             )
 
-    raise_if_cancelled(cancel)
     try:
         if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
             response = _resend_temporary_errors(request, resends, cancel)
@@ -296,7 +305,10 @@ def litellm_chat_completion_full(
     record(
         response=_extract_response_dict(response),
         tokens=_extract_tokens(response),
+        usage=_usage_reported(response),
         usd=_extract_usd(response),
+        served_model=getattr(response, "model", None),
+        fingerprint=getattr(response, "system_fingerprint", None),
     )
     return response
 
@@ -494,7 +506,7 @@ def _resend_temporary_errors(
 
     def count(state: tenacity.RetryCallState) -> None:
         resends["sends"] = state.attempt_number
-        resends["resend_wait_seconds"] = round(state.idle_for, _WAIT_DIGITS)
+        resends["resend_wait_seconds"] = round(state.idle_for, _SECONDS_DIGITS)
 
     def wait(seconds: float) -> None:
         _sleep(seconds, cancel)
@@ -568,22 +580,59 @@ def _seconds_asked(headers: dict[str, Any]) -> float | None:
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
-    """Pull a serializable {role, content, finish_reason} dict out of a LiteLLM response.
+    """Pull a serializable {role, content, finish_reason} dict out of a LiteLLM response,
+    and ``reasoning`` when the reply carries reasoning text.
 
     LiteLLM normalizes most providers' completion responses to OpenAI-shape:
     ``response.choices[0].message`` has ``.role`` and ``.content``,
-    ``response.choices[0].finish_reason``. Tolerant of missing fields.
+    ``response.choices[0].finish_reason``. Tolerant of missing fields. The reasoning is
+    litellm's ``reasoning_content``: the provider's own text, which litellm takes from
+    the message's ``reasoning_content`` or ``reasoning``, a ``<think>`` block it moves
+    out of ``content``, or Anthropic's thinking blocks.
     """
     try:
         choice = response.choices[0]
         msg = choice.message
-        return {
-            "role": getattr(msg, "role", "assistant"),
-            "content": getattr(msg, "content", "") or "",
-            "finish_reason": getattr(choice, "finish_reason", None),
-        }
     except (AttributeError, IndexError):
         return {"role": "assistant", "content": "", "finish_reason": None}
+    reply = {
+        "role": getattr(msg, "role", "assistant"),
+        "content": getattr(msg, "content", "") or "",
+        "finish_reason": getattr(choice, "finish_reason", None),
+    }
+    reasoning = getattr(msg, "reasoning_content", None)
+    return {**reply, "reasoning": reasoning} if reasoning else reply
+
+
+def _usage_reported(response: Any) -> dict[str, Any] | None:
+    """The usage report the provider sent with ``response``, as litellm passes it on,
+    or ``None`` without one.
+
+    litellm keeps no copy of the provider's JSON on the response, so this is litellm's
+    usage without what litellm adds: the ``None`` it fills into each field the provider
+    did not send, the ``cache_creation_tokens`` it copies from ``cache_write_tokens``,
+    and the empty usage, zero counts, it starts each response with and keeps for a
+    reply without one. A field the provider did not send is not there, and one it
+    sent, a ``cached_tokens`` of 0 say, is."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    reported = usage.model_dump(mode="json", exclude_none=True, exclude=_LITELLMS_COPY)
+    return None if reported == _EMPTY_USAGE else reported
+
+
+def _params_sent(request: Mapping[str, Any]) -> dict[str, Any]:
+    """What r3con hands litellm for ``request``, but its messages, and its response
+    format's schema, which can run to many thousand characters: its name stays."""
+    params = {name: value for name, value in request.items() if name != "messages"}
+    response_format = params.get("response_format")
+    if not isinstance(response_format, dict):
+        return params
+    json_schema = response_format.get("json_schema")
+    if isinstance(json_schema, dict):
+        named = {name: value for name, value in json_schema.items() if name != "schema"}
+        params["response_format"] = {**response_format, "json_schema": named}
+    return params
 
 
 def _extract_usd(response: Any) -> float | None:

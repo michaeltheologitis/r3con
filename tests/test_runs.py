@@ -24,6 +24,13 @@ MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 ERROR_LINE = "RateLimitError: slow down"
 TOKENS = {"prompt": 10, "completion": 2, "total": 12}
+USAGE = {
+    "prompt_tokens": 10,
+    "completion_tokens": 2,
+    "total_tokens": 12,
+    "completion_tokens_details": {"reasoning_tokens": 1},
+}
+THOUGHT = "Count the memos first."
 
 
 class Sample(BaseModel):
@@ -212,6 +219,58 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
     assert recorded == [(3, 2.5), (None, None)]
 
 
+def test_each_call_records_what_its_reply_says_of_itself(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    run.add_step(
+        messages=[],
+        response={**reply("a"), "reasoning": THOUGHT},
+        tokens=TOKENS,
+        usage=USAGE,
+        served_model="gpt-6-luna-2026-09-01",
+        fingerprint="fp_3f1c2d",
+    )
+    run.flush(write_transcript=False)
+    [call] = json.loads((run.dir / "calls.json").read_text())
+    assert call["tokens"] == TOKENS
+    assert call["usage"] == USAGE
+    assert (call["served_model"], call["fingerprint"]) == (
+        "gpt-6-luna-2026-09-01",
+        "fp_3f1c2d",
+    )
+    assert (call["reasoning"], call["output"]) == (THOUGHT, "a")
+
+
+def test_each_call_records_what_was_sent_and_how_long_it_took(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    params = {"model": MODEL, "temperature": 0.3}
+    run.add_step(messages=[], response=reply(), params=params, seconds=1.25)
+    run.flush(write_transcript=False)
+    [call] = json.loads((run.dir / "calls.json").read_text())
+    assert (call["params"], call["seconds"]) == (params, 1.25)
+
+
+def test_a_call_that_raised_records_nothing_of_a_reply_but_what_it_sent(logger):
+    run = StageRun(stage="relevance", task_logger=logger)
+    params = {"model": MODEL}
+    run.add_step(
+        messages=[], response={}, usd=0.0, params=params, seconds=0.5, error=ERROR_LINE
+    )
+    run.flush(write_transcript=False)
+    [call] = json.loads((run.dir / "calls.json").read_text())
+    reply_fields = ("tokens", "usage", "served_model", "fingerprint", "reasoning")
+    assert [call[field] for field in reply_fields] == [None] * len(reply_fields)
+    assert (call["params"], call["seconds"]) == (params, 0.5)
+
+
+def test_a_transcripts_last_reply_shows_its_reasoning(logger):
+    run = StageRun(stage="reasoning", task_logger=logger)
+    run.add_step(
+        messages=[{"role": "user", "content": "u"}],
+        response={**reply("a"), "reasoning": THOUGHT},
+    )
+    assert flushed_transcript(run)["messages"][-1]["reasoning"] == THOUGHT
+
+
 def test_each_call_records_its_error_and_one_that_raised_no_output(logger):
     run = StageRun(stage="relevance", task_logger=logger)
     run.add_step(messages=[], response=reply("a"))
@@ -313,6 +372,7 @@ def test_the_manifest_records_the_identity_and_the_installed_version(logger):
     )
     manifest = json.loads((logger.dir / "manifest.json").read_text())
     assert manifest["r3con_version"] == importlib.metadata.version("r3context")
+    assert manifest["litellm_version"] == importlib.metadata.version("litellm")
     assert manifest["task"] == "what happened?"
     assert manifest["n_docs"] == 3
     assert manifest["context_chars"] == 1234
