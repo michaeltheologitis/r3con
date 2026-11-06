@@ -16,6 +16,7 @@ Request = dict[str, Any]
 Content = str | dict[str, Any]
 Reply = Content | BaseException | Callable[[Request], Content]
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+FINGERPRINT = "fp_fake"
 SCHEMA_REPLY = """Thought: one row per memo, with its lines.
 <schema>
 class Line(BaseModel):
@@ -189,10 +190,25 @@ def unscripted(request: Request) -> UnscriptedRequest:
 
 
 def mock_completion(request: Request, content: str) -> Any:
-    """litellm's response to ``request`` when its own mock replies ``content``."""
+    """litellm's response to ``request`` when its own mock replies ``content``, the
+    reply's body handed to the request's ``logger_fn``, as litellm hands a server's:
+    its model the model asked for, without the provider."""
     # The dict form, because litellm treats mock_response="" as absent.
     choice = {"index": 0, "finish_reason": "stop", "message": {"content": content}}
-    return _completion(**request, mock_response={"choices": [choice], "usage": USAGE})
+    body = {
+        "model": request["model"].partition("/")[2] or request["model"],
+        "system_fingerprint": FINGERPRINT,
+        "choices": [choice],
+        "usage": USAGE,
+    }
+    response = _completion(**request, mock_response=body)
+    # litellm's mock skips the call a real send makes with the body it got.
+    logger_fn = request.get("logger_fn")
+    if logger_fn is not None:
+        logger_fn(
+            {"log_event_type": "post_api_call", "original_response": json.dumps(body)}
+        )
+    return response
 
 
 def _summary_reply(summary: str, request: Request) -> dict[str, Any]:

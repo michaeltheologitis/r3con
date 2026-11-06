@@ -25,6 +25,13 @@ those left hold no more than 1,000 values together, and a pattern with a lookaro
 :func:`schema_as_sent` builds the schema as sent, for the request and for the token
 budgets.
 
+**What a call is recorded with.** Each request r3con records goes out with a
+``logger_fn`` of r3con's (:func:`_catch_reply_body`), litellm's per-call logging hook,
+which sends nothing to the provider: litellm hands it each reply's body, so a recorded
+call's ``usage``, ``served_model`` and ``fingerprint`` are the provider's own, where
+litellm's response would give its normalized copy. A ``logger_fn`` the caller passes is
+still called, and a supplied ``completion=`` gets r3con's, to pass on to litellm.
+
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
 models, litellm's ``get_model_info`` lookup asks a server.
@@ -74,6 +81,7 @@ r3con does not make itself run their course: a supplied ``completion=``'s, such 
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import random
 import re
@@ -104,12 +112,17 @@ _TEMPORARY_CLIENT_ERRORS = frozenset({408, 409, 429})
 _FIRST_SERVER_ERROR = 500
 _MILLISECONDS_PER_SECOND = 1000
 _RETRY_AFTER_JITTER_SECONDS = 1.0
-_WAIT_DIGITS = 2
+_SECONDS_DIGITS = 2
 # OpenAI Structured Outputs: "up to 1000 enum values across all enum properties".
 _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
+# Where a reply's body has its usage report and model: OpenAI's names, then Gemini's.
+_USAGE_FIELDS = ("usage", "usageMetadata")
+_MODEL_FIELDS = ("model", "modelVersion")
+_PRE_SEND = "pre_api_call"
+_POST_SEND = "post_api_call"
 
 
 class Cancelled(Exception):
@@ -223,12 +236,13 @@ def litellm_chat_completion_full(
 
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
-    If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
-    to it with the request messages, response content, tokens, cost in USD, and
-    ``kind`` label. Pass ``kind="retry"`` (or another custom label) on retry attempts
-    so the transcript renders them as a labeled block. A call that raises an error is
-    recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
-    error is raised unchanged.
+    If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended to it with the
+    request messages, the response content and reasoning, tokens and the provider's
+    usage report, cost in USD, the model and fingerprint the reply names, the seconds
+    the call took, and ``kind`` label. Pass ``kind="retry"`` (or another custom label)
+    on retry attempts so the transcript renders them as a labeled block. A call that
+    raises an error is recorded with it, no reply and a cost of 0, as r3con got no
+    reply to price, and the error is raised unchanged.
 
     If ``cancel`` is set, :class:`Cancelled` is raised before the request is sent, and
     nothing is recorded; if it is set while r3con waits to resend, the wait ends at
@@ -272,18 +286,20 @@ def litellm_chat_completion_full(
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
     register_credentials(request, completion)
+    reply_body = None if run is None else _catch_reply_body(request)
+    raise_if_cancelled(cancel)
+    started = time.monotonic()
 
     def record(**outcome: Any) -> None:
         if run is not None:
             run.add_step(
                 kind=kind,
                 messages=request_messages,
-                schema=request.get("response_format"),
+                seconds=round(time.monotonic() - started, _SECONDS_DIGITS),
                 **resends,
                 **outcome,
             )
 
-    raise_if_cancelled(cancel)
     try:
         if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
             response = _resend_temporary_errors(request, resends, cancel)
@@ -293,10 +309,14 @@ def litellm_chat_completion_full(
         record(response={}, usd=0.0, error=one_line(error))
         raise
 
+    body = {} if reply_body is None else reply_body()
     record(
         response=_extract_response_dict(response),
         tokens=_extract_tokens(response),
+        usage=_without_nulls(_first_of(body, _USAGE_FIELDS)),
         usd=_extract_usd(response),
+        served_model=_first_of(body, _MODEL_FIELDS),
+        fingerprint=body.get("system_fingerprint"),
     )
     return response
 
@@ -494,7 +514,7 @@ def _resend_temporary_errors(
 
     def count(state: tenacity.RetryCallState) -> None:
         resends["sends"] = state.attempt_number
-        resends["resend_wait_seconds"] = round(state.idle_for, _WAIT_DIGITS)
+        resends["resend_wait_seconds"] = round(state.idle_for, _SECONDS_DIGITS)
 
     def wait(seconds: float) -> None:
         _sleep(seconds, cancel)
@@ -568,22 +588,79 @@ def _seconds_asked(headers: dict[str, Any]) -> float | None:
 
 
 def _extract_response_dict(response: Any) -> dict[str, Any]:
-    """Pull a serializable {role, content, finish_reason} dict out of a LiteLLM response.
+    """Pull a serializable {role, content, finish_reason} dict out of a LiteLLM response,
+    and ``reasoning`` when the reply carries reasoning text.
 
     LiteLLM normalizes most providers' completion responses to OpenAI-shape:
     ``response.choices[0].message`` has ``.role`` and ``.content``,
-    ``response.choices[0].finish_reason``. Tolerant of missing fields.
+    ``response.choices[0].finish_reason``. Tolerant of missing fields. The reasoning is
+    litellm's ``reasoning_content``: the provider's own text, which litellm takes from
+    the message's ``reasoning_content`` or ``reasoning``, a ``<think>`` block it moves
+    out of ``content``, or Anthropic's thinking blocks.
     """
     try:
         choice = response.choices[0]
         msg = choice.message
-        return {
-            "role": getattr(msg, "role", "assistant"),
-            "content": getattr(msg, "content", "") or "",
-            "finish_reason": getattr(choice, "finish_reason", None),
-        }
     except (AttributeError, IndexError):
         return {"role": "assistant", "content": "", "finish_reason": None}
+    reply = {
+        "role": getattr(msg, "role", "assistant"),
+        "content": getattr(msg, "content", "") or "",
+        "finish_reason": getattr(choice, "finish_reason", None),
+    }
+    reasoning = getattr(msg, "reasoning_content", None)
+    return {**reply, "reasoning": reasoning} if reasoning else reply
+
+
+def _catch_reply_body(request: dict[str, Any]) -> Callable[[], dict[str, Any]]:
+    """Give ``request`` a ``logger_fn`` that keeps its reply's body, and return the
+    function that reads it once the call is back: the body's JSON, or ``{}`` when
+    litellm handed over none, as for a ``completion=`` that does not pass
+    ``logger_fn`` on to litellm.
+
+    litellm calls ``logger_fn`` before each send and, after it, with what the provider
+    answered: the body as it came for ``hosted_vllm/``, the OpenAI SDK's reading of it
+    for ``openai/``, which adds ``None`` for each field the body did not have. So the
+    body kept is the first one after the last send. A ``logger_fn`` the caller passes
+    is still called."""
+    caught: dict[str, Any] = {}
+    theirs = request.get("logger_fn")
+
+    def logger_fn(details: dict[str, Any]) -> None:
+        event = details.get("log_event_type")
+        if event == _PRE_SEND:
+            caught.clear()
+        elif event == _POST_SEND:
+            caught.setdefault("body", details.get("original_response"))
+        if theirs is not None:
+            theirs(details)
+
+    def body() -> dict[str, Any]:
+        text = caught.get("body")
+        if not isinstance(text, str):
+            return {}
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    request["logger_fn"] = logger_fn
+    return body
+
+
+def _first_of(body: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    """The value of the first of ``fields`` that ``body`` has, else ``None``."""
+    return next((body[field] for field in fields if body.get(field) is not None), None)
+
+
+def _without_nulls(value: Any) -> Any:
+    """``value`` without the ``None`` among its dicts' values, at any depth: what the
+    OpenAI SDK adds for each field a body did not have."""
+    if not isinstance(value, dict):
+        return value
+    return {
+        name: _without_nulls(item) for name, item in value.items() if item is not None
+    }
 
 
 def _extract_usd(response: Any) -> float | None:
