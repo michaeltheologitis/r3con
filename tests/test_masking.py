@@ -1,7 +1,13 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from r3con.masking import _ERROR_CHARS, masked, one_line, register_key
+from r3con.masking import (
+    _ERROR_CHARS,
+    is_credential_name,
+    masked,
+    one_line,
+    register_key,
+)
 
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 ECHOED = f"Incorrect API key provided: {KEY}"
@@ -64,6 +70,64 @@ def test_an_environment_value_is_masked_when_its_name_and_shape_say_secret(
     monkeypatch.setenv(name, value)
     text = f"refused for {value}, see logs"
     assert masked(text) == ("refused for REDACTED, see logs" if secret else text)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "token",
+        "access_token",
+        "id_token",
+        "refresh_token",
+        "auth_token",
+        "azure_ad_token",
+        "api_key",
+        "api-key",
+        "x-api-key",
+        "apikey",
+        "apiKey",
+        "subscription_key",
+        "Ocp-Apim-Subscription-Key",
+        "secret",
+        "client_secret",
+        "aws_secret_access_key",
+        "password",
+        "private_key",
+        "credential",
+        "vertex_credentials",
+        "Authorization",
+        "proxy-authorization",
+        "cookie",
+        "auth",
+        "x-gateway-auth",
+        "AWS_BEARER_TOKEN_BEDROCK",
+    ],
+)
+def test_a_credentials_name_is_read_as_one(name):
+    assert is_credential_name(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stop_token_ids",
+        "allowed_token_ids",
+        "tokenizer",
+        "max_tokens",
+        "max_completion_tokens",
+        "author",
+        "authority",
+        "auth_method",
+        "key",
+        "prompt_cache_key",
+        "X-Title",
+        "anthropic-version",
+        "content-type",
+        "SLACK_TOKEN_LABEL",
+    ],
+)
+def test_a_settings_name_is_not_read_as_a_credentials(name):
+    assert not is_credential_name(name)
 
 
 def test_a_registered_key_is_masked_from_then_on_the_longest_first_but_a_placeholder():

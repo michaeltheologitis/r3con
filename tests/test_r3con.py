@@ -70,6 +70,17 @@ JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 # The default config's model, and the model the fake's reply body names.
 MODEL = "openai/gpt-6-luna"
+# Settings that name no credential: an ask sends them again from the run's manifest.
+PLAIN_PARAMS = {
+    "temperature": 0.3,
+    "extra_headers": {"X-Title": "my-app", "anthropic-beta": "caching-2024-07-31"},
+    "extra_body": {
+        "stop_token_ids": [151645],
+        "allowed_token_ids": [1, 2],
+        "metadata": {"author": "Michael"},
+    },
+}
+GATEWAY = {"extra_headers": {"Authorization": "Bearer gateway-0123456789"}}
 GPT_4O = "openai/gpt-4o"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
@@ -1094,6 +1105,40 @@ def test_each_call_of_an_ask_records_its_replys_body_and_what_was_sent(
     assert what_each_call_records(reasoning_calls(folder)) == {
         ("turn-1", "gpt-6-luna", FINGERPRINT, json.dumps(USAGE), MODEL, True)
     }
+
+
+def test_an_ask_sends_the_runs_settings_that_name_no_credential_as_the_run_did(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, model=GPT_4O, params=PLAIN_PARAMS)
+    ask(result, "Who else?", completion=answering_llm)
+
+    ran, asked = answering_llm.requests_for("reasoning")
+    assert {key: asked[key] for key in PLAIN_PARAMS} == PLAIN_PARAMS
+    assert {key: ran[key] for key in PLAIN_PARAMS} == PLAIN_PARAMS
+
+
+def test_an_ask_refuses_to_send_a_credential_the_runs_manifest_masked(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, params=GATEWAY)
+    sent = len(answering_llm.requests)
+
+    with pytest.raises(ValueError, match=r"\(extra_headers\.Authorization\).*params="):
+        ask(result, "Who else?", completion=answering_llm)
+
+    assert len(answering_llm.requests) == sent
+    assert not (result.run_dir / "asks").exists()
+
+
+def test_an_ask_given_its_params_sends_them_whatever_the_run_masked(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, params=GATEWAY)
+    ask(result, "Who else?", params=GATEWAY, completion=answering_llm)
+
+    _, asked = answering_llm.requests_for("reasoning")
+    assert asked["extra_headers"] == GATEWAY["extra_headers"]
 
 
 def test_an_ask_reasons_on_the_path_given_instead_of_the_runs(answering_llm, tmp_path):

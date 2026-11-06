@@ -70,10 +70,11 @@ Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
 ``events.jsonl``, each split's ``error`` in ``splits.json`` and the ``error`` of
 reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key, as do
 ``manifest.json``'s ``config`` and each call's ``params`` in ``calls.json`` in place of
-each credential among the parameters, at any depth (:func:`r3con.masking.masked_params`):
-a header's value, an ``extra_body``'s ``api_key``, a service account; an ``api_base``
-is written without its user, password and query. Prompts, replies and documents are
-written as they are.
+each credential among the parameters, at any depth, found by its name
+(:func:`r3con.masking.masked_params`): an ``Authorization`` header, an
+``extra_body``'s ``api_key``, a service account's strings, the password and the key in
+an ``api_base``; every other setting is written as it was. Prompts, replies and
+documents are written as they are.
 
 Two layers in code:
 
@@ -92,16 +93,22 @@ Each call in ``calls.json`` has:
 
 - ``step``, ``kind``, ``doc`` and ``chunk``, the part index of a document read in
   parts;
-- ``tokens``, litellm's ``{prompt, completion, total}``, and ``usage``, the ``usage``
-  of the reply's body as the provider sent it, such as vLLM's
-  ``prompt_tokens_details.cached_tokens`` or OpenAI's
-  ``completion_tokens_details.reasoning_tokens``, in the provider's own form, an
-  Anthropic reply's ``input_tokens`` say, and without its ``null`` fields, which carry
-  no count (the OpenAI SDK, which reads the body for ``openai/``, adds one for each
-  field the body did not have); ``null`` when the body has none, or when r3con did not
-  see the body: litellm hands it over (:mod:`r3con.runtime.llm`), except to a
-  ``completion=`` that does not pass r3con's ``logger_fn`` on, and for its
-  ``mock_response``;
+- ``tokens``, litellm's count, ``{prompt, completion, total}`` whatever the provider,
+  which the stage totals, ``run_finished`` and the app add up, and ``usage``, the
+  server's own report, as the reply's body holds it, without its ``null`` fields,
+  which carry no count (the OpenAI SDK, which reads the body for ``openai/``, adds one
+  for each field the body did not have): vLLM's
+  ``prompt_tokens_details.cached_tokens``, say, or OpenAI's
+  ``completion_tokens_details.reasoning_tokens``, each only when the server sent it.
+  The body is the provider's own, and so is its form: OpenAI-compatible servers
+  (vLLM, SGLang, OpenAI) send ``usage``, Anthropic its own ``usage``
+  (``input_tokens``, ...), Bedrock Converse a camelCase ``usage``, and Gemini
+  ``usageMetadata``, recorded in its place. ``usage`` is ``null`` when the body has
+  none, as ``ollama_chat/``'s, whose counts are at its top level
+  (``prompt_eval_count``, ``eval_count``), and when r3con saw no body: litellm hands
+  it over (:mod:`r3con.runtime.llm`), but not for ``ollama/``, nor for a reply it
+  serves from its cache, which was never sent, nor to a ``completion=`` that does not
+  pass r3con's ``logger_fn`` on, nor for its ``mock_response``;
 - ``usd``, litellm's price for the call, or ``null`` when it cannot price it;
 - ``sends``, the times the request was sent, more than 1 when a temporary error made
   r3con resend it, and ``resend_wait_seconds``, the seconds, to hundredths, waited
@@ -110,15 +117,15 @@ Each call in ``calls.json`` has:
   reply or its error, any resends and the waits before them included;
 - ``finish_reason``, and ``error``, ``null``, or, for a call that raised one, the
   error's class and the first non-empty line of its message, keys masked;
-- ``served_model``, the ``model`` of the reply's body, the model the server says
-  answered, and ``fingerprint``, its ``system_fingerprint``, whatever JSON the server
-  sent, each ``null`` when the body has none or r3con did not see it, as for
-  ``usage``;
+- ``served_model``, the ``model`` of the reply's body (Gemini's ``modelVersion``), the
+  model the server says answered, and ``fingerprint``, its ``system_fingerprint``,
+  whatever JSON the server sent, each ``null`` when the body has none (Bedrock
+  Converse's has no model) or r3con saw no body, as for ``usage``;
 - ``params``, what r3con handed litellm for the call, taken before it was sent, as
   JSON: the litellm model string, the ``api_base``, the sampling and token settings,
-  ``extra_body`` and the like, and the response format by its name, without its
-  schema; not the messages, the ``api_key``, or the ``num_retries=0`` and
-  ``logger_fn`` r3con adds; each credential masked, as below;
+  ``extra_body``, the headers and the like, and the response format by its name,
+  without its schema; not the messages, the ``api_key``, a ``logger_fn``, or the
+  ``num_retries=0`` r3con adds; each credential masked, as below;
 - ``prompt``, the messages sent, ``reasoning``, the reasoning text the reply carries
   (litellm's ``reasoning_content``, from the provider's ``reasoning_content`` or
   ``reasoning``, its thinking blocks, or a ``<think>`` block litellm moves out of the

@@ -25,13 +25,13 @@ those left hold no more than 1,000 values together, and a pattern with a lookaro
 :func:`schema_as_sent` builds the schema as sent, for the request and for the token
 budgets.
 
-**What a call is recorded with.** Each request goes out with a ``logger_fn`` of r3con's
-(:func:`_catch_reply_body`), litellm's per-call logging hook, which sends nothing to the
-provider: litellm hands it each reply's body, so a recorded call's ``usage``,
-``served_model`` and ``fingerprint`` are the provider's own, where litellm's response
-would give its normalized copy. A ``logger_fn`` the caller passes is still called, and a
-supplied ``completion=`` gets r3con's, to pass on to litellm. The parameters recorded
-are those r3con hands litellm, taken before the request is sent
+**What a call is recorded with.** Each request r3con records goes out with a
+``logger_fn`` of r3con's (:func:`_catch_reply_body`), litellm's per-call logging hook,
+which sends nothing to the provider: litellm hands it each reply's body, so a recorded
+call's ``usage``, ``served_model`` and ``fingerprint`` are the provider's own, where
+litellm's response would give its normalized copy. A ``logger_fn`` the caller passes is
+still called, and a supplied ``completion=`` gets r3con's, to pass on to litellm. The
+parameters recorded are those r3con hands litellm, taken before the request is sent
 (:func:`_params_sent`). Each request gets its own copy of each dict and list among the
 caller's ``kwargs`` (:func:`_unshared`): litellm writes into a request's ``metadata``,
 and one dict shared by every call of a run would gather all their writes.
@@ -122,8 +122,12 @@ _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
-# Not listed in a call's params: the messages are its prompt, and a key tells nothing.
-_UNLISTED_PARAMS = frozenset({"messages", "api_key"})
+# Not listed in a call's params: the messages are its prompt, a key tells nothing, and
+# a logger_fn is code.
+_UNLISTED_PARAMS = frozenset({"messages", "api_key", "logger_fn"})
+# Where a reply's body has its usage report and model: OpenAI's names, then Gemini's.
+_USAGE_FIELDS = ("usage", "usageMetadata")
+_MODEL_FIELDS = ("model", "modelVersion")
 _PRE_SEND = "pre_api_call"
 _POST_SEND = "post_api_call"
 
@@ -290,8 +294,8 @@ def litellm_chat_completion_full(
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
     register_credentials(request, completion)
-    params = _params_sent(request) if run is not None else None
-    reply_body = _catch_reply_body(request)
+    params = None if run is None else _params_sent(request)
+    reply_body = None if run is None else _catch_reply_body(request)
     raise_if_cancelled(cancel)
     started = time.monotonic()
 
@@ -315,13 +319,13 @@ def litellm_chat_completion_full(
         record(response={}, usd=0.0, error=one_line(error))
         raise
 
-    body = reply_body()
+    body = {} if reply_body is None else reply_body()
     record(
         response=_extract_response_dict(response),
         tokens=_extract_tokens(response),
-        usage=_without_nulls(body.get("usage")),
+        usage=_without_nulls(_first_of(body, _USAGE_FIELDS)),
         usd=_extract_usd(response),
-        served_model=body.get("model"),
+        served_model=_first_of(body, _MODEL_FIELDS),
         fingerprint=body.get("system_fingerprint"),
     )
     return response
@@ -461,9 +465,10 @@ def register_credentials(
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
     request with ``params`` sends, at any depth (:func:`r3con.masking.credentials_in`):
-    each header's value, each string with a credential's name
-    (:func:`r3con.masking.is_credential_name`), ``api_key`` among them, the password and
-    key in an ``api_base``, and the token alone of a ``<scheme> <token>`` one
+    each string with a credential's name (:func:`r3con.masking.is_credential_name`),
+    ``api_key`` and an ``Authorization`` header among them, the password and each
+    credential in the query of a URL setting, and the token alone of a
+    ``<scheme> <token>`` one
     (``Bearer``, ``Basic``); and when ``completion`` is a ``litellm.Router``'s, the same
     of each of its deployments' ``litellm_params``, where the Router has already read
     an ``os.environ/NAME`` from the environment."""
@@ -651,6 +656,11 @@ def _catch_reply_body(request: dict[str, Any]) -> Callable[[], dict[str, Any]]:
 
     request["logger_fn"] = logger_fn
     return body
+
+
+def _first_of(body: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    """The value of the first of ``fields`` that ``body`` has, else ``None``."""
+    return next((body[field] for field in fields if body.get(field) is not None), None)
 
 
 def _unshared(value: Any) -> Any:

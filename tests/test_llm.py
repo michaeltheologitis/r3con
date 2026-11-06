@@ -808,9 +808,19 @@ def test_a_routers_call_records_the_body_its_deployment_answered_with(
 
 @pytest.mark.allow_hosts(["127.0.0.1"])
 @BOTH_PATHS
-def test_the_hook_that_reads_the_reply_is_not_sent_and_the_callers_own_still_runs(
+def test_the_hook_that_reads_the_reply_sends_nothing_to_the_server(
     httpserver, run, model
 ):
+    answers_in_turn(httpserver, OK)
+    ask_server(httpserver, model=model, run=run)
+
+    [(request, _)] = httpserver.log
+    assert set(request.get_json()) == {"model", "messages"}
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_callers_own_logger_fn_is_still_called(httpserver, run, model):
     events = []
     answers_in_turn(httpserver, (200, answering(usage=COUNTS)))
     ask_server(
@@ -820,10 +830,42 @@ def test_the_hook_that_reads_the_reply_is_not_sent_and_the_callers_own_still_run
         logger_fn=lambda details: events.append(details["log_event_type"]),
     )
 
-    [(request, _)] = httpserver.log
-    assert set(request.get_json()) == {"model", "messages"}
     assert "post_api_call" in events
     assert run.steps[0].usage == COUNTS
+
+
+def test_a_call_r3con_does_not_record_goes_out_without_the_hook(llm):
+    ask(llm.replies("ok"))
+
+    assert "logger_fn" not in llm.requests[0]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_gemini_reply_records_its_usage_metadata_and_model_version(httpserver, run):
+    usage = {"promptTokenCount": 11, "candidatesTokenCount": 2, "totalTokenCount": 13}
+    httpserver.expect_request(re.compile(".*:generateContent")).respond_with_json(
+        {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "OK"}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": usage,
+            "modelVersion": "gemini-served-1",
+        }
+    )
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model="gemini/gemini-2.5-flash",
+        api_base=httpserver.url_for(""),
+        api_key="fake-gemini-key",
+        run=run,
+    )
+
+    [step] = run.steps
+    assert (step.usage, step.served_model) == (usage, "gemini-served-1")
 
 
 def test_a_supplied_completion_that_hands_over_no_body_records_none(run):
@@ -835,6 +877,12 @@ def test_a_supplied_completion_that_hands_over_no_body_records_none(run):
 
     [step] = run.steps
     assert (step.error, step.usage, step.served_model, step.fingerprint) == (None,) * 4
+
+
+def test_the_params_a_call_records_leave_out_a_callers_logger_fn(llm, run):
+    ask(llm.replies("ok"), run=run, logger_fn=lambda details: None)
+
+    assert run.steps[0].params == {"model": MODEL}
 
 
 def test_a_recorded_call_keeps_what_was_sent_but_the_messages_and_the_schema(llm, run):
@@ -883,37 +931,61 @@ def test_each_call_records_what_was_sent_before_litellm_wrote_into_it(
     ("sent", "recorded"),
     [
         ({"extra_body": {"api_key": SECRET}}, {"extra_body": {"api_key": "REDACTED"}}),
+        ({"extra_body": {"api-key": SECRET}}, {"extra_body": {"api-key": "REDACTED"}}),
+        (
+            {"extra_body": {"subscription_key": SECRET}},
+            {"extra_body": {"subscription_key": "REDACTED"}},
+        ),
         (
             {"headers": {"Authorization": f"Bearer {SECRET}"}},
             {"headers": {"Authorization": "REDACTED"}},
         ),
         (
-            {"extra_headers": {"X-Trace": "t1"}},
-            {"extra_headers": {"X-Trace": "REDACTED"}},
+            {"extra_headers": {"x-api-key": SECRET, "X-Title": "my-app"}},
+            {"extra_headers": {"x-api-key": "REDACTED", "X-Title": "my-app"}},
         ),
-        ({"vertex_credentials": SERVICE_ACCOUNT}, {"vertex_credentials": "REDACTED"}),
+        (
+            {"vertex_credentials": SERVICE_ACCOUNT},
+            {"vertex_credentials": {"type": "REDACTED", "private_key": "REDACTED"}},
+        ),
         ({"aws_secret_access_key": "short"}, {"aws_secret_access_key": "REDACTED"}),
+        ({"extra_query": {"key": SECRET}}, {"extra_query": {"key": "REDACTED"}}),
+        (
+            {"extra_query": {"api-key": SECRET}},
+            {"extra_query": {"api-key": "REDACTED"}},
+        ),
         (
             {"api_base": f"https://user:{SECRET}@gateway.example/v1"},
-            {"api_base": "https://gateway.example/v1"},
+            {"api_base": "https://user:REDACTED@gateway.example/v1"},
         ),
         (
-            {"api_base": f"https://gateway.example/v1?key={SECRET}"},
-            {"api_base": "https://gateway.example/v1"},
+            {
+                "api_base": f"https://gateway.example/v1?api-version=2024-02-01&key={SECRET}"
+            },
+            {
+                "api_base": "https://gateway.example/v1?api-version=2024-02-01&key=REDACTED"
+            },
+        ),
+        (
+            {"azure_endpoint": f"https://user:{SECRET}@x.openai.azure.com"},
+            {"azure_endpoint": "https://user:REDACTED@x.openai.azure.com"},
         ),
         ({"api_key": "sk-1234"}, {}),
-        ({"max_tokens": 50}, {"max_tokens": 50}),
     ],
     ids=[
         "nested-in-extra-body",
+        "hyphenated",
+        "a-subscription-key",
         "a-header",
-        "every-extra-header",
-        "a-service-account",
+        "a-key-header-but-not-the-others",
+        "a-service-accounts-strings",
         "too-short-to-register",
+        "a-bare-key-in-extra-query",
+        "an-api-key-in-extra-query",
         "a-password-in-the-api-base",
         "a-key-in-the-api-base-query",
+        "a-password-in-the-azure-endpoint",
         "the-api-key",
-        "a-count-named-like-a-token",
     ],
 )
 def test_the_params_a_call_records_hold_no_credential(llm, run, sent, recorded):
@@ -923,6 +995,29 @@ def test_the_params_a_call_records_hold_no_credential(llm, run, sent, recorded):
     [call] = json.loads((run.dir / "calls.json").read_text())
     assert call["params"] == {"model": MODEL, **recorded}
     assert SECRET not in (run.dir / "calls.json").read_text()
+
+
+@pytest.mark.parametrize(
+    "sent",
+    [
+        {
+            "extra_headers": {
+                "X-Title": "my-app",
+                "anthropic-beta": "caching-2024-07-31",
+            }
+        },
+        {"extra_body": {"stop_token_ids": [151645], "allowed_token_ids": [1, 2]}},
+        {"extra_body": {"tokenizer": "Qwen/Qwen3-8B", "max_tokens": "512"}},
+        {"metadata": {"author": "Michael", "authority": "x", "auth_method": "none"}},
+        {"api_base": "https://gateway.example/v1?api-version=2024-02-01"},
+        {"max_tokens": 50},
+    ],
+    ids=["headers", "token-ids", "a-tokenizer", "author", "an-api-version", "a-count"],
+)
+def test_the_params_a_call_records_keep_every_other_setting_as_sent(llm, run, sent):
+    ask(llm.replies("ok"), run=run, **sent)
+
+    assert run.steps[0].params == {"model": MODEL, **sent}
 
 
 @pytest.mark.parametrize("rate_limits", [0, 1], ids=["first-time", "after-a-resend"])
@@ -1113,6 +1208,8 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
         "extra_headers": {
             "x-gateway-auth": "header-0123456789",
             "Authorization": "Bearer bearer-token-0123456789",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
         },
         "azure_ad_token": "ad-token-0123456789",
         "extra_body": {"api_key": "nested-key-0123456789"},
@@ -1129,6 +1226,5 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
         "url-password-0123 url-key-0123456789"
     )
     register_credentials(params, routing.completion)
-    assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
-        "REDACTED " * 11 + "end-user-0123456789 summaries-cache-2026 4096"
-    )
+    kept = "end-user-0123456789 summaries-cache-2026 4096 2023-06-01 application/json"
+    assert masked(f"{sent} {kept}") == "REDACTED " * 11 + kept

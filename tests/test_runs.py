@@ -391,7 +391,7 @@ def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
         ),
         (
             {"vertex_credentials": {"private_key": "-----BEGIN PRIVATE KEY-----"}},
-            {"vertex_credentials": "REDACTED"},
+            {"vertex_credentials": {"private_key": "REDACTED"}},
         ),
         ({"max_tokens": 50}, {"max_tokens": 50}),
     ],
