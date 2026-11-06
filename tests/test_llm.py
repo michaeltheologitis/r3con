@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 from email.utils import parsedate_to_datetime
+from types import SimpleNamespace
 from typing import Literal
 
 import litellm
@@ -19,6 +20,7 @@ from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
+    _SECONDS_DIGITS,
     Cancelled,
     _sleep,
     litellm_chat_completion,
@@ -80,6 +82,41 @@ BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 LONG_RETRY_AFTER_SECONDS = 60
 STOPPED_WITHIN_SECONDS = 5
+SLOW_SEND_SECONDS = 0.05
+COUNTS = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+DETAILED_USAGE = {
+    **COUNTS,
+    "prompt_tokens_details": {"cached_tokens": 0},
+    "completion_tokens_details": {"reasoning_tokens": 7},
+}
+# As OpenAI sends it: litellm's copy of cache_write_tokens must not be recorded.
+OPENAI_USAGE = {
+    **COUNTS,
+    "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 0,
+        "audio_tokens": 0,
+    },
+    "completion_tokens_details": {
+        "reasoning_tokens": 6,
+        "audio_tokens": 0,
+        "accepted_prediction_tokens": 0,
+        "rejected_prediction_tokens": 0,
+    },
+}
+# A field litellm has no name for, as a newer server might send.
+UNKNOWN_FIELD_USAGE = {**COUNTS, "queued_tokens": 3}
+# Each of these litellm rewrites in its own usage: a count it fills with 0, the cache
+# counts it copies under OpenAI's names.
+NO_COMPLETION_COUNT_USAGE = {"prompt_tokens": 10, "total_tokens": 10}
+DEEPSEEK_USAGE = {**COUNTS, "prompt_cache_hit_tokens": 4, "prompt_cache_miss_tokens": 6}
+CACHE_CREATION_USAGE = {**COUNTS, "prompt_tokens_details": {"cache_creation_tokens": 5}}
+# Zeros the server sent, which are kept, unlike the empty usage litellm starts with.
+ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+RETRY_AFTER_SECONDS = 0.1
+SERVED = "Qwen/Qwen3-8B-2504"
+FINGERPRINT = "fp_3f1c2d"
+THOUGHT = "The user wants OK."
 
 
 class Flat(BaseModel):
@@ -166,6 +203,27 @@ def answers_in_turn(httpserver, *replies: tuple) -> None:
             earlier_body, earlier_status, *earlier_headers
         )
     httpserver.expect_request(CHAT).respond_with_json(body, status, *headers)
+
+
+def answering(message: dict | None = None, **reply) -> dict:
+    """A server's reply of OK, its message with ``message``'s fields too, and with
+    ``reply``'s fields."""
+    [choice] = ANSWER["choices"]
+    said = {**choice["message"], **(message or {})}
+    return {**ANSWER, "choices": [{**choice, "message": said}], **reply}
+
+
+def slowly(reply: str | BaseException):
+    """A reply that takes ``SLOW_SEND_SECONDS`` to arrive: ``reply``, or ``reply``
+    raised."""
+
+    def answer(request: dict) -> str:
+        time.sleep(SLOW_SEND_SECONDS)
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+    return answer
 
 
 def rate_limited(retry_after: int) -> tuple[int, dict, dict[str, str]]:
@@ -626,6 +684,231 @@ def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm
 
     [step] = run.steps
     assert (step.sends, step.resend_wait_seconds) == (None, None)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("reply", "recorded"),
+    [
+        (answering(usage=COUNTS), COUNTS),
+        (answering(usage={**COUNTS, "prompt_tokens_details": None}), COUNTS),
+        (answering(usage=DETAILED_USAGE), DETAILED_USAGE),
+        (answering(usage=OPENAI_USAGE), OPENAI_USAGE),
+        (answering(usage=UNKNOWN_FIELD_USAGE), UNKNOWN_FIELD_USAGE),
+        (answering(usage=NO_COMPLETION_COUNT_USAGE), NO_COMPLETION_COUNT_USAGE),
+        (answering(usage=DEEPSEEK_USAGE), DEEPSEEK_USAGE),
+        (answering(usage=CACHE_CREATION_USAGE), CACHE_CREATION_USAGE),
+        (answering(usage=ZERO_USAGE), ZERO_USAGE),
+        (ANSWER, None),
+    ],
+    ids=[
+        "counts-only",
+        "null-details",
+        "details",
+        "openais-cache-write",
+        "unknown-field",
+        "a-count-missing",
+        "deepseeks-names",
+        "cache-creation",
+        "zero-counts",
+        "no-usage",
+    ],
+)
+def test_a_recorded_call_keeps_each_usage_field_the_server_sent_and_no_other(
+    httpserver, run, model, reply, recorded
+):
+    answers_in_turn(httpserver, (200, reply))
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert step.usage == recorded
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("reply", "recorded"),
+    [
+        (
+            answering(model=SERVED, system_fingerprint=FINGERPRINT),
+            (SERVED, FINGERPRINT),
+        ),
+        (answering(model=SERVED), (SERVED, None)),
+        (ANSWER, (None, None)),
+    ],
+    ids=["fingerprinted", "no-fingerprint", "neither"],
+)
+def test_a_recorded_call_names_the_model_and_fingerprint_the_server_answered_with(
+    httpserver, run, model, reply, recorded
+):
+    answers_in_turn(httpserver, (200, reply))
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert (step.served_model, step.fingerprint) == recorded
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+@pytest.mark.parametrize(
+    ("message", "recorded"),
+    [
+        ({"reasoning_content": THOUGHT}, THOUGHT),
+        ({"reasoning": THOUGHT}, THOUGHT),
+        ({"content": f"<think>{THOUGHT}</think>OK"}, THOUGHT),
+        ({}, None),
+    ],
+    ids=["reasoning_content", "reasoning", "think-block", "none"],
+)
+def test_a_recorded_call_keeps_the_reasoning_text_the_server_sent(
+    httpserver, run, model, message, recorded
+):
+    answers_in_turn(httpserver, (200, answering(message)))
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert step.response.get("reasoning") == recorded
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_resent_call_records_the_body_of_the_send_that_answered(
+    httpserver, run, model
+):
+    answers_in_turn(
+        httpserver, RATE_LIMITED, (200, answering(model=SERVED, usage=COUNTS))
+    )
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.usage, step.served_model) == (2, COUNTS, SERVED)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_routers_call_records_the_body_its_deployment_answered_with(
+    httpserver, run, router
+):
+    api_base = httpserver.url_for("/v1")
+    routing = router({"model": VLLM, "api_base": api_base, "api_key": "sk-fake"})
+    answers_in_turn(httpserver, (200, answering(model=SERVED, usage=COUNTS)))
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        completion=routing.completion,
+        run=run,
+    )
+
+    [step] = run.steps
+    assert (step.usage, step.served_model) == (COUNTS, SERVED)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_the_hook_that_reads_the_reply_sends_nothing_to_the_server(
+    httpserver, run, model
+):
+    answers_in_turn(httpserver, OK)
+    ask_server(httpserver, model=model, run=run)
+
+    [(request, _)] = httpserver.log
+    assert set(request.get_json()) == {"model", "messages"}
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_callers_own_logger_fn_is_still_called_and_the_body_still_recorded(
+    httpserver, run, model
+):
+    events = []
+    answers_in_turn(httpserver, (200, answering(usage=COUNTS)))
+    ask_server(
+        httpserver,
+        model=model,
+        run=run,
+        logger_fn=lambda details: events.append(details["log_event_type"]),
+    )
+
+    assert "post_api_call" in events
+    assert run.steps[0].usage == COUNTS
+
+
+def test_a_call_r3con_does_not_record_goes_out_without_the_hook(llm):
+    ask(llm.replies("ok"))
+
+    assert "logger_fn" not in llm.requests[0]
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_gemini_reply_records_its_usage_metadata_and_model_version(httpserver, run):
+    usage = {"promptTokenCount": 11, "candidatesTokenCount": 2, "totalTokenCount": 13}
+    httpserver.expect_request(re.compile(".*:generateContent")).respond_with_json(
+        {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "OK"}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": usage,
+            "modelVersion": "gemini-served-1",
+        }
+    )
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model="gemini/gemini-2.5-flash",
+        api_base=httpserver.url_for(""),
+        api_key="fake-gemini-key",
+        run=run,
+    )
+
+    [step] = run.steps
+    assert (step.usage, step.served_model) == (usage, "gemini-served-1")
+
+
+def test_a_supplied_completion_that_hands_over_no_body_records_no_usage_model_or_fingerprint(
+    run,
+):
+    reply = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        usage={"prompt_tokens": 3},
+    )
+    assert ask(lambda **request: reply, run=run) == "ok"
+
+    [step] = run.steps
+    assert (step.error, step.usage, step.served_model, step.fingerprint) == (None,) * 4
+
+
+@pytest.mark.parametrize("rate_limits", [0, 1], ids=["first-time", "after-a-resend"])
+def test_a_recorded_call_says_how_long_it_took_resends_and_waits_included(
+    llm, monkeypatch, run, rate_limits
+):
+    # r3con's own wait, which the autouse `waits` fixture replaces with a record.
+    monkeypatch.setattr("r3con.runtime.llm._sleep", _sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: low)
+    error = slowed_down(retry_after=str(RETRY_AFTER_SECONDS))
+    errors = [slowly(error) for _ in range(rate_limits)]
+    monkeypatch.setattr(litellm, "completion", llm.replies(*errors, slowly("ok")))
+
+    litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL, run=run)
+
+    [step] = run.steps
+    waited = rate_limits * RETRY_AFTER_SECONDS
+    assert step.resend_wait_seconds == pytest.approx(waited, abs=0.01)
+    assert (rate_limits + 1) * SLOW_SEND_SECONDS + waited <= step.seconds
+    assert step.seconds < STOPPED_WITHIN_SECONDS
+    assert step.seconds == round(step.seconds, _SECONDS_DIGITS)
+
+
+def test_a_call_that_raises_records_how_long_it_took_and_nothing_of_a_reply(llm, run):
+    with pytest.raises(litellm.BadRequestError):
+        ask(llm.replies(slowly(refused("no"))), run=run)
+
+    [step] = run.steps
+    assert SLOW_SEND_SECONDS <= step.seconds
+    assert (step.usage, step.served_model, step.fingerprint) == (None, None, None)
 
 
 @pytest.mark.parametrize("supplied", [False, True], ids=["litellm", "supplied"])
