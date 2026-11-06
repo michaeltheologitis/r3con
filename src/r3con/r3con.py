@@ -625,10 +625,8 @@ def ask(
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
             with ``save_artifacts=False``), if a file in its folder is not as this
             r3con writes it (one an older r3con wrote, say), if it leaves a prompt
-            version unpinned, if an override is not valid for its setting, if a
-            setting in :mod:`r3con.settings` is out of range, or if ``params`` is not
-            given and the run's hold a credential its manifest masks, which the ask
-            can't send again (an ``Authorization`` header, say).
+            version unpinned, if an override is not valid for its setting, or if a
+            setting in :mod:`r3con.settings` is out of range.
         Each of these is raised in one line, before any request and before the ask's
         folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left

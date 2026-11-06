@@ -219,19 +219,19 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
     assert recorded == [(3, 2.5), (None, None)]
 
 
-def test_each_call_records_its_reply_what_was_sent_and_how_long_it_took(logger):
+def test_each_call_records_its_reply_and_how_long_it_took(logger):
     run = StageRun(stage="relevance", task_logger=logger)
-    sent = {"params": {"model": MODEL, "temperature": 0.3}, "seconds": 1.25}
+    took = {"seconds": 1.25}
     said = {"usage": USAGE, "served_model": "gpt-6-luna", "fingerprint": "fp_3f1c2d"}
     response = {**reply("a"), "reasoning": THOUGHT}
-    run.add_step(messages=[], response=response, tokens=TOKENS, **sent, **said)
-    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE, **sent)
+    run.add_step(messages=[], response=response, tokens=TOKENS, **took, **said)
+    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE, **took)
     run.flush(write_transcript=False)
     answered, failed = json.loads((run.dir / "calls.json").read_text())
-    recorded = {"reasoning": THOUGHT, "output": "a", "tokens": TOKENS, **sent, **said}
+    recorded = {"reasoning": THOUGHT, "output": "a", "tokens": TOKENS, **took, **said}
     assert {field: answered[field] for field in recorded} == recorded
     nothing = dict.fromkeys(["reasoning", "output", "tokens", *said])
-    assert {field: failed[field] for field in [*nothing, *sent]} == {**nothing, **sent}
+    assert {field: failed[field] for field in [*nothing, *took]} == {**nothing, **took}
 
 
 def test_a_transcripts_last_reply_shows_its_reasoning(logger):
@@ -379,30 +379,6 @@ def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
         "extra_headers": {"x-gateway-auth": "REDACTED"},
         "temperature": 0.3,
     }
-
-
-@pytest.mark.parametrize(
-    ("params", "recorded"),
-    [
-        ({"extra_body": {"api_key": "sk-1"}}, {"extra_body": {"api_key": "REDACTED"}}),
-        (
-            {"headers": {"Authorization": "x"}},
-            {"headers": {"Authorization": "REDACTED"}},
-        ),
-        (
-            {"vertex_credentials": {"private_key": "-----BEGIN PRIVATE KEY-----"}},
-            {"vertex_credentials": {"private_key": "REDACTED"}},
-        ),
-        ({"max_tokens": 50}, {"max_tokens": 50}),
-    ],
-    ids=["nested-in-extra-body", "a-header", "a-service-account", "a-count"],
-)
-def test_the_manifest_masks_a_credential_among_the_runs_params_by_its_name(
-    logger, params, recorded
-):
-    write_manifest(logger, task="q", config=config(params=params), n_docs=1)
-    manifest = json.loads((logger.dir / "manifest.json").read_text())
-    assert manifest["config"]["params"] == recorded
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):

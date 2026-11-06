@@ -53,7 +53,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
-from r3con.masking import masked, masked_settings, one_line
+from r3con.masking import masked, one_line
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -708,22 +708,12 @@ def ask_config(
     reasoning: ReasoningPath | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> RunConfig:
-    """The run's config with an ask's overrides, as :func:`r3con.ask` says. It refuses,
-    in one line, to send the run's params again when the run's manifest masked a
-    credential among them (:func:`r3con.masking.masked_settings`): the manifest does
-    not keep it, so the ask would send ``REDACTED`` in its place."""
+    """The run's config with an ask's overrides, as :func:`r3con.ask` says."""
     another_model = model is not None and (
         normalize_model_name(model) != normalize_model_name(built.config.model)
     )
     if params is None and another_model:
         params = {}
-    masked = sorted(set(masked_settings(built.config.params))) if params is None else []
-    if masked:
-        raise ValueError(
-            f"the run's params hold a credential its manifest.json masks "
-            f"({', '.join(masked)}), so ask can't send them as the run did: pass "
-            "params= to r3con.ask with the setting itself."
-        )
     return configure(
         built.config.model_dump(exclude={"overrides"}),
         built.config.name,

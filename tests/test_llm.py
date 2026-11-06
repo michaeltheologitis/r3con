@@ -1,4 +1,3 @@
-import json
 import logging
 import random
 import re
@@ -114,8 +113,6 @@ DEEPSEEK_USAGE = {**COUNTS, "prompt_cache_hit_tokens": 4, "prompt_cache_miss_tok
 CACHE_CREATION_USAGE = {**COUNTS, "prompt_tokens_details": {"cache_creation_tokens": 5}}
 ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 RETRY_AFTER_SECONDS = 0.1
-SECRET = "secret-0123456789"
-SERVICE_ACCOUNT = {"type": "service_account", "private_key": SECRET}
 SERVED = "Qwen/Qwen3-8B-2504"
 FINGERPRINT = "fp_3f1c2d"
 THOUGHT = "The user wants OK."
@@ -879,147 +876,6 @@ def test_a_supplied_completion_that_hands_over_no_body_records_none(run):
     assert (step.error, step.usage, step.served_model, step.fingerprint) == (None,) * 4
 
 
-def test_the_params_a_call_records_leave_out_a_callers_logger_fn(llm, run):
-    ask(llm.replies("ok"), run=run, logger_fn=lambda details: None)
-
-    assert run.steps[0].params == {"model": MODEL}
-
-
-def test_a_recorded_call_keeps_what_was_sent_but_the_messages_and_the_schema(llm, run):
-    extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
-    litellm_chat_completion(
-        system_prompt="s",
-        user_prompt="u",
-        model=VLLM,
-        schema=Number,
-        completion=llm.replies('{"x": 1}'),
-        run=run,
-        temperature=0.3,
-        reasoning_effort="low",
-        extra_body=extra_body,
-    )
-
-    [step] = run.steps
-    assert step.params == {
-        "model": VLLM,
-        "temperature": 0.3,
-        "reasoning_effort": "low",
-        "extra_body": extra_body,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": "Number", "strict": True},
-        },
-    }
-
-
-@pytest.mark.allow_hosts(["127.0.0.1"])
-@BOTH_PATHS
-def test_each_call_records_what_was_sent_before_litellm_wrote_into_it(
-    httpserver, run, model
-):
-    metadata = {"trace_name": "r3con"}
-    answers_in_turn(httpserver, (200, answering({"content": '{"x": 1}'})))
-    for _ in range(2):
-        ask_server(httpserver, model=model, run=run, schema=Number, metadata=metadata)
-
-    assert [step.params["metadata"] for step in run.steps] == [
-        {"trace_name": "r3con"}
-    ] * 2
-
-
-@pytest.mark.parametrize(
-    ("sent", "recorded"),
-    [
-        ({"extra_body": {"api_key": SECRET}}, {"extra_body": {"api_key": "REDACTED"}}),
-        ({"extra_body": {"api-key": SECRET}}, {"extra_body": {"api-key": "REDACTED"}}),
-        (
-            {"extra_body": {"subscription_key": SECRET}},
-            {"extra_body": {"subscription_key": "REDACTED"}},
-        ),
-        (
-            {"headers": {"Authorization": f"Bearer {SECRET}"}},
-            {"headers": {"Authorization": "REDACTED"}},
-        ),
-        (
-            {"extra_headers": {"x-api-key": SECRET, "X-Title": "my-app"}},
-            {"extra_headers": {"x-api-key": "REDACTED", "X-Title": "my-app"}},
-        ),
-        (
-            {"vertex_credentials": SERVICE_ACCOUNT},
-            {"vertex_credentials": {"type": "REDACTED", "private_key": "REDACTED"}},
-        ),
-        ({"aws_secret_access_key": "short"}, {"aws_secret_access_key": "REDACTED"}),
-        ({"extra_query": {"key": SECRET}}, {"extra_query": {"key": "REDACTED"}}),
-        (
-            {"extra_query": {"api-key": SECRET}},
-            {"extra_query": {"api-key": "REDACTED"}},
-        ),
-        (
-            {"api_base": f"https://user:{SECRET}@gateway.example/v1"},
-            {"api_base": "https://user:REDACTED@gateway.example/v1"},
-        ),
-        (
-            {
-                "api_base": f"https://gateway.example/v1?api-version=2024-02-01&key={SECRET}"
-            },
-            {
-                "api_base": "https://gateway.example/v1?api-version=2024-02-01&key=REDACTED"
-            },
-        ),
-        (
-            {"azure_endpoint": f"https://user:{SECRET}@x.openai.azure.com"},
-            {"azure_endpoint": "https://user:REDACTED@x.openai.azure.com"},
-        ),
-        ({"api_key": "sk-1234"}, {}),
-    ],
-    ids=[
-        "nested-in-extra-body",
-        "hyphenated",
-        "a-subscription-key",
-        "a-header",
-        "a-key-header-but-not-the-others",
-        "a-service-accounts-strings",
-        "too-short-to-register",
-        "a-bare-key-in-extra-query",
-        "an-api-key-in-extra-query",
-        "a-password-in-the-api-base",
-        "a-key-in-the-api-base-query",
-        "a-password-in-the-azure-endpoint",
-        "the-api-key",
-    ],
-)
-def test_the_params_a_call_records_hold_no_credential(llm, run, sent, recorded):
-    ask(llm.replies("ok"), run=run, **sent)
-    run.flush(write_transcript=False)
-
-    [call] = json.loads((run.dir / "calls.json").read_text())
-    assert call["params"] == {"model": MODEL, **recorded}
-    assert SECRET not in (run.dir / "calls.json").read_text()
-
-
-@pytest.mark.parametrize(
-    "sent",
-    [
-        {
-            "extra_headers": {
-                "X-Title": "my-app",
-                "anthropic-beta": "caching-2024-07-31",
-            }
-        },
-        {"extra_body": {"stop_token_ids": [151645], "allowed_token_ids": [1, 2]}},
-        {"extra_body": {"tokenizer": "Qwen/Qwen3-8B", "max_tokens": "512"}},
-        {"metadata": {"author": "Michael", "authority": "x", "auth_method": "none"}},
-        {"api_base": "https://gateway.example/v1?api-version=2024-02-01"},
-        {"max_tokens": 50},
-    ],
-    ids=["headers", "token-ids", "a-tokenizer", "author", "an-api-version", "a-count"],
-)
-def test_the_params_a_call_records_keep_every_other_setting_as_sent(llm, run, sent):
-    ask(llm.replies("ok"), run=run, **sent)
-
-    assert run.steps[0].params == {"model": MODEL, **sent}
-
-
 @pytest.mark.parametrize("rate_limits", [0, 1], ids=["first-time", "after-a-resend"])
 def test_a_recorded_call_says_how_long_it_took_resends_and_waits_included(
     llm, monkeypatch, run, rate_limits
@@ -1041,12 +897,11 @@ def test_a_recorded_call_says_how_long_it_took_resends_and_waits_included(
     assert step.seconds == round(step.seconds, _SECONDS_DIGITS)
 
 
-def test_a_call_that_raises_keeps_what_it_sent_and_how_long_it_took(llm, run):
+def test_a_call_that_raises_records_how_long_it_took_and_nothing_of_a_reply(llm, run):
     with pytest.raises(litellm.BadRequestError):
-        ask(llm.replies(slowly(refused("no"))), run=run, max_tokens=50)
+        ask(llm.replies(slowly(refused("no"))), run=run)
 
     [step] = run.steps
-    assert step.params == {"model": MODEL, "max_tokens": 50}
     assert SLOW_SEND_SECONDS <= step.seconds
     assert (step.usage, step.served_model, step.fingerprint) == (None, None, None)
 
@@ -1208,13 +1063,8 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
         "extra_headers": {
             "x-gateway-auth": "header-0123456789",
             "Authorization": "Bearer bearer-token-0123456789",
-            "anthropic-version": "2023-06-01",
-            "Content-Type": "application/json",
         },
         "azure_ad_token": "ad-token-0123456789",
-        "extra_body": {"api_key": "nested-key-0123456789"},
-        "headers": {"Authorization": "Bearer headers-token-0123456789"},
-        "api_base": "https://user:url-password-0123@gw.example/v1?key=url-key-0123456789",
         "user": "end-user-0123456789",
         "prompt_cache_key": "summaries-cache-2026",
         "max_tokens": 4096,
@@ -1222,9 +1072,9 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     sent = (
         "router-key-0123456789 gateway-from-the-environment tenant-0123456789 "
         "call-key-0123456789 header-0123456789 bearer-token-0123456789 "
-        "ad-token-0123456789 nested-key-0123456789 headers-token-0123456789 "
-        "url-password-0123 url-key-0123456789"
+        "ad-token-0123456789"
     )
     register_credentials(params, routing.completion)
-    kept = "end-user-0123456789 summaries-cache-2026 4096 2023-06-01 application/json"
-    assert masked(f"{sent} {kept}") == "REDACTED " * 11 + kept
+    assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
+        "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
+    )

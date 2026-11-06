@@ -30,11 +30,7 @@ budgets.
 which sends nothing to the provider: litellm hands it each reply's body, so a recorded
 call's ``usage``, ``served_model`` and ``fingerprint`` are the provider's own, where
 litellm's response would give its normalized copy. A ``logger_fn`` the caller passes is
-still called, and a supplied ``completion=`` gets r3con's, to pass on to litellm. The
-parameters recorded are those r3con hands litellm, taken before the request is sent
-(:func:`_params_sent`). Each request gets its own copy of each dict and list among the
-caller's ``kwargs`` (:func:`_unshared`): litellm writes into a request's ``metadata``,
-and one dict shared by every call of a run would gather all their writes.
+still called, and a supplied ``completion=`` gets r3con's, to pass on to litellm.
 
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
@@ -102,7 +98,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import credentials_in, masked_params, one_line, register_key
+from r3con.masking import is_credential_name, one_line, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -122,9 +118,6 @@ _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
-# Not listed in a call's params: the messages are its prompt, a key tells nothing, and
-# a logger_fn is code.
-_UNLISTED_PARAMS = frozenset({"messages", "api_key", "logger_fn"})
 # Where a reply's body has its usage report and model: OpenAI's names, then Gemini's.
 _USAGE_FIELDS = ("usage", "usageMetadata")
 _MODEL_FIELDS = ("model", "modelVersion")
@@ -244,11 +237,11 @@ def litellm_chat_completion_full(
     If ``schema`` is provided, it must be a Pydantic ``BaseModel`` class.
 
     If ``run`` is provided, a :class:`r3con.runs.StepRecord` is appended
-    to it with the request messages and the rest of what r3con sent, the response
-    content and reasoning, tokens and the provider's usage report, cost in USD, the
-    model and fingerprint the reply names, the seconds the call took, and ``kind``
-    label. Pass ``kind="retry"`` (or another custom label) on retry attempts
-    so the transcript renders them as a labeled block. A call that raises an error is
+    to it with the request messages, the response content and reasoning, tokens and
+    the provider's usage report, cost in USD, the model and fingerprint the reply
+    names, the seconds the call took, and ``kind`` label. Pass ``kind="retry"`` (or
+    another custom label) on retry attempts so the transcript renders them as a
+    labeled block. A call that raises an error is
     recorded with it, no reply and a cost of 0, as r3con got no reply to price, and the
     error is raised unchanged.
 
@@ -276,7 +269,7 @@ def litellm_chat_completion_full(
     request: dict[str, Any] = {
         "model": model,
         "messages": request_messages,
-        **_unshared(kwargs),
+        **kwargs,
     }
     if api_base is not None:
         request["api_base"] = api_base
@@ -294,7 +287,6 @@ def litellm_chat_completion_full(
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
     register_credentials(request, completion)
-    params = None if run is None else _params_sent(request)
     reply_body = None if run is None else _catch_reply_body(request)
     raise_if_cancelled(cancel)
     started = time.monotonic()
@@ -304,7 +296,6 @@ def litellm_chat_completion_full(
             run.add_step(
                 kind=kind,
                 messages=request_messages,
-                params=params,
                 seconds=round(time.monotonic() - started, _SECONDS_DIGITS),
                 **resends,
                 **outcome,
@@ -464,15 +455,15 @@ def register_credentials(
     params: Mapping[str, Any], completion: Callable[..., Any] | None = None
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
-    request with ``params`` sends, at any depth (:func:`r3con.masking.credentials_in`):
-    each string with a credential's name (:func:`r3con.masking.is_credential_name`),
-    ``api_key`` and an ``Authorization`` header among them, the password and each
-    credential in the query of a URL setting, and the token alone of a
-    ``<scheme> <token>`` one
+    request with ``params`` sends: each value of its ``extra_headers`` and of each
+    parameter with a credential's name (:func:`r3con.masking.is_credential_name`),
+    ``api_key`` among them, and the token alone of a ``<scheme> <token>`` one
     (``Bearer``, ``Basic``); and when ``completion`` is a ``litellm.Router``'s, the same
     of each of its deployments' ``litellm_params``, where the Router has already read
     an ``os.environ/NAME`` from the environment."""
-    sent = list(credentials_in(params))
+    headers = params.get("extra_headers") or {}
+    named = [value for name, value in params.items() if is_credential_name(name)]
+    sent = [value for value in [*headers.values(), *named] if isinstance(value, str)]
     # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
     schemed = [words for words in map(str.split, sent) if len(words) == 2]
     for value in [*sent, *(token for scheme, token in schemed if scheme.isalpha())]:
@@ -663,17 +654,6 @@ def _first_of(body: dict[str, Any], fields: tuple[str, ...]) -> Any:
     return next((body[field] for field in fields if body.get(field) is not None), None)
 
 
-def _unshared(value: Any) -> Any:
-    """``value`` with each dict and list in it copied, and all else as it is: litellm
-    writes into a request's ``metadata``, and one dict of the caller's would gather
-    every call's writes."""
-    if isinstance(value, dict):
-        return {name: _unshared(item) for name, item in value.items()}
-    if isinstance(value, list):
-        return [_unshared(item) for item in value]
-    return value
-
-
 def _without_nulls(value: Any) -> Any:
     """``value`` without the ``None`` among its dicts' values, at any depth: what the
     OpenAI SDK adds for each field a body did not have."""
@@ -682,23 +662,6 @@ def _without_nulls(value: Any) -> Any:
     return {
         name: _without_nulls(item) for name, item in value.items() if item is not None
     }
-
-
-def _params_sent(request: Mapping[str, Any]) -> Any:
-    """What r3con hands litellm for ``request``, as JSON taken before it is sent:
-    without its messages, its ``api_key`` or its response format's schema, which can
-    run to many thousand characters (its name stays), and with each credential masked
-    (:func:`r3con.masking.masked_params`)."""
-    listed = {
-        name: value for name, value in request.items() if name not in _UNLISTED_PARAMS
-    }
-    params = json.loads(json.dumps(listed, default=str))
-    response_format = params.get("response_format")
-    if isinstance(response_format, dict):
-        json_schema = response_format.get("json_schema")
-        if isinstance(json_schema, dict):
-            json_schema.pop("schema", None)
-    return masked_params(params)
 
 
 def _extract_usd(response: Any) -> float | None:
