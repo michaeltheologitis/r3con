@@ -178,7 +178,7 @@ def refuses_a_lookaround(reply: dict):
     return answer
 
 
-def parse_one(llm, prompt_version="v3", document_ids=(), **kwargs):
+def parse_one(llm, prompt_version="v4", document_ids=(), **kwargs):
     """The memo parsed as the document IDS[0] names."""
     return parse_one_document(
         document="memo",
@@ -201,7 +201,7 @@ def parse_all(llm, documents, model=MODEL, **kwargs):
         schema_code=SCHEMA,
         parse_cls=Parse,
         task="Who is mentioned?",
-        prompt_version="v3",
+        prompt_version="v4",
         document_ids=IDS[: len(documents)],
         model=model,
         completion=llm,
@@ -428,7 +428,7 @@ def test_a_decimal_field_is_parsed_though_openai_refuses_a_lookaround(llm):
         schema_code=COSTS,
         parse_cls=check_schema(COSTS),
         task="What did it cost?",
-        prompt_version="v3",
+        prompt_version="v4",
         document_id=IDS[0],
         document_ids=[],
         model=MODEL,
@@ -477,7 +477,7 @@ def test_a_provider_error_is_not_retried(llm):
     assert len(llm.requests) == 1
 
 
-@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3", "v4"])
 def test_ids_and_the_reply_schema_do_not_depend_on_the_prompt_version(llm, version):
     reply = {"parse": {"rows": [{"who": "Halloran"}]}, "provenance_ids": [IDS[1]]}
     result = parse_one(
@@ -558,7 +558,7 @@ def test_document_ids_that_are_not_one_per_document_are_refused_before_any_reque
             schema_code=SCHEMA,
             parse_cls=Parse,
             task="Who is mentioned?",
-            prompt_version="v3",
+            prompt_version="v4",
             document_ids=IDS[:2],
             model=MODEL,
             completion=llm,

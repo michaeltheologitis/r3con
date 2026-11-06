@@ -12,7 +12,7 @@ from r3con.stages.reasoning import _sample_record_per_field, reason
 from tests.fakes import citable_lists
 
 MODEL = "openai/gpt-6-luna"
-PROMPTS = {"reasoning/direct": "v3", "reasoning/coding": "v3"}
+PROMPTS = {"reasoning/direct": "v4", "reasoning/coding": "v4"}
 PATHS = pytest.mark.parametrize("path", REASONING_PATHS)
 IDS = [f"d0c{n:03x}" for n in range(10)]
 READ_IN_PARTS = "Some documents were too long to read whole and were read in parts"
@@ -20,9 +20,9 @@ PRINTS = "Thought: peek.\n<code>\nprint(1)\n</code>"
 SAMPLE = "only a SAMPLE"
 NUMBERED = re.compile(r"Document \d|\"document\": \d")
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
-# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,410
-# tokens with the whole parse and about 2,920 with one sample record per field; the
-# direct request about 4,130 with its reply's schema.
+# 100 records, 1,609 tokens as JSON: the coding path's first turn takes about 4,380
+# tokens with the whole parse and about 2,880 with one sample record per field; the
+# direct request about 4,120 with its reply's schema.
 ROWS = {"rows": [{"who": f"Site {i:03d} logged nothing unusual"} for i in range(100)]}
 LAST_ROW = '"who": "Site 099 logged nothing unusual"'
 TWO_DOCUMENTS = {
@@ -505,7 +505,7 @@ def test_a_sample_view_shows_the_records_ids(llm, monkeypatch):
     assert NUMBERED.search(summaries(prompt)) is None
 
 
-@pytest.mark.parametrize("version", ["v1", "v2", "v3"])
+@pytest.mark.parametrize("version", ["v1", "v2", "v3", "v4"])
 def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
     llm, version
 ):
@@ -651,7 +651,7 @@ def test_the_whole_parse_is_shown_only_when_the_first_turn_fits_the_line(
         assert caplog.messages == [
             (
                 "the whole parse (about 1,609 tokens) would put reasoning's first turn "
-                "at about 4,412 tokens, over the 3,400-token line; showing one sample "
+                "at about 4,377 tokens, over the 3,400-token line; showing one sample "
                 "record per field"
             )
         ]
@@ -712,12 +712,12 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
     caplog.set_level(logging.INFO, logger="r3con.reasoning")
     result = ask(llm, citing("coding"), model=window(4_000))
     assert (result.answer, result.path) == ("ok", "coding")
-    assert result.fallback == {"cause": "estimate", "estimate": 4_155, "line": 3_400}
+    assert result.fallback == {"cause": "estimate", "estimate": 4_120, "line": 3_400}
     [request] = llm.requests
     assert SAMPLE in request["messages"][0]["content"]
     assert caplog.messages == [
         (
-            "reasoning's direct prompt would take about 4,155 tokens, over the "
+            "reasoning's direct prompt would take about 4,120 tokens, over the "
             "3,400-token line; reasoning with code instead"
         )
     ]
@@ -726,7 +726,7 @@ def test_a_direct_prompt_over_the_line_is_not_sent_and_the_coding_path_answers(
 def test_a_direct_prompt_refused_as_too_long_goes_to_the_coding_path_with_samples(
     llm, caplog
 ):
-    # The direct request takes about 4,130 tokens, the coding one with samples 2,920.
+    # The direct request takes about 4,120 tokens, the coding one with samples 2,880.
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     result = ask(llm.refuses_over(tokens=3_500), citing("coding"))
     assert (result.answer, result.path) == ("ok", "coding")
