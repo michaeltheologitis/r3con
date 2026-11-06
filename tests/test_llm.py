@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 from email.utils import parsedate_to_datetime
+from types import SimpleNamespace
 from typing import Literal
 
 import litellm
@@ -20,6 +21,7 @@ from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
+    _SECONDS_DIGITS,
     Cancelled,
     _sleep,
     litellm_chat_completion,
@@ -105,6 +107,15 @@ OPENAI_USAGE = {
 }
 # A field litellm has no name for, as a newer server might send.
 UNKNOWN_FIELD_USAGE = {**COUNTS, "queued_tokens": 3}
+# Each of these litellm rewrites in its own usage: a count it fills with 0, the cache
+# counts it copies under OpenAI's names.
+NO_COMPLETION_COUNT_USAGE = {"prompt_tokens": 10, "total_tokens": 10}
+DEEPSEEK_USAGE = {**COUNTS, "prompt_cache_hit_tokens": 4, "prompt_cache_miss_tokens": 6}
+CACHE_CREATION_USAGE = {**COUNTS, "prompt_tokens_details": {"cache_creation_tokens": 5}}
+ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+RETRY_AFTER_SECONDS = 0.1
+SECRET = "secret-0123456789"
+SERVICE_ACCOUNT = {"type": "service_account", "private_key": SECRET}
 SERVED = "Qwen/Qwen3-8B-2504"
 FINGERPRINT = "fp_3f1c2d"
 THOUGHT = "The user wants OK."
@@ -687,6 +698,10 @@ def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm
         (answering(usage=DETAILED_USAGE), DETAILED_USAGE),
         (answering(usage=OPENAI_USAGE), OPENAI_USAGE),
         (answering(usage=UNKNOWN_FIELD_USAGE), UNKNOWN_FIELD_USAGE),
+        (answering(usage=NO_COMPLETION_COUNT_USAGE), NO_COMPLETION_COUNT_USAGE),
+        (answering(usage=DEEPSEEK_USAGE), DEEPSEEK_USAGE),
+        (answering(usage=CACHE_CREATION_USAGE), CACHE_CREATION_USAGE),
+        (answering(usage=ZERO_USAGE), ZERO_USAGE),
         (ANSWER, None),
     ],
     ids=[
@@ -695,6 +710,10 @@ def test_a_supplied_completion_that_raises_is_recorded_without_sends_or_wait(llm
         "details",
         "openais-cache-write",
         "unknown-field",
+        "a-count-missing",
+        "deepseeks-names",
+        "cache-creation",
+        "zero-counts",
         "no-usage",
     ],
 )
@@ -718,8 +737,9 @@ def test_a_recorded_call_keeps_each_usage_field_the_server_sent_and_no_other(
             (SERVED, FINGERPRINT),
         ),
         (answering(model=SERVED), (SERVED, None)),
+        (ANSWER, (None, None)),
     ],
-    ids=["fingerprinted", "no-fingerprint"],
+    ids=["fingerprinted", "no-fingerprint", "neither"],
 )
 def test_a_recorded_call_names_the_model_and_fingerprint_the_server_answered_with(
     httpserver, run, model, reply, recorded
@@ -753,6 +773,70 @@ def test_a_recorded_call_keeps_the_reasoning_text_the_server_sent(
     assert step.response.get("reasoning") == recorded
 
 
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_a_resent_call_records_the_body_of_the_send_that_answered(
+    httpserver, run, model
+):
+    answers_in_turn(
+        httpserver, RATE_LIMITED, (200, answering(model=SERVED, usage=COUNTS))
+    )
+    ask_server(httpserver, model=model, run=run)
+
+    [step] = run.steps
+    assert (step.sends, step.usage, step.served_model) == (2, COUNTS, SERVED)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_routers_call_records_the_body_its_deployment_answered_with(
+    httpserver, run, router
+):
+    api_base = httpserver.url_for("/v1")
+    routing = router({"model": VLLM, "api_base": api_base, "api_key": "sk-fake"})
+    answers_in_turn(httpserver, (200, answering(model=SERVED, usage=COUNTS)))
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        completion=routing.completion,
+        run=run,
+    )
+
+    [step] = run.steps
+    assert (step.usage, step.served_model) == (COUNTS, SERVED)
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_the_hook_that_reads_the_reply_is_not_sent_and_the_callers_own_still_runs(
+    httpserver, run, model
+):
+    events = []
+    answers_in_turn(httpserver, (200, answering(usage=COUNTS)))
+    ask_server(
+        httpserver,
+        model=model,
+        run=run,
+        logger_fn=lambda details: events.append(details["log_event_type"]),
+    )
+
+    [(request, _)] = httpserver.log
+    assert set(request.get_json()) == {"model", "messages"}
+    assert "post_api_call" in events
+    assert run.steps[0].usage == COUNTS
+
+
+def test_a_supplied_completion_that_hands_over_no_body_records_none(run):
+    reply = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))],
+        usage={"prompt_tokens": 3},
+    )
+    assert ask(lambda **request: reply, run=run) == "ok"
+
+    [step] = run.steps
+    assert (step.error, step.usage, step.served_model, step.fingerprint) == (None,) * 4
+
+
 def test_a_recorded_call_keeps_what_was_sent_but_the_messages_and_the_schema(llm, run):
     extra_body = {"chat_template_kwargs": {"enable_thinking": False}}
     litellm_chat_completion(
@@ -780,27 +864,86 @@ def test_a_recorded_call_keeps_what_was_sent_but_the_messages_and_the_schema(llm
     }
 
 
-def test_the_params_a_call_records_mask_the_key_it_sent(llm, run):
-    ask(llm.replies("ok"), run=run, api_key=PLAIN_KEY)
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@BOTH_PATHS
+def test_each_call_records_what_was_sent_before_litellm_wrote_into_it(
+    httpserver, run, model
+):
+    metadata = {"trace_name": "r3con"}
+    answers_in_turn(httpserver, (200, answering({"content": '{"x": 1}'})))
+    for _ in range(2):
+        ask_server(httpserver, model=model, run=run, schema=Number, metadata=metadata)
+
+    assert [step.params["metadata"] for step in run.steps] == [
+        {"trace_name": "r3con"}
+    ] * 2
+
+
+@pytest.mark.parametrize(
+    ("sent", "recorded"),
+    [
+        ({"extra_body": {"api_key": SECRET}}, {"extra_body": {"api_key": "REDACTED"}}),
+        (
+            {"headers": {"Authorization": f"Bearer {SECRET}"}},
+            {"headers": {"Authorization": "REDACTED"}},
+        ),
+        (
+            {"extra_headers": {"X-Trace": "t1"}},
+            {"extra_headers": {"X-Trace": "REDACTED"}},
+        ),
+        ({"vertex_credentials": SERVICE_ACCOUNT}, {"vertex_credentials": "REDACTED"}),
+        ({"aws_secret_access_key": "short"}, {"aws_secret_access_key": "REDACTED"}),
+        (
+            {"api_base": f"https://user:{SECRET}@gateway.example/v1"},
+            {"api_base": "https://gateway.example/v1"},
+        ),
+        (
+            {"api_base": f"https://gateway.example/v1?key={SECRET}"},
+            {"api_base": "https://gateway.example/v1"},
+        ),
+        ({"api_key": "sk-1234"}, {}),
+        ({"max_tokens": 50}, {"max_tokens": 50}),
+    ],
+    ids=[
+        "nested-in-extra-body",
+        "a-header",
+        "every-extra-header",
+        "a-service-account",
+        "too-short-to-register",
+        "a-password-in-the-api-base",
+        "a-key-in-the-api-base-query",
+        "the-api-key",
+        "a-count-named-like-a-token",
+    ],
+)
+def test_the_params_a_call_records_hold_no_credential(llm, run, sent, recorded):
+    ask(llm.replies("ok"), run=run, **sent)
     run.flush(write_transcript=False)
 
     [call] = json.loads((run.dir / "calls.json").read_text())
-    assert call["params"] == {"model": MODEL, "api_key": "REDACTED"}
+    assert call["params"] == {"model": MODEL, **recorded}
+    assert SECRET not in (run.dir / "calls.json").read_text()
 
 
 @pytest.mark.parametrize("rate_limits", [0, 1], ids=["first-time", "after-a-resend"])
-def test_a_recorded_call_says_how_long_it_took_resends_included(
+def test_a_recorded_call_says_how_long_it_took_resends_and_waits_included(
     llm, monkeypatch, run, rate_limits
 ):
-    errors = [slowly(slowed_down(retry_after="0")) for _ in range(rate_limits)]
+    # r3con's own wait, which the autouse `waits` fixture replaces with a record.
+    monkeypatch.setattr("r3con.runtime.llm._sleep", _sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: low)
+    error = slowed_down(retry_after=str(RETRY_AFTER_SECONDS))
+    errors = [slowly(error) for _ in range(rate_limits)]
     monkeypatch.setattr(litellm, "completion", llm.replies(*errors, slowly("ok")))
 
     litellm_chat_completion(system_prompt="s", user_prompt="u", model=MODEL, run=run)
 
     [step] = run.steps
-    assert (rate_limits + 1) * SLOW_SEND_SECONDS <= step.seconds
+    waited = rate_limits * RETRY_AFTER_SECONDS
+    assert step.resend_wait_seconds == pytest.approx(waited, abs=0.01)
+    assert (rate_limits + 1) * SLOW_SEND_SECONDS + waited <= step.seconds
     assert step.seconds < STOPPED_WITHIN_SECONDS
-    assert step.seconds == round(step.seconds, 2)
+    assert step.seconds == round(step.seconds, _SECONDS_DIGITS)
 
 
 def test_a_call_that_raises_keeps_what_it_sent_and_how_long_it_took(llm, run):
@@ -972,6 +1115,9 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
             "Authorization": "Bearer bearer-token-0123456789",
         },
         "azure_ad_token": "ad-token-0123456789",
+        "extra_body": {"api_key": "nested-key-0123456789"},
+        "headers": {"Authorization": "Bearer headers-token-0123456789"},
+        "api_base": "https://user:url-password-0123@gw.example/v1?key=url-key-0123456789",
         "user": "end-user-0123456789",
         "prompt_cache_key": "summaries-cache-2026",
         "max_tokens": 4096,
@@ -979,9 +1125,10 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     sent = (
         "router-key-0123456789 gateway-from-the-environment tenant-0123456789 "
         "call-key-0123456789 header-0123456789 bearer-token-0123456789 "
-        "ad-token-0123456789"
+        "ad-token-0123456789 nested-key-0123456789 headers-token-0123456789 "
+        "url-password-0123 url-key-0123456789"
     )
     register_credentials(params, routing.completion)
     assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
-        "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
+        "REDACTED " * 11 + "end-user-0123456789 summaries-cache-2026 4096"
     )

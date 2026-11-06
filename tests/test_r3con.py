@@ -29,6 +29,8 @@ from tests.documents import (
 )
 from tests.fakes import (
     ANSWERING_SCHEMA,
+    FINGERPRINT,
+    USAGE,
     citable_lists,
     cited_documents,
     is_later_round,
@@ -66,6 +68,8 @@ NAMES = ["memos/halloran.txt", "memos/merrow.txt", "calder.txt"]
 NAMED_DOCS = dict(zip(NAMES, DOCS, strict=True))
 JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
+# The default config's model, and the model the fake's reply body names.
+MODEL = "openai/gpt-6-luna"
 GPT_4O = "openai/gpt-4o"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
@@ -99,6 +103,26 @@ def finished_run(llm, tmp_path: Path, documents=DOCS, **options) -> Answer:
     ``tmp_path / "logs"``."""
     logs = tmp_path / "logs"
     return run("Who?", documents, completion=llm, logs_dir=logs, **options)
+
+
+def reasoning_calls(folder: Path) -> list[dict[str, Any]]:
+    return json.loads((folder / "reasoning" / "calls.json").read_text())
+
+
+def what_each_call_records(calls: list[dict[str, Any]]) -> set[tuple]:
+    """Each call's kind, what its reply's body said and what was sent, as
+    ``(kind, served_model, fingerprint, usage, model sent, seconds is a number)``."""
+    return {
+        (
+            call["kind"],
+            call["served_model"],
+            call["fingerprint"],
+            json.dumps(call["usage"]),
+            call["params"]["model"],
+            isinstance(call["seconds"], float),
+        )
+        for call in calls
+    }
 
 
 def files_holding(text: str, folder: Path) -> list[str]:
@@ -1047,6 +1071,29 @@ def test_an_ask_over_a_run_recorded_without_its_litellm_model_uses_the_bare_name
     ask(result, "Who else?", completion=answering_llm)
     ran, asked = answering_llm.requests_for("reasoning")
     assert (ran["model"], asked["model"]) == (GPT_4O, "gpt-4o")
+
+
+def test_each_coding_turn_records_its_replys_body_and_what_was_sent(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, reasoning="coding")
+
+    calls = reasoning_calls(result.run_dir)
+    assert what_each_call_records(calls) == {
+        ("turn-1", "gpt-6-luna", FINGERPRINT, json.dumps(USAGE), MODEL, True)
+    }
+
+
+def test_each_call_of_an_ask_records_its_replys_body_and_what_was_sent(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path)
+    ask(result, "Who else?", reasoning="coding", completion=answering_llm)
+
+    [folder] = (result.run_dir / "asks").iterdir()
+    assert what_each_call_records(reasoning_calls(folder)) == {
+        ("turn-1", "gpt-6-luna", FINGERPRINT, json.dumps(USAGE), MODEL, True)
+    }
 
 
 def test_an_ask_reasons_on_the_path_given_instead_of_the_runs(answering_llm, tmp_path):

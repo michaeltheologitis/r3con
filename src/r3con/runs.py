@@ -70,8 +70,10 @@ Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
 ``events.jsonl``, each split's ``error`` in ``splits.json`` and the ``error`` of
 reasoning's ``fallback`` say ``REDACTED`` where a provider echoed a key, as do
 ``manifest.json``'s ``config`` and each call's ``params`` in ``calls.json`` in place of
-a credential among the parameters, an ``api_key`` or an extra header say. Prompts,
-replies and documents are written as they are.
+each credential among the parameters, at any depth (:func:`r3con.masking.masked_params`):
+a header's value, an ``extra_body``'s ``api_key``, a service account; an ``api_base``
+is written without its user, password and query. Prompts, replies and documents are
+written as they are.
 
 Two layers in code:
 
@@ -90,13 +92,16 @@ Each call in ``calls.json`` has:
 
 - ``step``, ``kind``, ``doc`` and ``chunk``, the part index of a document read in
   parts;
-- ``tokens``, ``{prompt, completion, total}``, and ``usage``, the provider's own usage
-  report: each field it sent, such as ``prompt_tokens_details.cached_tokens`` or
-  ``completion_tokens_details.reasoning_tokens``, and none litellm adds (the ``None``
-  it fills into a field the provider did not send, the ``cache_creation_tokens`` it
-  copies from ``cache_write_tokens``), or ``null`` when the reply has none; for a
-  provider whose report litellm rewrites into OpenAI's form, such as Anthropic's,
-  the rewritten one;
+- ``tokens``, litellm's ``{prompt, completion, total}``, and ``usage``, the ``usage``
+  of the reply's body as the provider sent it, such as vLLM's
+  ``prompt_tokens_details.cached_tokens`` or OpenAI's
+  ``completion_tokens_details.reasoning_tokens``, in the provider's own form, an
+  Anthropic reply's ``input_tokens`` say, and without its ``null`` fields, which carry
+  no count (the OpenAI SDK, which reads the body for ``openai/``, adds one for each
+  field the body did not have); ``null`` when the body has none, or when r3con did not
+  see the body: litellm hands it over (:mod:`r3con.runtime.llm`), except to a
+  ``completion=`` that does not pass r3con's ``logger_fn`` on, and for its
+  ``mock_response``;
 - ``usd``, litellm's price for the call, or ``null`` when it cannot price it;
 - ``sends``, the times the request was sent, more than 1 when a temporary error made
   r3con resend it, and ``resend_wait_seconds``, the seconds, to hundredths, waited
@@ -105,12 +110,15 @@ Each call in ``calls.json`` has:
   reply or its error, any resends and the waits before them included;
 - ``finish_reason``, and ``error``, ``null``, or, for a call that raised one, the
   error's class and the first non-empty line of its message, keys masked;
-- ``served_model``, the model the reply says answered (``response.model``), and
-  ``fingerprint``, its ``system_fingerprint``, each ``null`` when the reply has none;
-- ``params``, what r3con handed litellm for the call but its messages: the litellm
-  model string, the sampling and token settings, ``extra_body`` and the like, and the
-  response format by its name, without its schema; ``num_retries=0``, which r3con
-  adds when it resends a call itself, is not listed;
+- ``served_model``, the ``model`` of the reply's body, the model the server says
+  answered, and ``fingerprint``, its ``system_fingerprint``, whatever JSON the server
+  sent, each ``null`` when the body has none or r3con did not see it, as for
+  ``usage``;
+- ``params``, what r3con handed litellm for the call, taken before it was sent, as
+  JSON: the litellm model string, the ``api_base``, the sampling and token settings,
+  ``extra_body`` and the like, and the response format by its name, without its
+  schema; not the messages, the ``api_key``, or the ``num_retries=0`` and
+  ``logger_fn`` r3con adds; each credential masked, as below;
 - ``prompt``, the messages sent, ``reasoning``, the reasoning text the reply carries
   (litellm's ``reasoning_content``, from the provider's ``reasoning_content`` or
   ``reasoning``, its thinking blocks, or a ``<think>`` block litellm moves out of the
@@ -143,7 +151,7 @@ from pydantic import BaseModel
 # same normalized name the run label does.
 from r3con.config import normalize_model_name
 from r3con.logging_setup import get_logger
-from r3con.masking import masked
+from r3con.masking import masked_params
 from r3con.settings import active_logs_dir
 
 _log = get_logger("runs")
@@ -332,8 +340,8 @@ def write_manifest(
     overrides = config_block.get("overrides") or {}
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
-    # Its params may hold a credential, an extra header say, registered at run start.
-    config_block = _masked_values(config_block)
+    # Its params may hold a credential, an extra header say.
+    config_block = masked_params(config_block)
     manifest = {
         "r3con_version": __version__,
         "litellm_version": importlib.metadata.version("litellm"),
@@ -363,18 +371,6 @@ def write_manifest(
     return task_logger.write_json("manifest", manifest)
 
 
-def _masked_values(data: Any) -> Any:
-    """``data`` with each string among its dicts' values and its lists' items masked
-    (:func:`r3con.masking.masked`), so a key JSON would escape is still found."""
-    if isinstance(data, str):
-        return masked(data)
-    if isinstance(data, dict):
-        return {name: _masked_values(value) for name, value in data.items()}
-    if isinstance(data, (list, tuple)):
-        return [_masked_values(item) for item in data]
-    return data
-
-
 def _sources(
     config_name, prompts, stages, resolve_config, resolve_prompt
 ) -> dict[str, Any]:
@@ -400,17 +396,17 @@ class StepRecord:
     kind: str  # "llm_call" | "retry" | "turn-N" | "relevance-r2-d3" | "parse-d0" | ...
     messages: list[dict[str, Any]]
     response: dict[str, Any]  # {"role": ..., "content": ..., "finish_reason": ...}
-    schema: dict[str, Any] | None = None
     # {"prompt": int, "completion": int, "total": int}
     tokens: dict[str, int] | None = None
-    usage: dict[str, Any] | None = None
+    # The provider's JSON, as it sent it: usage, served_model and fingerprint.
+    usage: Any = None
     usd: float | None = None
     sends: int | None = None
     resend_wait_seconds: float | None = None
     seconds: float | None = None
-    served_model: str | None = None
-    fingerprint: str | None = None
-    params: dict[str, Any] | None = None
+    served_model: Any = None
+    fingerprint: Any = None
+    params: Any = None
     error: str | None = None
 
 
@@ -466,16 +462,15 @@ class StageRun:
         kind: str = "llm_call",
         messages: list[dict[str, Any]],
         response: dict[str, Any],
-        schema: dict[str, Any] | None = None,
         tokens: dict[str, int] | None = None,
-        usage: dict[str, Any] | None = None,
+        usage: Any = None,
         usd: float | None = None,
         sends: int | None = None,
         resend_wait_seconds: float | None = None,
         seconds: float | None = None,
-        served_model: str | None = None,
-        fingerprint: str | None = None,
-        params: dict[str, Any] | None = None,
+        served_model: Any = None,
+        fingerprint: Any = None,
+        params: Any = None,
         error: str | None = None,
     ) -> StepRecord:
         """Record one step (thread-safe). Step numbers are assigned under a lock, in
@@ -487,7 +482,6 @@ class StageRun:
                 kind=kind,
                 messages=list(messages),
                 response=dict(response),
-                schema=schema,
                 tokens=tokens,
                 usage=usage,
                 usd=usd,
@@ -547,7 +541,7 @@ class StageRun:
                     "error": s.error,
                     "served_model": s.served_model,
                     "fingerprint": s.fingerprint,
-                    "params": _masked_values(s.params),
+                    "params": s.params,
                     "prompt": s.messages,
                     "reasoning": resp.get("reasoning"),
                     "output": resp.get("content"),

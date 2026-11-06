@@ -25,6 +25,17 @@ those left hold no more than 1,000 values together, and a pattern with a lookaro
 :func:`schema_as_sent` builds the schema as sent, for the request and for the token
 budgets.
 
+**What a call is recorded with.** Each request goes out with a ``logger_fn`` of r3con's
+(:func:`_catch_reply_body`), litellm's per-call logging hook, which sends nothing to the
+provider: litellm hands it each reply's body, so a recorded call's ``usage``,
+``served_model`` and ``fingerprint`` are the provider's own, where litellm's response
+would give its normalized copy. A ``logger_fn`` the caller passes is still called, and a
+supplied ``completion=`` gets r3con's, to pass on to litellm. The parameters recorded
+are those r3con hands litellm, taken before the request is sent
+(:func:`_params_sent`). Each request gets its own copy of each dict and list among the
+caller's ``kwargs`` (:func:`_unshared`): litellm writes into a request's ``metadata``,
+and one dict shared by every call of a run would gather all their writes.
+
 Two helpers ask litellm, not the model: :func:`count_tokens`, offline, and
 :func:`quiet_litellm`, which silences a model lookup. For some local or Hugging Face
 models, litellm's ``get_model_info`` lookup asks a server.
@@ -74,6 +85,7 @@ r3con does not make itself run their course: a supplied ``completion=``'s, such 
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import random
 import re
@@ -90,7 +102,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import is_credential_name, one_line, register_key
+from r3con.masking import credentials_in, masked_params, one_line, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -110,10 +122,10 @@ _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
-# litellm keeps this a copy of cache_write_tokens, OpenAI's name for the same count.
-_LITELLMS_COPY = {"prompt_tokens_details": {"cache_creation_tokens"}}
-# Zero counts and nothing else: litellm's own usage, which no real reply reports.
-_EMPTY_USAGE = litellm.Usage().model_dump(mode="json", exclude_none=True)
+# Not listed in a call's params: the messages are its prompt, and a key tells nothing.
+_UNLISTED_PARAMS = frozenset({"messages", "api_key"})
+_PRE_SEND = "pre_api_call"
+_POST_SEND = "post_api_call"
 
 
 class Cancelled(Exception):
@@ -260,7 +272,7 @@ def litellm_chat_completion_full(
     request: dict[str, Any] = {
         "model": model,
         "messages": request_messages,
-        **kwargs,
+        **_unshared(kwargs),
     }
     if api_base is not None:
         request["api_base"] = api_base
@@ -278,6 +290,8 @@ def litellm_chat_completion_full(
 
     resends: dict[str, Any] = {"sends": None, "resend_wait_seconds": None}
     register_credentials(request, completion)
+    params = _params_sent(request) if run is not None else None
+    reply_body = _catch_reply_body(request)
     raise_if_cancelled(cancel)
     started = time.monotonic()
 
@@ -286,8 +300,7 @@ def litellm_chat_completion_full(
             run.add_step(
                 kind=kind,
                 messages=request_messages,
-                schema=request.get("response_format"),
-                params=_params_sent(request),
+                params=params,
                 seconds=round(time.monotonic() - started, _SECONDS_DIGITS),
                 **resends,
                 **outcome,
@@ -302,13 +315,14 @@ def litellm_chat_completion_full(
         record(response={}, usd=0.0, error=one_line(error))
         raise
 
+    body = reply_body()
     record(
         response=_extract_response_dict(response),
         tokens=_extract_tokens(response),
-        usage=_usage_reported(response),
+        usage=_without_nulls(body.get("usage")),
         usd=_extract_usd(response),
-        served_model=getattr(response, "model", None),
-        fingerprint=getattr(response, "system_fingerprint", None),
+        served_model=body.get("model"),
+        fingerprint=body.get("system_fingerprint"),
     )
     return response
 
@@ -446,15 +460,14 @@ def register_credentials(
     params: Mapping[str, Any], completion: Callable[..., Any] | None = None
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
-    request with ``params`` sends: each value of its ``extra_headers`` and of each
-    parameter with a credential's name (:func:`r3con.masking.is_credential_name`),
-    ``api_key`` among them, and the token alone of a ``<scheme> <token>`` one
+    request with ``params`` sends, at any depth (:func:`r3con.masking.credentials_in`):
+    each header's value, each string with a credential's name
+    (:func:`r3con.masking.is_credential_name`), ``api_key`` among them, the password and
+    key in an ``api_base``, and the token alone of a ``<scheme> <token>`` one
     (``Bearer``, ``Basic``); and when ``completion`` is a ``litellm.Router``'s, the same
     of each of its deployments' ``litellm_params``, where the Router has already read
     an ``os.environ/NAME`` from the environment."""
-    headers = params.get("extra_headers") or {}
-    named = [value for name, value in params.items() if is_credential_name(name)]
-    sent = [value for value in [*headers.values(), *named] if isinstance(value, str)]
+    sent = list(credentials_in(params))
     # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
     schemed = [words for words in map(str.split, sent) if len(words) == 2]
     for value in [*sent, *(token for scheme, token in schemed if scheme.isalpha())]:
@@ -604,35 +617,78 @@ def _extract_response_dict(response: Any) -> dict[str, Any]:
     return {**reply, "reasoning": reasoning} if reasoning else reply
 
 
-def _usage_reported(response: Any) -> dict[str, Any] | None:
-    """The usage report the provider sent with ``response``, as litellm passes it on,
-    or ``None`` without one.
+def _catch_reply_body(request: dict[str, Any]) -> Callable[[], dict[str, Any]]:
+    """Give ``request`` a ``logger_fn`` that keeps its reply's body, and return the
+    function that reads it once the call is back: the body's JSON, or ``{}`` when
+    litellm handed over none, as for a ``completion=`` that does not pass
+    ``logger_fn`` on to litellm.
 
-    litellm keeps no copy of the provider's JSON on the response, so this is litellm's
-    usage without what litellm adds: the ``None`` it fills into each field the provider
-    did not send, the ``cache_creation_tokens`` it copies from ``cache_write_tokens``,
-    and the empty usage, zero counts, it starts each response with and keeps for a
-    reply without one. A field the provider did not send is not there, and one it
-    sent, a ``cached_tokens`` of 0 say, is."""
-    usage = getattr(response, "usage", None)
-    if usage is None:
-        return None
-    reported = usage.model_dump(mode="json", exclude_none=True, exclude=_LITELLMS_COPY)
-    return None if reported == _EMPTY_USAGE else reported
+    litellm calls ``logger_fn`` before each send and, after it, with what the provider
+    answered: the body as it came for ``hosted_vllm/``, the OpenAI SDK's reading of it
+    for ``openai/``, which adds ``None`` for each field the body did not have. So the
+    body kept is the first one after the last send. A ``logger_fn`` the caller passes
+    is still called."""
+    caught: dict[str, Any] = {}
+    theirs = request.get("logger_fn")
+
+    def logger_fn(details: dict[str, Any]) -> None:
+        event = details.get("log_event_type")
+        if event == _PRE_SEND:
+            caught.clear()
+        elif event == _POST_SEND:
+            caught.setdefault("body", details.get("original_response"))
+        if theirs is not None:
+            theirs(details)
+
+    def body() -> dict[str, Any]:
+        text = caught.get("body")
+        if not isinstance(text, str):
+            return {}
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
+
+    request["logger_fn"] = logger_fn
+    return body
 
 
-def _params_sent(request: Mapping[str, Any]) -> dict[str, Any]:
-    """What r3con hands litellm for ``request``, but its messages, and its response
-    format's schema, which can run to many thousand characters: its name stays."""
-    params = {name: value for name, value in request.items() if name != "messages"}
+def _unshared(value: Any) -> Any:
+    """``value`` with each dict and list in it copied, and all else as it is: litellm
+    writes into a request's ``metadata``, and one dict of the caller's would gather
+    every call's writes."""
+    if isinstance(value, dict):
+        return {name: _unshared(item) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_unshared(item) for item in value]
+    return value
+
+
+def _without_nulls(value: Any) -> Any:
+    """``value`` without the ``None`` among its dicts' values, at any depth: what the
+    OpenAI SDK adds for each field a body did not have."""
+    if not isinstance(value, dict):
+        return value
+    return {
+        name: _without_nulls(item) for name, item in value.items() if item is not None
+    }
+
+
+def _params_sent(request: Mapping[str, Any]) -> Any:
+    """What r3con hands litellm for ``request``, as JSON taken before it is sent:
+    without its messages, its ``api_key`` or its response format's schema, which can
+    run to many thousand characters (its name stays), and with each credential masked
+    (:func:`r3con.masking.masked_params`)."""
+    listed = {
+        name: value for name, value in request.items() if name not in _UNLISTED_PARAMS
+    }
+    params = json.loads(json.dumps(listed, default=str))
     response_format = params.get("response_format")
-    if not isinstance(response_format, dict):
-        return params
-    json_schema = response_format.get("json_schema")
-    if isinstance(json_schema, dict):
-        named = {name: value for name, value in json_schema.items() if name != "schema"}
-        params["response_format"] = {**response_format, "json_schema": named}
-    return params
+    if isinstance(response_format, dict):
+        json_schema = response_format.get("json_schema")
+        if isinstance(json_schema, dict):
+            json_schema.pop("schema", None)
+    return masked_params(params)
 
 
 def _extract_usd(response: Any) -> float | None:

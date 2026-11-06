@@ -5,21 +5,23 @@ A provider may echo the key it was sent in its error, and litellm passes the tex
 it as the provider sent it, and every traceback holds it through the chained SDK error.
 So each error r3con writes (``calls.json``'s ``error``, ``error.txt``, the ``error`` of
 ``run_failed`` and ``ask_failed``, ``splits.json``, reasoning's ``fallback``) goes
-through :func:`masked` or :func:`one_line` first, as do the run's ``params`` in
-``manifest.json``, each call's ``params`` in ``calls.json`` and every record an r3con
-logger logs (:func:`r3con.logging_setup.get_logger`). Prompts, replies and documents
-are data, and are written as they are: a document may well say ``api_key=…``.
+through :func:`masked` or :func:`one_line` first, as does every record an r3con logger
+logs (:func:`r3con.logging_setup.get_logger`). The parameters r3con writes, the
+``config`` in ``manifest.json`` and each call's ``params`` in ``calls.json``, go
+through :func:`masked_params`, which also masks a credential by its name, so one too
+short to register is masked too. Prompts, replies and documents are data, and are
+written as they are: a document may well say ``api_key=…``.
 
 :func:`masked` replaces each known key with ``REDACTED``, the longest first, and nothing
 else, so it never garbles a path or a name that merely looks like a key. The known keys
 are:
 
 - every key registered with :func:`register_key`, which r3con does for each credential
-  it sends (:func:`r3con.runtime.llm.register_credentials`): a call's ``api_key``, the
-  values of ``extra_headers`` and of any parameter with a credential's name
-  (:func:`is_credential_name`), and the keys of a ``litellm.Router`` whose
-  ``.completion`` is the run's ``completion``. A ``completion`` wrapper that adds a key
-  of its own must register it;
+  it sends (:func:`r3con.runtime.llm.register_credentials`), at any depth of its
+  parameters: a call's ``api_key``, each string with a credential's name
+  (:func:`is_credential_name`), each header's value, the password and key in an
+  ``api_base``, and the keys of a ``litellm.Router`` whose ``.completion`` is the run's
+  ``completion``. A ``completion`` wrapper that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
   a provider's key, unless it holds whitespace or starts with ``/`` or ``~``, as a path
   does (``GOOGLE_APPLICATION_CREDENTIALS``), or is shorter than
@@ -35,8 +37,9 @@ from __future__ import annotations
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 
@@ -50,6 +53,10 @@ _CREDENTIAL_NAME = re.compile(
     "api_?key$|token|secret|password|credential|auth", re.IGNORECASE
 )
 _PATH_STARTS = ("/", "~")
+_HEADERS = frozenset({"headers", "extra_headers"})
+_URLS = frozenset({"api_base", "base_url"})
+# The query parameter Google's APIs read a key from, as in "?key=...".
+_QUERY_KEY = "key"
 _registered: set[str] = set()
 _lock = threading.Lock()
 
@@ -72,10 +79,85 @@ def is_credential_name(name: str) -> bool:
 
 def masked(text: str) -> str:
     """``text`` with each known key replaced by ``REDACTED``."""
+    return _replaced(text, _known_keys())
+
+
+def masked_params(params: Any) -> Any:
+    """``params``, a request's parameters as JSON, with each credential in it replaced
+    by ``REDACTED``, at any depth: the string, list or dict a name says is a credential
+    holds (:func:`is_credential_name`; a number under one, ``max_tokens`` say, is
+    kept), each header's value (``headers``, ``extra_headers``), and each known key in
+    any other string, as :func:`masked` does, the keys read once. An ``api_base`` or a
+    ``base_url`` is written without its user, password, query or fragment."""
+    return _redacted(params, _known_keys())
+
+
+def credentials_in(params: Any, name: str = "") -> Iterator[str]:
+    """Each string a request sends as a credential in ``params``, its parameters, at
+    any depth: each string with a credential's name (:func:`is_credential_name`), each
+    header's value, and the password and the key (``key`` or a credential's name) in
+    the query of an ``api_base`` or ``base_url``. A dict under a credential's name, a
+    service account's say, is left to :func:`masked_params`: its strings include names
+    that are not keys."""
+    if isinstance(params, str):
+        if is_credential_name(name):
+            yield params
+        elif name in _URLS:
+            yield from _url_secrets(params)
+    elif isinstance(params, Mapping):
+        for key, value in params.items():
+            header = name in _HEADERS and isinstance(value, str)
+            yield from [value] if header else credentials_in(value, str(key))
+    elif isinstance(params, (list, tuple)):
+        for value in params:
+            yield from credentials_in(value, name)
+
+
+def _redacted(value: Any, known: list[str], name: str = "") -> Any:
+    if is_credential_name(name) and isinstance(value, (str, dict, list)):
+        return _MASK
+    if name in _HEADERS and isinstance(value, dict):
+        return dict.fromkeys(value, _MASK)
+    if isinstance(value, dict):
+        return {key: _redacted(item, known, str(key)) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redacted(item, known, name) for item in value]
+    if isinstance(value, str):
+        return _replaced(_bare_url(value) if name in _URLS else value, known)
+    return value
+
+
+def _bare_url(url: str) -> str:
+    """``url`` without its user, password, query or fragment."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return _MASK
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _url_secrets(url: str) -> list[str]:
+    try:
+        parts = urlsplit(url)
+        password = parts.password
+    except ValueError:
+        return []
+    query = parse_qsl(parts.query)
+    keys = [v for k, v in query if k == _QUERY_KEY or is_credential_name(k)]
+    return [secret for secret in [password, *keys] if secret]
+
+
+def _known_keys() -> list[str]:
+    """Every key :func:`masked` masks, the longest first."""
     known = set(_environment_secrets())
     with _lock:
         known |= _registered
-    for key in sorted(known, key=len, reverse=True):
+    return sorted(known, key=len, reverse=True)
+
+
+def _replaced(text: str, keys: list[str]) -> str:
+    for key in keys:
         text = text.replace(key, _MASK)
     return text
 

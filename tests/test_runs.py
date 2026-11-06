@@ -219,47 +219,19 @@ def test_each_call_records_how_often_it_was_sent_and_how_long_it_waited(logger):
     assert recorded == [(3, 2.5), (None, None)]
 
 
-def test_each_call_records_what_its_reply_says_of_itself(logger):
+def test_each_call_records_its_reply_what_was_sent_and_how_long_it_took(logger):
     run = StageRun(stage="relevance", task_logger=logger)
-    run.add_step(
-        messages=[],
-        response={**reply("a"), "reasoning": THOUGHT},
-        tokens=TOKENS,
-        usage=USAGE,
-        served_model="gpt-6-luna-2026-09-01",
-        fingerprint="fp_3f1c2d",
-    )
+    sent = {"params": {"model": MODEL, "temperature": 0.3}, "seconds": 1.25}
+    said = {"usage": USAGE, "served_model": "gpt-6-luna", "fingerprint": "fp_3f1c2d"}
+    response = {**reply("a"), "reasoning": THOUGHT}
+    run.add_step(messages=[], response=response, tokens=TOKENS, **sent, **said)
+    run.add_step(messages=[], response={}, usd=0.0, error=ERROR_LINE, **sent)
     run.flush(write_transcript=False)
-    [call] = json.loads((run.dir / "calls.json").read_text())
-    assert call["tokens"] == TOKENS
-    assert call["usage"] == USAGE
-    assert (call["served_model"], call["fingerprint"]) == (
-        "gpt-6-luna-2026-09-01",
-        "fp_3f1c2d",
-    )
-    assert (call["reasoning"], call["output"]) == (THOUGHT, "a")
-
-
-def test_each_call_records_what_was_sent_and_how_long_it_took(logger):
-    run = StageRun(stage="relevance", task_logger=logger)
-    params = {"model": MODEL, "temperature": 0.3}
-    run.add_step(messages=[], response=reply(), params=params, seconds=1.25)
-    run.flush(write_transcript=False)
-    [call] = json.loads((run.dir / "calls.json").read_text())
-    assert (call["params"], call["seconds"]) == (params, 1.25)
-
-
-def test_a_call_that_raised_records_nothing_of_a_reply_but_what_it_sent(logger):
-    run = StageRun(stage="relevance", task_logger=logger)
-    params = {"model": MODEL}
-    run.add_step(
-        messages=[], response={}, usd=0.0, params=params, seconds=0.5, error=ERROR_LINE
-    )
-    run.flush(write_transcript=False)
-    [call] = json.loads((run.dir / "calls.json").read_text())
-    reply_fields = ("tokens", "usage", "served_model", "fingerprint", "reasoning")
-    assert [call[field] for field in reply_fields] == [None] * len(reply_fields)
-    assert (call["params"], call["seconds"]) == (params, 0.5)
+    answered, failed = json.loads((run.dir / "calls.json").read_text())
+    recorded = {"reasoning": THOUGHT, "output": "a", "tokens": TOKENS, **sent, **said}
+    assert {field: answered[field] for field in recorded} == recorded
+    nothing = dict.fromkeys(["reasoning", "output", "tokens", *said])
+    assert {field: failed[field] for field in [*nothing, *sent]} == {**nothing, **sent}
 
 
 def test_a_transcripts_last_reply_shows_its_reasoning(logger):
@@ -407,6 +379,30 @@ def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
         "extra_headers": {"x-gateway-auth": "REDACTED"},
         "temperature": 0.3,
     }
+
+
+@pytest.mark.parametrize(
+    ("params", "recorded"),
+    [
+        ({"extra_body": {"api_key": "sk-1"}}, {"extra_body": {"api_key": "REDACTED"}}),
+        (
+            {"headers": {"Authorization": "x"}},
+            {"headers": {"Authorization": "REDACTED"}},
+        ),
+        (
+            {"vertex_credentials": {"private_key": "-----BEGIN PRIVATE KEY-----"}},
+            {"vertex_credentials": "REDACTED"},
+        ),
+        ({"max_tokens": 50}, {"max_tokens": 50}),
+    ],
+    ids=["nested-in-extra-body", "a-header", "a-service-account", "a-count"],
+)
+def test_the_manifest_masks_a_credential_among_the_runs_params_by_its_name(
+    logger, params, recorded
+):
+    write_manifest(logger, task="q", config=config(params=params), n_docs=1)
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == recorded
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):
