@@ -272,9 +272,8 @@ p { margin: 0; }
 }
 .trash[hidden] + .panel-hint { left: 1.5ch; }
 .panel-hint .remove-all { pointer-events: auto; }
-/* The can lights with remove all beside it, and asks with it. */
+/* The can lights with remove all, or undo, beside it. */
 .trash:has(+ .panel-hint .remove-all:is(:hover, :focus-visible)) { color: var(--fg); }
-.trash:has(+ .panel-hint .remove-all.asking) { color: var(--err); }
 .panel-tools {
   position: absolute;
   left: 1.5ch;
@@ -548,11 +547,9 @@ mark[title] { cursor: help; }
   gap: 0.9em;
 }
 /* Remove all ends the line, over each file's remove, or goes under it whole when the line is full. */
-.files-head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
-.files-head .remove-all { margin-left: auto; }
+.files-top { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
+.files-top .remove-all { margin-left: auto; }
 .remove-all { min-height: 24px; }
-/* --accent-ink falls short of 4.5:1 on the panel's fill; a press that removes everything asks in --err. */
-.remove-all.asking { color: var(--err); }
 .file-list { list-style: none; margin: 0; padding: 0; }
 .file-list li { display: flex; align-items: baseline; gap: 2ch; }
 .file-list button { min-height: 24px; }

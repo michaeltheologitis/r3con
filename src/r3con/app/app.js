@@ -101,6 +101,7 @@
    * @typedef {object} Tab
    * @property {number} id
    * @property {LoadedFile[]} files
+   * @property {LoadedFile[] | null} removed the files remove all took, while undo can put them back
    * @property {string} filesSaid
    * @property {string} filesError
    * @property {string} draft
@@ -748,8 +749,6 @@
   const MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS;
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
-  // How long remove all waits for the second press that confirms it.
-  const CONFIRM_MS = 4000;
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
@@ -906,6 +905,7 @@
     const tab = {
       id,
       files,
+      removed: null,
       filesSaid: '',
       filesError: '',
       draft: '',
@@ -2521,26 +2521,17 @@
     $('replay-btn').hidden = live || !state.shown.run;
   }
 
+  // Remove all is offered where the can is. Once it has emptied the tab, undo takes its place, beside the can and the count.
   function updateHint() {
-    const { run, files } = state.shown;
+    const { run, files, removed } = state.shown;
+    const count = plural((removed ?? files).length, 'document');
     $('panel-hint').hidden = Boolean(run);
-    $('panel-hint-text').textContent = files.length ? `${fileCount()} · ` : ADD_FILES;
-    trash.hidden = Boolean(run) || !files.length;
-    offerRemoveAll();
-  }
-
-  // Set while remove all waits for the second press that confirms it.
-  let confirmTimer = 0;
-
-  // Remove all is offered where the can is. A first press only asks: both buttons ask until a second press, or CONFIRM_MS.
-  function offerRemoveAll(asking = false) {
-    clearTimeout(confirmTimer);
-    confirmTimer = asking ? setTimeout(offerRemoveAll, CONFIRM_MS) : 0;
+    $('panel-hint-text').textContent = removed ? `${count} removed · ` : files.length ? `${count} · ` : ADD_FILES;
+    trash.hidden = Boolean(run) || !(removed || files.length);
     for (const button of removeAllButtons) {
       button.hidden = trash.hidden;
-      button.textContent = asking ? 'remove all?' : 'remove all';
-      button.ariaLabel = button.title = asking ? `remove all ${fileCount()}? press again to confirm` : 'remove all documents';
-      button.classList.toggle('asking', asking);
+      button.textContent = removed ? 'undo' : 'remove all';
+      button.ariaLabel = button.title = removed ? `undo remove all (${count})` : 'remove all documents';
     }
   }
 
@@ -2987,11 +2978,12 @@
   /** @param {string} question */
   function startRun(question) {
     const from = state.shown;
+    const at = docPositions(from);
     const opened = from.run ? copyTab(from) : from;
     const tab = Object.assign(opened, { run: { ...mode.newRun(question, opened.files), lit: null }, turn: addTurn(opened, question) });
     if (tab === from) renderFiles();
     else showTabContents(tab);
-    playRun(tab);
+    playRun(tab, at);
     revealTab(tab);
   }
 
@@ -3084,12 +3076,9 @@
     return tab;
   }
 
-  // Lists a new tab with `from`'s files and none of its work, their nodes where `from` has them.
   /** @param {Tab} from */
   function copyTab(from) {
-    const tab = openTab(newTab(from.files, from.view));
-    syncDocNodes(tab, { at: docPositions(from) });
-    return tab;
+    return openTab(newTab(from.files, from.view));
   }
 
   function updateTabs() {
@@ -3361,10 +3350,11 @@
     const picked = pickFiles(files);
     if (tab.run) return addFilesError(tab, notAdded([...failed, ...picked.map((f) => f.name)], RAN_FIRST) || RAN_FIRST);
     if (!picked.length && !failed.length) return addFilesError(tab, skipped ? noDocuments(skipped) : 'No files found there. Try picking the files themselves.');
-    const kept = tab.files.filter((f) => !f.sample);
+    // Read again after each wait, as files can be removed while a batch is read.
+    const kept = () => tab.files.filter((f) => !f.sample);
     /** @type {LoadedFile[]} */
     const read = [];
-    const room = () => MAX_FILES - kept.length - read.length;
+    const room = () => MAX_FILES - kept().length - read.length;
     /** @type {Map<string, string[]>} */
     const refused = new Map(failed.length ? [[BROWSER_COULD_NOT_READ, failed]] : []);
     /** @param {string} why @param {string} name */
@@ -3398,8 +3388,9 @@
       return;
     }
     // Files added over the sample memos take the place of any that are left.
-    const replaced = tab.files.length - kept.length;
-    tab.files = [...kept, ...read];
+    const left = kept();
+    const replaced = tab.files.length - left.length;
+    tab.files = [...left, ...read];
     const added = `${plural(read.length, 'file')} added`;
     const said = replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added;
     filesChanged(tab, skipped ? `${said}; ${skipped} skipped` : said);
@@ -3408,32 +3399,33 @@
   // The re-render drops the clicked button, and the focus with it.
   /** @param {LoadedFile} file @param {{ refocus?: boolean }} [options] */
   function removeFile(file, { refocus = true } = {}) {
-    const i = state.shown.files.indexOf(file);
-    removeFiles([file], `Removed ${file.name}`);
+    const { files } = state.shown;
+    const i = files.indexOf(file);
+    changeFiles(files.filter((f) => f !== file), `Removed ${file.name}`);
     if (!refocus) return;
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
   }
 
-  // Every file of the shown tab, on a second press; `then` takes the focus from the pressed button, gone with them.
-  /** @param {HTMLElement} then */
-  function removeAllFiles(then) {
-    if (!confirmTimer) return offerRemoveAll(true);
-    removeFiles(state.shown.files, `Removed ${plural(state.shown.files.length, 'file')}`);
-    then.focus({ preventScroll: true });
+  function removeAllOrUndo() {
+    const { files, removed } = state.shown;
+    if (removed) changeFiles(removed, `Restored ${plural(removed.length, 'document')}`);
+    else changeFiles([], `Removed ${fileCount()}`, files);
   }
 
-  /** @param {LoadedFile[]} gone @param {string} what */
-  function removeFiles(gone, what) {
+  /** @param {LoadedFile[]} files @param {string} what @param {LoadedFile[] | null} [removed] */
+  function changeFiles(files, what, removed = null) {
     const tab = state.shown;
-    tab.files = tab.files.filter((f) => !gone.includes(f));
+    tab.files = files;
     tellFiles(tab, { filesError: '' });
-    filesChanged(tab, what);
+    filesChanged(tab, what, removed);
   }
 
-  /** @param {Tab} tab @param {string} what */
-  function filesChanged(tab, what) {
+  // Undo stays only until the tab's files change some other way.
+  /** @param {Tab} tab @param {string} what @param {LoadedFile[] | null} [removed] */
+  function filesChanged(tab, what, removed = null) {
+    tab.removed = removed;
     // Rendered again for another tab's files, the pane would close the shown tab's open file, and drop the focus.
     if (tab === state.shown) {
       closeFile();
@@ -3947,7 +3939,7 @@
   function onPointerDown(e) {
     const { view } = state.shown;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (targetOf(e).closest('.inspector, .panel-tools, .panel-hint')) return;
+    if (targetOf(e).closest('.inspector, .panel-tools, .remove-all')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
@@ -4214,20 +4206,23 @@
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(runTab(state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
-    // A new tab copies the shown tab's files, ready for another question; with none, it opens on adding them.
     $('new-tab-btn').addEventListener('click', () => {
-      const tab = copyTab(state.shown);
+      const from = state.shown;
+      const tab = copyTab(from);
+      syncDocNodes(tab, { at: docPositions(from) });
       switchTab(tab);
       if (tab.files.length) {
         showTab('chat');
         questionEl.focus();
-        return;
+      } else {
+        showTab('files');
+        tab.button.focus();
       }
-      showTab('files');
-      tab.button.focus();
     });
-    $('files-remove-all').addEventListener('click', () => removeAllFiles($('file-input')));
-    $('panel-remove-all').addEventListener('click', () => removeAllFiles(panel));
+    for (const button of removeAllButtons) {
+      // The second click of a double-click would undo what the first did.
+      button.addEventListener('click', (e) => e.detail < 2 && removeAllOrUndo());
+    }
     $('chat-pane').addEventListener('click', onChatClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
