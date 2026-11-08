@@ -3,11 +3,12 @@ import json
 import re
 import threading
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 import litellm
-from litellm.exceptions import ContextWindowExceededError
+from litellm.exceptions import AuthenticationError, ContextWindowExceededError
 
 _completion = litellm.completion
 
@@ -44,6 +45,12 @@ class Parse(BaseModel):
 PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
 GATE_TIMEOUT_SECONDS = 10
 UNSCRIPTED_SHOWN_CHARS = 200
+TWO_LINE_MEMOS = {
+    "q3/halloran.txt": "Halloran memo\nThe Halloran memo logs two sites.",
+    "q3/merrow.txt": "Merrow memo\nThe Merrow memo logs two sites.",
+    "calder.pdf": "Calder memo\nThe Calder memo logs two sites.",
+}
+"""Three memos of two lines each, by name."""
 
 
 class UnscriptedRequest(AssertionError):
@@ -257,4 +264,97 @@ def too_long(limit: int, size: int, model: str) -> ContextWindowExceededError:
         ),
         model=model,
         llm_provider="hosted_vllm",
+    )
+
+
+def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
+    pins."""
+    return {key: value for key, value in provenance.items() if key != "trail"}
+
+
+def quote(text: str, start: int | None, end: int | None, match: str | None) -> dict:
+    """A snippet's quote of ``text``, found from ``start`` to ``end`` by ``match``."""
+    return {"text": text, "start": start, "end": end, "match": match, "score": None}
+
+
+def memo_line(document_ids: Sequence[str], i: int, k: int) -> dict[str, Any]:
+    """Line ``k`` of the ``i``-th of ``TWO_LINE_MEMOS``, as a quote behind an answer
+    over them, ``document_ids`` giving each memo's id."""
+    name, memo = list(TWO_LINE_MEMOS.items())[i]
+    text = memo.splitlines()[k]
+    start = memo.index(text)
+    return {
+        "document": document_ids[i],
+        "name": name,
+        "start": start,
+        "end": start + len(text),
+        "text": text,
+    }
+
+
+def quoting_a_line_a_round(
+    shown_ids: Callable[[Request], list[str]],
+) -> Callable[[Request], Content]:
+    """A relevance reply quoting the document's first line in round 1 and its second
+    later, then citing the first id shown."""
+
+    def reply(request: Request) -> Content:
+        first, second = request["messages"][1]["content"].splitlines()
+        if not is_later_round(request):
+            return {"summary": f"Notes on {first}.", "quotes": [first]}
+        cites = shown_ids(request)[:1]
+        return {
+            "summary": f"Notes on {first}.",
+            "quotes": [second],
+            "provenance_ids": cites,
+        }
+
+    return reply
+
+
+def citing(
+    answer: str, summaries: slice = slice(0), parses: slice = slice(0)
+) -> Callable[[Request], Content]:
+    """A direct reasoning reply of ``answer`` citing the ``summaries`` and the
+    ``parses`` of the ids its schema lists, none by default."""
+
+    def reply(request: Request) -> Content:
+        lists = citable_lists(request)
+
+        def listed(view: str) -> list[str]:
+            return lists[view]["items"].get("enum", [])
+
+        return {
+            "answer": answer,
+            "provenance_ids": {
+                "summary_ids": listed("summary_ids")[summaries],
+                "parse_ids": listed("parse_ids")[parses],
+            },
+        }
+
+    return reply
+
+
+def in_json(name: str, change: Callable[[Any], None]) -> Callable[[Path], None]:
+    """Rewrites the JSON file ``name`` of a run folder after ``change``."""
+
+    def rewrite(run_dir: Path) -> None:
+        data = json.loads((run_dir / name).read_text())
+        change(data)
+        (run_dir / name).write_text(json.dumps(data))
+
+    return rewrite
+
+
+def snippets_without_quotes(result: dict) -> None:
+    """As r3context 0.6.4 wrote them."""
+    for round_ in result["rounds"]:
+        for snippet in round_["snippets"]:
+            del snippet["quotes"]
+
+
+def bad_key() -> AuthenticationError:
+    return AuthenticationError(
+        message="bad key", llm_provider="openai", model="gpt-6-luna"
     )

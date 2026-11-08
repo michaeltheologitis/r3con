@@ -38,7 +38,7 @@ THREE_DOCUMENTS = {
     "source_docs": {"rows": [0, 1]},
     "document_ids": IDS[:3],
 }
-NO_IDS = {"summary_ids": [], "parse_ids": [], "quotes": []}
+NO_IDS = {"summary_ids": [], "parse_ids": []}
 EMPTY_ANSWER = {"answer": " \n", "provenance_ids": NO_IDS}
 KEYS_WARNING = (
     "coding: provenance_ids must map summary_ids and parse_ids to lists of ids; got "
@@ -138,7 +138,7 @@ def test_on_the_direct_path_one_call_answers_from_the_direct_prompt(
     reply = {"answer": "  Site 099 logged nothing unusual.\n", "provenance_ids": NO_IDS}
     result = ask(llm, reply)
     assert result.answer == "Site 099 logged nothing unusual."
-    assert result.provenance == NO_IDS
+    assert result.citations == NO_IDS
     assert (result.path, result.fallback) == ("direct", None)
     assert (result.turns, result.terminated_by) == ((), "reply")
     [request] = llm.requests
@@ -169,10 +169,10 @@ def test_the_direct_reply_cites_from_an_enum_of_summaries_and_one_of_parses_show
 
 @PATHS
 def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
-    caplog.set_level(logging.WARNING, logger="r3con.provenance")
+    caplog.set_level(logging.WARNING, logger="r3con.citing")
     cited = [IDS[1], f"{IDS[2]}.2"]
     result = cite(llm, path, citing(path, summary_ids=cited), documents=THREE_DOCUMENTS)
-    assert result.provenance == {**NO_IDS, "summary_ids": [f"{IDS[2]}.2"]}
+    assert result.citations == {**NO_IDS, "summary_ids": [f"{IDS[2]}.2"]}
     assert caplog.messages == [
         (
             f"{path} summary_ids: dropped provenance id(s) the call did not show: "
@@ -186,10 +186,10 @@ def test_an_empty_summary_cannot_be_cited(llm, caplog, path):
 
 @PATHS
 def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, path):
-    caplog.set_level(logging.WARNING, logger="r3con.provenance")
+    caplog.set_level(logging.WARNING, logger="r3con.citing")
     cited = [IDS[2], IDS[1]]
     result = cite(llm, path, citing(path, parse_ids=cited), documents=THREE_DOCUMENTS)
-    assert result.provenance == {**NO_IDS, "parse_ids": [IDS[1]]}
+    assert result.citations == {**NO_IDS, "parse_ids": [IDS[1]]}
     assert caplog.messages == [
         (
             f"{path} parse_ids: dropped provenance id(s) the call did not show: "
@@ -204,11 +204,11 @@ def test_a_document_with_no_records_cannot_be_cited_for_the_parse(llm, caplog, p
 def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropped(
     llm, caplog, path
 ):
-    caplog.set_level(logging.WARNING, logger="r3con.provenance")
+    caplog.set_level(logging.WARNING, logger="r3con.citing")
     unstamped = {"parsed": {"rows": [{"who": "Halloran"}]}, "document_ids": IDS[:1]}
     reply = citing(path, summary_ids=[IDS[0]], parse_ids=[IDS[0]])
     result = cite(llm, path, reply, documents=unstamped)
-    assert result.provenance == NO_IDS
+    assert result.citations == NO_IDS
     assert caplog.messages == [
         f"{path} {key}: dropped provenance id(s) the call did not show: ['{IDS[0]}']"
         for key in ("summary_ids", "parse_ids")
@@ -232,7 +232,7 @@ def test_with_nothing_to_cite_each_list_is_any_strings_and_all_it_holds_is_dropp
 )
 def test_a_direct_reply_without_provenance_ids_cites_nothing(llm, reply):
     result = ask(llm, reply)
-    assert (result.answer, result.provenance, result.path) == (
+    assert (result.answer, result.citations, result.path) == (
         "Halloran.",
         NO_IDS,
         "direct",
@@ -243,7 +243,7 @@ def test_a_direct_reply_without_provenance_ids_cites_nothing(llm, reply):
 def test_a_commit_without_provenance_ids_cites_nothing(llm, caplog):
     caplog.set_level(logging.WARNING, logger="r3con")
     result = cite(llm, "coding", committing(""))
-    assert (result.answer, result.provenance) == ("ok", NO_IDS)
+    assert (result.answer, result.citations) == ("ok", NO_IDS)
     assert caplog.messages == []
 
 
@@ -262,7 +262,7 @@ def test_provenance_ids_that_are_not_lists_of_ids_by_view_cite_nothing_with_a_wa
 ):
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     result = cite(llm, "coding", committing(f", provenance_ids={given!r}"))
-    assert (result.answer, result.provenance) == ("ok", NO_IDS)
+    assert (result.answer, result.citations) == ("ok", NO_IDS)
     assert caplog.messages == [KEYS_WARNING.format(given)]
 
 
@@ -270,14 +270,14 @@ def test_a_missing_list_cites_nothing_and_an_unknown_key_is_ignored(llm, caplog)
     caplog.set_level(logging.WARNING, logger="r3con.reasoning")
     given = {"summary_ids": [IDS[0]], "documents": [IDS[1]]}
     result = cite(llm, "coding", committing(f", provenance_ids={given!r}"))
-    assert result.provenance == {**NO_IDS, "summary_ids": [IDS[0]]}
+    assert result.citations == {**NO_IDS, "summary_ids": [IDS[0]]}
     assert caplog.messages == []
 
 
 def test_a_commit_may_pass_its_provenance_ids_second_by_position(llm):
     given = {"summary_ids": [IDS[0]], "parse_ids": [IDS[1]]}
     result = cite(llm, "coding", committing(f", {given!r}"))
-    assert (result.answer, result.provenance) == ("ok", {**given, "quotes": []})
+    assert (result.answer, result.citations) == ("ok", given)
 
 
 def test_a_coding_v2_commit_still_answers_and_its_provenance_list_cites_nothing(
@@ -288,7 +288,7 @@ def test_a_coding_v2_commit_still_answers_and_its_provenance_list_cites_nothing(
     v2_style = committing(f", provenance=[{IDS[0]!r}]")
     result = cite(llm, "coding", v2_style, prompts=prompts)
     assert (result.answer, result.terminated_by) == ("ok", "final_answer")
-    assert result.provenance == NO_IDS
+    assert result.citations == NO_IDS
     assert "final_answer(answer, provenance=[...])" in first_turn_prompts(llm)[0]
     assert caplog.messages == [
         (
@@ -396,9 +396,9 @@ def test_fewer_than_one_attempt_is_refused_before_any_request(llm):
 def test_only_the_shown_ids_are_kept_in_order_once_each(
     llm, caplog, path, summary_ids, parse_ids, kept, dropped
 ):
-    caplog.set_level(logging.WARNING, logger="r3con.provenance")
+    caplog.set_level(logging.WARNING, logger="r3con.citing")
     result = cite(llm, path, citing(path, summary_ids, parse_ids))
-    assert result.provenance == {**NO_IDS, "summary_ids": kept[0], "parse_ids": kept[1]}
+    assert result.citations == {**NO_IDS, "summary_ids": kept[0], "parse_ids": kept[1]}
     assert caplog.messages == [
         f"{path} {key}: dropped provenance id(s) the call did not show: {ids}"
         for key, ids in zip(("summary_ids", "parse_ids"), dropped, strict=True)
@@ -433,7 +433,7 @@ def test_records_from_a_document_without_an_id_are_refused_before_any_request(
 
 def test_a_coding_answer_at_the_turn_cap_cites_nothing(llm):
     result = ask(llm, PRINTS, "The answer is ok.", path="coding", max_turns=1)
-    assert (result.provenance, result.terminated_by) == (NO_IDS, "max_turns")
+    assert (result.citations, result.terminated_by) == (NO_IDS, "max_turns")
 
 
 @PATHS
@@ -512,7 +512,7 @@ def test_ids_and_the_provenance_schema_do_not_depend_on_the_prompt_version(
     prompts = {**PROMPTS, "reasoning/direct": version}
     reply = citing("direct", [f"{IDS[1]}.1"], [IDS[0]])
     result = cite(llm, "direct", reply, prompts=prompts)
-    assert result.provenance == {
+    assert result.citations == {
         **NO_IDS,
         "summary_ids": [f"{IDS[1]}.1"],
         "parse_ids": [IDS[0]],

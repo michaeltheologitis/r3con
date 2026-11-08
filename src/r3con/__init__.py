@@ -6,7 +6,7 @@ answering it is built *per question*, at the moment you ask:
     >>> from r3con import r3con
     >>> result = r3con.run("Which supplier missed the most delivery windows?", docs)
     >>> print(result)                 # the answer
-    >>> result.provenance                    # the snippets, parses and quotes behind it
+    >>> result.provenance                    # the snippets, parses, quotes and trail behind it
     >>> result.relevant_context              # what each document contributed
     >>> result.structured_context            # the structured parse behind it
 
@@ -31,11 +31,11 @@ document boundaries through the relevance snippets.
 
 from importlib import metadata as _metadata
 
-from r3con import r3con, settings
+from r3con import provenance, r3con, settings
 from r3con.config import RunConfig, load_config
 from r3con.pipeline import Answer, run_pipeline
 from r3con.prompts import load_prompt
-from r3con.r3con import ask, read_documents, run
+from r3con.r3con import ask, read_documents, run, trace
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
 from r3con.runtime.llm import (
@@ -91,6 +91,7 @@ __all__ = [
     "parse_documents",
     "parse_one_document",
     "propose_schema",
+    "provenance",
     "r3con",
     "read_documents",
     "reason",
@@ -100,4 +101,5 @@ __all__ = [
     "run_pipeline",
     "settings",
     "surface_relevance",
+    "trace",
 ]

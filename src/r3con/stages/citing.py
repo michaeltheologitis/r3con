@@ -10,7 +10,7 @@ from pydantic import BaseModel, BeforeValidator, Field, create_model
 from r3con.logging_setup import get_logger
 from r3con.runtime.llm import send_until_valid
 
-_log = get_logger("provenance")
+_log = get_logger("citing")
 
 
 class CitingRequest(NamedTuple):

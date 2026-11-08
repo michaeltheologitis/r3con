@@ -19,7 +19,7 @@ The reply is structured: the populated ``Parse``, and its ``provenance_ids``, th
 the notes the call used, from among the non-empty ones it shows, its own document's
 included (:func:`r3con.stages.relevance.citable_ids`). With no such note,
 ``provenance_ids`` is any list of strings, and whatever it holds is dropped
-(:func:`r3con.stages.provenance.cited`). Every call of a run sends the same system
+(:func:`r3con.stages.citing.cited`). Every call of a run sends the same system
 prompt and reply schema, built once.
 
 Each document (or part) yields one populated ``Parse``; the parses merge into one
@@ -62,7 +62,7 @@ from r3con.runtime.python_executor import (
 )
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.provenance import CitingRequest, citing_schema, read_citing
+from r3con.stages.citing import CitingRequest, citing_schema, read_citing
 from r3con.stages.relevance import (
     Snippet,
     citable_ids,
@@ -291,7 +291,7 @@ def _read(
     **llm_call: Any,
 ) -> tuple[BaseModel, list[str]]:
     """``part`` (a document or one part of one) parsed under ``request`` by
-    :func:`~r3con.stages.provenance.read_citing`, headed by its document's id: its
+    :func:`~r3con.stages.citing.read_citing`, headed by its document's id: its
     ``Parse``, and the citable ids it used."""
     reply, provenance = read_citing(
         request,
