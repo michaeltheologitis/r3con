@@ -39,7 +39,7 @@ import threading
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,7 @@ from r3con.config import (
 )
 from r3con.logging_setup import get_logger
 from r3con.masking import masked, one_line
-from r3con.provenance import build_graph, walk
+from r3con.provenance import Provenance, build_provenance
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -162,6 +162,16 @@ def _sources_as_ids(
     }
 
 
+def _cites_nothing() -> Provenance:
+    """The provenance of an answer that cites nothing."""
+    return build_provenance(
+        reasoning.cites_nothing(),
+        relevance=RelevantContext(records=[]),
+        parsing_provenance=[],
+        names={},
+    )
+
+
 @dataclass(frozen=True)
 class Answer:
     """What a run produced: the answer, and the two views it was derived from.
@@ -179,10 +189,10 @@ class Answer:
       ``provenance["trail"]``, the answer's trail under the default rule
       (:class:`~r3con.provenance.Trail`): the snippets and parses it cites, the
       snippets they cite, round by round back, and the documents those snippets
-      summarize, and ``provenance["quotes"]``, the sentences behind it, the trail's
-      quotes (:class:`~r3con.provenance.NamedQuote`), each naming its document by id
-      and by name. :func:`r3con.provenance.trail` walks a saved run again, under any
-      rule.
+      summarize, and ``provenance["quotes"]``, the sentences behind it, those the
+      trail's snippets are based on (:class:`~r3con.provenance.NamedQuote`), each
+      naming its document by id and by name (:class:`~r3con.provenance.Provenance`).
+      :func:`r3con.trace` builds it again from the run folder, under any rule.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
@@ -234,7 +244,7 @@ class Answer:
     run_dir: Path | None = None
     document_ids: list[str] = field(default_factory=list)
     document_names: list[str] = field(default_factory=list)
-    provenance: reasoning.Provenance = field(default_factory=reasoning.cites_nothing)
+    provenance: Provenance = field(default_factory=_cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
 
@@ -258,6 +268,18 @@ class Representation:
     schema_code: str
     parsed: dict[str, Any]
     source_docs: dict[str, list[int]]
+    parsing_provenance: list[list[str]]
+
+
+@dataclass(frozen=True)
+class SavedAnswer:
+    """An answer as its folder saved it, with the records of the run it answered over
+    that its provenance runs through, as :func:`read_answer` reads them back."""
+
+    citations: reasoning.Citations
+    names: dict[str, str]
+    """Each document's name by its id, in document order."""
+    relevance: RelevantContext
     parsing_provenance: list[list[str]]
 
 
@@ -607,18 +629,19 @@ def run_pipeline(
             len(result.turns),
             _preview(result.answer),
         )
-        result = replace(
-            result,
-            provenance=_with_trail(
-                result.provenance, relevance, extraction.provenance, names
-            ),
+        provenance = build_provenance(
+            result.citations,
+            relevance=relevance,
+            parsing_provenance=extraction.provenance,
+            names=names,
         )
-        record.result = _reasoning_record(result)
+        record.result = _reasoning_record(result, provenance)
     stage_runs.append(record.run)
-    emit("reasoning_finished", **_reasoning_outcome(result))
+    emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs))
     return _answer(
         result,
+        provenance=provenance,
         relevance=relevance,
         schema_code=proposal.schema_code,
         parsed=parsed,
@@ -632,50 +655,106 @@ def run_pipeline(
 def read_representation(run_dir: Path) -> Representation:
     """Read back what the run in ``run_dir``, or the run an ask's folder ``run_dir``
     asked over, built; :func:`r3con.ask` lists refusals."""
-    manifest = run_dir / "manifest.json"
-    # An ask's folder sits in the asks/ of the run it asked over.
-    if manifest.is_file() and "ask_of" in _read_json(manifest):
-        run_dir = run_dir.parent.parent
-    if not (run_dir / "manifest.json").is_file():
-        raise FileNotFoundError(
-            f"{run_dir} is not a run folder: it has no manifest.json."
-        )
+    run_dir = _run_of(run_dir)
     unbuilt = [s for s in _BUILT_STAGES if not (run_dir / s / "result.json").is_file()]
     if unbuilt:
         raise FileNotFoundError(
             f"{run_dir}: the run never finished parsing ({unbuilt[0]}/result.json is "
             "missing), and ask needs its relevance, schema and parsing."
         )
-    try:
+    with _readable(run_dir):
         built = _read_built(run_dir)
-    except _UNREADABLE as error:
-        raise ValueError(
-            f"can't read {run_dir} as a run folder: {_in_one_line(error)}"
-        ) from error
     check_prompts(built.config)
     return built
+
+
+def read_answer(folder: Path) -> SavedAnswer:
+    """Read back the answer saved in the run folder or ask's folder ``folder``, with
+    the snippets and parses' citations of the run it answered over: only what
+    :func:`r3con.trace` needs, so neither the run's config nor its prompts are read.
+
+    Raises:
+        FileNotFoundError: if ``folder`` is neither a run folder nor an ask's, or it
+            holds no answer, as when its reasoning failed.
+        ValueError: if a file it reads is not as this r3con writes it, in one line.
+    """
+    run_dir = _run_of(folder)
+    answered = folder / "reasoning" / "result.json"
+    if not answered.is_file():
+        raise FileNotFoundError(
+            f"{folder} holds no answer: reasoning/result.json is missing."
+        )
+    with _readable(folder):
+        cited = _read_json(answered)["provenance"]
+        names, relevance = _names_and_relevance(run_dir)
+        parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
+        return SavedAnswer(
+            citations=reasoning.Citations(
+                summary_ids=cited["summary_ids"], parse_ids=cited["parse_ids"]
+            ),
+            names=names,
+            relevance=relevance,
+            parsing_provenance=parsing["provenance"],
+        )
+
+
+def _run_of(folder: Path) -> Path:
+    """The run folder ``folder`` is, or, for an ask's folder, the run it asked over.
+
+    Raises:
+        FileNotFoundError: if it is neither.
+    """
+    manifest = folder / "manifest.json"
+    # An ask's folder sits in the asks/ of the run it asked over.
+    if manifest.is_file() and "ask_of" in _read_json(manifest):
+        folder = folder.parent.parent
+    if not (folder / "manifest.json").is_file():
+        raise FileNotFoundError(
+            f"{folder} is not a run folder: it has no manifest.json."
+        )
+    return folder
+
+
+@contextmanager
+def _readable(folder: Path) -> Iterator[None]:
+    """Raise what reading ``folder`` raises when a file is not as this r3con writes it
+    (:data:`_UNREADABLE`) as a ``ValueError`` in one line."""
+    try:
+        yield
+    except _UNREADABLE as error:
+        raise ValueError(
+            f"can't read {folder} as a run folder: {_in_one_line(error)}"
+        ) from error
 
 
 def _read_built(run_dir: Path) -> Representation:
     manifest = _read_json(run_dir / "manifest.json")
     model = manifest.get("litellm_model") or manifest["config"]["model"]
-    ids: dict[str, int] = _read_json(run_dir / "ids.json")
-    names_file = run_dir / "names.json"
-    # A run folder written before names.json existed: its names are positions.
-    recorded = _read_json(names_file) if names_file.is_file() else ids
-    rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
+    names, relevance = _names_and_relevance(run_dir)
     parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
     schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
     return Representation(
         run_dir=run_dir,
         config=RunConfig.model_validate({**manifest["config"], "model": model}),
-        names={id_: str(recorded[id_]) for id_ in sorted(ids, key=ids.__getitem__)},
-        relevance=_relevance(rounds, ids),
+        names=names,
+        relevance=relevance,
         schema_code=schema["schema_code"],
         parsed=parsing["parsed"],
         source_docs=parsing["source_docs"],
         parsing_provenance=parsing["provenance"],
     )
+
+
+def _names_and_relevance(run_dir: Path) -> tuple[dict[str, str], RelevantContext]:
+    """Each document's name by its id, in document order, and every round's snippets,
+    as ``run_dir`` holds them."""
+    ids: dict[str, int] = _read_json(run_dir / "ids.json")
+    names_file = run_dir / "names.json"
+    # A run folder written before names.json existed: its names are positions.
+    recorded = _read_json(names_file) if names_file.is_file() else ids
+    rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
+    names = {id_: str(recorded[id_]) for id_ in sorted(ids, key=ids.__getitem__)}
+    return names, _relevance(rounds, ids)
 
 
 def _relevance(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:
@@ -792,20 +871,18 @@ def ask_pipeline(
             run=record.run,
             **llm_kwargs,
         )
-        result = replace(
-            result,
-            provenance=_with_trail(
-                result.provenance,
-                built.relevance,
-                built.parsing_provenance,
-                built.names,
-            ),
+        provenance = build_provenance(
+            result.citations,
+            relevance=built.relevance,
+            parsing_provenance=built.parsing_provenance,
+            names=built.names,
         )
-        record.result = _reasoning_record(result)
-    emit("reasoning_finished", **_reasoning_outcome(result))
+        record.result = _reasoning_record(result, provenance)
+    emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
     return _answer(
         result,
+        provenance=provenance,
         relevance=built.relevance,
         schema_code=built.schema_code,
         parsed=built.parsed,
@@ -843,42 +920,26 @@ def _llm_kwargs(
     return llm_kwargs
 
 
-def _with_trail(
-    provenance: reasoning.Provenance,
-    relevance: RelevantContext,
-    parsing_provenance: list[list[str]],
-    names: dict[str, str],
-) -> reasoning.Provenance:
-    """The answer's ``provenance`` with its trail under the default rule
-    (:func:`r3con.provenance.walk`) and the trail's quotes, over the run's
-    ``relevance`` and each document's parse citing what ``parsing_provenance`` lists,
-    ``names`` giving each document's name by its id, in document order."""
-    graph = build_graph(
-        summary_ids=provenance["summary_ids"],
-        parse_ids=provenance["parse_ids"],
-        relevance=relevance,
-        parsing_provenance=parsing_provenance,
-        names=names,
-    )
-    trail = walk(graph)
-    return {**provenance, "quotes": trail["quotes"], "trail": trail}
-
-
-def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:
-    """What reasoning concluded: its answer, provenance, path and fallback, as its
-    ``result.json`` and its ``reasoning_finished`` event both give them."""
+def _reasoning_outcome(
+    result: reasoning.ReasoningResult, provenance: Provenance
+) -> dict[str, Any]:
+    """What reasoning concluded: its answer, with the answer's ``provenance``, its
+    path and fallback, as its ``result.json`` and its ``reasoning_finished`` event both
+    give them."""
     return {
         "answer": result.answer,
-        "provenance": result.provenance,
+        "provenance": provenance,
         "path": result.path,
         "fallback": result.fallback,
     }
 
 
-def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
+def _reasoning_record(
+    result: reasoning.ReasoningResult, provenance: Provenance
+) -> dict[str, Any]:
     """The fields of the reasoning stage's ``result.json``."""
     return {
-        **_reasoning_outcome(result),
+        **_reasoning_outcome(result, provenance),
         "terminated_by": result.terminated_by,
         "n_turns": len(result.turns),
         "turns": [
@@ -898,6 +959,7 @@ def _reasoning_record(result: reasoning.ReasoningResult) -> dict[str, Any]:
 def _answer(
     result: reasoning.ReasoningResult,
     *,
+    provenance: Provenance,
     relevance: RelevantContext,
     schema_code: str,
     parsed: BaseModel | dict[str, Any],
@@ -906,8 +968,9 @@ def _answer(
     names: dict[str, str],
     run_dir: Path | None,
 ) -> Answer:
-    """The :class:`Answer` that reasoning's ``result`` makes with what it reasoned
-    over, ``names`` giving each document's name by its id, in document order."""
+    """The :class:`Answer` that reasoning's ``result`` makes, with its
+    ``provenance``, over what it reasoned over, ``names`` giving each document's name
+    by its id, in document order."""
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance.snippets],
@@ -922,7 +985,7 @@ def _answer(
         run_dir=run_dir,
         document_ids=list(names),
         document_names=list(names.values()),
-        provenance=result.provenance,
+        provenance=provenance,
         relevance_provenance=relevance.provenance,
         parsing_provenance=parsing_provenance,
     )

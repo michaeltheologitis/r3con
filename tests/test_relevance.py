@@ -16,14 +16,13 @@ from r3con.stages.relevance import (
     render_relevance,
     surface_relevance,
 )
-from tests.fakes import is_later_round
+from tests.fakes import is_later_round, quote
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
 PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
-A, B, C = IDS
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
 NONE = (None, None, None)
@@ -96,10 +95,6 @@ def allowed_ids(request) -> dict:
     """The JSON schema of each id a request's reply may cite."""
     schema = request["response_format"]["json_schema"]["schema"]
     return schema["properties"]["provenance_ids"]["items"]
-
-
-def quote(text: str, start: int | None, end: int | None, match: str | None) -> dict:
-    return {"text": text, "start": start, "end": end, "match": match, "score": None}
 
 
 def check_strict_schema(request, fields: list[str]) -> None:
@@ -400,7 +395,7 @@ def test_a_cited_id_the_call_did_not_show_is_dropped_with_a_warning(llm, caplog)
             "provenance_ids": ["1b1b1b", "0a0a0a", "1b1b1b"],
         }
 
-    with caplog.at_level(logging.WARNING, logger="r3con.provenance"):
+    with caplog.at_level(logging.WARNING, logger="r3con.citing"):
         result = surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply)
     assert result.provenance == [["1b1b1b"], ["0a0a0a"]]
     assert (

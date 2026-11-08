@@ -55,7 +55,6 @@ from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import get_logger
 from r3con.masking import masked, one_line
 from r3con.prompts import load_prompt
-from r3con.provenance import NamedQuote, Trail, answer_alone
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
     DEFAULT_EXEC_TIMEOUT_S,
@@ -65,7 +64,7 @@ from r3con.runtime.codeact import (
 )
 from r3con.runtime.llm import count_tokens, schema_as_sent, send_until_valid
 from r3con.splitting import Splits
-from r3con.stages.provenance import cited, ids_field
+from r3con.stages.citing import cited, ids_field
 from r3con.stages.relevance import Snippet, citable_ids, render_relevance
 from r3con.stages.structuring.parsing import DOCUMENT_KEY
 
@@ -88,23 +87,18 @@ class _DirectReply(BaseModel):
         return answer
 
 
-class Provenance(TypedDict):
-    """What an answer used: the ids of the relevance snippets it cites
-    (``<id>.<k>`` for a part of a document read in parts), those of the documents whose
-    records it cites, the quotes behind it, and its trail through the run
-    (:mod:`r3con.provenance`). Reasoning leaves ``quotes`` empty and the answer alone on
-    its ``trail``; the pipeline fills them (:attr:`r3con.pipeline.Answer.provenance`)."""
+class Citations(TypedDict):
+    """What an answer cites: the ids of the relevance snippets it used (``<id>.<k>`` for
+    a part of a document read in parts), and those of the documents whose records it
+    used."""
 
     summary_ids: list[str]
     parse_ids: list[str]
-    quotes: list[NamedQuote]
-    trail: Trail
 
 
-def cites_nothing() -> Provenance:
-    """Provenance that cites nothing: no id under either view, no quote, and the answer
-    alone on its trail."""
-    return Provenance(summary_ids=[], parse_ids=[], quotes=[], trail=answer_alone())
+def cites_nothing() -> Citations:
+    """Citations of nothing: no id under either view."""
+    return Citations(summary_ids=[], parse_ids=[])
 
 
 def _documents_with_records(parse_dict: Any, document_ids: Sequence[str]) -> list[str]:
@@ -124,7 +118,7 @@ def _documents_with_records(parse_dict: Any, document_ids: Sequence[str]) -> lis
 
 def _provenance_ids_model(citable: Mapping[str, Sequence[str]]) -> type[BaseModel]:
     """The ``provenance_ids`` an answer gives, on either path: under each of
-    ``citable``'s keys, a list of its ids (:func:`~r3con.stages.provenance.ids_field`).
+    ``citable``'s keys, a list of its ids (:func:`~r3con.stages.citing.ids_field`).
     A missing list cites nothing, and another key is ignored."""
     lists: dict[str, Any] = {key: ids_field(ids) for key, ids in citable.items()}
     return create_model("ProvenanceIds", **lists)
@@ -153,25 +147,19 @@ def _cited(
     given: Mapping[str, Sequence[str]],
     citable: Mapping[str, Sequence[str]],
     kind: str,
-) -> Provenance:
+) -> Citations:
     """``given``'s ids under each view, less those ``citable`` does not hold under it,
-    by :func:`~r3con.stages.provenance.cited`, which warns as ``<kind> <view>``; no
-    quote, and the answer alone on its trail."""
+    by :func:`~r3con.stages.citing.cited`, which warns as ``<kind> <view>``."""
 
     def view(key: str) -> list[str]:
         return cited(given[key], citable[key], f"{kind} {key}")
 
-    return Provenance(
-        summary_ids=view("summary_ids"),
-        parse_ids=view("parse_ids"),
-        quotes=[],
-        trail=answer_alone(),
-    )
+    return Citations(summary_ids=view("summary_ids"), parse_ids=view("parse_ids"))
 
 
 def _committed_ids(
     arguments: Mapping[str, Any], citable: Mapping[str, Sequence[str]]
-) -> Provenance:
+) -> Citations:
     """What ``final_answer``'s ``provenance_ids`` cites, read as
     :func:`_provenance_ids_model` and checked by :func:`_cited`: nothing when it was
     not given, and nothing, with a warning, when it is not a mapping of lists of ids.
@@ -286,7 +274,7 @@ class ReasoningResult:
 
     - ``answer``: the answer text.
     - ``path``: the path that produced it, ``"direct"`` or ``"coding"``.
-    - ``provenance``: what the answer used (:class:`Provenance`).
+    - ``citations``: what the answer cites (:class:`Citations`).
     - ``turns`` and ``terminated_by``: on the coding path, the agent's turns and how its
       loop ended, as in :class:`~r3con.runtime.codeact.CodeActResult`; on the direct
       path, no turns and ``"reply"``.
@@ -299,7 +287,7 @@ class ReasoningResult:
 
     answer: str
     path: ReasoningPath
-    provenance: Provenance = field(default_factory=cites_nothing)
+    citations: Citations = field(default_factory=cites_nothing)
     turns: Sequence[CodeActTurn] = ()
     terminated_by: str = "reply"
     fallback: dict[str, Any] | None = None
@@ -406,7 +394,7 @@ def _reason_with_code(
     return ReasoningResult(
         answer=result.answer,
         path="coding",
-        provenance=_committed_ids(result.arguments, citable),
+        citations=_committed_ids(result.arguments, citable),
         turns=result.turns,
         terminated_by=result.terminated_by,
     )
@@ -467,7 +455,7 @@ def _reason_directly(
     return ReasoningResult(
         answer=reply.answer.strip(),
         path="direct",
-        provenance=_cited(reply.provenance_ids.model_dump(), citable, "direct"),
+        citations=_cited(reply.provenance_ids.model_dump(), citable, "direct"),
     )
 
 

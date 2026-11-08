@@ -18,7 +18,7 @@ import r3con
 from r3con import Answer, RunConfig
 from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES, REASONING_PATHS
-from r3con.r3con import ask, read_documents, run, unique_names
+from r3con.r3con import ask, read_documents, run, trace, unique_names
 from tests.documents import (
     CORRUPT_DOCX,
     PNG,
@@ -30,10 +30,15 @@ from tests.documents import (
 from tests.fakes import (
     ANSWERING_SCHEMA,
     FINGERPRINT,
+    TWO_LINE_MEMOS,
     USAGE,
-    citable_lists,
+    bad_key,
     cited_documents,
+    citing,
+    in_json,
     is_later_round,
+    quoting_a_line_a_round,
+    snippets_without_quotes,
     without_trail,
 )
 
@@ -138,29 +143,11 @@ def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
     }
 
 
-def in_json(name: str, change: Callable[[Any], None]) -> Callable[[Path], None]:
-    """Rewrites the JSON file ``name`` of a run folder after ``change``."""
-
-    def rewrite(run_dir: Path) -> None:
-        data = json.loads((run_dir / name).read_text())
-        change(data)
-        (run_dir / name).write_text(json.dumps(data))
-
-    return rewrite
-
-
 def snippets_without_provenance(result: dict) -> None:
     for round_ in result["rounds"]:
         round_["snippets"] = [
             {"id": s["id"], "summary": s["summary"]} for s in round_["snippets"]
         ]
-
-
-def snippets_without_quotes(result: dict) -> None:
-    """As r3context 0.6.4 wrote them."""
-    for round_ in result["rounds"]:
-        for snippet in round_["snippets"]:
-            del snippet["quotes"]
 
 
 def snippets_as_plain_text(result: dict) -> None:
@@ -185,12 +172,6 @@ def with_one_reasoning_prompt(manifest: dict) -> None:
     prompts["reasoning"] = "v2"
 
 
-def bad_key() -> litellm.AuthenticationError:
-    return litellm.AuthenticationError(
-        message="bad key", llm_provider="openai", model="gpt-6-luna"
-    )
-
-
 def quoting_only_in_round_one(shown_ids):
     """A relevance reply quoting the whole document in round 1, and later quoting
     nothing and citing the first id shown."""
@@ -205,13 +186,6 @@ def quoting_only_in_round_one(shown_ids):
     return reply
 
 
-def citing_the_first_summary(request) -> dict:
-    """A direct reasoning reply citing the first summary its prompt shows."""
-    shown = citable_lists(request)["summary_ids"]["items"]["enum"]
-    provenance_ids = {"summary_ids": shown[:1], "parse_ids": []}
-    return {"answer": "Halloran memo", "provenance_ids": provenance_ids}
-
-
 @pytest.fixture
 def quoted_run(answering_llm, shown_ids, tmp_path) -> Answer:
     """A finished run over ``NAMED_DOCS`` whose snippets quote their document in round
@@ -219,7 +193,7 @@ def quoted_run(answering_llm, shown_ids, tmp_path) -> Answer:
     from then on."""
     answering_llm.answers(
         relevance=quoting_only_in_round_one(shown_ids),
-        reasoning=citing_the_first_summary,
+        reasoning=citing("Halloran memo", slice(1)),
     )
     return finished_run(answering_llm, tmp_path, NAMED_DOCS)
 
@@ -1265,6 +1239,120 @@ def test_an_answer_without_a_run_folder_cannot_be_asked(answering_llm):
     assert len(answering_llm.requests) == sent
 
 
+@pytest.fixture
+def cited_run(answering_llm, shown_ids, tmp_path) -> Answer:
+    """A finished run over ``TWO_LINE_MEMOS`` whose summaries quote a line a round and
+    cite the first summary shown, and whose answer cites the first summary and the
+    last parse, which cites nothing; ``answering_llm`` answering so from then on."""
+    answering_llm.answers(
+        relevance=quoting_a_line_a_round(shown_ids),
+        reasoning=citing("Halloran memo", slice(1), slice(-1, None)),
+    )
+    return finished_run(answering_llm, tmp_path, TWO_LINE_MEMOS)
+
+
+def saved_provenance(folder: Path) -> dict:
+    return json.loads((folder / "reasoning" / "result.json").read_text())["provenance"]
+
+
+def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_only(
+    cited_run,
+):
+    assert trace(cited_run.run_dir) == trace(cited_run) == cited_run.provenance
+    assert saved_provenance(cited_run.run_dir) == cited_run.provenance
+    last = cited_run.document_ids[-1]
+    lit = trace(str(cited_run.run_dir), "parses-light-documents")
+    trail = cited_run.provenance["trail"]
+    assert lit["trail"]["rule"] == "parses-light-documents"
+    assert [e for e in lit["trail"]["edges"] if e not in trail["edges"]] == [
+        [f"parse:{last}", f"document:{last}", "parses"]
+    ]
+    assert [n for n in lit["trail"]["nodes"] if n not in trail["nodes"]] == [
+        f"document:{last}"
+    ]
+    assert without_trail(lit) == without_trail(cited_run.provenance)
+
+
+def test_trace_of_an_asks_folder_follows_the_asks_citations_through_the_runs_records(
+    answering_llm, cited_run
+):
+    answering_llm.answers(reasoning=citing("Merrow memo", slice(-1, None)))
+    asked = ask(cited_run, "Who else?", completion=answering_llm)
+    assert trace(asked.run_dir) == trace(asked) == asked.provenance
+    assert asked.provenance["trail"] != cited_run.provenance["trail"]
+
+
+def test_trace_of_a_folder_whose_snippets_have_no_quotes_quotes_nothing(cited_run):
+    assert cited_run.provenance["quotes"]
+    in_json("relevance/result.json", snippets_without_quotes)(cited_run.run_dir)
+    assert trace(cited_run.run_dir) == {**cited_run.provenance, "quotes": []}
+
+
+def pinning_a_missing_prompt(manifest: dict) -> None:
+    manifest["config"]["prompts"]["reasoning/coding"] = "v9"
+
+
+@pytest.mark.parametrize(
+    "make_older",
+    [with_one_reasoning_prompt, with_a_seed, pinning_a_missing_prompt],
+    ids=["one-reasoning-prompt", "config-with-a-seed", "a-missing-prompt"],
+)
+def test_trace_reads_a_run_whose_config_or_prompts_this_r3con_no_longer_runs(
+    cited_run, make_older
+):
+    in_json("manifest.json", make_older)(cited_run.run_dir)
+    assert trace(cited_run.run_dir) == cited_run.provenance
+
+
+@pytest.mark.parametrize(
+    "result", ["structuring/parsing/result.json", "reasoning/result.json"]
+)
+def test_trace_refuses_a_result_without_provenance_in_one_line(cited_run, result):
+    in_json(result, without_provenance)(cited_run.run_dir)
+    with pytest.raises(ValueError) as refused:
+        trace(cited_run.run_dir)
+    assert str(refused.value) == (
+        f"can't read {cited_run.run_dir} as a run folder: KeyError: 'provenance'"
+    )
+
+
+def test_trace_refuses_an_unknown_rule_before_reading_the_folder(tmp_path):
+    with pytest.raises(
+        ValueError, match="no provenance rule is named 'through-parses'"
+    ):
+        trace(tmp_path / "missing", "through-parses")
+
+
+def test_a_folder_that_is_not_a_run_folder_cannot_be_traced(tmp_path):
+    with pytest.raises(FileNotFoundError) as refused:
+        trace(tmp_path)
+    assert str(refused.value) == (
+        f"{tmp_path} is not a run folder: it has no manifest.json."
+    )
+
+
+def test_a_run_whose_reasoning_failed_has_no_answer_to_trace(answering_llm, tmp_path):
+    answering_llm.answers(reasoning=bad_key())
+    with pytest.raises(litellm.AuthenticationError):
+        finished_run(answering_llm, tmp_path)
+    [run_dir] = (tmp_path / "logs").iterdir()
+    with pytest.raises(FileNotFoundError) as refused:
+        trace(run_dir)
+    assert str(refused.value) == (
+        f"{run_dir} holds no answer: reasoning/result.json is missing."
+    )
+
+
+def test_an_answer_without_a_run_folder_cannot_be_traced(answering_llm):
+    result = run("Who?", DOCS, completion=answering_llm, save_artifacts=False)
+    with pytest.raises(ValueError) as refused:
+        trace(result)
+    assert str(refused.value) == (
+        "trace needs the run folder, and this Answer has none: its run was made with "
+        "save_artifacts=False."
+    )
+
+
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_an_ask_folder(
     answering_llm, tmp_path
 ):
@@ -1444,6 +1532,7 @@ def test_without_a_run_folder_only_the_callback_gets_events(answering_llm, tmp_p
 def test_run_is_reachable_from_the_package_and_from_its_module():
     assert r3con.run is namespace.run
     assert r3con.ask is namespace.ask
+    assert r3con.trace is namespace.trace
     assert r3con.read_documents is namespace.read_documents
     assert Answer is namespace.Answer
     assert r3con.Cancelled is namespace.Cancelled

@@ -56,7 +56,7 @@ from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.provenance import (
+from r3con.stages.citing import (
     CitingRequest,
     citing_schema,
     lenient_list,
@@ -261,7 +261,7 @@ def _read(
     request: CitingRequest, part: str, *, kind: str, max_attempts: int, **llm_call: Any
 ) -> tuple[str, list[str], list[str]]:
     """``part`` (a document or one part of one) read under ``request`` by
-    :func:`~r3con.stages.provenance.read_citing`: its snippet, stripped, its quotes,
+    :func:`~r3con.stages.citing.read_citing`: its snippet, stripped, its quotes,
     none for an empty snippet, and the shown ids it used."""
     reply, provenance = read_citing(
         request,

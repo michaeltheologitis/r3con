@@ -22,7 +22,9 @@ behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
-:func:`ask` reruns only reasoning over a finished run, for a new question.
+:func:`ask` reruns only reasoning over a finished run, for a new question, and
+:func:`trace` builds a saved answer's provenance again, under any rule, calling no
+model.
 
 ``documents`` is the documents themselves: their texts, each under its name, or a plain
 list of them. To read them off disk, :func:`read_documents` turns a folder, a glob or a
@@ -73,9 +75,11 @@ from r3con.pipeline import (
     ask_config,
     ask_pipeline,
     names_and_texts,
+    read_answer,
     read_representation,
     run_pipeline,
 )
+from r3con.provenance import DEFAULT_RULE, Provenance, build_provenance, check_rule
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
@@ -636,13 +640,7 @@ def ask(
         ``cancel`` is set.
     """
     load_dotenv(find_dotenv(usecwd=True))
-    run_dir = source.run_dir if isinstance(source, Answer) else Path(source)
-    if run_dir is None:
-        raise ValueError(
-            "ask needs the run folder, and this Answer has none: its run was made with "
-            "save_artifacts=False."
-        )
-    built = read_representation(run_dir)
+    built = read_representation(_folder_of(source, "ask"))
     config = ask_config(built, model=model, reasoning=reasoning, params=params)
     return ask_pipeline(
         built,
@@ -656,6 +654,55 @@ def ask(
     )
 
 
+def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
+    """The provenance of the answer ``source`` saved, its trail walked under ``rule``
+    (:mod:`r3con.provenance`), built from the files of its folder alone.
+
+    It calls no model, and reads neither the run's config nor its prompts, so a run
+    whose config or prompts this r3con no longer runs is traced all the same.
+
+    Args:
+        source: an :class:`Answer` from :func:`run` or :func:`ask`, whose ``run_dir``
+            is read, or the path of a run folder or of an ask's folder: an ask's answer
+            is its own, and its snippets and parses those of the run it asked over.
+        rule: the name of a rule in :data:`r3con.provenance.RULES`. Under the default,
+            the provenance is the one the answer was saved with.
+
+    Raises:
+        ValueError: if no rule is named ``rule``, before anything is read; if
+            ``source`` is an Answer without a ``run_dir``; or, in one line, if a file
+            it reads is not as this r3con writes it.
+        FileNotFoundError: if ``source`` is neither a run folder nor an ask's, or it
+            holds no answer, as when its reasoning failed.
+    """
+    check_rule(rule)
+    saved = read_answer(_folder_of(source, "trace"))
+    return build_provenance(
+        saved.citations,
+        relevance=saved.relevance,
+        parsing_provenance=saved.parsing_provenance,
+        names=saved.names,
+        rule=rule,
+    )
+
+
+def _folder_of(source: Answer | str | Path, reader: str) -> Path:
+    """The folder ``source`` names for ``reader``: an Answer's ``run_dir``, or the path
+    given.
+
+    Raises:
+        ValueError: if ``source`` is an Answer without a ``run_dir``.
+    """
+    if not isinstance(source, Answer):
+        return Path(source)
+    if source.run_dir is None:
+        raise ValueError(
+            f"{reader} needs the run folder, and this Answer has none: its run was "
+            "made with save_artifacts=False."
+        )
+    return source.run_dir
+
+
 __all__ = [
     "TEXT_SUFFIXES",
     "Answer",
@@ -663,5 +710,6 @@ __all__ = [
     "ask",
     "read_documents",
     "run",
+    "trace",
     "unique_names",
 ]

@@ -49,7 +49,7 @@ Layout per ``logs/<run-folder>/``:
 - ``reasoning/`` (stage 3) — ``result.json`` (``{answer, provenance, path, fallback,
   terminated_by, n_turns, turns, totals}`` — ``provenance`` is ``{summary_ids,
   parse_ids, quotes, trail}``, as :attr:`r3con.pipeline.Answer.provenance` says, the
-  trail ``{rule, nodes, edges, quotes}`` (:mod:`r3con.provenance`), ``path`` is
+  trail ``{rule, nodes, edges}`` (:mod:`r3con.provenance`), ``path`` is
   ``direct`` or ``coding``, and ``fallback`` says why the coding path ran when the
   config asked for direct, else ``null``) + ``calls.json`` + ``transcript.yaml``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
