@@ -500,6 +500,9 @@ function recordedSample() {
   return match ? JSON.parse(match[1]) : null;
 }
 
+// The index of the sample's document that r3con's snippet or document id `id` names.
+const docIndexIn = (sample, id) => sample.ids.indexOf(id.split('.')[0]);
+
 // Each sample memo's name without its suffix, as the page labels it.
 const SAMPLE_STEMS = recordedSample().docs.map((d) => d.name.replace(/\.txt$/, ''));
 const stem = (i) => SAMPLE_STEMS[i];
@@ -548,8 +551,9 @@ async function introCounts(area, options) {
 function sourcesOf(sample, docIds, id) {
   const [kind, i] = id.split('-');
   const own = ['r1', 'r2', 'parsed'].includes(kind) ? [docIds[i]] : [];
-  const { provenance } = sample.answer;
-  if (kind === 'answer') return [...provenance.summary_ids.map((d) => `r2-${d}`), ...provenance.parse_ids.map((d) => `parsed-${d}`)];
+  const { summary_ids, parse_ids } = sample.answer.provenance;
+  const cited = (ids, prefix) => ids.map((id) => `${prefix}-${docIndexIn(sample, id)}`);
+  if (kind === 'answer') return [...cited(summary_ids, 'r2'), ...cited(parse_ids, 'parsed')];
   if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((d) => `r2-${d}`)];
   if (kind === 'r2') return [...own, ...sample.r2[i].provenance.map((d) => `r1-${d}`)];
   return own;
@@ -570,13 +574,27 @@ function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
   };
 }
 
-// What simulated answer `id` lights: the lines from what it cites, and from the document of each summary among them.
+// What the open popup's provenance row lists, by name.
+const provenanceListed = (page) =>
+  page.$$eval('#inspector .row', (rows) => {
+    const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
+    return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
+  });
+
+// What simulated answer `id` over the sample memos lights: what its provenance cites, as its popup lists it, and the
+// document of each summary among them. Opening its popup lights it.
 async function directCitations(page, id) {
   const docIds = await docIdsOf(page);
-  const cited = (await page.$$eval('.edge.cite', (els) => els.map((el) => el.dataset.key))).filter((key) => key.endsWith(`>${id}`));
-  const sources = cited.map((key) => key.split('>')[0]);
-  const read = sources.filter((from) => from.startsWith('r2-')).map((from) => `${docIds[from.split('-')[1]]}>${from}`);
-  return { nodes: [id, ...sources, ...read.map((key) => key.split('>')[0])].sort(), edges: [...cited, ...read].sort() };
+  await inspect(page, id);
+  const cited = (await provenanceListed(page)).map((name) => {
+    const [memo, what] = name.split(' · ');
+    return `${what === 'parsed' ? 'parsed' : 'r2'}-${SAMPLE_STEMS.indexOf(memo)}`;
+  });
+  const read = cited.filter((from) => from.startsWith('r2-')).map((from) => [docIds[from.slice('r2-'.length)], from]);
+  return {
+    nodes: [id, ...cited, ...read.map(([doc]) => doc)].sort(),
+    edges: [...cited.map((from) => `${from}>${id}`), ...read.map(([doc, summary]) => `${doc}>${summary}`)].sort(),
+  };
 }
 
 // The lines a round-2 summary or the run's answer lights in the recorded sample: from what it draws on, and to each of `ids` that draws on it.
@@ -1150,15 +1168,16 @@ async function sampleReplay() {
     check('sample replay', 'the page holds a recorded sample', Boolean(sample));
     const lit = Object.keys(edges).filter((k) => edges[k].includes('lit')).sort();
     const onPath = await litNodes(page);
-    const expected = trailOnPage(sample.answer.provenance.trail, sample.ids, docIds);
+    const expected = sample && trailOnPage(sample.answer.provenance.trail, sample.ids, docIds);
     const litName = "the lit nodes and lines are exactly the recorded answer's trail, as r3con walked it, named as the page names them";
-    const litDetail = `${onPath.length} nodes and ${lit.length} lines lit; the trail has ${expected.nodes.length} and ${expected.edges.length}`;
-    check('sample replay', litName, isDeepStrictEqual({ nodes: onPath, edges: lit }, expected), litDetail);
-    const parses = sample.answer.provenance.parse_ids;
-    const deadEnds = parses.every((d) => !sample.parsed[d].provenance.length && onPath.includes(`parsed-${d}`) && !lit.includes(`${docIds[d]}>parsed-${d}`));
+    const litDetail = `${onPath.length} nodes and ${lit.length} lines lit; the trail has ${expected?.nodes.length} and ${expected?.edges.length}`;
+    check('sample replay', litName, Boolean(sample) && isDeepStrictEqual({ nodes: onPath, edges: lit }, expected), litDetail);
+    const parses = (sample?.answer.provenance.parse_ids ?? []).map((id) => docIndexIn(sample, id));
+    const citeNothing = parses.every((d) => !sample.parsed[d].provenance.length);
+    const unlit = parses.every((d) => onPath.includes(`parsed-${d}`) && !lit.includes(`${docIds[d]}>parsed-${d}`));
     const reached = parses.every((d) => onPath.includes(docIds[d]) && lit.includes(`${docIds[d]}>r2-${d}`));
-    const deadEndName = "each parse the answer cites, which cites no summary, is lit without the line from its document, whose summaries light it instead";
-    check('sample replay', deadEndName, parses.length > 0 && deadEnds && reached, lit.filter((k) => k.includes('>parsed-')).join(' '));
+    const deadEndName = "every parse the sample's answer cites cites nothing, so it lights without the line from its document, which its summaries light";
+    check('sample replay', deadEndName, parses.length > 0 && citeNothing && unlit && reached, lit.filter((k) => k.includes('>parsed-')).join(' '));
 
     const dotted = Object.keys(edges).filter((k) => edges[k].includes('self')).sort();
     const ownLines = docIds.flatMap((doc, i) => [`${doc}>r2-${i}`, `${doc}>parsed-${i}`]).sort();
@@ -2192,12 +2211,9 @@ async function popupArea() {
     const roundNames = (await page.$$eval('.node.r1, .node.r2', (els) => els.map((el) => el.getAttribute('aria-label')))).sort();
     const snippetNames = [1, 2].flatMap((round) => sample.docs.map((_, i) => `${stem(i)}, round ${round} relevance snippet`)).sort();
     check('popup', "each round's node is named for its document and its relevance snippet", isDeepStrictEqual(roundNames, snippetNames), roundNames[0]);
-    const cited = [...summary_ids.map((i) => `${stem(i)} · round 2`), ...parse_ids.map((i) => `${stem(i)} · parsed`)];
+    const cited = [...summary_ids.map((id) => `${stem(docIndexIn(sample, id))} · round 2`), ...parse_ids.map((id) => `${stem(docIndexIn(sample, id))} · parsed`)];
     await inspect(page, 'answer-0');
-    const listed = await page.$$eval('#inspector .row', (rows) => {
-      const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
-      return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
-    });
+    const listed = await provenanceListed(page);
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
     const opening = await page.$$eval('#inspector > :not(.insp-head)', (els) => els.slice(0, 2).map((el) => [el.textContent, getComputedStyle(el).fontWeight]));
     const questionFirst = isDeepStrictEqual(opening, [[`question ${sample.question}`, '400'], [sample.answer.text, '600']]);
@@ -2319,7 +2335,7 @@ const PAST_PREVIEW = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(PREV
 // The sample with nothing located in its first memo: round 1 quotes nothing, and round 2 one sentence r3con didn't find.
 function unlocatedFirstMemo(sample) {
   sample.r1[0].quotes = [];
-  sample.r2[0].quotes = [{ text: sample.r2[0].quotes[0].text, start: null, end: null }];
+  sample.r2[0].quotes = [{ ...sample.r2[0].quotes[0], start: null, end: null }];
   return sample;
 }
 
@@ -2327,10 +2343,20 @@ function unlocatedFirstMemo(sample) {
 function touchingHalves(sample) {
   const [first, ...rest] = sample.r2[0].quotes;
   const chars = Array.from(sample.docs[0].text);
-  const half = (start, end) => ({ text: chars.slice(start, end).join(''), start, end });
+  const half = (start, end) => ({ ...first, text: chars.slice(start, end).join(''), start, end });
   const middle = Math.floor((first.start + first.end) / 2);
   sample.r1[0].quotes = [];
   sample.r2[0].quotes = [half(first.start, middle), half(middle, first.end), ...rest];
+  return sample;
+}
+
+// The sample with its answer's trail also reaching nodes the page has none of: a third round's summary of its first
+// memo, and the summary of a document it doesn't hold.
+function trailBeyondPage(sample) {
+  const { trail } = sample.answer.provenance;
+  const [third, unknown] = [`summary:3:${sample.ids[0]}`, 'summary:2:ffffff'];
+  trail.nodes.push(third, unknown, 'document:ffffff');
+  trail.edges.push(['answer', unknown, 'cites'], [unknown, third, 'cites'], [unknown, 'document:ffffff', 'summarizes']);
   return sample;
 }
 
@@ -2640,8 +2666,8 @@ async function quotesArea() {
     await page.fill('#question', NEW_QUESTION);
     await page.click('#new-run-btn');
     await waitLit(page);
-    const madeUp = await litOnPanel(page);
     const direct = await directCitations(page, 'answer-0');
+    const madeUp = await litOnPanel(page);
     const directName = "a simulated run's answer lights only what it cites and the documents of the summaries among them, not what those cite";
     check('quotes', directName, direct.edges.length > 0 && isDeepStrictEqual(madeUp, direct), `${madeUp.edges.join(' ')}; expected ${direct.edges.join(' ')}`);
     const pills = Object.keys(await page.evaluate(pillsOn)).length;
@@ -2687,6 +2713,16 @@ async function quotesArea() {
     const first = (await page.evaluate(sentenceLists))[0]?.docs[0];
     const halves = String(SAMPLE_QUOTED.pills[0] + 1);
     check('quotes', 'two quotes that only meet count as two sentences, in the pill and the chat; quotes that overlap still count as one', pill === halves && first?.length === SAMPLE_QUOTED.pills[0] + 2, `pill ${pill}; ${JSON.stringify(first)}`);
+  });
+
+  await withPage('quotes', { before: serving(withSample(trailBeyondPage)) }, async (page) => {
+    const lit = await litOnPanel(page);
+    const expected = trailOnPage(sample.answer.provenance.trail, sample.ids, await docIdsOf(page));
+    await inspect(page, 'answer-0');
+    const said = await page.textContent('#inspector');
+    const [list] = await page.evaluate(sentenceLists);
+    const beyondName = "an answer whose trail also names nodes the page has none of lights the rest, and its popup and its sentences show as before";
+    check('quotes', beyondName, isDeepStrictEqual(lit, expected) && said.includes(SAMPLE_QUOTED.line) && list?.line === SAMPLE_QUOTED.line, `${lit.edges.length} lines lit; ${list?.line}`);
   });
 
   await withPage('quotes', { before: serving(withSample(unlocatedFirstMemo)) }, async (page) => {
@@ -3097,8 +3133,8 @@ async function answersOnTheRun(sample, asks) {
     const flaggedInChat = simulated.after.includes(SIMULATED_LABEL) && simulated.folded === `ready · ${DEFAULT_MODEL} · nothing was sent`;
     const flaggedInPopup = (await inspect(page, 'answer-2')).includes(SIMULATED_LABEL);
     check('answers', 'an unrecorded ask is labelled simulated, in the chat, in view, and its popup', flaggedInChat && flaggedInPopup, `${simulated.folded}; ${simulated.after[0]}`);
-    const madeUp = await litOnPanel(page);
     const direct = await directCitations(page, 'answer-2');
+    const madeUp = await litOnPanel(page);
     const directName = 'a simulated ask, lit, lights only what it cites and the documents of the summaries among them, not what those cite';
     check('answers', directName, direct.edges.length > 0 && isDeepStrictEqual(madeUp, direct), `${madeUp.edges.join(' ')}; expected ${direct.edges.join(' ')}`);
 
@@ -4425,27 +4461,33 @@ async function liveQuotes(url) {
   });
 }
 
-// Every line quiet, so it summarizes to nothing, while its parse has a record: the answer cites that parse, which can
-// cite no summary of its own document.
-const quietMemo = () => memo('00_quiet.txt', `${QUIET} Notice board.\n${QUIET} The kettle is fixed.\n`);
+// Long enough that fake_server.py refuses it whole, and relevant throughout, so each of its two parts quotes a line.
+function twoPartMemo() {
+  const lines = Array.from({ length: 48 }, (_, i) => `Northfield site, note ${i + 1}: an equipment incident was logged in Q3.`);
+  return memo('01a_two_parts.txt', lines.join('\n\n'));
+}
 
-async function liveDeadEnd(url) {
+// Second, so the scripted answer cites the first memo's summary and the first part's, not the second part's.
+async function livePartQuotes(url) {
   const before = (page) => page.addInitScript(recordEvents);
   await withPage('live', { url, sample: false, before }, async (page) => {
-    const memos = [quietMemo(), ...sampleMemos()];
+    const [first, ...rest] = sampleMemos();
+    const memos = [first, twoPartMemo(), ...rest];
     await page.setInputFiles('#file-input', memos);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-    const docIds = await docIdsOf(page);
+    await openSentences(page);
+    const [list] = await page.evaluate(sentenceLists);
     const [answer] = await page.evaluate(answersRead);
-    const quiet = `parse:${answer.ids[0]}`;
-    const deadEnd = answer.trail.nodes.includes(quiet) && !answer.trail.edges.some(([from]) => from === quiet);
-    const { nodes, edges } = await litOnPanel(page);
-    const unlit = nodes.includes('parsed-0') && edges.includes('parsed-0>answer-0') && !nodes.includes(docIds[0]) && !edges.includes(`${docIds[0]}>parsed-0`);
-    const throughSummary = nodes.includes(docIds[1]) && edges.includes(`${docIds[1]}>r2-1`) && !edges.includes(`${docIds[1]}>parsed-1`);
-    const name = "a cited parse that cites no summary is lit, but not its document, which only a summary on the trail lights, as it does the next memo's";
-    check('live', name, done && deadEnd && unlit && throughSummary, `dead end ${deadEnd}; ${edges.filter((key) => key.includes('parsed-')).join(' ')}; ${nodes.join(' ')}`);
+    const two = answer.ids[1];
+    const summarized = (part) => answer.trail.edges.some(([from, , kind]) => kind === 'summarizes' && from.endsWith(`:${two}.${part}`));
+    const quotedAt = (part) => page.evaluate(([id, k]) => window.events.some((e) => e.type === 'relevance_finished' && e.doc_id === id && e.part === k && e.quotes.some((q) => q.start !== null)), [two, part]);
+    const oneOfTwo = summarized(1) && !summarized(2) && (await quotedAt(1)) && (await quotedAt(2));
+    const docs = memos.map((m) => ({ name: m.name, text: m.buffer.toString() }));
+    const fromQuotes = quotesListed(docs, answer.ids, answer.quotes);
+    const name = "a document read in two parts, each quoting a line, with only its first part on the trail, highlights only that part's quotes, as the reasoning_finished event's quotes say";
+    check('live', name, done && oneOfTwo && isDeepStrictEqual(list?.docs, fromQuotes), `one part of two on the trail: ${oneOfTwo}; ${JSON.stringify(list?.docs)}; expected ${JSON.stringify(fromQuotes)}`);
   });
 }
 
@@ -5427,7 +5469,7 @@ async function live() {
     await liveWhileGoing(url);
     await liveParts(url);
     await liveQuotes(url);
-    await liveDeadEnd(url);
+    await livePartQuotes(url);
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);

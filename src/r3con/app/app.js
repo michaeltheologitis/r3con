@@ -31,8 +31,9 @@
    * here is indexed, while SAMPLE and an event hold r3con's own.
    * @typedef {{ text: string, start: number | null, end: number | null }} Quote
    */
-  /** @typedef {Quote & { summary: string }} RunQuote A quote in a run, and the trail node of the summary quoting it. */
-  /** @typedef {{ summary: string, provenance: number[], quotes: Quote[] }} RecordedSummary */
+  /** @typedef {Quote & { snippet: string }} RecordedQuote A quote, and the id of the snippet quoting it. */
+  /** @typedef {Quote & { summary: string }} RunQuote A quote, and the trail node of the summary quoting it. */
+  /** @typedef {{ summary: string, provenance: number[], quotes: RecordedQuote[] }} RecordedSummary */
   /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[] }} Summary */
   /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
   /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
@@ -54,9 +55,8 @@
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
   /**
-   * An answer's provenance: the documents whose round-2 summaries and parses it cites, by index; its trail; and the
-   * quotes r3con found on the trail, which a made-up answer has none of.
-   * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail, quotes?: NamedQuote[] }} Provenance
+   * An answer's provenance: the documents whose round-2 summaries and parses it cites, by index, and its trail.
+   * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail }} Provenance
    */
   /**
    * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id.
@@ -110,13 +110,13 @@
    * @property {RecordedSummary[]} r2
    * @property {Schema} schema
    * @property {Parse[]} parsed
-   * @property {{ text: string, provenance: Provenance }} answer
+   * @property {{ text: string, provenance: R3conProvenance }} answer
    * @property {Record<string, Call>} calls
    * @property {Totals} totals
    */
   /**
    * @typedef {{ question: string, model: string, folder: string, created: string, text: string,
-   *   provenance: Provenance, totals: Totals }} RecordedAsk
+   *   provenance: R3conProvenance, totals: Totals }} RecordedAsk
    */
   /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement }} PanelNode */
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
@@ -159,7 +159,8 @@
    * them all). A round is 1 or 2, since the page refuses a run with more.
    * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
    *   | { type: 'relevance_started', round: 1 | 2, doc_id: string }
-   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, summary: string, quotes: Quote[], provenance: string[] }
+   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, part: number | null, summary: string, quotes: Quote[],
+   *       provenance: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
@@ -253,12 +254,14 @@
     {
      "text": "Equipment incidents logged this quarter: 5.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "17f027"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
      "start": 141,
-     "end": 218
+     "end": 218,
+     "snippet": "17f027"
     }
    ]
   },
@@ -269,12 +272,14 @@
     {
      "text": "Equipment incidents logged this quarter: 9.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "964bc2"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
      "start": 136,
-     "end": 213
+     "end": 213,
+     "snippet": "964bc2"
     }
    ]
   },
@@ -285,12 +290,14 @@
     {
      "text": "Equipment incidents logged this quarter: 6.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "9e02b3"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
      "start": 164,
-     "end": 241
+     "end": 241,
+     "snippet": "9e02b3"
     }
    ]
   },
@@ -301,17 +308,20 @@
     {
      "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
      "start": 54,
-     "end": 127
+     "end": 127,
+     "snippet": "d9add2"
     },
     {
      "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
      "start": 128,
-     "end": 189
+     "end": 189,
+     "snippet": "d9add2"
     },
     {
      "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
      "start": 248,
-     "end": 328
+     "end": 328,
+     "snippet": "d9add2"
     }
    ]
   },
@@ -332,12 +342,14 @@
     {
      "text": "Equipment incidents logged this quarter: 5.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "17f027"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
      "start": 141,
-     "end": 218
+     "end": 218,
+     "snippet": "17f027"
     }
    ]
   },
@@ -350,12 +362,14 @@
     {
      "text": "Equipment incidents logged this quarter: 9.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "964bc2"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
      "start": 136,
-     "end": 213
+     "end": 213,
+     "snippet": "964bc2"
     }
    ]
   },
@@ -368,12 +382,14 @@
     {
      "text": "Equipment incidents logged this quarter: 6.",
      "start": 45,
-     "end": 88
+     "end": 88,
+     "snippet": "9e02b3"
     },
     {
      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
      "start": 164,
-     "end": 241
+     "end": 241,
+     "snippet": "9e02b3"
     }
    ]
   },
@@ -388,12 +404,14 @@
     {
      "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
      "start": 54,
-     "end": 127
+     "end": 127,
+     "snippet": "d9add2"
     },
     {
      "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
      "start": 248,
-     "end": 328
+     "end": 328,
+     "snippet": "d9add2"
     }
    ]
   },
@@ -485,16 +503,16 @@
   "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
   "provenance": {
    "summary_ids": [
-    0,
-    2,
-    1,
-    3
+    "17f027",
+    "9e02b3",
+    "964bc2",
+    "d9add2"
    ],
    "parse_ids": [
-    0,
-    2,
-    1,
-    3
+    "17f027",
+    "9e02b3",
+    "964bc2",
+    "d9add2"
    ],
    "quotes": [
     {
@@ -806,14 +824,14 @@
   "text": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
   "provenance": {
    "summary_ids": [
-    0,
-    2,
-    3
+    "17f027",
+    "9e02b3",
+    "d9add2"
    ],
    "parse_ids": [
-    0,
-    2,
-    3
+    "17f027",
+    "9e02b3",
+    "d9add2"
    ],
    "quotes": [
     {
@@ -1011,14 +1029,14 @@
   "text": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
   "provenance": {
    "summary_ids": [
-    0,
-    2,
-    3
+    "17f027",
+    "9e02b3",
+    "d9add2"
    ],
    "parse_ids": [
-    0,
-    2,
-    3
+    "17f027",
+    "9e02b3",
+    "d9add2"
    ],
    "quotes": [
     {
@@ -1216,12 +1234,12 @@
   "text": "Merrow Facilities Group's site(s) logged 9 equipment incidents in Q3.",
   "provenance": {
    "summary_ids": [
-    1,
-    3
+    "964bc2",
+    "d9add2"
    ],
    "parse_ids": [
-    1,
-    3
+    "964bc2",
+    "d9add2"
    ],
    "quotes": [
     {
@@ -1999,15 +2017,25 @@
     }
   }
 
-  // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
-  /** @param {Run} run @param {string[]} ids */
-  function docIndices(run, ids) {
-    return [...new Set(ids.map((id) => run.ids.indexOf(id.split('.')[0])))];
+  /** @type {WeakMap<string[], Map<string, number>>} */
+  const docIndexes = new WeakMap();
+
+  // r3con names a snippet by its document's id, or `<id>.<k>` for part k of a document read in parts.
+  /** @param {Pick<Run, 'ids'>} run @param {string} id */
+  function docIndex(run, id) {
+    let index = docIndexes.get(run.ids);
+    if (!index) docIndexes.set(run.ids, (index = new Map(run.ids.map((own, d) => [own, d]))));
+    return index.get(id.split('.')[0]);
   }
 
-  /** @param {Run} run @param {R3conProvenance} provenance @returns {Provenance} */
-  function provenanceOf(run, provenance) {
-    return { ...provenance, summary_ids: docIndices(run, provenance.summary_ids), parse_ids: docIndices(run, provenance.parse_ids) };
+  /** @param {Pick<Run, 'ids'>} run @param {string[]} ids */
+  function docIndices(run, ids) {
+    return [...new Set(ids.flatMap((id) => docIndex(run, id) ?? []))];
+  }
+
+  /** @param {Pick<Run, 'ids'>} run @param {R3conProvenance} provenance @returns {Provenance} */
+  function provenanceOf(run, { summary_ids, parse_ids, trail }) {
+    return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids), trail };
   }
 
   /** @param {{ tokens: { total: number } | null, usd: number | null }} event */
@@ -2044,19 +2072,22 @@
   /** @template {Quote} Q @param {Q} quote @returns {quote is Q & TextRange} */
   const located = (quote) => quote.start !== null;
 
-  // r3con's names for an answer and a summary as nodes of a trail.
+  // r3con's names for the nodes of a trail.
   const TRAIL_ANSWER = 'answer';
-  /** @param {number} round @param {string} id */
-  const summaryNode = (round, id) => `summary:${round}:${id}`;
+  /** @param {number} round @param {string} snippet */
+  const summaryNode = (round, snippet) => `summary:${round}:${snippet}`;
+  /** @param {string} id */
+  const parseNode = (id) => `parse:${id}`;
+  /** @param {string} id */
+  const documentNode = (id) => `document:${id}`;
 
   // Where each of `ranges` starts or ends, in order, once each.
   /** @param {{ start: number, end: number }[]} ranges */
   const cutsOf = (ranges) => [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
 
-  // `quotes`, found in `text` by the summary that is trail node `summary`, with their places in UTF-16 code units,
-  // walking the text once up to the last of them.
-  /** @param {string} text @param {Quote[]} quotes @param {string} summary @returns {RunQuote[]} */
-  function quotesInUnits(text, quotes, summary) {
+  // `quotes`, found in `text`, with their places in UTF-16 code units, walking the text once up to the last of them.
+  /** @template {Quote} Q @param {string} text @param {Q[]} quotes @returns {Q[]} */
+  function quotesInUnits(text, quotes) {
     /** @type {Map<number, number>} */
     const units = new Map();
     let point = 0;
@@ -2065,7 +2096,7 @@
       for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(/** @type {number} */ (text.codePointAt(unit))).length;
       units.set(target, unit);
     }
-    return quotes.map((q) => ({ ...(located(q) ? /** @type {Quote} */ ({ ...q, start: units.get(q.start), end: units.get(q.end) }) : q), summary }));
+    return quotes.map((q) => (located(q) ? /** @type {Q} */ ({ ...q, start: units.get(q.start), end: units.get(q.end) }) : q));
   }
 
   /** @returns {Run} */
@@ -2073,10 +2104,14 @@
     /** @param {PerDocumentKind} prefix */
     const finishOrder = (prefix) =>
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
-    /** @param {RecordedSummary[]} summaries @param {number} round */
+    /** @param {RecordedSummary[]} summaries @param {number} round @returns {Summary[]} */
     const inUnits = (summaries, round) =>
-      summaries.map((s, i) => ({ ...s, quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes, summaryNode(round, SAMPLE.ids[i])) }));
-    return {
+      summaries.map((s, i) => ({
+        ...s,
+        quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes).map(({ snippet, ...q }) => ({ ...q, summary: summaryNode(round, snippet) })),
+      }));
+    /** @type {Omit<Run, 'answers'>} */
+    const run = {
       simulated: false,
       docs: SAMPLE_FILES,
       ids: SAMPLE.ids,
@@ -2084,12 +2119,13 @@
       r2: inUnits(SAMPLE.r2, 2),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
-      answers: [{ question: SAMPLE.question, model: SAMPLE.model, ...SAMPLE.answer }],
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       source: 'recorded run',
       order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
+    const { text, provenance } = SAMPLE.answer;
+    return { ...run, answers: [{ question: SAMPLE.question, model: SAMPLE.model, text, provenance: provenanceOf(run, provenance) }] };
   }
 
   /** @param {number} i @param {number} n */
@@ -2100,17 +2136,16 @@
     return cites;
   }
 
-  // As r3con does, it cites only non-empty round-2 summaries and parses with records. Its trail is no walk: one hop, to
-  // what it cites, and from each summary among them to its document.
-  /** @param {Pick<Run, 'docs' | 'ids' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift */
+  // As r3con does, it cites only non-empty round-2 summaries and parses with records; its trail goes one hop.
+  /** @param {Pick<Run, 'docs' | 'ids' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
   function madeUpAnswer(run, question, shift) {
     /** @param {number} stride @param {(i: number) => boolean} citable */
     const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
     const summary_ids = every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary));
     const parse_ids = every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i]));
     const summaries = summary_ids.map((d) => summaryNode(ROUNDS, run.ids[d]));
-    const documents = summary_ids.map((d) => `document:${run.ids[d]}`);
-    const cited = [...summaries, ...parse_ids.map((d) => `parse:${run.ids[d]}`)];
+    const documents = summary_ids.map((d) => documentNode(run.ids[d]));
+    const cited = [...summaries, ...parse_ids.map((d) => parseNode(run.ids[d]))];
     const edges = [
       ...cited.map((to) => /** @type {TrailEdge} */ ([TRAIL_ANSWER, to, 'cites'])),
       ...summaries.map((from, k) => /** @type {TrailEdge} */ ([from, documents[k], 'summarizes'])),
@@ -2211,41 +2246,44 @@
     return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
-  // The trail r3con gave answer `answerId`, drawn on the page: r3con walked it from the answer, so the first edge on it
-  // to reach a summary comes from the node on it nearest the answer.
-  /** @param {Run} run @param {string} answerId @returns {Trail} */
-  function trailOf(run, answerId) {
-    const { trail } = /** @type {Provenance} */ (answerAt(run, answerId).provenance);
-    /** @param {string} node */
-    const onPage = (node) => {
-      if (node === TRAIL_ANSWER) return answerId;
-      const [kind, ...rest] = node.split(':');
-      const [d] = docIndices(run, rest.slice(-1));
-      if (kind === 'summary') return `r${rest[0]}-${d}`;
-      return kind === 'parse' ? `parsed-${d}` : docId(run.docs[d]);
-    };
-    /** @type {Map<string, string>} */
-    const citedBy = new Map();
-    for (const [from, to, kind] of trail.edges) {
-      if (kind === 'cites' && to.startsWith('summary:') && !citedBy.has(onPage(to))) citedBy.set(onPage(to), onPage(from));
-    }
-    const quoting = new Set(trail.edges.filter(([, , kind]) => kind === 'summarizes').map(([from]) => from));
-    return {
-      nodes: new Set(trail.nodes.map(onPage)),
-      edges: new Set(trail.edges.map(([from, to]) => `${onPage(to)}>${onPage(from)}`)),
-      citedBy,
-      quoting,
-      quoted: run.docs.map((_, d) => quotedIn(run, quoting, d)),
-    };
+  // Trail node `node` as the page names it, or null where the page has no node for it.
+  /** @param {Run} run @param {string} answerId @param {string} node */
+  function pageNode(run, answerId, node) {
+    if (node === TRAIL_ANSWER) return answerId;
+    const [kind, ...rest] = node.split(':');
+    const d = docIndex(run, rest[rest.length - 1]);
+    if (d === undefined || !run.docs[d]) return null;
+    if (kind === 'parse') return run.parsed[d] ? `parsed-${d}` : null;
+    if (kind === 'document') return docId(run.docs[d]);
+    const summaries = SUMMARY_KINDS[Number(rest[0]) - 1];
+    return summaries && run[summaries][d] ? `${summaries}-${d}` : null;
   }
 
-  // What the summaries that are trail nodes `quoting` quote of document d: its parts, cut where a quote starts or ends,
-  // each with the summaries quoting it; and its sentences, where quotes that overlap are one, and quotes that only meet
-  // are two.
-  /** @param {Run} run @param {Set<string>} quoting @param {number} d @returns {Quoted} */
+  // r3con walks the trail from the answer, so a summary's first edge on it comes from the node nearest the answer.
+  /** @param {Run} run @param {string} answerId @returns {Trail | null} */
+  function trailOf(run, answerId) {
+    const trail = answerAt(run, answerId).provenance?.trail;
+    if (!trail?.edges.length) return null;
+    const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
+    /** @type {Trail} */
+    const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
+    for (const id of named.values()) if (id) drawn.nodes.add(id);
+    for (const [from, to, kind] of trail.edges) {
+      const [pageFrom, pageTo] = [named.get(from), named.get(to)];
+      if (!pageFrom || !pageTo) continue;
+      drawn.edges.add(`${pageTo}>${pageFrom}`);
+      if (kind === 'cites' && to.startsWith('summary:') && !drawn.citedBy.has(pageTo)) drawn.citedBy.set(pageTo, pageFrom);
+      if (kind === 'summarizes') drawn.quoting.add(from);
+    }
+    drawn.quoted = run.docs.map((_, d) => quotedIn(run, drawn.quoting, d));
+    return drawn;
+  }
+
+  // What `quoting` quotes of document d, by part and by sentence; quotes that overlap join, quotes that only meet don't.
+  /** @param {Run} run @param {Set<string>} quoting the trail nodes of the summaries whose quotes count @param {number} d @returns {Quoted} */
   function quotedIn(run, quoting, d) {
     const quotes = SUMMARY_KINDS.flatMap((kind) =>
-      run[kind][d].quotes.filter((q) => quoting.has(q.summary)).filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
+      (run[kind][d]?.quotes ?? []).filter((q) => quoting.has(q.summary)).filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
     );
     const cuts = cutsOf(quotes);
     const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
@@ -2740,7 +2778,7 @@
   /** @param {RunTab} tab */
   function lightPath(tab) {
     const { run } = tab;
-    const trail = run.lit && cites(run, run.lit).length ? trailOf(run, run.lit) : null;
+    const trail = run.lit ? trailOf(run, run.lit) : null;
     tab.trail = trail;
     tab.drawing.classList.toggle('is-lit', Boolean(trail));
     for (const [id, n] of tab.nodes) {
@@ -2913,7 +2951,6 @@
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
   /** @param {RunTab} tab @param {'r1' | 'r2'} kind @param {number} d */
   function quotesFold(tab, kind, d) {
-    const id = `${kind}-${d}`;
     const { quotes } = tab.run[kind][d];
     if (!quotes.length) return null;
     /** @param {RunQuote} quote */
@@ -2996,7 +3033,8 @@
       ];
     }
     const answer = answerOf(run, id);
-    const quoted = sentencesFrom(trailOf(run, id));
+    const trail = trailOf(run, id);
+    const quoted = trail && sentencesFrom(trail);
     return [
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
@@ -3499,8 +3537,8 @@
   /** @param {RunTab} tab @param {string} id */
   function sentenceList(tab, id) {
     const trail = trailOf(tab.run, id);
-    const line = sentencesFrom(trail);
-    if (!line) return null;
+    const line = trail && sentencesFrom(trail);
+    if (!trail || !line) return null;
     /** @param {LoadedFile} file @param {TextRange[]} sentences */
     const group = (file, sentences) =>
       h(
@@ -3614,8 +3652,9 @@
   /** @param {RunTab} tab @param {Narrator} narr @param {ServerEvent} event */
   function drawEvent(tab, narr, event) {
     const { run } = tab;
+    // An event names a document of its own run.
     /** @param {string} id */
-    const doc = (id) => docIndices(run, [id])[0];
+    const doc = (id) => /** @type {number} */ (docIndex(run, id));
     switch (event.type) {
       case 'run_started':
         if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
@@ -3627,7 +3666,7 @@
         appear(tab, `r${event.round}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
-        addSnippet(tab, narr, event);
+        addSnippet(tab, narr, doc(event.doc_id), event);
         break;
       case 'schema_started':
         beginStage(tab, narr, 'schema');
@@ -3665,17 +3704,17 @@
   }
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
-  // quotes are placed in the whole document, so they add up as they are.
-  /** @param {RunTab} tab @param {Narrator} narr @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
-  function addSnippet(tab, narr, { round, doc_id, summary, provenance, quotes }) {
+  // quotes are placed in the whole document, so they add up as they are, each with its part's trail node.
+  /** @param {RunTab} tab @param {Narrator} narr @param {number} i @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
+  function addSnippet(tab, narr, i, { round, doc_id, part, summary, provenance, quotes }) {
     const { run } = tab;
     const kind = /** @type {'r1' | 'r2'} */ (`r${round}`);
-    const [i] = docIndices(run, [doc_id]);
+    const node = summaryNode(round, part === null ? doc_id : `${doc_id}.${part}`);
     const earlier = run[kind][i] ?? { summary: '', provenance: [], quotes: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
       provenance: [...new Set([...earlier.provenance, ...docIndices(run, provenance)])],
-      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes, summaryNode(round, doc_id))],
+      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes).map((q) => ({ ...q, summary: node }))],
     };
     settle(tab, narr, `${kind}-${i}`);
   }
@@ -3815,7 +3854,7 @@
     const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
     /** @type {Answer} */
-    const ask = recorded ? { ...recorded, source: 'recorded' } : simulatedAsk(run, question, model);
+    const ask = recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), source: 'recorded' } : simulatedAsk(run, question, model);
     const id = addAsk(tab, ask);
     const narr = askTurn(tab, question, model);
     showAnswer(tab, narr, id);
