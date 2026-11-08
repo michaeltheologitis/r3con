@@ -79,7 +79,7 @@ const POPUP_ROWS = {
   'r2-3': ['read'],
   schema: ['reasoning'],
   'parsed-0': ['read', 'used'],
-  'answer-0': ['question', 'provenance'],
+  'answer-0': ['question'],
 };
 const MODEL_KEY = 'r3con-proto-model';
 const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
@@ -577,10 +577,10 @@ function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
   };
 }
 
-// What the open popup's provenance row lists, by name.
+// What the open popup's provenance fold lists, by name, open or not.
 const provenanceListed = (page) =>
-  page.$$eval('#inspector .row', (rows) => {
-    const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
+  page.$$eval('#inspector details', (folds) => {
+    const provenance = folds.find((d) => d.querySelector('summary').textContent.startsWith('provenance '));
     return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
   });
 
@@ -2218,6 +2218,23 @@ async function popupArea() {
     await inspect(page, 'answer-0');
     const listed = await provenanceListed(page);
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
+    const closed = await page.evaluate(foldsIn);
+    const hidden = await page.$$eval('#inspector details .ref', (els) => els.every((el) => !el.checkVisibility()));
+    await page.click('#inspector details > summary');
+    const opened = await page.evaluate(foldsIn);
+    const shownRefs = await page.$$eval('#inspector details .ref', (els) => els.filter((el) => el.checkVisibility()).map((el) => el.textContent));
+    const foldName = `provenance ${cited.length}`;
+    const answerFolded = isDeepStrictEqual(closed.map((f) => [f.name, f.open, f.marker]), [[foldName, false, '"▸ "']]) && hidden;
+    const answerOpened = isDeepStrictEqual(opened.map((f) => [f.name, f.open, f.marker]), [[foldName, true, '"▾ "']]) && isDeepStrictEqual(shownRefs, cited);
+    const answerFoldName = "the answer's popup folds its provenance, counted and ▸ closed until opened; a click opens it ▾ to the nodes it cites";
+    check('popup', answerFoldName, answerFolded && answerOpened, JSON.stringify({ closed: closed.map((f) => [f.name, f.open]), shownRefs }));
+    await inspect(page, 'answer-0');
+    await page.focus('#inspector-close');
+    await page.keyboard.press('Tab');
+    const reached = await page.evaluate(() => document.activeElement?.matches('#inspector details > summary') ?? false);
+    await page.keyboard.press('Enter');
+    const byEnter = await page.$eval('#inspector details', (d) => d.open);
+    check('popup', "from the keyboard, Tab from the popup's close button reaches the answer's provenance fold, and Enter opens it", reached && byEnter, `reached ${reached}, open ${byEnter}`);
     const opening = await page.$$eval('#inspector > :not(.insp-head)', (els) => els.slice(0, 2).map((el) => [el.textContent, getComputedStyle(el).fontWeight]));
     const questionFirst = isDeepStrictEqual(opening, [[`question ${sample.question}`, '400'], [sample.answer.text, '600']]);
     check('popup', "the answer's popup gives its question first, then the answer in bold", questionFirst, JSON.stringify(opening));

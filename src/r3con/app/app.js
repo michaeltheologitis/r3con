@@ -3042,11 +3042,12 @@
     const answer = answerOf(run, id);
     const trail = answerTrail(tab, id);
     const quoted = trail && sentencesFrom(trail);
+    const provenance = cites(run, id);
     return [
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
-      row('provenance', refs(cites(run, id))),
+      fold(`provenance ${provenance.length}`, refs(provenance)),
       quoted && h('div', { class: 'used' }, quoted),
       h('div', { class: 'k' }, answer.summary),
     ];
