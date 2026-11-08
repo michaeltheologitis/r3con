@@ -22,12 +22,16 @@ opened URL's fragment, ``#token=...``.
 - A run or ask names its model and, as ``endpoint``, the server it runs on, if any.
   With no server, OpenAI's, Anthropic's and Gemini's models get their provider's key
   stored here, and any other gets litellm's own setup from the environment. On a
-  server, a model of a self-hosted provider in ``SELF_HOSTED``, or a name litellm
-  can't place, is sent there with the server's key, or ``KEYLESS_SERVER_KEY`` for a
-  keyless server: given none, litellm would send it one from the environment, such
-  as ``OLLAMA_API_KEY``. An ``endpoint`` that isn't a stored server, or a model
-  litellm places with a provider that isn't self-hosted, is refused (422), so that no
-  provider's key, stored here or in the environment, ever reaches a server.
+  server, a model of a self-hosted provider in ``SELF_HOSTED`` goes as it is, and
+  any other, whether litellm can't place it (``Qwen/Qwen3-8B``) or places it with
+  another provider (``openai/gpt-oss-20b``), goes after ``SERVER_ROUTE``: litellm's
+  route to an OpenAI-compatible server, which sends the server the name that follows
+  it. Either way it goes with the server's key, or ``KEYLESS_SERVER_KEY`` for a
+  keyless server: given none, litellm would send it one from the environment, such as
+  ``HOSTED_VLLM_API_KEY``. So on a server, r3con is always called with a self-hosted
+  route and an explicit key, and no provider's key, stored here or in the
+  environment, ever reaches a server. An ``endpoint`` that isn't a stored server is
+  refused (422).
 - Keys stay in this process's memory, and the server never logs or writes one, and
   answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
   which r3con registers before sending it and masks in every event's ``error``, in
@@ -191,15 +195,13 @@ MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS
 SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
+SERVER_ROUTE = "hosted_vllm/"
 # vLLM's placeholder for "no key"; non-empty, since r3con drops an empty api_key.
 KEYLESS_SERVER_KEY = SecretStr("EMPTY")
 UNKNOWN_SERVER = "This model's server isn't in settings: add it there first."
 CREDENTIALS_IN_URL = "must not hold a user or password: put the key in its key field"
 NO_HOST_IN_URL = "must name a host"
 ONE_NAME_PER_DOCUMENT = "must give one name per document"
-NOT_SELF_HOSTED = (
-    "isn't a self-hosted model, so it can't run on a server: pick other model… for it."
-)
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
@@ -397,12 +399,12 @@ def _model_options(
         base = None
     elif endpoint not in state.servers:
         raise HTTPException(422, UNKNOWN_SERVER)
-    elif provider is None or provider in SELF_HOSTED:
+    else:
         stored = state.servers[endpoint]
         key = KEYLESS_SERVER_KEY if stored is None else stored
         base = endpoint
-    else:
-        raise HTTPException(422, f"{model} {NOT_SELF_HOSTED}")
+        if provider not in SELF_HOSTED:
+            model = f"{SERVER_ROUTE}{model}"
     return {
         "model": model,
         "api_key": None if key is None else key.get_secret_value(),

@@ -23,6 +23,7 @@ from r3con.app.server import (
     MAX_ZIP_ENTRIES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
+    UNKNOWN_SERVER,
     UNREADABLE_ZIP,
     ZIP_ENCRYPTED_FLAG,
     ServerState,
@@ -51,6 +52,10 @@ QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 # A bare OpenAI name that litellm's model map places from its floor, 1.103, on.
 BARE_OPENAI_MODEL = "gpt-5"
+# A Hugging Face name, as vLLM and SGLang serve a model, that litellm can't place.
+SERVED_MODEL = "google/gemma-4-12B-it"
+# A served model whose Hugging Face name litellm reads as OpenAI's.
+SERVED_OPENAI_MODEL = "openai/gpt-oss-20b"
 OPENAI_KEY = "sk-stored-openai-key-1234"
 OTHER_KEY = "other-endpoint-key-5678"
 ENVIRONMENT_KEY = "key-from-the-environment-9012"
@@ -182,8 +187,8 @@ def run_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
     return events_of(client, f"/api/runs/{run_id}/events")
 
 
-def ask_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
-    response = client.post(f"/api/runs/{run_id}/asks", json=ASK)
+def ask_events(client: TestClient, run_id: str, **ask: Any) -> list[dict[str, Any]]:
+    response = client.post(f"/api/runs/{run_id}/asks", json={**ASK, **ask})
     assert response.status_code == 202, response.text
     return events_of(client, f"/api/asks/{response.json()['ask_id']}/events")
 
@@ -492,6 +497,10 @@ def test_a_model_on_no_server_gets_only_its_providers_stored_key(
         ("ollama/llama3", "OLLAMA_API_KEY"),
         ("ollama_chat/llama3", "OLLAMA_API_KEY"),
         ("custom_openai/qwen", "OPENAI_API_KEY"),
+        (SERVED_MODEL, "HOSTED_VLLM_API_KEY"),
+        (SERVED_OPENAI_MODEL, "OPENAI_API_KEY"),
+        (BARE_OPENAI_MODEL, "OPENAI_API_KEY"),
+        ("anthropic/claude-sonnet-5-5", "ANTHROPIC_API_KEY"),
     ],
 )
 def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment(
@@ -529,6 +538,21 @@ def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment
             SECOND_ENDPOINT,
             {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
         ),
+        (
+            SERVED_MODEL,
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            MODEL,
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            SERVED_OPENAI_MODEL,
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
     ],
 )
 def test_a_model_on_a_server_reaches_that_server_with_its_key(
@@ -546,51 +570,51 @@ def test_a_model_on_a_server_reaches_that_server_with_its_key(
 
 
 @pytest.mark.parametrize(
-    ("model_name", "endpoint", "wrong"),
+    ("model_name", "endpoint", "sent"),
     [
-        ("hosted_vllm/qwen", "http://127.0.0.1:10/v1", "isn't in settings"),
-        (MODEL, ENDPOINT, f"{MODEL} isn't a self-hosted model"),
-        (BARE_OPENAI_MODEL, ENDPOINT, "isn't a self-hosted model"),
-        ("anthropic/claude-sonnet-5-5", ENDPOINT, "isn't a self-hosted model"),
+        (SERVED_MODEL, ENDPOINT, f"hosted_vllm/{SERVED_MODEL}"),
+        ("qwen3-32b", ENDPOINT, "hosted_vllm/qwen3-32b"),
+        (SERVED_OPENAI_MODEL, ENDPOINT, f"hosted_vllm/{SERVED_OPENAI_MODEL}"),
+        (BARE_OPENAI_MODEL, ENDPOINT, f"hosted_vllm/{BARE_OPENAI_MODEL}"),
+        (
+            "anthropic/claude-sonnet-5-5",
+            ENDPOINT,
+            "hosted_vllm/anthropic/claude-sonnet-5-5",
+        ),
+        ("hosted_vllm/x", ENDPOINT, "hosted_vllm/x"),
+        ("ollama/x", ENDPOINT, "ollama/x"),
+        (SERVED_OPENAI_MODEL, None, SERVED_OPENAI_MODEL),
     ],
 )
-def test_an_unknown_server_or_a_hosted_model_on_a_server_is_refused(
+def test_a_model_on_a_server_goes_by_a_self_hosted_route_and_on_none_as_named(
     client: TestClient,
     llm: FakeLLM,
-    monkeypatch: pytest.MonkeyPatch,
     model_name: str,
-    endpoint: str,
-    wrong: str,
+    endpoint: str | None,
+    sent: str,
 ):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", ENVIRONMENT_KEY)
-    client.post("/api/keys", json=STORED_OPENAI)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    run_id = finished_run(client, model_name, endpoint)
+    ask = ask_events(client, run_id, model=model_name, endpoint=endpoint)
+    assert ask[-1]["type"] == "ask_finished", ask[-1]
+    assert {call["model"] for call in llm.requests} == {sent}
+
+
+def test_a_model_on_a_server_not_in_settings_is_refused(
+    client: TestClient, llm: FakeLLM
+):
     client.post("/api/keys", json=KEYLESS_OTHER)
     run_id = finished_run(client)
     llm.requests.clear()
+    unknown = {"model": "hosted_vllm/qwen", "endpoint": "http://127.0.0.1:10/v1"}
     responses = [
-        client.post("/api/runs", json=run_body(model_name, endpoint)),
-        client.post(
-            f"/api/runs/{run_id}/asks",
-            json={**ASK, "model": model_name, "endpoint": endpoint},
-        ),
+        client.post("/api/runs", json={**run_body(), **unknown}),
+        client.post(f"/api/runs/{run_id}/asks", json={**ASK, **unknown}),
     ]
     for response in responses:
         assert response.status_code == 422
-        assert wrong in response.json()["error"]
+        assert response.json()["error"] == UNKNOWN_SERVER
     assert llm.requests == []
-
-
-def test_a_name_litellm_cannot_place_is_sent_to_its_server_which_litellm_then_refuses(
-    client: TestClient, llm: FakeLLM
-):
-    client.post("/api/keys", json=OTHER)
-    last = run_events(client, start_run(client, "qwen3-32b", ENDPOINT))[-1]
-    assert llm.requests
-    assert transport(llm) == [{"api_key": OTHER_KEY, "api_base": ENDPOINT}] * len(
-        llm.requests
-    )
-    assert last["type"] == "run_failed"
-    assert "LLM Provider NOT provided" in last["error"]
 
 
 def test_a_pasted_key_and_endpoint_are_used_and_masked_without_their_whitespace(
