@@ -57,6 +57,8 @@ UNKNOWN_PARAMETER = {
 # A new process's documents make its first model calls at once, as relevance does,
 # and every line of pydantic's model rebuild hands the GIL to another thread: before
 # pydantic 2.14, two threads building one of litellm's deferred models raced there.
+# completion=litellm.completion has r3con send each call once: its own resend of a
+# failed call would hide the race behind one retry.
 FIRST_CALLS_AT_ONCE = """
 import threading, time
 import litellm, pydantic
@@ -65,19 +67,20 @@ from r3con.runtime.llm import litellm_chat_completion_full
 
 REBUILD = pydantic.BaseModel.model_rebuild.__func__.__code__
 DOCUMENTS = 5
-rebuilt = []
+HAND_OVER_SECONDS = 0.001
+rebuilt = threading.Event()
 
 
 def hand_over_each_line(frame, event, arg):
     if event == "line":
-        time.sleep(0.001)
+        time.sleep(HAND_OVER_SECONDS)
     return hand_over_each_line
 
 
 def trace_rebuilds(frame, event, arg):
     if frame.f_code is not REBUILD:
         return None
-    rebuilt.append(frame.f_locals["cls"].__name__)
+    rebuilt.set()
     return hand_over_each_line
 
 
@@ -90,8 +93,9 @@ parallel_map(
     range(DOCUMENTS),
     max_workers=DOCUMENTS,
 )
-assert rebuilt, "no thread ran BaseModel.model_rebuild, so this run forced no race"
+assert rebuilt.is_set(), "no thread ran BaseModel.model_rebuild, so no race was forced"
 """
+FIRST_CALLS_TIMEOUT_SECONDS = 60
 QUOTA_SPENT = {
     "error": {
         "message": "You exceeded your current quota, please check your plan.",
@@ -1126,10 +1130,14 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
 
 
 def test_first_model_calls_made_at_once_in_a_new_process_all_get_replies():
-    first_calls = subprocess.run(
-        [sys.executable, "-c", FIRST_CALLS_AT_ONCE],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        first_calls = subprocess.run(
+            [sys.executable, "-c", FIRST_CALLS_AT_ONCE],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=FIRST_CALLS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as hung:
+        pytest.fail(f"the first calls hung; their stderr:\n{hung.stderr}")
     assert first_calls.returncode == 0, first_calls.stderr
