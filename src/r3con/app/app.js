@@ -748,6 +748,8 @@
   const MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS;
   const SAVED_MS = 1800;
   const ARRANGE_MS = 420;
+  // How long remove all waits for the second press that confirms it.
+  const CONFIRM_MS = 4000;
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
@@ -852,6 +854,7 @@
   const modelRemove = $('model-remove', HTMLButtonElement);
   const frame = $('frame');
   const trash = $('trash');
+  const removeAllButtons = [$('files-remove-all'), $('panel-remove-all')];
   const side = $('side');
   const resizer = $('resizer');
 
@@ -2520,11 +2523,25 @@
 
   function updateHint() {
     const { run, files } = state.shown;
-    const hint = $('panel-hint');
-    if (run) hint.textContent = '';
-    else hint.textContent = files.length ? `${fileCount()} · ready to run` : ADD_FILES;
-    hint.hidden = !hint.textContent;
+    $('panel-hint').hidden = Boolean(run);
+    $('panel-hint-text').textContent = files.length ? `${fileCount()} · ` : ADD_FILES;
     trash.hidden = Boolean(run) || !files.length;
+    offerRemoveAll();
+  }
+
+  // Set while remove all waits for the second press that confirms it.
+  let confirmTimer = 0;
+
+  // Remove all is offered where the can is. A first press only asks: both buttons ask until a second press, or CONFIRM_MS.
+  function offerRemoveAll(asking = false) {
+    clearTimeout(confirmTimer);
+    confirmTimer = asking ? setTimeout(offerRemoveAll, CONFIRM_MS) : 0;
+    for (const button of removeAllButtons) {
+      button.hidden = trash.hidden;
+      button.textContent = asking ? 'remove all?' : 'remove all';
+      button.ariaLabel = button.title = asking ? `remove all ${fileCount()}? press again to confirm` : 'remove all documents';
+      button.classList.toggle('asking', asking);
+    }
   }
 
   // `action` is ask, over the run on the panel, or run, a new one over the files.
@@ -2970,12 +2987,11 @@
   /** @param {string} question */
   function startRun(question) {
     const from = state.shown;
-    const at = docPositions(from);
-    const opened = from.run ? openTab(newTab(from.files, from.view)) : from;
+    const opened = from.run ? copyTab(from) : from;
     const tab = Object.assign(opened, { run: { ...mode.newRun(question, opened.files), lit: null }, turn: addTurn(opened, question) });
     if (tab === from) renderFiles();
     else showTabContents(tab);
-    playRun(tab, at);
+    playRun(tab);
     revealTab(tab);
   }
 
@@ -3065,6 +3081,14 @@
     $('run-tabs').append(tab.button, tab.close);
     $('ask-form').before(tab.chat);
     if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab)}.`);
+    return tab;
+  }
+
+  // Lists a new tab with `from`'s files and none of its work, their nodes where `from` has them.
+  /** @param {Tab} from */
+  function copyTab(from) {
+    const tab = openTab(newTab(from.files, from.view));
+    syncDocNodes(tab, { at: docPositions(from) });
     return tab;
   }
 
@@ -3175,7 +3199,7 @@
   function renderFiles() {
     const { files, run } = state.shown;
     const sampleOnly = files.length > 0 && files.every((f) => f.sample);
-    const head = `${fileCount()} · ${fmtBytes(totalBytes(files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
+    const head = `${fileCount()} · ${fmtBytes(totalBytes(files))}${sampleOnly ? ' · sample memos' : ''}`;
     $('files-head').textContent = files.length ? head : NO_FILES;
     $('file-list').replaceChildren(
       ...files.map((f) =>
@@ -3384,15 +3408,28 @@
   // The re-render drops the clicked button, and the focus with it.
   /** @param {LoadedFile} file @param {{ refocus?: boolean }} [options] */
   function removeFile(file, { refocus = true } = {}) {
-    const tab = state.shown;
-    const i = tab.files.indexOf(file);
-    tab.files = tab.files.filter((f) => f !== file);
-    tellFiles(tab, { filesError: '' });
-    filesChanged(tab, `Removed ${file.name}`);
+    const i = state.shown.files.indexOf(file);
+    removeFiles([file], `Removed ${file.name}`);
     if (!refocus) return;
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
+  }
+
+  // Every file of the shown tab, on a second press; `then` takes the focus from the pressed button, gone with them.
+  /** @param {HTMLElement} then */
+  function removeAllFiles(then) {
+    if (!confirmTimer) return offerRemoveAll(true);
+    removeFiles(state.shown.files, `Removed ${plural(state.shown.files.length, 'file')}`);
+    then.focus({ preventScroll: true });
+  }
+
+  /** @param {LoadedFile[]} gone @param {string} what */
+  function removeFiles(gone, what) {
+    const tab = state.shown;
+    tab.files = tab.files.filter((f) => !gone.includes(f));
+    tellFiles(tab, { filesError: '' });
+    filesChanged(tab, what);
   }
 
   /** @param {Tab} tab @param {string} what */
@@ -3910,7 +3947,7 @@
   function onPointerDown(e) {
     const { view } = state.shown;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (targetOf(e).closest('.inspector, .panel-tools')) return;
+    if (targetOf(e).closest('.inspector, .panel-tools, .panel-hint')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
@@ -4177,12 +4214,20 @@
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(runTab(state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
+    // A new tab copies the shown tab's files, ready for another question; with none, it opens on adding them.
     $('new-tab-btn').addEventListener('click', () => {
-      const tab = openTab(newTab([]));
+      const tab = copyTab(state.shown);
       switchTab(tab);
+      if (tab.files.length) {
+        showTab('chat');
+        questionEl.focus();
+        return;
+      }
       showTab('files');
       tab.button.focus();
     });
+    $('files-remove-all').addEventListener('click', () => removeAllFiles($('file-input')));
+    $('panel-remove-all').addEventListener('click', () => removeAllFiles(panel));
     $('chat-pane').addEventListener('click', onChatClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);

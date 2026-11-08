@@ -307,6 +307,13 @@ const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
 const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
 const ADD_FILES = 'no files yet · add them in the files tab';
+// Remove all's label and name at rest, and its label and name while it asks for the second press that confirms it.
+const REMOVE_ALL = 'remove all';
+const REMOVE_ALL_NAME = 'remove all documents';
+const REMOVE_ALL_ASKING = 'remove all?';
+const removeAllAsks = (n) => `remove all ${n} documents? press again to confirm`;
+// The page's CONFIRM_MS: how long remove all asks before it stops asking.
+const CONFIRM_MS = 4000;
 const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
 const RAN_FIRST = "The tab's run started first, so its files are locked.";
 const DROP_ADDS = 'drop to add files';
@@ -1063,9 +1070,9 @@ async function beforeRun() {
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
-    const hint = await page.textContent('#panel-hint');
-    const hintText = `${SAMPLE_DOCS} documents · ready to run`;
-    check('before a run', 'the hint says the documents are ready to run', hint === hintText, hint);
+    const hint = await page.innerText('#panel-hint');
+    const hintText = `${SAMPLE_DOCS} documents · ${REMOVE_ALL}`;
+    check('before a run', 'the hint beside the can counts the documents and offers to remove them all, and no longer says ready to run', hint === hintText, hint);
     const status = await page.textContent('#run-status');
     const named = status === ready('recorded run', RECORDED_MODEL);
     check('before a run', "the status names a recorded run and the recording's model", named, status);
@@ -1464,7 +1471,7 @@ async function removeArea() {
     const after = {
       docs: await docNames(page),
       count: await page.textContent('#files-count'),
-      hint: await page.textContent('#panel-hint'),
+      hint: await page.innerText('#panel-hint'),
       status: await page.textContent('#run-status'),
       head: (await page.textContent('#files-head')).split(' · ').at(-1),
       said: await page.textContent('#files-said'),
@@ -1474,7 +1481,7 @@ async function removeArea() {
     const expected = {
       docs: left,
       count: String(left.length),
-      hint: `${left.length} documents · ready to run`,
+      hint: `${left.length} documents · ${REMOVE_ALL}`,
       status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
       head: 'sample memos',
       said: `Removed ${names[1]}.`,
@@ -1491,8 +1498,9 @@ async function removeArea() {
     const said = [await page.textContent('#files-said'), await lastChatLine(page)];
     const inPlace = `1 file added, in place of the ${left.length} sample memos`;
     const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
-    const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head.endsWith('your files') && saysSo;
-    check('remove', 'files added over the sample memos left take their place, and the files pane and the chat say which they replaced', replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
+    const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && head === '1 document · 15 B' && saysSo;
+    const replacedName = "files added over the sample memos left take their place, and the files pane and the chat say which they replaced; the pane's head no longer calls them your files";
+    check('remove', replacedName, replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
   });
 
   await withPage('remove', { sample: false }, async (page) => {
@@ -1623,18 +1631,21 @@ async function trashArea() {
     check('trash', 'a node panned under the can is still grabbed there, not the view', isDeepStrictEqual(grabbed, { moved: true, panned: false, docs: names }), JSON.stringify(grabbed));
 
     await page.click('#new-tab-btn');
+    const copied = await canShown(page);
+    await removeAll(page);
     const empty = await canShown(page);
+    await page.click('#tab-files');
     const second = ['a_memo.txt', 'b_memo.txt'];
     await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
     await removeButton(page, second[1]).waitFor();
     const withFiles = await canShown(page);
     const flicked = await dragOver(page, await centre(page, await docNodeId(page, second[0])), spot, { steps: 1 });
-    const plus = { empty, withFiles, flicked, docs: await docNames(page), pane: (await page.evaluate(filesPane)).names };
+    const plus = { copied, empty, withFiles, flicked, docs: await docNames(page), pane: (await page.evaluate(filesPane)).names };
     await showRunTab(page, 0);
     const first = { tab: (await tabLabels(page))[0][0], pane: (await page.evaluate(filesPane)).names };
     const plusName =
-      "a + tab shows the can once it has files, not before, and a node flicked onto it in one move lights it and is removed from that tab only: tab 1, not run, keeps all its files";
-    const expected = { empty: false, withFiles: true, flicked: true, docs: second.slice(1), pane: second.slice(1) };
+      "a + tab, holding a copy of tab 1's files, shows the can; emptied by remove all it hides it until files are added, and a node flicked onto it in one move lights it and is removed from that tab only: tab 1, not run, keeps all its files";
+    const expected = { copied: true, empty: false, withFiles: true, flicked: true, docs: second.slice(1), pane: second.slice(1) };
     const firstKept = isDeepStrictEqual(first, { tab: FIRST_TAB_BEFORE_RUN, pane: names });
     check('trash', plusName, isDeepStrictEqual(plus, expected) && firstKept, JSON.stringify({ ...plus, first }));
 
@@ -1655,6 +1666,140 @@ async function trashArea() {
     const ranName = 'a tab that has run shows no can, and a document node dropped where it was keeps its file';
     check('trash', ranName, isDeepStrictEqual(ran, { shown: false, lit: false, docs: names, pane: names }), JSON.stringify(ran));
   });
+}
+
+// ---------- remove all: the files pane's, and the panel's beside the can; a first press asks, a second removes ----------
+
+// Presses a remove all twice, as it takes: the panel's, or another by its id.
+async function removeAll(page, id = 'panel-remove-all') {
+  for (let i = 0; i < 2; i += 1) await page.click(`#${id}`);
+}
+
+// A + tab with none of the shown tab's files, its files pane shown: + copies them, and remove all takes them out.
+async function openEmptyTab(page) {
+  await page.click('#new-tab-btn');
+  await removeAll(page);
+  await page.click('#tab-files');
+}
+
+// Each remove all, the files pane's then the panel's: whether it is offered, its label, name and tooltip, and whether it asks.
+function removeAllButtons() {
+  return ['files-remove-all', 'panel-remove-all'].map((id) => {
+    const button = document.getElementById(id);
+    return { offered: !button.hidden, label: button.textContent, name: button.ariaLabel, tooltip: button.title, asking: button.classList.contains('asking') };
+  });
+}
+
+// The shown tab's files as the page shows them: its nodes, the files pane, the hint and the can, the tab's name and the status.
+async function filesShown(page) {
+  return {
+    docs: await docNames(page),
+    pane: await page.evaluate(filesPane),
+    hint: await page.innerText('#panel-hint'),
+    can: await canShown(page),
+    tab: (await tabLabels(page)).find(([, selected]) => selected)[0],
+    status: await page.textContent('#run-status'),
+  };
+}
+
+const colorOf = (page, selector) => page.$eval(selector, (el) => getComputedStyle(el).color);
+const panelAsking = () => document.getElementById('panel-remove-all').classList.contains('asking');
+
+async function removeAllArea() {
+  const names = recordedSample().docs.map((d) => d.name);
+  const atRest = { offered: true, label: REMOVE_ALL, name: REMOVE_ALL_NAME, tooltip: REMOVE_ALL_NAME, asking: false };
+  const asking = { offered: true, label: REMOVE_ALL_ASKING, name: removeAllAsks(SAMPLE_DOCS), tooltip: removeAllAsks(SAMPLE_DOCS), asking: true };
+  const gone = { ...atRest, offered: false };
+  const both = (button) => [button, button];
+
+  // What remove all must leave: the tab as removing each file by its own remove leaves it.
+  let oneByOne = null;
+  await withPage('remove all', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    for (const name of names) await removeButton(page, name).click();
+    oneByOne = await filesShown(page);
+  });
+
+  await withPage('remove all', { sample: false }, async (page) => {
+    await page.click('#tab-files');
+    const rest = await page.evaluate(removeAllButtons);
+    const restName = `before a run the files pane's head, and the panel beside the can, each offer ${REMOVE_ALL}, named ${REMOVE_ALL_NAME} with that tooltip`;
+    check('remove all', restName, isDeepStrictEqual(rest, both(atRest)), JSON.stringify(rest));
+
+    const before = await filesShown(page);
+    await page.click('#files-remove-all');
+    const asked = { buttons: await page.evaluate(removeAllButtons), files: await filesShown(page), canMatches: (await colorOf(page, '#trash')) === (await colorOf(page, '#panel-remove-all')) };
+    const askedName = `a first press on the files pane's ${REMOVE_ALL} removes nothing: both ask "${REMOVE_ALL_ASKING}", named for the count and the second press, and the can asks in their colour`;
+    const unchanged = { ...before, hint: `${SAMPLE_DOCS} documents · ${REMOVE_ALL_ASKING}` };
+    check('remove all', askedName, isDeepStrictEqual(asked, { buttons: both(asking), files: unchanged, canMatches: true }), JSON.stringify(asked));
+
+    const linesBefore = await count(page, `${CHAT} .line`);
+    await page.click('#files-remove-all');
+    const removed = {
+      files: await filesShown(page),
+      buttons: await page.evaluate(removeAllButtons),
+      said: await page.textContent('#files-said'),
+      chat: [(await count(page, `${CHAT} .line`)) - linesBefore, await lastChatLine(page)],
+      focus: await focusedId(page),
+    };
+    const expected = {
+      files: oneByOne,
+      buttons: both(gone),
+      said: `Removed ${SAMPLE_DOCS} files.`,
+      chat: [1, `Removed ${SAMPLE_DOCS} files: the next question runs over 0 documents.`],
+      focus: 'file-input',
+    };
+    const removedName = `a second press removes every file of the tab, which then looks as it does with each removed by its own remove; the files pane and the chat say so once, ${REMOVE_ALL} goes with the can, and the focus moves to adding files`;
+    check('remove all', removedName, isDeepStrictEqual(removed, expected), JSON.stringify(removed));
+  });
+
+  await withPage('remove all', { sample: false }, async (page) => {
+    await page.click('#panel-remove-all');
+    await page.click('#new-tab-btn');
+    const carried = await page.evaluate(removeAllButtons);
+    await page.click('#panel-remove-all');
+    const copyKept = await docNames(page);
+    const carriedName = `asking stays with its tab: a + tab opened while ${REMOVE_ALL} asks offers it at rest, and a first press there removes nothing`;
+    check('remove all', carriedName, isDeepStrictEqual(carried, both(atRest)) && isDeepStrictEqual(copyKept, names), JSON.stringify({ carried, copyKept }));
+
+    const askedAtFirst = await page.evaluate(panelAsking);
+    const lapsed = await becomes(page, () => !document.getElementById('panel-remove-all').classList.contains('asking'), null, CONFIRM_MS + SETTLE_TIMEOUT_MS);
+    const afterLapse = await page.evaluate(removeAllButtons);
+    await page.click('#panel-remove-all');
+    const keptAfter = await docNames(page);
+    const lapsedName = `${REMOVE_ALL} stops asking after ${CONFIRM_MS / 1000} s: a press after that only asks again, and removes nothing`;
+    const stopsAsking = askedAtFirst && lapsed && isDeepStrictEqual(afterLapse, both(atRest)) && isDeepStrictEqual(keptAfter, names);
+    check('remove all', lapsedName, stopsAsking, JSON.stringify({ askedAtFirst, lapsed, afterLapse, keptAfter }));
+
+    await page.click('#panel-remove-all');
+    const panelRemoved = { docs: await docNames(page), buttons: await page.evaluate(removeAllButtons), focus: await focusedId(page) };
+    await showRunTab(page, 0);
+    const first = await docNames(page);
+    const panelName = `the panel's ${REMOVE_ALL}, pressed again while it asks, removes every file of the shown tab alone, and the focus goes to the panel: tab 1, which the + tab copied, keeps its files`;
+    check('remove all', panelName, isDeepStrictEqual(panelRemoved, { docs: [], buttons: both(gone), focus: 'panel' }) && isDeepStrictEqual(first, names), JSON.stringify({ panelRemoved, first }));
+  });
+
+  await withPage('remove all', {}, async (page) => {
+    await page.click('#tab-files');
+    const ran = { buttons: (await page.evaluate(removeAllButtons)).map((b) => b.offered), can: await canShown(page), hint: await page.isVisible('#panel-hint') };
+    check('remove all', `a tab that has run offers no ${REMOVE_ALL}, in the files pane or the panel, as it shows no can`, isDeepStrictEqual(ran, { buttons: [false, false], can: false, hint: false }), JSON.stringify(ran));
+  });
+
+  for (const layout of Object.values(LAYOUTS)) {
+    await withPage('remove all', { layout, sample: false }, async (page) => {
+      await page.click('#tab-files');
+      const selectors = ['#files-remove-all', '#panel-remove-all'];
+      const atRestContrast = await page.evaluate(lowestContrasts, selectors);
+      await page.click('#panel-remove-all');
+      const askingContrast = await page.evaluate(lowestContrasts, selectors);
+      const boxes = await Promise.all(selectors.map((selector) => rect(page, selector)));
+      const big = boxes.every((box) => box.width >= MIN_TARGET_PX && box.height >= MIN_TARGET_PX);
+      const lowest = Math.min(...Object.values(atRestContrast), ...Object.values(askingContrast));
+      const fits = (await page.evaluate(noHorizontalScroll)) && (await page.evaluate(listFits));
+      const fitName = `${layout.name}: each ${REMOVE_ALL} is at least ${MIN_TARGET_PX} px each way, its label meets ${MIN_TEXT_CONTRAST}:1 at rest and asking, and neither the page nor the files pane scrolls sideways`;
+      check('remove all', fitName, big && lowest >= MIN_TEXT_CONTRAST && fits, `lowest ${lowest.toFixed(2)}; ${boxes.map((box) => `${Math.round(box.width)}×${Math.round(box.height)}`).join(', ')}`);
+    });
+  }
 }
 
 async function settings() {
@@ -3090,10 +3235,27 @@ async function tabs() {
     const firstChat = await chatLines(page, 0);
     const left = await scrollChatTo(page, 1 / 2);
     await page.click('#new-tab-btn');
+    const plus = {
+      lines: await chatLines(page, 1),
+      shown: await page.$$eval('.transcript', (els) => els.map((el) => el.checkVisibility())),
+      focus: await focusedId(page),
+      nodes: await page.$$eval('#world .node', (els) => els.map((el) => el.classList[1])),
+      status: await page.textContent('#run-status'),
+      pane: await paneOf(page),
+    };
     await page.click('#tab-chat');
-    const plus = { lines: await chatLines(page, 1), shown: await page.$$eval('.transcript', (els) => els.map((el) => el.checkVisibility())) };
-    const plusName = "a + tab's chat starts empty, and tab 1's is hidden: none of its lines are in the + tab";
-    check('tabs', plusName, isDeepStrictEqual(plus, { lines: [], shown: [false, true] }), JSON.stringify(plus));
+    const names = recordedSample().docs.map((d) => d.name);
+    const copy = {
+      lines: [loadedLine(SAMPLE_DOCS)],
+      shown: [false, true],
+      focus: 'question',
+      nodes: Array(SAMPLE_DOCS).fill('doc'),
+      status: ready('simulated run', DEFAULT_MODEL),
+      pane: { names, removes: SAMPLE_DOCS, adds: true, locked: null, count: String(SAMPLE_DOCS) },
+    };
+    const plusName =
+      "+ on a tab that has run opens a tab with a copy of its files and none of its work: only their nodes, files not locked, its chat only saying it loaded them, tab 1's hidden, and the focus in the question box";
+    check('tabs', plusName, isDeepStrictEqual(plus, copy), JSON.stringify(plus));
 
     await showRunTab(page, 0);
     const back = { lines: await chatLines(page, 0), ...(await chatState(page)) };
@@ -3331,25 +3493,30 @@ async function tabFiles() {
     const opened = {
       tabs: await tabLabels(page),
       focus: await focusedId(page),
-      filesShown: await page.$eval('#files-pane', (el) => !el.hidden),
+      chatShown: await page.$eval('#chat-pane', (el) => !el.hidden),
+      chat: await chatLines(page, 1),
       pane: await page.evaluate(filesPane),
+      docs: await docNames(page),
       nodes: await count(page, '#world .node'),
-      hint: await page.textContent('#panel-hint'),
+      hint: await page.innerText('#panel-hint'),
       status: await page.textContent('#run-status'),
     };
-    const plusName = `+ is a button named ${NEW_TAB}, outside the tab list, the next stop after the shown tab, and Enter on it opens an empty tab, shows it with the focus on it, and shows its empty files pane`;
+    const plusName = `+ is a button named ${NEW_TAB}, outside the tab list, the next stop after the shown tab, and Enter on it opens a tab with a copy of the shown tab's files, not run and not locked, its own chat saying only that it loaded them, with the focus in the question box`;
     const expected = {
-      tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new', true]],
-      focus: 'run-tab-2',
-      filesShown: true,
-      pane: { names: [], removes: 0, adds: true, locked: null, count: '0' },
-      nodes: 0,
-      hint: ADD_FILES,
-      status: ADD_FILES,
+      tabs: [[FIRST_TAB_BEFORE_RUN, false], [`2 new · ${SAMPLE_DOCS} files`, true]],
+      focus: 'question',
+      chatShown: true,
+      chat: [loadedLine(SAMPLE_DOCS)],
+      pane: { names, removes: SAMPLE_DOCS, adds: true, locked: null, count: String(SAMPLE_DOCS) },
+      docs: names,
+      nodes: SAMPLE_DOCS,
+      hint: `${SAMPLE_DOCS} documents · ${REMOVE_ALL}`,
+      status: ready('simulated run', DEFAULT_MODEL),
     };
     check('tab files', plusName, outside && reached === 'new-tab-btn' && isDeepStrictEqual(opened, expected), `${reached}; ${JSON.stringify(opened)}`);
     const inPlusTab = await page.inputValue('#question');
 
+    await page.click('#tab-files');
     await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
     await removeButton(page, second[1]).waitFor();
     const inSecond = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), tabs: await tabLabels(page), chat: await lastChatLine(page) };
@@ -3362,11 +3529,11 @@ async function tabFiles() {
     await showRunTab(page, 0);
     const firstAgain = (await page.evaluate(filesPane)).names;
     const apart =
-      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new · 2 files', true]], chat: '2 files added: the next question runs over 2 documents.' }) &&
+      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [[FIRST_TAB_BEFORE_RUN, false], ['2 new · 2 files', true]], chat: `2 files added, in place of the ${SAMPLE_DOCS} sample memos: the next question runs over 2 documents.` }) &&
       isDeepStrictEqual(inFirst, { names, docs: names }) &&
       isDeepStrictEqual(secondAgain, second) &&
       isDeepStrictEqual(firstAgain, names.slice(1));
-    const apartName = "files added in tab 2 are its own: tab 1 keeps the sample memos, and a memo removed in tab 1 stays in tab 2";
+    const apartName = "files added in tab 2 take the place of its copied sample memos and are its own: tab 1 keeps the sample memos, and a memo removed in tab 1 stays in tab 2";
     check('tab files', apartName, apart, JSON.stringify({ inSecond, inFirst, secondAgain, firstAgain }));
     const questions = [preloaded, inPlusTab, backOnFirst];
     const sampleQuestion = recordedSample().question;
@@ -3431,25 +3598,54 @@ async function tabFiles() {
     const overOpen = await page.evaluate(dropFiles, [['dropped_too.txt', 'Another dropped memo.\n']]);
     await removeButton(page, 'dropped_too.txt').waitFor();
     const added = { tabs: (await page.evaluate(tabRow)).length, names: (await page.evaluate(filesPane)).names };
-    const addsName = 'files dropped on a tab that has not run are added to it, as the overlay says';
-    check('tab files', addsName, overOpen === DROP_ADDS && isDeepStrictEqual(added, { tabs: 4, names: ['dropped_too.txt'] }), `${overOpen}; ${JSON.stringify(added)}`);
+    const addsName = "files dropped on a + tab, which has not run, are added to the files it copied, as the overlay says";
+    check('tab files', addsName, overOpen === DROP_ADDS && isDeepStrictEqual(added, { tabs: 4, names: [...second, 'dropped_too.txt'] }), `${overOpen}; ${JSON.stringify(added)}`);
     check('tab files', '1440 light: with four tabs and + the page has no horizontal scroll', await page.evaluate(noHorizontalScroll));
   });
 
   await withPage('tab files', { sample: false }, async (page) => {
+    await removeAll(page);
     await page.click('#new-tab-btn');
+    const empty = {
+      tabs: await tabLabels(page),
+      focus: await focusedId(page),
+      filesShown: await page.$eval('#files-pane', (el) => !el.hidden),
+      pane: await page.evaluate(filesPane),
+      nodes: await count(page, '#world .node'),
+      can: await canShown(page),
+      hint: await page.innerText('#panel-hint'),
+      status: await page.textContent('#run-status'),
+    };
+    const emptyExpected = {
+      tabs: [['1 new', false], ['2 new', true]],
+      focus: 'run-tab-2',
+      filesShown: true,
+      pane: { names: [], removes: 0, adds: true, locked: null, count: '0' },
+      nodes: 0,
+      can: false,
+      hint: ADD_FILES,
+      status: ADD_FILES,
+    };
+    const emptyName = '+ on a tab with no files opens an empty tab, shows it with the focus on it, and shows its empty files pane';
+    check('tab files', emptyName, isDeepStrictEqual(empty, emptyExpected), JSON.stringify(empty));
+  });
+
+  await withPage('tab files', { sample: false }, async (page) => {
+    await page.click('#new-tab-btn');
+    await page.locator('.run-tab').nth(1).focus();
     await page.keyboard.press('Delete');
-    const closedEmpty = { tabs: await tabLabels(page), focus: await focusedId(page) };
+    const closedByKey = { tabs: await tabLabels(page), focus: await focusedId(page) };
     await page.keyboard.press('Delete');
     const lastKept = await tabLabels(page);
     await page.click('#new-tab-btn');
+    await page.click('#tab-files');
     await page.setInputFiles('#file-input', memo('c_memo.txt', 'A memo.\n'));
     await removeButton(page, 'c_memo.txt').waitFor();
     await page.locator('.tab-close').nth(1).click();
     const closedWithFiles = await tabLabels(page);
     const one = [[FIRST_TAB_BEFORE_RUN, true]];
-    const closes = isDeepStrictEqual(closedEmpty, { tabs: one, focus: 'run-tab-1' }) && isDeepStrictEqual(lastKept, one) && isDeepStrictEqual(closedWithFiles, one);
-    check('tab files', "a + tab closes, empty with Delete or with files by its ×, and the focus goes to the tab shown; the last tab doesn't close", closes, JSON.stringify({ closedEmpty, lastKept, closedWithFiles }));
+    const closes = isDeepStrictEqual(closedByKey, { tabs: one, focus: 'run-tab-1' }) && isDeepStrictEqual(lastKept, one) && isDeepStrictEqual(closedWithFiles, one);
+    check('tab files', "a + tab closes, with Delete or by its ×, and the focus goes to the tab shown; the last tab doesn't close", closes, JSON.stringify({ closedByKey, lastKept, closedWithFiles }));
     await page.click('#tab-chat');
     await page.fill('#question', NEW_QUESTION);
     await page.click('#new-tab-btn');
@@ -3468,8 +3664,11 @@ async function tabFiles() {
     check('tab files', 'back on a tab that new run left, the box is empty: no question from before its run', left === '', left);
   });
 
+  // The + tabs copy the run's files; the third is emptied, so that adding a file lengthens its name.
   await withPage('tab files', { layout: LAYOUTS.phone }, async (page) => {
     for (let i = 0; i < 2; i += 1) await page.click('#new-tab-btn');
+    await removeAll(page);
+    await page.click('#tab-files');
     await page.setInputFiles('#file-input', memo('d_memo.txt', 'A memo that makes its tab named longer.\n'));
     await removeButton(page, 'd_memo.txt').waitFor();
     const plus = await rect(page, '#new-tab-btn');
@@ -3612,7 +3811,7 @@ async function dropArea() {
     const none = { error: await becomes(page, (text) => document.getElementById('files-error').textContent === text, `${NO_DOCUMENTS}; 2 skipped.`), names: (await page.evaluate(filesPane)).names };
     check('drop', 'a folder with no file r3con run reads adds nothing, and says how many it skipped', none.error && isDeepStrictEqual(none.names, expected.names), `${await filesError(page)}; ${JSON.stringify(none)}`);
 
-    await page.click('#new-tab-btn');
+    await openEmptyTab(page);
     const many = memoNames(0, MAX_FILES + 2).map((name) => [name, `${name}\n`]);
     await page.evaluate(dropItems, { on: 'panel', items: [['many', many.reverse()]] });
     await removeButton(page, 'memo_39.txt').waitFor();
@@ -3621,7 +3820,7 @@ async function dropArea() {
     const cappedExpected = { names: memoNames(0, MAX_FILES), error: `Not added: 2 files. ${TOO_MANY_FILES}`, said: `${MAX_FILES} files added.` };
     check('drop', cappedName, isDeepStrictEqual(capped, cappedExpected), JSON.stringify({ ...capped, names: `${capped.names.length}: ${capped.names[0]}…${capped.names.at(-1)}` }));
 
-    await page.click('#new-tab-btn');
+    await openEmptyTab(page);
     const pdfs = ['a_0.pdf', 'a_1.pdf', 'a_2.pdf'].map((name) => [name, '%PDF-1.7']);
     await page.evaluate(dropItems, { on: 'panel', items: [['mixed', [...pdfs, ...memoNames(0, MAX_FILES).map((name) => [name, `${name}\n`])]]] });
     await removeButton(page, 'memo_39.txt').waitFor();
@@ -4533,6 +4732,7 @@ async function liveTabFiles(url) {
     const posts = postsOf(page);
     const text = 'A memo for the second tab.\n';
     await page.click('#new-tab-btn');
+    await page.click('#tab-files');
     await page.setInputFiles('#file-input', memo('07_second_tab.txt', text));
     await removeButton(page, '07_second_tab.txt').waitFor();
     await page.click('#tab-chat');
@@ -4640,7 +4840,7 @@ async function liveBatchesPerTab(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const release = await holdExtraction(page);
     await page.evaluate(recordFilesLines);
-    await page.click('#new-tab-btn');
+    await openEmptyTab(page);
     await page.setInputFiles('#file-input', [documents['01_memo.pdf'], oldWord()]);
     await showRunTab(page, 0);
     await page.evaluate(() => (window.lineWrites = []));
@@ -5055,7 +5255,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
