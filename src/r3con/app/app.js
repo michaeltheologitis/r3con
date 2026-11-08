@@ -4997,6 +4997,7 @@
     inspector.addEventListener('pointerdown', onInspectorGrab);
     inspector.addEventListener('pointermove', onInspectorMove);
     inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
+    inspector.addEventListener('toggle', positionInspector, true);
     resizer.addEventListener('pointerdown', onResizerGrab);
     resizer.addEventListener('pointermove', onResizerMove);
     resizer.addEventListener('lostpointercapture', onResizerDrop);

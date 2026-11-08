@@ -318,6 +318,10 @@ const DROP_ADDS = 'drop to add files';
 const DROP_LOCKED = 'this tab has run · press + for a new tab';
 const FIRST_TAB_BEFORE_RUN = '1 new · 5 files';
 const DRAG_STEPS = 8;
+// The page's POPOVER_MARGIN: how far inside the panel's edges a popup is kept.
+const POPOVER_MARGIN_PX = 10;
+// A popup dropped this far above the panel's bottom margin, less than the answer's provenance fold adds to it.
+const DROP_ABOVE_MARGIN_PX = 40;
 // The page's SIDE_WIDTH_KEY, SIDE_MIN_PX, SIDE_MAX_SHARE and SIDE_STEP_PX: where the chat's width is kept, its narrowest, its widest as a share of the frame, and a key press's step.
 const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
 const SIDE_MIN_PX = 280;
@@ -687,11 +691,13 @@ function viewChanged(previous) {
   return document.getElementById('world').style.transform !== previous;
 }
 
-function popupInsidePanel() {
+// Whether the open popup is inside the panel, at least `margin` px in from each edge, to the nearest pixel.
+function popupInsidePanel(margin = 0) {
   const el = document.getElementById('inspector');
   const r = el.getBoundingClientRect();
   const p = document.getElementById('panel').getBoundingClientRect();
-  return !el.hidden && r.left >= p.left && r.top >= p.top && r.right <= p.right && r.bottom <= p.bottom;
+  const gaps = [r.left - p.left, r.top - p.top, p.right - r.right, p.bottom - r.bottom];
+  return !el.hidden && gaps.every((gap) => Math.round(gap) >= margin);
 }
 
 function countStatusWrites() {
@@ -2310,6 +2316,45 @@ async function popupArea() {
     check('popup', 'back at 1440 it returns to where it was dropped', returned);
     await page.keyboard.press('Escape');
     check('popup', 'Escape closes it', (await popup(page)) === null);
+  });
+
+  // At 1440×900, r2-3's popup sits on the panel's bottom margin, and its folds, or the answer's, make it taller.
+  await withPage('popup', {}, async (page) => {
+    const summaries = page.locator('#inspector details > summary');
+    for (const id of ['r2-3', 'answer-0']) {
+      await inspect(page, id);
+      const spots = [];
+      const inside = [];
+      for (let i = 0; i < (await summaries.count()); i += 1) {
+        spots.push(await popup(page));
+        await summaries.nth(i).click();
+        inside.push(await becomes(page, popupInsidePanel, POPOVER_MARGIN_PX));
+      }
+      const opened = JSON.stringify(await popup(page));
+      check('popup', `at 1440×900, each fold opened in ${id}'s popup keeps the popup inside the panel's margin`, spots.length > 0 && inside.every(Boolean), opened);
+      const back = [];
+      for (let i = spots.length - 1; i >= 0; i -= 1) {
+        await summaries.nth(i).click();
+        back.push(await becomes(page, popupIsAt, [spots[i].left, spots[i].top]));
+      }
+      const closed = JSON.stringify(await popup(page));
+      check('popup', `closing ${id}'s folds again puts its popup back where it was before each opened`, back.every(Boolean), `${JSON.stringify(spots[0])} → ${closed}`);
+    }
+
+    const panel = await rect(page, '#panel');
+    const exact = await rect(page, '#inspector');
+    const head = await rect(page, '#inspector .insp-head');
+    const target = { left: Math.round(panel.left + POPOVER_MARGIN_PX), top: Math.round(panel.bottom - POPOVER_MARGIN_PX - DROP_ABOVE_MARGIN_PX - exact.height) };
+    const grab = { x: head.left + 40, y: head.top + head.height / 2 };
+    await drag(page, grab, { x: grab.x + target.left - exact.left, y: grab.y + target.top - exact.top });
+    const dropped = await popup(page);
+    await summaries.first().click();
+    const inside = await becomes(page, popupInsidePanel, POPOVER_MARGIN_PX);
+    const opened = JSON.stringify(await popup(page));
+    check('popup', "a fold opened in a popup dropped near the panel's bottom keeps the popup inside the panel's margin", inside, opened);
+    await summaries.first().click();
+    const returned = await becomes(page, popupIsAt, [dropped.left, dropped.top]);
+    check('popup', 'closing that fold returns the popup to where it was dropped', returned, `${JSON.stringify(dropped)} → ${JSON.stringify(await popup(page))}`);
   });
 
   await withPage('popup', { before: serving(withLongParse) }, async (page) => {
