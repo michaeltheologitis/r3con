@@ -44,7 +44,7 @@ const COUNTED = {
   flow: '.edge.flow',
   onPath: '.node.on-path',
 };
-const SAMPLE_COUNTS = { nodes: 22, edges: 75, lit: 27, dotted: 10, faint: 40, cited: 15, flow: 10, onPath: 17 };
+const SAMPLE_COUNTS = { nodes: 22, edges: 75, lit: 23, dotted: 10, faint: 40, cited: 15, flow: 10, onPath: 17 };
 const SAMPLE_STATUS = '● done · recorded run · gpt-6-luna · 32,400 tokens · $0.0045';
 // What the sample's answer quotes: each document's marks, as code points in its memo and whether both rounds' summaries
 // quote them; its pills, its line in the chat, one mark's hover text, summaries' trail lines, and the files off its trail.
@@ -212,11 +212,6 @@ const SPLIT_MEMO = '06_split_memo';
 // The relevance rounds r3con's default config runs, and the page draws.
 const ROUNDS = 2;
 const SCRIPTED_ANSWER = "The check's scripted model answers this.";
-const SCRIPTED_CITES = {
-  r2: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i === 0 ? 1 : 0] })),
-  parsed: Array.from({ length: SAMPLE_DOCS }, (_, i) => ({ provenance: [i] })),
-  answer: { provenance: { summary_ids: [0, 1], parse_ids: [0, 1] } },
-};
 // The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
 const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
@@ -415,6 +410,8 @@ const nodeSel = (id) => `.node[data-id="${id}"]`;
 const count = (page, selector) => page.$$eval(selector, (els) => els.length);
 const litEdges = (page) => page.$$eval('.edge.lit', (els) => els.map((e) => e.dataset.key).sort());
 const litAnswers = (page) => page.$$eval('.node.answer.on-path', (els) => els.map((el) => el.dataset.id));
+const litNodes = (page) => page.$$eval('.node.on-path', (els) => els.map((el) => el.dataset.id).sort());
+const litOnPanel = async (page) => ({ nodes: await litNodes(page), edges: await litEdges(page) });
 const answerIds = (page) => page.$$eval('.node.answer', (els) => els.map((el) => el.dataset.id));
 const docIdsOf = (page) => page.$$eval('.node.doc', (els) => els.map((el) => el.dataset.id));
 const rect = (page, selector) => page.$eval(selector, (el) => el.getBoundingClientRect().toJSON());
@@ -547,27 +544,39 @@ async function introCounts(area, options) {
   check(area, name, isDeepStrictEqual(intros, [SAMPLE_DOCS, FEWER_MEMOS].map(loadedLine)), intros.join(' | '));
 }
 
-// What node `id` draws on in the recorded sample: its own document, then what it cites, with `provenance` for an answer.
-function sourcesOf(sample, docIds, id, provenance = sample.answer.provenance) {
+// What node `id` draws on in the recorded sample: its own document, then what it cites.
+function sourcesOf(sample, docIds, id) {
   const [kind, i] = id.split('-');
   const own = ['r1', 'r2', 'parsed'].includes(kind) ? [docIds[i]] : [];
+  const { provenance } = sample.answer;
   if (kind === 'answer') return [...provenance.summary_ids.map((d) => `r2-${d}`), ...provenance.parse_ids.map((d) => `parsed-${d}`)];
   if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((d) => `r2-${d}`)];
   if (kind === 'r2') return [...own, ...sample.r2[i].provenance.map((d) => `r1-${d}`)];
   return own;
 }
 
-// The edges an answer's lit path holds: the run's own answer by default, or `answerId` with `provenance`.
-function lineage(sample, docIds, answerId = 'answer-0', provenance = sample.answer.provenance) {
-  const nodes = new Set([answerId]);
-  const edges = new Set();
-  for (const id of nodes) {
-    for (const from of sourcesOf(sample, docIds, id, provenance)) {
-      nodes.add(from);
-      edges.add(`${from}>${id}`);
-    }
-  }
-  return [...edges].sort();
+// r3con's trail of answer `answerId` with its nodes and edges named as the page names its nodes and lines, by `ids`,
+// r3con's document ids, and `docIds`, the page's document nodes, both in document order.
+function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
+  const named = (node) => {
+    if (node === 'answer') return answerId;
+    const [kind, ...rest] = node.split(':');
+    const d = ids.indexOf(rest.at(-1).split('.')[0]);
+    return { summary: `r${rest[0]}-${d}`, parse: `parsed-${d}`, document: docIds[d] }[kind];
+  };
+  return {
+    nodes: [...new Set(trail.nodes.map(named))].sort(),
+    edges: [...new Set(trail.edges.map(([from, to]) => `${named(to)}>${named(from)}`))].sort(),
+  };
+}
+
+// What simulated answer `id` lights: the lines from what it cites, and from the document of each summary among them.
+async function directCitations(page, id) {
+  const docIds = await docIdsOf(page);
+  const cited = (await page.$$eval('.edge.cite', (els) => els.map((el) => el.dataset.key))).filter((key) => key.endsWith(`>${id}`));
+  const sources = cited.map((key) => key.split('>')[0]);
+  const read = sources.filter((from) => from.startsWith('r2-')).map((from) => `${docIds[from.split('-')[1]]}>${from}`);
+  return { nodes: [id, ...sources, ...read.map((key) => key.split('>')[0])].sort(), edges: [...cited, ...read].sort() };
 }
 
 // The lines a round-2 summary or the run's answer lights in the recorded sample: from what it draws on, and to each of `ids` that draws on it.
@@ -772,6 +781,39 @@ function cutEventStreams(size) {
     });
     return new Response(body, { status: response.status, headers: response.headers });
   };
+}
+
+// Keeps each event the server streams to the page in window.events, as it arrives, whatever the page holds back.
+function recordEvents() {
+  window.events = [];
+  const realFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const response = await realFetch(...args);
+    if (!response.headers.get('content-type')?.startsWith('text/event-stream')) return response;
+    const [read, kept] = response.body.tee();
+    (async () => {
+      const reader = kept.pipeThrough(new TextDecoderStream()).getReader();
+      let buffer = '';
+      for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+        const frames = (buffer + chunk.value).split('\n\n');
+        buffer = frames.pop();
+        for (const frame of frames) window.events.push(JSON.parse(frame.slice('data: '.length)));
+      }
+    })();
+    return new Response(read, { status: response.status, headers: response.headers });
+  };
+}
+
+// Each answer in window.events, in the order they landed: its provenance, and the document ids of the run started
+// last before it, which in these checks is the run it answers over.
+function answersRead() {
+  let ids = null;
+  const read = [];
+  for (const event of window.events) {
+    if (event.type === 'run_started') ids = event.document_ids;
+    if (event.type === 'reasoning_finished') read.push({ ids, ...event.provenance });
+  }
+  return read;
 }
 
 // Holds back each event stream from its `type` frame on, until the page sets window.release.
@@ -1107,10 +1149,16 @@ async function sampleReplay() {
     const sample = recordedSample();
     check('sample replay', 'the page holds a recorded sample', Boolean(sample));
     const lit = Object.keys(edges).filter((k) => edges[k].includes('lit')).sort();
-    const expected = sample ? lineage(sample, docIds) : [];
-    const litName = 'the lit edges are exactly the lineage computed from the recorded sample';
-    const litDetail = `${lit.length} lit, ${expected.length} computed`;
-    check('sample replay', litName, Boolean(sample) && isDeepStrictEqual(lit, expected), litDetail);
+    const onPath = await litNodes(page);
+    const expected = trailOnPage(sample.answer.provenance.trail, sample.ids, docIds);
+    const litName = "the lit nodes and lines are exactly the recorded answer's trail, as r3con walked it, named as the page names them";
+    const litDetail = `${onPath.length} nodes and ${lit.length} lines lit; the trail has ${expected.nodes.length} and ${expected.edges.length}`;
+    check('sample replay', litName, isDeepStrictEqual({ nodes: onPath, edges: lit }, expected), litDetail);
+    const parses = sample.answer.provenance.parse_ids;
+    const deadEnds = parses.every((d) => !sample.parsed[d].provenance.length && onPath.includes(`parsed-${d}`) && !lit.includes(`${docIds[d]}>parsed-${d}`));
+    const reached = parses.every((d) => onPath.includes(docIds[d]) && lit.includes(`${docIds[d]}>r2-${d}`));
+    const deadEndName = "each parse the answer cites, which cites no summary, is lit without the line from its document, whose summaries light it instead";
+    check('sample replay', deadEndName, parses.length > 0 && deadEnds && reached, lit.filter((k) => k.includes('>parsed-')).join(' '));
 
     const dotted = Object.keys(edges).filter((k) => edges[k].includes('self')).sort();
     const ownLines = docIds.flatMap((doc, i) => [`${doc}>r2-${i}`, `${doc}>parsed-${i}`]).sort();
@@ -2247,6 +2295,15 @@ function quotesShown(sample, docIds, { marks, pills }) {
   };
 }
 
+// The chat's list of the sentences r3con's `quotes` give, over documents `docs` whose ids are `ids`: each document's name,
+// then the text at each place it quotes there, in order. None of these quotes overlap, which the list would join.
+function quotesListed(docs, ids, quotes) {
+  return docs.flatMap((doc, d) => {
+    const own = quotes.filter((q) => q.document === ids[d]).sort((a, b) => a.start - b.start);
+    return own.length ? [[doc.name, ...own.map((q) => Array.from(doc.text).slice(q.start, q.end).join(''))]] : [];
+  });
+}
+
 // The sample with `prefix` before its first memo, its quotes moved by the prefix's code points, as r3con would place them.
 const prefixed = (prefix) => (sample) => {
   const shift = Array.from(prefix).length;
@@ -2475,6 +2532,8 @@ async function quotesArea() {
     const listed = isDeepStrictEqual(lists, [foldedList]) && isDeepStrictEqual(openedList, [{ ...foldedList, open: true, shown: true, marker: '"▾ "' }]);
     const listName = "under the answer the chat lists its trail's sentences, ▸ folded: N sentences from M documents; a click opens it to each document's name and its sentences, marked";
     check('quotes', listName, listed, JSON.stringify([lists, openedList].map((l) => l[0] && [l[0].open, l[0].shown, l[0].marker])));
+    const fromQuotes = quotesListed(sample.docs, sample.ids, sample.answer.provenance.quotes);
+    check('quotes', "the sentences highlighted for the answer are exactly the quotes r3con recorded on its trail", isDeepStrictEqual(openedList[0]?.docs, fromQuotes), JSON.stringify(fromQuotes.map((doc) => doc.length - 1)));
     await page.click('.sentences .sentence >> nth=0');
     const fromChat = { title: (await popup(page))?.title, flash: (await page.evaluate(flashed))?.text };
     const chatName = "a sentence in the chat's list opens its document's popup at it, flashed";
@@ -2501,6 +2560,8 @@ async function quotesArea() {
     const ownName = "an ask lit shows its own trail's pills and file counts, and its chat lists its own sentences, folded";
     const own = isDeepStrictEqual(askPills, ask.pills) && isDeepStrictEqual(askFiles, ask.counts) && isDeepStrictEqual(askList, { line: ASK_QUOTED.line, open: false, shown: false, marker: '"▸ "', docs: ask.docs });
     check('quotes', ownName, own, JSON.stringify({ askPills, askList: askList?.line }));
+    const askQuoted = isDeepStrictEqual(askList?.docs, quotesListed(sample.docs, sample.ids, asks[0].provenance.quotes));
+    check('quotes', "the sentences highlighted for a recorded ask are exactly the quotes r3con recorded on its trail", askQuoted, JSON.stringify(askList?.docs.map((doc) => doc.length - 1)));
     await inspect(page, docIds[ASK_QUOTED.title[0]]);
     const askMarks = (await page.evaluate(marksIn, '#inspector')).marks;
     const askMarksName = `an ask lit marks its own trail in a document's text: ${sample.docs[ASK_QUOTED.title[0]].name}, quoted by both rounds for the answer, by round 1 alone for the ask`;
@@ -2579,6 +2640,10 @@ async function quotesArea() {
     await page.fill('#question', NEW_QUESTION);
     await page.click('#new-run-btn');
     await waitLit(page);
+    const madeUp = await litOnPanel(page);
+    const direct = await directCitations(page, 'answer-0');
+    const directName = "a simulated run's answer lights only what it cites and the documents of the summaries among them, not what those cite";
+    check('quotes', directName, direct.edges.length > 0 && isDeepStrictEqual(madeUp, direct), `${madeUp.edges.join(' ')}; expected ${direct.edges.join(' ')}`);
     const pills = Object.keys(await page.evaluate(pillsOn)).length;
     await inspect(page, (await docIdsOf(page))[0]);
     const marks = await page.evaluate(marksIn, '#inspector');
@@ -2956,8 +3021,8 @@ async function answers() {
 async function answersOnTheRun(sample, asks) {
   await withPage('answers', {}, async (page) => {
     const docIds = await docIdsOf(page);
-    const runPath = lineage(sample, docIds);
-    const askPath = (k) => lineage(sample, docIds, `answer-${k + 1}`, asks[k].provenance);
+    const runPath = trailOnPage(sample.answer.provenance.trail, sample.ids, docIds).edges;
+    const askPath = (k) => trailOnPage(asks[k].provenance.trail, sample.ids, docIds, `answer-${k + 1}`).edges;
     const offered = await page.evaluate(composer);
     const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: true });
     check('answers', 'after a run the composer offers ask ⏎ and new run, and no stop', offersBoth, JSON.stringify(offered));
@@ -3032,6 +3097,10 @@ async function answersOnTheRun(sample, asks) {
     const flaggedInChat = simulated.after.includes(SIMULATED_LABEL) && simulated.folded === `ready · ${DEFAULT_MODEL} · nothing was sent`;
     const flaggedInPopup = (await inspect(page, 'answer-2')).includes(SIMULATED_LABEL);
     check('answers', 'an unrecorded ask is labelled simulated, in the chat, in view, and its popup', flaggedInChat && flaggedInPopup, `${simulated.folded}; ${simulated.after[0]}`);
+    const madeUp = await litOnPanel(page);
+    const direct = await directCitations(page, 'answer-2');
+    const directName = 'a simulated ask, lit, lights only what it cites and the documents of the summaries among them, not what those cite';
+    check('answers', directName, direct.edges.length > 0 && isDeepStrictEqual(madeUp, direct), `${madeUp.edges.join(' ')}; expected ${direct.edges.join(' ')}`);
 
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: offerLabel(asks[1]), exact: true }).click();
@@ -4102,7 +4171,8 @@ function postsOf(page) {
 // Saves a key on its server.
 async function liveSession(url) {
   const token = tokenOf(url);
-  await withPage('live', { url, sample: false }, async (page, messages) => {
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, before }, async (page, messages) => {
     const address = await page.evaluate(() => location.href);
     check('live', 'the launch token leaves the address bar at once', !address.includes(token) && !address.includes('#'), address);
     const ready = await page.textContent('#run-status');
@@ -4138,11 +4208,11 @@ async function liveSession(url) {
     const scripted = recordedSample().docs.map((d) => scriptedSummary(d.text));
     const ownName = "each summary lands on its own document's node: the run's ids map to the files by order";
     check('live', ownName, isDeepStrictEqual(summaries, scripted), summaries[0]);
-    const lit = await litEdges(page);
-    const docIds = await docIdsOf(page);
-    const expected = lineage(SCRIPTED_CITES, docIds);
-    const litName = 'the lit edges are exactly the lineage of the provenance the events carried';
-    check('live', litName, isDeepStrictEqual(lit, expected), `${lit.length} lit, ${expected.length} expected`);
+    const lit = await litOnPanel(page);
+    const [answer] = await page.evaluate(answersRead);
+    const expected = trailOnPage(answer.trail, answer.ids, await docIdsOf(page));
+    const litName = 'the lit nodes and lines are exactly the trail the reasoning_finished event carried, named as the page names them';
+    check('live', litName, lit.edges.length > 0 && isDeepStrictEqual(lit, expected), `${lit.edges.length} lines lit, ${expected.edges.length} on the trail`);
     const costed = [];
     for (const id of ['r1-0', 'r2-0', 'schema', 'parsed-0']) {
       if ((await inspect(page, id)).includes('tokens')) costed.push(id);
@@ -4326,7 +4396,8 @@ const ROADWORKS_LINE = 'The 🚧 Westgate site logged 4 equipment incidents in Q
 const roadworksMemo = () => memo('00_roadworks.txt', `🚧🚧 ${QUIET} Roadworks notice.\n${ROADWORKS_LINE}\nSite manager: Ana Ruiz.\n`);
 
 async function liveQuotes(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, before }, async (page) => {
     const memos = [roadworksMemo(), ...sampleMemos(), splitMemo()];
     await page.setInputFiles('#file-input', memos);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
@@ -4347,26 +4418,57 @@ async function liveQuotes(url) {
     const listed = list?.line === SCRIPTED_SENTENCES && isDeepStrictEqual(list.docs, quoted);
     const name = "each quote lands on its sentence however its document was read: past emoji, a code point each to r3con and two code units here, and in a document read in parts, in its second part";
     check('live', name, done && marked && listed && flash === partLine, `${JSON.stringify(roadworks)}; ${JSON.stringify(pills)}; ${list?.line}; flashed ${JSON.stringify(flash)}`);
+    const [answer] = await page.evaluate(answersRead);
+    const docs = memos.map((m) => ({ name: m.name, text: m.buffer.toString() }));
+    const fromQuotes = quotesListed(docs, answer.ids, answer.quotes);
+    check('live', 'the sentences highlighted are exactly the quotes the reasoning_finished event carried', isDeepStrictEqual(list?.docs, fromQuotes), JSON.stringify(fromQuotes));
+  });
+}
+
+// Every line quiet, so it summarizes to nothing, while its parse has a record: the answer cites that parse, which can
+// cite no summary of its own document.
+const quietMemo = () => memo('00_quiet.txt', `${QUIET} Notice board.\n${QUIET} The kettle is fixed.\n`);
+
+async function liveDeadEnd(url) {
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    const memos = [quietMemo(), ...sampleMemos()];
+    await page.setInputFiles('#file-input', memos);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const docIds = await docIdsOf(page);
+    const [answer] = await page.evaluate(answersRead);
+    const quiet = `parse:${answer.ids[0]}`;
+    const deadEnd = answer.trail.nodes.includes(quiet) && !answer.trail.edges.some(([from]) => from === quiet);
+    const { nodes, edges } = await litOnPanel(page);
+    const unlit = nodes.includes('parsed-0') && edges.includes('parsed-0>answer-0') && !nodes.includes(docIds[0]) && !edges.includes(`${docIds[0]}>parsed-0`);
+    const throughSummary = nodes.includes(docIds[1]) && edges.includes(`${docIds[1]}>r2-1`) && !edges.includes(`${docIds[1]}>parsed-1`);
+    const name = "a cited parse that cites no summary is lit, but not its document, which only a summary on the trail lights, as it does the next memo's";
+    check('live', name, done && deadEnd && unlit && throughSummary, `dead end ${deadEnd}; ${edges.filter((key) => key.includes('parsed-')).join(' ')}; ${nodes.join(' ')}`);
   });
 }
 
 // Holds the ask's last event until its popup is open.
 async function liveAnswers(url) {
-  const before = (page) => page.addInitScript(holdFrom, 'ask_finished');
+  const before = async (page) => {
+    await page.addInitScript(recordEvents);
+    await page.addInitScript(holdFrom, 'ask_finished');
+  };
   await withPage('live', { url, sample: false, before }, async (page) => {
     const posts = postsOf(page);
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, 'Which memo is the registry?');
     const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
-    const docIds = await docIdsOf(page);
-    const expected = lineage(SCRIPTED_CITES, docIds, 'answer-1', SCRIPTED_CITES.answer.provenance);
-    const lit = await litEdges(page);
+    const ask = (await page.evaluate(answersRead))[1];
+    const expected = trailOnPage(ask.trail, ask.ids, await docIdsOf(page), 'answer-1');
+    const lit = await litOnPanel(page);
     const ownPath = landed && isDeepStrictEqual(lit, expected) && isDeepStrictEqual(await litAnswers(page), ['answer-1']);
     const beforeEnd = await inspect(page, 'answer-1');
     const live = beforeEnd.includes(`${LIVE_ASK} · ${DEFAULT_MODEL}`);
-    const askName = 'an ask adds an answer node, lit along its own path, and its popup says it is live';
-    check('live', askName, ownPath && live, `${lit.length} lit, ${expected.length} expected`);
+    const askName = "an ask adds an answer node, lit along the trail its reasoning_finished event carried, and its popup says it is live";
+    check('live', askName, ownPath && live, `${lit.edges.length} lines lit, ${expected.edges.length} on the trail`);
     await page.evaluate(() => (window.release = true));
     const costed = await becomes(page, (start) => document.getElementById('inspector').textContent.includes(start), `${LIVE_ASK} · ${DEFAULT_MODEL} · `, LIVE_RUN_MS);
     const costName = "a live ask's open popup shows its tokens and cost once the ask finishes";
@@ -4434,7 +4536,10 @@ async function liveLog(url) {
 
 // Holds the second run's answer back until the first tab is shown.
 async function liveTabs(url) {
-  const before = (page) => page.addInitScript(holdFrom, 'reasoning_finished');
+  const before = async (page) => {
+    await page.addInitScript(recordEvents);
+    await page.addInitScript(holdFrom, 'reasoning_finished');
+  };
   await withPage('live', { url, sample: false, before }, async (page) => {
     const posts = postsOf(page);
     await page.evaluate(() => (window.release = true));
@@ -4461,8 +4566,8 @@ async function liveTabs(url) {
     await page.locator('.run-tab').nth(1).click();
     const nodes = await count(page, '.node');
     const working = await count(page, '.node.working');
-    const lit = await litEdges(page);
-    const drawn = nodes === SAMPLE_COUNTS.nodes && working === 0 && isDeepStrictEqual(lit, lineage(SCRIPTED_CITES, await docIdsOf(page)));
+    const answer = (await page.evaluate(answersRead)).at(-1);
+    const drawn = nodes === SAMPLE_COUNTS.nodes && working === 0 && isDeepStrictEqual(await litOnPanel(page), trailOnPage(answer.trail, answer.ids, await docIdsOf(page)));
     const status = await page.textContent('#run-status');
     const backName = "switching to that tab shows all it drew in the background: every node, its lit answer and its cost";
     check('live', backName, drawn && LIVE_DONE.test(status), `${nodes} nodes, ${working} working; ${status}`);
@@ -5322,6 +5427,7 @@ async function live() {
     await liveWhileGoing(url);
     await liveParts(url);
     await liveQuotes(url);
+    await liveDeadEnd(url);
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);

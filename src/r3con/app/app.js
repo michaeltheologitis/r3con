@@ -31,18 +31,37 @@
    * here is indexed, while SAMPLE and an event hold r3con's own.
    * @typedef {{ text: string, start: number | null, end: number | null }} Quote
    */
-  /** @typedef {{ summary: string, provenance: number[], quotes: Quote[] }} Summary */
+  /** @typedef {Quote & { summary: string }} RunQuote A quote in a run, and the trail node of the summary quoting it. */
+  /** @typedef {{ summary: string, provenance: number[], quotes: Quote[] }} RecordedSummary */
+  /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[] }} Summary */
   /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
   /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
   /** @typedef {{ spans: Span[], sentences: TextRange[] }} Quoted What a trail quotes of one document. */
+  /** @typedef {[string, string, 'cites' | 'summarizes' | 'parses']} TrailEdge `[from, to, kind]`. */
   /**
-   * An answer's trail: every node on its lineage; each summary on it, with the first node on it that cites the
-   * summary; and what it quotes of each document, by index.
-   * @typedef {{ nodes: Set<string>, citedBy: Map<string, string>, quoted: Quoted[] }} Trail
+   * An answer's trail as r3con gives it (r3con.provenance): the nodes its walk under `rule` reached from the answer,
+   * `answer`, `summary:<round>:<id>`, `parse:<id>` and `document:<id>`, where an id is a document's, or `<id>.<k>` for
+   * part k of a document read in parts; and the edges it followed.
+   * @typedef {{ rule: string, nodes: string[], edges: TrailEdge[] }} ProvenanceTrail
+   */
+  /** @typedef {{ document: string, start: number, end: number, text: string, name: string }} NamedQuote A quote behind an answer, as r3con gives it. */
+  /**
+   * The lit answer's trail as the page draws it: its nodes and lines, as the page names them, a summary of a document
+   * read in parts as its document's; each summary on it, with the first node on it that cites the summary; the trail
+   * nodes of the summaries whose quotes it carries; and what they quote of each document, by index.
+   * @typedef {{ nodes: Set<string>, edges: Set<string>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
    */
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
-  /** @typedef {{ summary_ids: number[], parse_ids: number[] }} Provenance */
+  /**
+   * An answer's provenance: the documents whose round-2 summaries and parses it cites, by index; its trail; and the
+   * quotes r3con found on the trail, which a made-up answer has none of.
+   * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail, quotes?: NamedQuote[] }} Provenance
+   */
+  /**
+   * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id.
+   * @typedef {{ summary_ids: string[], parse_ids: string[], quotes: NamedQuote[], trail: ProvenanceTrail }} R3conProvenance
+   */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
   /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
   /**
@@ -60,7 +79,8 @@
    */
   /**
    * A recorded, simulated or live run; answers[0] is its own, the rest asks over it. A replay has the
-   * order its calls finished in; a live run, the server's id for it and r3con's document ids.
+   * order its calls finished in; a live run, the server's id for it. Its document ids are r3con's, or made up for a
+   * simulated run.
    * @typedef {object} Run
    * @property {boolean} simulated
    * @property {LoadedFile[]} docs
@@ -74,7 +94,7 @@
    * @property {string} [source]
    * @property {Record<PerDocumentKind, number[]>} [order]
    * @property {string | null} [id]
-   * @property {string[]} [ids]
+   * @property {string[]} ids
    * @property {string | null} [lit]
    */
   /**
@@ -85,8 +105,9 @@
    * @property {string} runFolder
    * @property {string} created
    * @property {{ name: string, text: string, size: number }[]} docs
-   * @property {Summary[]} r1
-   * @property {Summary[]} r2
+   * @property {string[]} ids
+   * @property {RecordedSummary[]} r1
+   * @property {RecordedSummary[]} r2
    * @property {Schema} schema
    * @property {Parse[]} parsed
    * @property {{ text: string, provenance: Provenance }} answer
@@ -144,7 +165,7 @@
    *   | { type: 'parsing_started', doc_id: string }
    *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
    *   | { type: 'reasoning_finished', answer: string,
-   *       provenance: { summary_ids: string[], parse_ids: string[], quotes: { document: string, start: number, end: number, text: string }[] } }
+   *       provenance: R3conProvenance }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
    * } ServerEvent
@@ -216,6 +237,13 @@
    "text": "MEMO — Cafeteria refurbishment, phase 2\n\nThe serving counter will be replaced during the October shutdown. Seating\ncapacity rises from 60 to 82. Catering staff should expect two weeks of\nreduced service. No impact on production areas.\n",
    "size": 237
   }
+ ],
+ "ids": [
+  "17f027",
+  "964bc2",
+  "9e02b3",
+  "d9add2",
+  "7109a9"
  ],
  "r1": [
   {
@@ -467,7 +495,211 @@
     2,
     1,
     3
-   ]
+   ],
+   "quotes": [
+    {
+     "document": "17f027",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 5.",
+     "name": "0"
+    },
+    {
+     "document": "17f027",
+     "start": 141,
+     "end": 218,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 9.",
+     "name": "1"
+    },
+    {
+     "document": "964bc2",
+     "start": 136,
+     "end": 213,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 6.",
+     "name": "2"
+    },
+    {
+     "document": "9e02b3",
+     "start": 164,
+     "end": 241,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "start": 54,
+     "end": 127,
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 128,
+     "end": 189,
+     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 248,
+     "end": 328,
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "name": "3"
+    }
+   ],
+   "trail": {
+    "rule": "through-summaries",
+    "nodes": [
+     "answer",
+     "summary:2:17f027",
+     "summary:2:9e02b3",
+     "summary:2:964bc2",
+     "summary:2:d9add2",
+     "parse:17f027",
+     "parse:9e02b3",
+     "parse:964bc2",
+     "parse:d9add2",
+     "summary:1:9e02b3",
+     "summary:1:d9add2",
+     "document:17f027",
+     "document:9e02b3",
+     "document:964bc2",
+     "summary:1:17f027",
+     "summary:1:964bc2",
+     "document:d9add2"
+    ],
+    "edges": [
+     [
+      "answer",
+      "summary:2:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:964bc2",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:d9add2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:964bc2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:2:9e02b3",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:2:964bc2",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:17f027",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:964bc2",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:1:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:1:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ]
+    ]
+   }
   }
  },
  "calls": {
@@ -582,7 +814,189 @@
     0,
     2,
     3
-   ]
+   ],
+   "quotes": [
+    {
+     "document": "17f027",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 5.",
+     "name": "0"
+    },
+    {
+     "document": "17f027",
+     "start": 141,
+     "end": 218,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 9.",
+     "name": "1"
+    },
+    {
+     "document": "964bc2",
+     "start": 136,
+     "end": 213,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 6.",
+     "name": "2"
+    },
+    {
+     "document": "9e02b3",
+     "start": 164,
+     "end": 241,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "start": 54,
+     "end": 127,
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 128,
+     "end": 189,
+     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 248,
+     "end": 328,
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "name": "3"
+    }
+   ],
+   "trail": {
+    "rule": "through-summaries",
+    "nodes": [
+     "answer",
+     "summary:2:17f027",
+     "summary:2:9e02b3",
+     "summary:2:d9add2",
+     "parse:17f027",
+     "parse:9e02b3",
+     "parse:d9add2",
+     "summary:1:9e02b3",
+     "summary:1:d9add2",
+     "document:17f027",
+     "document:9e02b3",
+     "summary:1:17f027",
+     "summary:1:964bc2",
+     "document:d9add2",
+     "document:964bc2"
+    ],
+    "edges": [
+     [
+      "answer",
+      "summary:2:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:d9add2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:2:9e02b3",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:17f027",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:964bc2",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:1:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:1:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ]
+    ]
+   }
   },
   "totals": {
    "tokens": 3313,
@@ -605,7 +1019,189 @@
     0,
     2,
     3
-   ]
+   ],
+   "quotes": [
+    {
+     "document": "17f027",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 5.",
+     "name": "0"
+    },
+    {
+     "document": "17f027",
+     "start": 141,
+     "end": 218,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 9.",
+     "name": "1"
+    },
+    {
+     "document": "964bc2",
+     "start": 136,
+     "end": 213,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 6.",
+     "name": "2"
+    },
+    {
+     "document": "9e02b3",
+     "start": 164,
+     "end": 241,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "start": 54,
+     "end": 127,
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 128,
+     "end": 189,
+     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 248,
+     "end": 328,
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "name": "3"
+    }
+   ],
+   "trail": {
+    "rule": "through-summaries",
+    "nodes": [
+     "answer",
+     "summary:2:17f027",
+     "summary:2:9e02b3",
+     "summary:2:d9add2",
+     "parse:17f027",
+     "parse:9e02b3",
+     "parse:d9add2",
+     "summary:1:9e02b3",
+     "summary:1:d9add2",
+     "document:17f027",
+     "document:9e02b3",
+     "summary:1:17f027",
+     "summary:1:964bc2",
+     "document:d9add2",
+     "document:964bc2"
+    ],
+    "edges": [
+     [
+      "answer",
+      "summary:2:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:d9add2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:17f027",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:9e02b3",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:2:9e02b3",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:17f027",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:964bc2",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ],
+     [
+      "summary:1:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:1:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ]
+    ]
+   }
   },
   "totals": {
    "tokens": 3288,
@@ -626,7 +1222,162 @@
    "parse_ids": [
     1,
     3
-   ]
+   ],
+   "quotes": [
+    {
+     "document": "17f027",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 5.",
+     "name": "0"
+    },
+    {
+     "document": "17f027",
+     "start": 141,
+     "end": 218,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 9.",
+     "name": "1"
+    },
+    {
+     "document": "964bc2",
+     "start": 136,
+     "end": 213,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "start": 45,
+     "end": 88,
+     "text": "Equipment incidents logged this quarter: 6.",
+     "name": "2"
+    },
+    {
+     "document": "9e02b3",
+     "start": 164,
+     "end": 241,
+     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "start": 54,
+     "end": 127,
+     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 128,
+     "end": 189,
+     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+     "name": "3"
+    },
+    {
+     "document": "d9add2",
+     "start": 248,
+     "end": 328,
+     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+     "name": "3"
+    }
+   ],
+   "trail": {
+    "rule": "through-summaries",
+    "nodes": [
+     "answer",
+     "summary:2:964bc2",
+     "summary:2:d9add2",
+     "parse:964bc2",
+     "parse:d9add2",
+     "summary:1:d9add2",
+     "document:964bc2",
+     "summary:1:17f027",
+     "summary:1:964bc2",
+     "summary:1:9e02b3",
+     "document:d9add2",
+     "document:17f027",
+     "document:9e02b3"
+    ],
+    "edges": [
+     [
+      "answer",
+      "summary:2:964bc2",
+      "cites"
+     ],
+     [
+      "answer",
+      "summary:2:d9add2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:964bc2",
+      "cites"
+     ],
+     [
+      "answer",
+      "parse:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:964bc2",
+      "summary:1:d9add2",
+      "cites"
+     ],
+     [
+      "summary:2:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:17f027",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:964bc2",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "summary:1:9e02b3",
+      "cites"
+     ],
+     [
+      "summary:2:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:d9add2",
+      "document:d9add2",
+      "summarizes"
+     ],
+     [
+      "summary:1:17f027",
+      "document:17f027",
+      "summarizes"
+     ],
+     [
+      "summary:1:964bc2",
+      "document:964bc2",
+      "summarizes"
+     ],
+     [
+      "summary:1:9e02b3",
+      "document:9e02b3",
+      "summarizes"
+     ]
+    ]
+   }
   },
   "totals": {
    "tokens": 3353,
@@ -711,6 +1462,8 @@
   const MAX_SIMULATED_CITES = 4;
   const SIMULATED_SUMMARY_STRIDE = 2;
   const SIMULATED_PARSE_STRIDE = 3;
+  // A made-up answer's trail goes one hop, under none of r3con's rules.
+  const ONE_HOP = 'one hop';
   const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
   const SIMULATED_SCHEMA = [
     '# simulated — not connected to r3con yet',
@@ -1249,12 +2002,12 @@
   // A live run's provenance names snippets by id, `<id>.<k>` for part k of a document read in parts.
   /** @param {Run} run @param {string[]} ids */
   function docIndices(run, ids) {
-    return [...new Set(ids.map((id) => /** @type {string[]} */ (run.ids).indexOf(id.split('.')[0])))];
+    return [...new Set(ids.map((id) => run.ids.indexOf(id.split('.')[0])))];
   }
 
-  /** @param {Run} run @param {{ summary_ids: string[], parse_ids: string[] }} provenance */
-  function provenanceOf(run, { summary_ids, parse_ids }) {
-    return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids) };
+  /** @param {Run} run @param {R3conProvenance} provenance @returns {Provenance} */
+  function provenanceOf(run, provenance) {
+    return { ...provenance, summary_ids: docIndices(run, provenance.summary_ids), parse_ids: docIndices(run, provenance.parse_ids) };
   }
 
   /** @param {{ tokens: { total: number } | null, usd: number | null }} event */
@@ -1288,16 +2041,22 @@
 
   // ---------- runs ----------
 
-  /** @param {Quote} quote @returns {quote is Quote & TextRange} */
+  /** @template {Quote} Q @param {Q} quote @returns {quote is Q & TextRange} */
   const located = (quote) => quote.start !== null;
+
+  // r3con's names for an answer and a summary as nodes of a trail.
+  const TRAIL_ANSWER = 'answer';
+  /** @param {number} round @param {string} id */
+  const summaryNode = (round, id) => `summary:${round}:${id}`;
 
   // Where each of `ranges` starts or ends, in order, once each.
   /** @param {{ start: number, end: number }[]} ranges */
   const cutsOf = (ranges) => [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
 
-  // `quotes`, found in `text`, with their places in UTF-16 code units, walking the text once up to the last of them.
-  /** @param {string} text @param {Quote[]} quotes @returns {Quote[]} */
-  function quotesInUnits(text, quotes) {
+  // `quotes`, found in `text` by the summary that is trail node `summary`, with their places in UTF-16 code units,
+  // walking the text once up to the last of them.
+  /** @param {string} text @param {Quote[]} quotes @param {string} summary @returns {RunQuote[]} */
+  function quotesInUnits(text, quotes, summary) {
     /** @type {Map<number, number>} */
     const units = new Map();
     let point = 0;
@@ -1306,7 +2065,7 @@
       for (; point < target && unit < text.length; point += 1) unit += String.fromCodePoint(/** @type {number} */ (text.codePointAt(unit))).length;
       units.set(target, unit);
     }
-    return quotes.map((q) => (located(q) ? /** @type {Quote} */ ({ ...q, start: units.get(q.start), end: units.get(q.end) }) : q));
+    return quotes.map((q) => ({ ...(located(q) ? /** @type {Quote} */ ({ ...q, start: units.get(q.start), end: units.get(q.end) }) : q), summary }));
   }
 
   /** @returns {Run} */
@@ -1314,13 +2073,15 @@
     /** @param {PerDocumentKind} prefix */
     const finishOrder = (prefix) =>
       range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
-    /** @param {Summary[]} round */
-    const inUnits = (round) => round.map((s, i) => ({ ...s, quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes) }));
+    /** @param {RecordedSummary[]} summaries @param {number} round */
+    const inUnits = (summaries, round) =>
+      summaries.map((s, i) => ({ ...s, quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes, summaryNode(round, SAMPLE.ids[i])) }));
     return {
       simulated: false,
       docs: SAMPLE_FILES,
-      r1: inUnits(SAMPLE.r1),
-      r2: inUnits(SAMPLE.r2),
+      ids: SAMPLE.ids,
+      r1: inUnits(SAMPLE.r1, 1),
+      r2: inUnits(SAMPLE.r2, 2),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
       answers: [{ question: SAMPLE.question, model: SAMPLE.model, ...SAMPLE.answer }],
@@ -1339,17 +2100,24 @@
     return cites;
   }
 
-  // As r3con does, it cites only non-empty round-2 summaries and parses with records.
-  /** @param {Pick<Run, 'docs' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift */
+  // As r3con does, it cites only non-empty round-2 summaries and parses with records. Its trail is no walk: one hop, to
+  // what it cites, and from each summary among them to its document.
+  /** @param {Pick<Run, 'docs' | 'ids' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift */
   function madeUpAnswer(run, question, shift) {
     /** @param {number} stride @param {(i: number) => boolean} citable */
     const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
+    const summary_ids = every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary));
+    const parse_ids = every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i]));
+    const summaries = summary_ids.map((d) => summaryNode(ROUNDS, run.ids[d]));
+    const documents = summary_ids.map((d) => `document:${run.ids[d]}`);
+    const cited = [...summaries, ...parse_ids.map((d) => `parse:${run.ids[d]}`)];
+    const edges = [
+      ...cited.map((to) => /** @type {TrailEdge} */ ([TRAIL_ANSWER, to, 'cites'])),
+      ...summaries.map((from, k) => /** @type {TrailEdge} */ ([from, documents[k], 'summarizes'])),
+    ];
     return {
       text: `r3con's answer to “${question}” would appear here. The documents it cites are made up.`,
-      provenance: {
-        summary_ids: every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary)),
-        parse_ids: every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i])),
-      },
+      provenance: { summary_ids, parse_ids, trail: { rule: ONE_HOP, nodes: [TRAIL_ANSWER, ...cited, ...documents], edges } },
     };
   }
 
@@ -1369,8 +2137,9 @@
     const run = {
       simulated: true,
       docs: files,
-      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]), quotes: /** @type {Quote[]} */ ([]) })),
-      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)), quotes: /** @type {Quote[]} */ ([]) })),
+      ids: order.map(String),
+      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]), quotes: /** @type {RunQuote[]} */ ([]) })),
+      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)), quotes: /** @type {RunQuote[]} */ ([]) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
       calls: null,
@@ -1442,34 +2211,41 @@
     return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
   }
 
-  // Walked from the answer, so the first node on it to cite a summary is the nearest the answer.
-  /** @param {Run} run @param {string} answerId */
-  function answerLineage(run, answerId) {
-    const nodes = new Set([answerId]);
-    const edges = new Set();
+  // The trail r3con gave answer `answerId`, drawn on the page: r3con walked it from the answer, so the first edge on it
+  // to reach a summary comes from the node on it nearest the answer.
+  /** @param {Run} run @param {string} answerId @returns {Trail} */
+  function trailOf(run, answerId) {
+    const { trail } = /** @type {Provenance} */ (answerAt(run, answerId).provenance);
+    /** @param {string} node */
+    const onPage = (node) => {
+      if (node === TRAIL_ANSWER) return answerId;
+      const [kind, ...rest] = node.split(':');
+      const [d] = docIndices(run, rest.slice(-1));
+      if (kind === 'summary') return `r${rest[0]}-${d}`;
+      return kind === 'parse' ? `parsed-${d}` : docId(run.docs[d]);
+    };
     /** @type {Map<string, string>} */
     const citedBy = new Map();
-    for (const id of nodes) {
-      for (const from of [ownDocument(run, id), ...cites(run, id)].filter((from) => from !== null)) {
-        if (/** @type {NodeKind[]} */ (SUMMARY_KINDS).includes(splitId(from)[0]) && !nodes.has(from)) citedBy.set(from, id);
-        nodes.add(from);
-        edges.add(`${from}>${id}`);
-      }
+    for (const [from, to, kind] of trail.edges) {
+      if (kind === 'cites' && to.startsWith('summary:') && !citedBy.has(onPage(to))) citedBy.set(onPage(to), onPage(from));
     }
-    return { nodes, edges, citedBy };
+    const quoting = new Set(trail.edges.filter(([, , kind]) => kind === 'summarizes').map(([from]) => from));
+    return {
+      nodes: new Set(trail.nodes.map(onPage)),
+      edges: new Set(trail.edges.map(([from, to]) => `${onPage(to)}>${onPage(from)}`)),
+      citedBy,
+      quoting,
+      quoted: run.docs.map((_, d) => quotedIn(run, quoting, d)),
+    };
   }
 
-  /** @param {Run} run @param {ReturnType<typeof answerLineage>} lineage @returns {Trail} */
-  function trailOf(run, { nodes, citedBy }) {
-    return { nodes, citedBy, quoted: run.docs.map((_, d) => quotedIn(run, citedBy, d)) };
-  }
-
-  // What the summaries in `citedBy` quote of document d: its parts, cut where a quote starts or ends, each with the
-  // summaries quoting it; and its sentences, where quotes that overlap are one, and quotes that only meet are two.
-  /** @param {Run} run @param {Map<string, string>} citedBy @param {number} d @returns {Quoted} */
-  function quotedIn(run, citedBy, d) {
-    const quotes = SUMMARY_KINDS.filter((kind) => citedBy.has(`${kind}-${d}`)).flatMap((kind) =>
-      run[kind][d].quotes.filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
+  // What the summaries that are trail nodes `quoting` quote of document d: its parts, cut where a quote starts or ends,
+  // each with the summaries quoting it; and its sentences, where quotes that overlap are one, and quotes that only meet
+  // are two.
+  /** @param {Run} run @param {Set<string>} quoting @param {number} d @returns {Quoted} */
+  function quotedIn(run, quoting, d) {
+    const quotes = SUMMARY_KINDS.flatMap((kind) =>
+      run[kind][d].quotes.filter((q) => quoting.has(q.summary)).filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
     );
     const cuts = cutsOf(quotes);
     const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
@@ -1960,20 +2736,20 @@
     for (const n of tab.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
-  // Lights the lineage of the tab's lit answer; an answer that cites nothing lights nothing.
+  // Lights the trail of the tab's lit answer; an answer that cites nothing lights nothing.
   /** @param {RunTab} tab */
   function lightPath(tab) {
     const { run } = tab;
-    const path = run.lit && cites(run, run.lit).length ? answerLineage(run, run.lit) : null;
-    tab.trail = path && trailOf(run, path);
-    tab.drawing.classList.toggle('is-lit', Boolean(path));
+    const trail = run.lit && cites(run, run.lit).length ? trailOf(run, run.lit) : null;
+    tab.trail = trail;
+    tab.drawing.classList.toggle('is-lit', Boolean(trail));
     for (const [id, n] of tab.nodes) {
-      n.el.classList.toggle('on-path', Boolean(path?.nodes.has(id)));
+      n.el.classList.toggle('on-path', Boolean(trail?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    run.docs.forEach((file, d) => countSentences(tab, drawnNode(tab, docId(file)), tab.trail?.quoted[d].sentences.length ?? 0));
+    run.docs.forEach((file, d) => countSentences(tab, drawnNode(tab, docId(file)), trail?.quoted[d].sentences.length ?? 0));
     for (const e of tab.edges.values()) {
-      const on = Boolean(path?.edges.has(e.key));
+      const on = Boolean(trail?.edges.has(e.key));
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
       e.el.classList.toggle('lit', on);
       if (e.el.parentNode !== layer) layer.append(e.el);
@@ -2140,10 +2916,10 @@
     const id = `${kind}-${d}`;
     const { quotes } = tab.run[kind][d];
     if (!quotes.length) return null;
-    /** @param {Quote} quote */
+    /** @param {RunQuote} quote */
     const item = (quote) => {
       if (!located(quote)) return h('p', {}, quote.text);
-      return trailPart(tab, sentenceButton(tab.run.docs[d], quote, 'quote'), (trail) => (trail?.citedBy.has(id) ? h('mark', {}, quote.text) : quote.text));
+      return trailPart(tab, sentenceButton(tab.run.docs[d], quote, 'quote'), (trail) => (trail?.quoting.has(quote.summary) ? h('mark', {}, quote.text) : quote.text));
     };
     return fold(`quotes ${quotes.length}`, h('div', { class: 'quotes' }, quotes.map(item)));
   }
@@ -2220,7 +2996,7 @@
       ];
     }
     const answer = answerOf(run, id);
-    const quoted = sentencesFrom(trailOf(run, answerLineage(run, id)));
+    const quoted = sentencesFrom(trailOf(run, id));
     return [
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
@@ -2722,7 +3498,7 @@
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
   /** @param {RunTab} tab @param {string} id */
   function sentenceList(tab, id) {
-    const trail = trailOf(tab.run, answerLineage(tab.run, id));
+    const trail = trailOf(tab.run, id);
     const line = sentencesFrom(trail);
     if (!line) return null;
     /** @param {LoadedFile} file @param {TextRange[]} sentences */
@@ -2851,7 +3627,7 @@
         appear(tab, `r${event.round}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
-        addSnippet(tab, narr, `r${event.round}-${doc(event.doc_id)}`, event.summary, docIndices(run, event.provenance), event.quotes);
+        addSnippet(tab, narr, event);
         break;
       case 'schema_started':
         beginStage(tab, narr, 'schema');
@@ -2890,17 +3666,18 @@
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
   // quotes are placed in the whole document, so they add up as they are.
-  /** @param {RunTab} tab @param {Narrator} narr @param {string} id @param {string} summary @param {number[]} provenance @param {Quote[]} quotes */
-  function addSnippet(tab, narr, id, summary, provenance, quotes) {
+  /** @param {RunTab} tab @param {Narrator} narr @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
+  function addSnippet(tab, narr, { round, doc_id, summary, provenance, quotes }) {
     const { run } = tab;
-    const [kind, i] = /** @type {['r1' | 'r2', number]} */ (splitId(id));
+    const kind = /** @type {'r1' | 'r2'} */ (`r${round}`);
+    const [i] = docIndices(run, [doc_id]);
     const earlier = run[kind][i] ?? { summary: '', provenance: [], quotes: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
-      provenance: [...new Set([...earlier.provenance, ...provenance])],
-      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes)],
+      provenance: [...new Set([...earlier.provenance, ...docIndices(run, provenance)])],
+      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes, summaryNode(round, doc_id))],
     };
-    settle(tab, narr, id);
+    settle(tab, narr, `${kind}-${i}`);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
