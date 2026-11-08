@@ -272,7 +272,6 @@ p { margin: 0; }
 }
 .trash[hidden] + .panel-hint { left: 1.5ch; }
 .panel-hint .remove-all { pointer-events: auto; }
-/* The can lights with remove all, or undo, beside it. */
 .trash:has(+ .panel-hint .remove-all:is(:hover, :focus-visible)) { color: var(--fg); }
 .panel-tools {
   position: absolute;
@@ -546,7 +545,7 @@ mark[title] { cursor: help; }
   flex-direction: column;
   gap: 0.9em;
 }
-/* Remove all ends the line, over each file's remove, or goes under it whole when the line is full. */
+/* A full line pushes remove all under the head, never into it. */
 .files-top { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
 .files-top .remove-all { margin-left: auto; }
 .remove-all { min-height: 24px; }

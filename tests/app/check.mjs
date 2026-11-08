@@ -312,6 +312,11 @@ const REMOVE_ALL = 'remove all';
 const REMOVE_ALL_NAME = 'remove all documents';
 const UNDO = 'undo';
 const undoName = (n) => `undo remove all (${n} documents)`;
+// The page's PRESS_GUARD_MS: a press on remove all or undo this soon after the last is not taken. A held key repeats
+// this often, here this many times, past the guard.
+const PRESS_GUARD_MS = 400;
+const KEY_REPEAT_MS = 40;
+const HELD_REPEATS = 20;
 const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
 const RAN_FIRST = "The tab's run started first, so its files are locked.";
 const DROP_ADDS = 'drop to add files';
@@ -1631,7 +1636,7 @@ async function trashArea() {
 
     await page.click('#new-tab-btn');
     const copied = await canShown(page);
-    await removeAll(page);
+    await pressRemoveAll(page);
     await page.click('#tab-files');
     const second = ['a_memo.txt', 'b_memo.txt'];
     await page.setInputFiles('#file-input', second.map((name) => memo(name, `A memo, ${name}, for the second tab.\n`)));
@@ -1668,12 +1673,16 @@ async function trashArea() {
 
 // ---------- remove all: the files pane's, and the panel's beside the can; once pressed, undo takes its place ----------
 
-const removeAll = (page) => page.click('#panel-remove-all');
+// Presses remove all, or undo in its place, once the page would take the press: not within PRESS_GUARD_MS of the last.
+async function pressRemoveAll(page, selector = '#panel-remove-all') {
+  await page.waitForTimeout(PRESS_GUARD_MS);
+  await page.click(selector);
+}
 
 // A + tab with none of the shown tab's files: + copies them, and remove all takes them out.
 async function openEmptyTab(page) {
   await page.click('#new-tab-btn');
-  await removeAll(page);
+  await pressRemoveAll(page);
 }
 
 // Each remove all, the files pane's then the panel's: whether it is offered, and its label, name and tooltip.
@@ -1694,6 +1703,13 @@ async function filesShown(page) {
     tab: (await tabLabels(page)).find(([, selected]) => selected)[0],
     status: await page.textContent('#run-status'),
   };
+}
+
+// Whether both remove all buttons are MIN_TARGET_PX each way, and the page and the files pane don't scroll sideways.
+async function removeAllFits(page) {
+  const boxes = await Promise.all(['#files-remove-all', '#panel-remove-all'].map((selector) => rect(page, selector)));
+  const big = boxes.every((box) => box.width >= MIN_TARGET_PX && box.height >= MIN_TARGET_PX);
+  return { big, page: await page.evaluate(noHorizontalScroll), list: await page.evaluate(listFits) };
 }
 
 async function removeAllArea() {
@@ -1745,20 +1761,39 @@ async function removeAllArea() {
     const removedName = `one press removes every file of the tab, which then looks as with each removed by its own remove, but for the can and the count, kept beside ${UNDO}; both buttons read ${UNDO}, named for what it puts back, the focus stays on the one pressed, and the files pane's polite line and the chat say so once`;
     check('remove all', removedName, isDeepStrictEqual(removed, expected), JSON.stringify(removed));
 
-    await page.click('#files-remove-all');
+    await pressRemoveAll(page, '#files-remove-all');
     const restored = { files: await filesShown(page), nodes: await count(page, '#world .node'), said: await page.textContent('#files-said'), focus: await focusedId(page) };
     const restoredName = `${UNDO} puts back the same files in the same order, their nodes too, and the tab is as before the removal, its recorded run included; the focus stays on the button, which offers ${REMOVE_ALL} again`;
     const back = { files: before, nodes: SAMPLE_DOCS, said: `Restored ${SAMPLE_DOCS} documents.`, focus: 'files-remove-all' };
     check('remove all', restoredName, isDeepStrictEqual(restored, back), JSON.stringify(restored));
 
+    await page.waitForTimeout(PRESS_GUARD_MS);
     await page.dblclick('#files-remove-all');
     const doubled = { docs: await docNames(page), buttons: await page.evaluate(removeAllButtons) };
-    await page.click('#files-remove-all');
+    await pressRemoveAll(page, '#files-remove-all');
     const once = { doubled, undone: await docNames(page) };
-    const doubleName = `a double-click on ${REMOVE_ALL} removes the files once and leaves ${UNDO}, which puts back all of them`;
+    const doubleName = `a double-click on ${REMOVE_ALL} removes the files once and leaves ${UNDO}, and a press after ${PRESS_GUARD_MS} ms puts all of them back`;
     check('remove all', doubleName, isDeepStrictEqual(once, { doubled: { docs: [], buttons: undo }, undone: names }), JSON.stringify(once));
 
-    await removeAll(page);
+    await page.waitForTimeout(PRESS_GUARD_MS);
+    await page.focus('#files-remove-all');
+    await page.keyboard.press('Enter');
+    const byKey = await docNames(page);
+    await page.waitForTimeout(PRESS_GUARD_MS);
+    await page.keyboard.press('Enter');
+    const keyedBack = await docNames(page);
+    await page.waitForTimeout(PRESS_GUARD_MS);
+    await page.keyboard.down('Enter');
+    for (let i = 0; i < HELD_REPEATS; i += 1) {
+      await page.waitForTimeout(KEY_REPEAT_MS);
+      await page.keyboard.down('Enter');
+    }
+    await page.keyboard.up('Enter');
+    const held = await docNames(page);
+    const keys = { byKey, keyedBack, held };
+    const keyName = `from the keyboard, Enter on ${REMOVE_ALL} removes the files, Enter again after ${PRESS_GUARD_MS} ms puts them back, and Enter held down, its repeats past ${PRESS_GUARD_MS} ms, removes them once`;
+    check('remove all', keyName, isDeepStrictEqual(keys, { byKey: [], keyedBack: names, held: [] }), JSON.stringify(keys));
+
     await page.setInputFiles('#file-input', memo('06_extra_memo.txt', 'An extra memo.\n'));
     await removeButton(page, '06_extra_memo.txt').waitFor();
     const added = { docs: await docNames(page), buttons: await page.evaluate(removeAllButtons), hint: await page.innerText('#panel-hint') };
@@ -1767,14 +1802,24 @@ async function removeAllArea() {
   });
 
   await withPage('remove all', { sample: false }, async (page) => {
+    const id = await docNodeId(page, names[2]);
+    await dragNode(page, id, 120, 40);
+    const dragged = await positionOf(page, id);
+    await pressRemoveAll(page);
+    await pressRemoveAll(page);
+    const putBack = await positionOf(page, id);
+    check('remove all', `${UNDO} puts a document's node back where it was dragged before ${REMOVE_ALL}`, isDeepStrictEqual(putBack, dragged), JSON.stringify({ dragged, putBack }));
+  });
+
+  await withPage('remove all', { sample: false }, async (page) => {
     await page.click('#new-tab-btn');
-    await removeAll(page);
+    await pressRemoveAll(page);
     const pressed = { docs: await docNames(page), focus: await focusedId(page) };
     await showRunTab(page, 0);
     const first = { docs: await docNames(page), buttons: await page.evaluate(removeAllButtons) };
     await showRunTab(page, 1);
     const second = await page.evaluate(removeAllButtons);
-    await removeAll(page);
+    await pressRemoveAll(page);
     const undone = await docNames(page);
     const tabName = `${UNDO} is the tab's own: the panel's ${REMOVE_ALL} empties a + tab alone, with the focus kept on it; tab 1 still offers ${REMOVE_ALL}, and back on the + tab ${UNDO} is still there and puts its files back`;
     const perTab = { pressed, first, second, undone };
@@ -1792,15 +1837,17 @@ async function removeAllArea() {
     await withPage('remove all', { layout, sample: false }, async (page) => {
       await page.click('#tab-files');
       const selectors = ['#files-remove-all', '#panel-remove-all'];
-      const atRestContrast = await page.evaluate(lowestContrasts, selectors);
-      await removeAll(page);
+      const fullHead = await page.textContent('#files-head');
+      const restFits = await removeAllFits(page);
+      const restContrast = await page.evaluate(lowestContrasts, selectors);
+      await pressRemoveAll(page);
+      const undoFits = await removeAllFits(page);
       const undoContrast = await page.evaluate(lowestContrasts, selectors);
-      const boxes = await Promise.all(selectors.map((selector) => rect(page, selector)));
-      const big = boxes.every((box) => box.width >= MIN_TARGET_PX && box.height >= MIN_TARGET_PX);
-      const lowest = Math.min(...Object.values(atRestContrast), ...Object.values(undoContrast));
-      const fits = (await page.evaluate(noHorizontalScroll)) && (await page.evaluate(listFits));
-      const fitName = `${layout.name}: ${REMOVE_ALL}, and ${UNDO} in its place, are at least ${MIN_TARGET_PX} px each way, their labels meet ${MIN_TEXT_CONTRAST}:1, and neither the page nor the files pane scrolls sideways`;
-      check('remove all', fitName, big && lowest >= MIN_TEXT_CONTRAST && fits, `lowest ${lowest.toFixed(2)}; ${boxes.map((box) => `${Math.round(box.width)}×${Math.round(box.height)}`).join(', ')}`);
+      const lowest = Math.min(...Object.values(restContrast), ...Object.values(undoContrast));
+      const fits = { full: fullHead.endsWith(' · sample memos'), rest: restFits, undo: undoFits };
+      const allFit = { full: true, rest: { big: true, page: true, list: true }, undo: { big: true, page: true, list: true } };
+      const fitName = `${layout.name}: ${REMOVE_ALL}, beside the sample's full head, and ${UNDO} in its place are each at least ${MIN_TARGET_PX} px each way, their labels meet ${MIN_TEXT_CONTRAST}:1, and neither the page nor the files pane scrolls sideways`;
+      check('remove all', fitName, isDeepStrictEqual(fits, allFit) && lowest >= MIN_TEXT_CONTRAST, `lowest ${lowest.toFixed(2)}; ${fullHead}; ${JSON.stringify(fits)}`);
     });
   }
 }
@@ -3607,7 +3654,7 @@ async function tabFiles() {
   });
 
   await withPage('tab files', { sample: false }, async (page) => {
-    await removeAll(page);
+    await pressRemoveAll(page);
     await page.click('#new-tab-btn');
     const empty = {
       tabs: await tabLabels(page),
@@ -4877,8 +4924,8 @@ async function liveBatchesPerTab(url) {
   });
 }
 
-// Holds a PDF's text at the server while remove all empties the tab it is being added to.
-async function liveRemoveAllWhileReading(url) {
+// Holds a PDF's text at the server while one of the tab's files is removed.
+async function liveRemoveWhileReading(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     await page.click('#tab-files');
     const earlier = ['a_memo.txt', 'b_memo.txt'];
@@ -4887,12 +4934,39 @@ async function liveRemoveAllWhileReading(url) {
     const release = await holdExtraction(page);
     await page.setInputFiles('#file-input', documents['01_memo.pdf']);
     const reading = await becomes(page, () => document.getElementById('files-said').textContent === 'Reading 1 file…');
-    await page.click('#files-remove-all');
+    const whileReading = { offered: (await page.evaluate(removeAllButtons)).map((b) => b.offered), hint: await page.innerText('#panel-hint') };
+    await removeButton(page, earlier[0]).click();
     release();
     await removeButton(page, '01_memo.pdf').waitFor();
-    const landed = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), control: (await page.evaluate(removeAllButtons))[0].label };
-    const name = `files removed by ${REMOVE_ALL} while a batch is read stay removed: the batch lands in a tab holding only its own file, and ${REMOVE_ALL} is back in place of ${UNDO}`;
-    check('live', name, reading && isDeepStrictEqual(landed, { names: ['01_memo.pdf'], docs: ['01_memo.pdf'], control: REMOVE_ALL }), JSON.stringify(landed));
+    const landed = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), offered: (await page.evaluate(removeAllButtons)).map((b) => b.offered) };
+    const kept = [earlier[1], '01_memo.pdf'];
+    const expected = { whileReading: { offered: [false, false], hint: '2 documents' }, landed: { names: kept, docs: kept, offered: [true, true] } };
+    const name = `while a batch is read ${REMOVE_ALL} is not offered, and a file removed meanwhile stays removed once the batch lands, ${REMOVE_ALL} offered again`;
+    check('live', name, reading && isDeepStrictEqual({ whileReading, landed }, expected), JSON.stringify({ reading, whileReading, landed }));
+  });
+}
+
+// Holds PDFs' text at the server while undo, not offered then, is pressed anyway from the page.
+async function liveUndoWhileReading(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.click('#tab-files');
+    const earlier = memoNames(0, MAX_FILES - 10);
+    await page.setInputFiles('#file-input', earlier.map((name) => memo(name, `${name}\n`)));
+    await removeButton(page, earlier.at(-1)).waitFor();
+    await pressRemoveAll(page);
+    const release = await holdExtraction(page);
+    const pdfs = Array.from({ length: 11 }, (_, i) => ({ ...documents['01_memo.pdf'], name: `pdf_${String(i).padStart(2, '0')}.pdf` }));
+    await page.setInputFiles('#file-input', pdfs);
+    const reading = await becomes(page, (n) => document.getElementById('files-said').textContent === `Reading ${n} files…`, pdfs.length);
+    const whileReading = (await page.evaluate(removeAllButtons)).map((b) => b.offered);
+    await page.waitForTimeout(PRESS_GUARD_MS);
+    await page.evaluate(() => document.getElementById('files-remove-all').click());
+    release();
+    const landed = await becomes(page, (n) => document.getElementById('files-count').textContent === String(n), MAX_FILES, LIVE_RUN_MS);
+    const after = { count: await page.textContent('#files-count'), error: await filesError(page), said: await filesSaid(page) };
+    const expected = { count: String(MAX_FILES), error: `Not added: 1 file. ${TOO_MANY_FILES}`, said: '10 files added.' };
+    const name = `a batch lands within the ${MAX_FILES} files a tab takes, whatever the tab took back while it was read: ${UNDO} is not offered then, and pressed anyway, it leaves the batch only the room left, the rest said to be too many`;
+    check('live', name, reading && isDeepStrictEqual(whileReading, [false, false]) && landed && isDeepStrictEqual(after, expected), JSON.stringify({ reading, whileReading, ...after }));
   });
 }
 
@@ -5264,7 +5338,8 @@ async function live() {
     await liveZip(url);
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
-    await liveRemoveAllWhileReading(url);
+    await liveRemoveWhileReading(url);
+    await liveUndoWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
