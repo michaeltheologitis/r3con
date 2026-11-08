@@ -121,14 +121,13 @@ def _reply_schema(citable: Mapping[str, Sequence[str]]) -> type[_DirectReply]:
     (:func:`_provenance_ids_model`). A reply without them, or with null for them,
     cites nothing."""
     provenance_ids = _provenance_ids_model(citable)
-    return create_model(
-        "ReasoningAnswer",
-        __base__=_DirectReply,
-        provenance_ids=(
+    fields: dict[str, Any] = {
+        "provenance_ids": (
             Annotated[provenance_ids, BeforeValidator(_nothing_if_null)],
             Field(default_factory=provenance_ids),
-        ),
-    )
+        )
+    }
+    return create_model("ReasoningAnswer", __base__=_DirectReply, **fields)
 
 
 def _nothing_if_null(value: Any) -> Any:

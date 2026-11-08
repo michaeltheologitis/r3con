@@ -25,7 +25,8 @@ classifiers = [
 dependencies = [
     "litellm>=1.103,<2",
     "jinja2>=3.1.0",
-    "pydantic>=2.11",
+    # 2.14.0 locks model_rebuild (pydantic#13419): threads' first calls raced before it.
+    "pydantic>=2.14",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
     "tenacity>=8.0",
