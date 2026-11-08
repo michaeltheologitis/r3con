@@ -54,7 +54,7 @@ from r3con.config import (
 )
 from r3con.logging_setup import get_logger
 from r3con.masking import masked, one_line
-from r3con.provenance import Provenance, build_provenance
+from r3con.provenance import Citations, Provenance, build_provenance, check_rule
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -83,8 +83,9 @@ _log = get_logger("pipeline")
 
 ASKS_FOLDER = "asks"
 _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
-# What reading a run folder raises when its files are not as this r3con writes them.
-_UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValidationError)
+# What reading a run folder raises when its files are not as this r3con writes them:
+# a pydantic ValidationError and a file that is not JSON among the ValueErrors.
+_UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValueError)
 
 
 def names_and_texts(documents: Any) -> tuple[list[str], list[str]]:
@@ -268,18 +269,6 @@ class Representation:
     schema_code: str
     parsed: dict[str, Any]
     source_docs: dict[str, list[int]]
-    parsing_provenance: list[list[str]]
-
-
-@dataclass(frozen=True)
-class SavedAnswer:
-    """An answer as its folder saved it, with the records of the run it answered over
-    that its provenance runs through, as :func:`read_answer` reads them back."""
-
-    citations: reasoning.Citations
-    names: dict[str, str]
-    """Each document's name by its id, in document order."""
-    relevance: RelevantContext
     parsing_provenance: list[list[str]]
 
 
@@ -668,16 +657,21 @@ def read_representation(run_dir: Path) -> Representation:
     return built
 
 
-def read_answer(folder: Path) -> SavedAnswer:
-    """Read back the answer saved in the run folder or ask's folder ``folder``, with
-    the snippets and parses' citations of the run it answered over: only what
-    :func:`r3con.trace` needs, so neither the run's config nor its prompts are read.
+def read_answer(folder: Path, rule: str) -> Provenance:
+    """The provenance of the answer saved in the run folder or ask's folder ``folder``,
+    its trail walked under ``rule``, built from its citations and the snippets and
+    parses' citations of the run it answered over: only what :func:`r3con.trace` needs,
+    so neither the run's config nor its prompts are read.
 
     Raises:
-        FileNotFoundError: if ``folder`` is neither a run folder nor an ask's, or it
-            holds no answer, as when its reasoning failed.
-        ValueError: if a file it reads is not as this r3con writes it, in one line.
+        ValueError: if no rule is named ``rule``, before anything is read; or, in one
+            line naming the folder that holds it, if a file it reads is not as this
+            r3con writes it.
+        FileNotFoundError: if ``folder`` is neither a run folder nor an ask's folder in
+            the run it asked over, or it holds no answer, as when its reasoning failed.
     """
+    check_rule(rule)
+    folder = folder.resolve()
     run_dir = _run_of(folder)
     answered = folder / "reasoning" / "result.json"
     if not answered.is_file():
@@ -686,33 +680,46 @@ def read_answer(folder: Path) -> SavedAnswer:
         )
     with _readable(folder):
         cited = _read_json(answered)["provenance"]
+        citations = Citations(
+            summary_ids=list(cited["summary_ids"]), parse_ids=list(cited["parse_ids"])
+        )
+    with _readable(run_dir):
         names, relevance = _names_and_relevance(run_dir)
         parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
-        return SavedAnswer(
-            citations=reasoning.Citations(
-                summary_ids=cited["summary_ids"], parse_ids=cited["parse_ids"]
-            ),
-            names=names,
+        return build_provenance(
+            citations,
             relevance=relevance,
             parsing_provenance=parsing["provenance"],
+            names=names,
+            rule=rule,
         )
 
 
 def _run_of(folder: Path) -> Path:
-    """The run folder ``folder`` is, or, for an ask's folder, the run it asked over.
+    """The run folder ``folder`` is, or, for an ask's folder, the run it asked over: the
+    folder holding its ``asks/``, whose name its manifest's ``ask_of`` gives; either
+    resolved.
 
     Raises:
-        FileNotFoundError: if it is neither.
+        FileNotFoundError: if ``folder`` holds no manifest, or it is an ask's folder that
+            is not in the ``asks/`` of a run folder by that name.
     """
+    folder = folder.resolve()
     manifest = folder / "manifest.json"
-    # An ask's folder sits in the asks/ of the run it asked over.
-    if manifest.is_file() and "ask_of" in _read_json(manifest):
-        folder = folder.parent.parent
-    if not (folder / "manifest.json").is_file():
+    if not manifest.is_file():
         raise FileNotFoundError(
             f"{folder} is not a run folder: it has no manifest.json."
         )
-    return folder
+    ask_of = _read_json(manifest).get("ask_of")
+    if ask_of is None:
+        return folder
+    run_dir = folder.parent.parent
+    if run_dir.name != ask_of or not (run_dir / "manifest.json").is_file():
+        raise FileNotFoundError(
+            f"{folder} is an ask's folder, but not in the {ASKS_FOLDER}/ of {ask_of}, "
+            "the run folder it asked over."
+        )
+    return run_dir
 
 
 @contextmanager

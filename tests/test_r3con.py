@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -1304,16 +1305,92 @@ def test_trace_reads_a_run_whose_config_or_prompts_this_r3con_no_longer_runs(
     assert trace(cited_run.run_dir) == cited_run.provenance
 
 
+def a_parse_citation_short(result: dict) -> None:
+    result["provenance"] = result["provenance"][:-1]
+
+
+def a_quote_without_text(result: dict) -> None:
+    del result["rounds"][0]["snippets"][0]["quotes"][0]["text"]
+
+
 @pytest.mark.parametrize(
-    "result", ["structuring/parsing/result.json", "reasoning/result.json"]
+    ("name", "make_malformed", "error"),
+    [
+        (
+            "structuring/parsing/result.json",
+            without_provenance,
+            "KeyError: 'provenance'",
+        ),
+        ("reasoning/result.json", without_provenance, "KeyError: 'provenance'"),
+        (
+            "structuring/parsing/result.json",
+            a_parse_citation_short,
+            "ValueError: zip() argument 2 is shorter than argument 1",
+        ),
+        ("relevance/result.json", a_quote_without_text, "KeyError: 'text'"),
+    ],
+    ids=[
+        "parse-without-provenance",
+        "answer-without-provenance",
+        "a-parse-citation-short",
+        "a-quote-without-text",
+    ],
 )
-def test_trace_refuses_a_result_without_provenance_in_one_line(cited_run, result):
-    in_json(result, without_provenance)(cited_run.run_dir)
+def test_trace_refuses_malformed_saved_records_in_one_line(
+    cited_run, name, make_malformed, error
+):
+    in_json(name, make_malformed)(cited_run.run_dir)
     with pytest.raises(ValueError) as refused:
         trace(cited_run.run_dir)
     assert str(refused.value) == (
-        f"can't read {cited_run.run_dir} as a run folder: KeyError: 'provenance'"
+        f"can't read {cited_run.run_dir} as a run folder: {error}"
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "in_the_ask"),
+    [("structuring/parsing/result.json", False), ("reasoning/result.json", True)],
+    ids=["the-runs-parse", "the-asks-answer"],
+)
+def test_trace_of_an_ask_names_the_folder_that_holds_the_malformed_file(
+    answering_llm, cited_run, name, in_the_ask
+):
+    asked = ask(cited_run, "Who else?", completion=answering_llm)
+    holder = asked.run_dir if in_the_ask else cited_run.run_dir
+    in_json(name, without_provenance)(holder)
+    with pytest.raises(ValueError) as refused:
+        trace(asked.run_dir)
+    assert str(refused.value) == (
+        f"can't read {holder} as a run folder: KeyError: 'provenance'"
+    )
+
+
+def test_trace_from_inside_an_asks_folder_reads_the_run_it_asked_over(
+    answering_llm, cited_run, monkeypatch
+):
+    asked = ask(cited_run, "Who else?", completion=answering_llm)
+    monkeypatch.chdir(asked.run_dir)
+    assert trace(".") == asked.provenance
+
+
+def test_an_asks_folder_moved_out_of_its_runs_asks_is_refused(
+    answering_llm, cited_run, tmp_path
+):
+    asked = ask(cited_run, "Who else?", completion=answering_llm)
+    # In the asks/ of another run folder, which has a manifest but another name.
+    other = tmp_path / "other"
+    moved = shutil.copytree(asked.run_dir, other / "asks" / asked.run_dir.name)
+    shutil.copy(cited_run.run_dir / "manifest.json", other / "manifest.json")
+    refusal = (
+        f"{moved} is an ask's folder, but not in the asks/ of {cited_run.run_dir.name}, "
+        "the run folder it asked over."
+    )
+    with pytest.raises(FileNotFoundError) as refused:
+        trace(moved)
+    assert str(refused.value) == refusal
+    with pytest.raises(FileNotFoundError) as refused:
+        ask(moved, "Who else?", completion=answering_llm)
+    assert str(refused.value) == refusal
 
 
 def test_trace_refuses_an_unknown_rule_before_reading_the_folder(tmp_path):

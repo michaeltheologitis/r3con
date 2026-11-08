@@ -79,7 +79,7 @@ from r3con.pipeline import (
     read_representation,
     run_pipeline,
 )
-from r3con.provenance import DEFAULT_RULE, Provenance, build_provenance, check_rule
+from r3con.provenance import DEFAULT_RULE, Provenance
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
@@ -626,8 +626,9 @@ def ask(
         folder, which holds its manifest, calls and transcript.
 
     Raises:
-        FileNotFoundError: if ``source`` is not a run folder, if its run never finished
-            parsing, or if a prompt version it pins has no file.
+        FileNotFoundError: if ``source`` is neither a run folder nor an ask's folder in
+            the ``asks/`` of the run it asked over, if its run never finished parsing,
+            or if a prompt version it pins has no file.
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
             with ``save_artifacts=False``), if a file in its folder is not as this
             r3con writes it (one an older r3con wrote, say), if it leaves a prompt
@@ -670,20 +671,13 @@ def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
 
     Raises:
         ValueError: if no rule is named ``rule``, before anything is read; if
-            ``source`` is an Answer without a ``run_dir``; or, in one line, if a file
-            it reads is not as this r3con writes it.
-        FileNotFoundError: if ``source`` is neither a run folder nor an ask's, or it
-            holds no answer, as when its reasoning failed.
+            ``source`` is an Answer without a ``run_dir``; or, in one line naming the
+            folder that holds it, if a file it reads is not as this r3con writes it.
+        FileNotFoundError: if ``source`` is neither a run folder nor an ask's folder in
+            the ``asks/`` of the run it asked over, or it holds no answer, as when its
+            reasoning failed.
     """
-    check_rule(rule)
-    saved = read_answer(_folder_of(source, "trace"))
-    return build_provenance(
-        saved.citations,
-        relevance=saved.relevance,
-        parsing_provenance=saved.parsing_provenance,
-        names=saved.names,
-        rule=rule,
-    )
+    return read_answer(_folder_of(source, "trace"), rule)
 
 
 def _folder_of(source: Answer | str | Path, reader: str) -> Path:

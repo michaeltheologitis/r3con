@@ -39,7 +39,6 @@ from itertools import chain
 from typing import TypedDict
 
 from r3con.quotes import Quote
-from r3con.stages.reasoning import Citations
 from r3con.stages.relevance import RelevantContext
 
 ANSWER = "answer"
@@ -58,6 +57,15 @@ RULES: dict[str, frozenset[str]] = {
 
 Edge = list[str]
 """``[from, to, kind]``, in memory as in JSON."""
+
+
+class Citations(TypedDict):
+    """What an answer cites: the ids of the relevance snippets it used (``<id>.<k>`` for
+    a part of a document read in parts), and those of the documents whose records it
+    used."""
+
+    summary_ids: list[str]
+    parse_ids: list[str]
 
 
 class NamedQuote(TypedDict):

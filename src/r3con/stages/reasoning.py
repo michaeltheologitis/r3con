@@ -38,7 +38,7 @@ import functools
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, TypedDict, cast
+from typing import Annotated, Any, cast
 
 from litellm.exceptions import ContextWindowExceededError
 from pydantic import (
@@ -55,6 +55,7 @@ from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import get_logger
 from r3con.masking import masked, one_line
 from r3con.prompts import load_prompt
+from r3con.provenance import Citations
 from r3con.runs import StageRun
 from r3con.runtime.codeact import (
     DEFAULT_EXEC_TIMEOUT_S,
@@ -85,15 +86,6 @@ class _DirectReply(BaseModel):
         if not answer.strip():
             raise ValueError("the answer is empty")
         return answer
-
-
-class Citations(TypedDict):
-    """What an answer cites: the ids of the relevance snippets it used (``<id>.<k>`` for
-    a part of a document read in parts), and those of the documents whose records it
-    used."""
-
-    summary_ids: list[str]
-    parse_ids: list[str]
 
 
 def cites_nothing() -> Citations:
