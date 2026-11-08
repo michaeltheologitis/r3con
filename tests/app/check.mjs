@@ -318,6 +318,12 @@ const DROP_ADDS = 'drop to add files';
 const DROP_LOCKED = 'this tab has run · press + for a new tab';
 const FIRST_TAB_BEFORE_RUN = '1 new · 5 files';
 const DRAG_STEPS = 8;
+// The page's POPOVER_MARGIN: how far inside the panel's edges a popup is kept.
+const POPOVER_MARGIN_PX = 10;
+// A popup dropped this far above the panel's bottom margin, less than the answer's provenance fold adds to it.
+const DROP_ABOVE_MARGIN_PX = 40;
+// Where a drag grabs a popup's header: this far in from its left, clear of its close button.
+const HEADER_GRAB_PX = 40;
 // The page's SIDE_WIDTH_KEY, SIDE_MIN_PX, SIDE_MAX_SHARE and SIDE_STEP_PX: where the chat's width is kept, its narrowest, its widest as a share of the frame, and a key press's step.
 const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
 const SIDE_MIN_PX = 280;
@@ -493,6 +499,40 @@ function popup(page) {
     const [left, top, right, bottom] = [r.left, r.top, r.right, r.bottom].map(Math.round);
     return { left, top, right, bottom, title: el.querySelector('.insp-title').textContent };
   });
+}
+
+// Drags the open popup by its header so its top left lands on `target`, and returns where it is then.
+async function dragPopupTo(page, target) {
+  // Unrounded, so the drag's own rounding is the only one.
+  const exact = await rect(page, '#inspector');
+  const head = await rect(page, '#inspector .insp-head');
+  const grab = { x: head.left + HEADER_GRAB_PX, y: head.top + head.height / 2 };
+  await drag(page, grab, { x: grab.x + target.left - exact.left, y: grab.y + target.top - exact.top });
+  return popup(page);
+}
+
+// Opens each fold of the open popup in turn, then closes them in reverse. Returns whether the popup was inside the
+// panel's margin once each fold had opened, its smallest gap to the panel's edges in any frame painted meanwhile
+// (recordPaintedGaps must be running), and whether each close put it back where it was before that fold opened.
+async function foldPopup(page) {
+  const summaries = page.locator('#inspector details > summary');
+  const folds = await summaries.count();
+  const spots = [];
+  const inside = [];
+  await page.evaluate(() => (window.paintedGaps = []));
+  for (let i = 0; i < folds; i += 1) {
+    spots.push(await popup(page));
+    await summaries.nth(i).click();
+    inside.push(await becomes(page, popupInsidePanel, POPOVER_MARGIN_PX));
+  }
+  const opened = await popup(page);
+  const back = [];
+  for (let i = folds - 1; i >= 0; i -= 1) {
+    await summaries.nth(i).click();
+    back.push(await becomes(page, popupIsAt, [spots[i].left, spots[i].top]));
+  }
+  const paintedGap = Math.min(...(await page.evaluate(() => window.paintedGaps)));
+  return { inside: folds > 0 && inside.every(Boolean), paintedGap, back: back.every(Boolean), from: spots[0], opened, closed: await popup(page) };
 }
 
 function recordedSample() {
@@ -687,11 +727,28 @@ function viewChanged(previous) {
   return document.getElementById('world').style.transform !== previous;
 }
 
-function popupInsidePanel() {
+// Whether the open popup is inside the panel, `margin` px in from each edge to within a pixel: the page places it on
+// whole pixels, and its height is fractional.
+function popupInsidePanel(margin = 0) {
   const el = document.getElementById('inspector');
   const r = el.getBoundingClientRect();
   const p = document.getElementById('panel').getBoundingClientRect();
-  return !el.hidden && r.left >= p.left && r.top >= p.top && r.right <= p.right && r.bottom <= p.bottom;
+  const gaps = [r.left - p.left, r.top - p.top, p.right - r.right, p.bottom - r.bottom];
+  return !el.hidden && gaps.every((gap) => gap > margin - 1);
+}
+
+// From now on, each time the open popup's size changes, records its smallest gap to the panel's edges in
+// window.paintedGaps. A ResizeObserver runs after layout and before paint, and one created after the page's own runs
+// after theirs, so it reads the popup where the frame paints it.
+function recordPaintedGaps() {
+  window.paintedGaps = [];
+  const el = document.getElementById('inspector');
+  new ResizeObserver(() => {
+    if (el.hidden) return;
+    const r = el.getBoundingClientRect();
+    const p = document.getElementById('panel').getBoundingClientRect();
+    window.paintedGaps.push(Math.min(r.left - p.left, r.top - p.top, p.right - r.right, p.bottom - r.bottom));
+  }).observe(el);
 }
 
 function countStatusWrites() {
@@ -2270,14 +2327,9 @@ async function popupArea() {
     const panel = await rect(page, '#panel');
     await page.click(nodeSel('schema'));
     const before = await popup(page);
-    // Unrounded, so the drag's own rounding is the only one.
-    const exact = await rect(page, '#inspector');
-    const head = await rect(page, '#inspector .insp-head');
     const width = before.right - before.left;
-    const target = { left: Math.round(panel.right - width - 10), top: Math.round(panel.top + 10) };
-    const grab = { x: head.left + 40, y: head.top + head.height / 2 };
-    await drag(page, grab, { x: grab.x + target.left - exact.left, y: grab.y + target.top - exact.top });
-    const dropped = await popup(page);
+    const target = { left: Math.round(panel.right - width - POPOVER_MARGIN_PX), top: Math.round(panel.top + POPOVER_MARGIN_PX) };
+    const dropped = await dragPopupTo(page, target);
     const moved = `${before.left},${before.top} → ${dropped.left},${dropped.top}`;
     check('popup', 'dragging its header moves it', sameSpot(dropped, target), moved);
 
@@ -2310,6 +2362,31 @@ async function popupArea() {
     check('popup', 'back at 1440 it returns to where it was dropped', returned);
     await page.keyboard.press('Escape');
     check('popup', 'Escape closes it', (await popup(page)) === null);
+  });
+
+  // At 1440×900, r2-3's popup sits on the panel's bottom margin, and its folds, or the answer's, make it taller.
+  await withPage('popup', {}, async (page) => {
+    await page.evaluate(recordPaintedGaps);
+    for (const id of ['r2-3', 'answer-0']) {
+      await inspect(page, id);
+      const folded = await foldPopup(page);
+      const opened = JSON.stringify(folded.opened);
+      check('popup', `at 1440×900, each fold opened in ${id}'s popup keeps the popup inside the panel's margin`, folded.inside, opened);
+      const paintedName = `${id}'s popup is inside the panel's margin in every frame painted as its folds open and close`;
+      check('popup', paintedName, folded.paintedGap > POPOVER_MARGIN_PX - 1, `smallest gap ${folded.paintedGap.toFixed(1)} px`);
+      const closedName = `closing ${id}'s folds again puts its popup back where it was before each opened`;
+      check('popup', closedName, folded.back, `${JSON.stringify(folded.from)} → ${JSON.stringify(folded.closed)}`);
+    }
+
+    const panel = await rect(page, '#panel');
+    const anchored = await popup(page);
+    const height = anchored.bottom - anchored.top;
+    const target = { left: Math.round(panel.left + POPOVER_MARGIN_PX), top: Math.round(panel.bottom - POPOVER_MARGIN_PX - DROP_ABOVE_MARGIN_PX - height) };
+    const dropped = await dragPopupTo(page, target);
+    const folded = await foldPopup(page);
+    const droppedName = "a fold opened in a popup dropped near the panel's bottom keeps the popup inside the panel's margin";
+    check('popup', droppedName, sameSpot(dropped, target) && folded.inside, `${JSON.stringify(dropped)} → ${JSON.stringify(folded.opened)}`);
+    check('popup', 'closing that fold returns the popup to where it was dropped', folded.back, `${JSON.stringify(folded.from)} → ${JSON.stringify(folded.closed)}`);
   });
 
   await withPage('popup', { before: serving(withLongParse) }, async (page) => {

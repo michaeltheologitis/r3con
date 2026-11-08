@@ -5172,6 +5172,7 @@
       positionInspector();
     }).observe(panel);
     new ResizeObserver(fitSideToFrame).observe(frame);
+    new ResizeObserver(positionInspector).observe(inspector);
   }
 
   // ---------- modes ----------
