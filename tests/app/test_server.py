@@ -59,6 +59,9 @@ ENVIRONMENT_KEY = "key-from-the-environment-9012"
 ENDPOINT = "http://127.0.0.1:9/v1"
 SECOND_ENDPOINT = "http://127.0.0.1:11/v1"
 SECOND_KEY = "second-server-key-3456"
+# A known provider's URL, by which litellm places a bare name with that provider.
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1"
+CUSTOM_HEADERS = "Authorization: Bearer custom-header-key-7890\nX-Gateway-Key: gate"
 STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
@@ -544,6 +547,16 @@ def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment
             SECOND_ENDPOINT,
             {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
         ),
+        (
+            MODEL,
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            BARE_OPENAI_MODEL,
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
     ],
 )
 def test_a_model_on_a_server_reaches_it_as_typed_with_its_key_in_a_run_and_an_ask(
@@ -575,9 +588,16 @@ def test_a_model_on_a_server_reaches_it_as_typed_with_its_key_in_a_run_and_an_as
             "anthropic/claude-sonnet-5-5 isn't a self-hosted or openai/ model",
         ),
         ("gemini/gemini-2.5-pro", ENDPOINT, "isn't a self-hosted or openai/ model"),
+        (BARE_OPENAI_MODEL, GROQ_ENDPOINT, "isn't a self-hosted or openai/ model"),
+        (
+            SERVED_OPENAI_MODEL,
+            ENDPOINT,
+            "would send the server the headers in OPENAI_CUSTOM_HEADERS",
+        ),
+        ("lm_studio/qwen", ENDPOINT, "OPENAI_CUSTOM_HEADERS"),
     ],
 )
-def test_an_unknown_server_or_an_anthropic_or_gemini_model_on_a_server_is_refused(
+def test_an_unknown_server_or_a_model_that_would_send_it_other_credentials_is_refused(
     client: TestClient,
     llm: FakeLLM,
     monkeypatch: pytest.MonkeyPatch,
@@ -586,8 +606,10 @@ def test_an_unknown_server_or_an_anthropic_or_gemini_model_on_a_server_is_refuse
     wrong: str,
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", ENVIRONMENT_KEY)
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", CUSTOM_HEADERS)
     client.post("/api/keys", json=STORED_OPENAI)
     client.post("/api/keys", json=KEYLESS_OTHER)
+    client.post("/api/keys", json={"provider": "other", "endpoint": GROQ_ENDPOINT})
     run_id = finished_run(client)
     llm.requests.clear()
     responses = [
@@ -601,6 +623,18 @@ def test_an_unknown_server_or_an_anthropic_or_gemini_model_on_a_server_is_refuse
         assert response.status_code == 422
         assert wrong in response.json()["error"]
     assert llm.requests == []
+
+
+def test_a_hosted_vllm_model_on_a_server_runs_while_openai_custom_headers_is_set(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", CUSTOM_HEADERS)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    finished_run(client, "hosted_vllm/qwen", ENDPOINT)
+    placeholder = KEYLESS_SERVER_KEY.get_secret_value()
+    assert transport(llm) == [{"api_key": placeholder, "api_base": ENDPOINT}] * len(
+        llm.requests
+    )
 
 
 def test_a_name_litellm_cannot_place_is_sent_to_its_server_which_litellm_then_refuses(

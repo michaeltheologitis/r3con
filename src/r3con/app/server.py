@@ -26,12 +26,16 @@ opened URL's fragment, ``#token=...``.
   place, is sent there with the server's key, or ``KEYLESS_SERVER_KEY`` for a
   keyless server: given none, litellm would send it one from the environment, such
   as ``OLLAMA_API_KEY``. Those providers are the self-hosted ones and ``openai``,
-  litellm's route to any OpenAI-compatible server: given a key, it sends that one
-  alone, though an OpenAI organization or project id set in the environment
-  (``OPENAI_ORGANIZATION``, ``OPENAI_ORG_ID``, ``OPENAI_PROJECT_ID``) goes too, as a
-  header. Any other provider may read credentials besides the key, so a model of
-  one, like an ``endpoint`` that isn't a stored server, is refused (422): no
-  provider's key, stored here or in the environment, ever reaches a server.
+  litellm's route to any OpenAI-compatible server. Those in ``OPENAI_SDK_PROVIDERS``
+  go through the OpenAI SDK, which also sends an OpenAI organization or project id
+  set in the environment (``OPENAI_ORGANIZATION``, ``OPENAI_ORG_ID``,
+  ``OPENAI_PROJECT_ID``) as a header, and the headers in ``OPENAI_CUSTOM_HEADERS``,
+  which win over the key's ``Authorization``: while that variable is set, a model of
+  one is refused (422). Any other provider may read credentials besides the key, so a
+  model of one, like an ``endpoint`` that isn't a stored server, is refused (422): no
+  provider's key, stored here or in the environment, ever reaches a server. A model
+  is placed by its name and the server's URL, as litellm places it to send it, so a
+  name on a server at a known provider's URL, such as Groq's, is that provider's.
 - Keys stay in this process's memory, and the server never logs or writes one, and
   answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
   which r3con registers before sending it and masks in every event's ``error``, in
@@ -196,6 +200,8 @@ SELF_HOSTED = frozenset(
     {"hosted_vllm", "ollama", "ollama_chat", "lm_studio", "llamafile", "custom_openai"}
 )
 SERVER_PROVIDERS = SELF_HOSTED | {"openai"}
+OPENAI_SDK_PROVIDERS = frozenset({"openai", "custom_openai", "lm_studio", "llamafile"})
+CUSTOM_HEADERS_VARIABLE = "OPENAI_CUSTOM_HEADERS"
 # vLLM's placeholder for "no key"; non-empty, since r3con drops an empty api_key.
 KEYLESS_SERVER_KEY = SecretStr("EMPTY")
 UNKNOWN_SERVER = "This model's server isn't in settings: add it there first."
@@ -205,6 +211,10 @@ ONE_NAME_PER_DOCUMENT = "must give one name per document"
 NOT_A_SERVER_MODEL = (
     "isn't a self-hosted or openai/ model, so it can't run on a server: "
     "pick other model… for it."
+)
+CUSTOM_HEADERS_WOULD_REACH_SERVER = (
+    f"would send the server the headers in {CUSTOM_HEADERS_VARIABLE}: unset that "
+    "variable, or type the model as hosted_vllm/<its name>."
 )
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
 FORBID_EXTRA = ConfigDict(extra="forbid")
@@ -382,11 +392,12 @@ def _key_status(state: ServerState) -> dict[str, Any]:
     return status
 
 
-def _provider(model: str) -> str | None:
-    """``model``'s provider as litellm places it, or ``None`` if it can't."""
+def _provider(model: str, api_base: str | None) -> str | None:
+    """``model``'s provider as litellm places it on ``api_base``, or ``None`` if it
+    can't."""
     try:
         with quiet_litellm():
-            return litellm.get_llm_provider(model)[1]
+            return litellm.get_llm_provider(model, api_base=api_base)[1]
     except BadRequestError:
         return None
 
@@ -397,12 +408,14 @@ def _model_options(
     """What r3con is called with for ``model`` on the server at ``endpoint``, if any,
     as the module docstring says. Anything not stored here is passed as ``None``, so
     that litellm reads the environment."""
-    provider = _provider(model)
+    provider = _provider(model, endpoint)
     if endpoint is None:
         key = state.keys.get(provider) if provider in KEY_VARIABLES else None
         base = None
     elif endpoint not in state.servers:
         raise HTTPException(422, UNKNOWN_SERVER)
+    elif provider in OPENAI_SDK_PROVIDERS and os.environ.get(CUSTOM_HEADERS_VARIABLE):
+        raise HTTPException(422, f"{model} {CUSTOM_HEADERS_WOULD_REACH_SERVER}")
     elif provider is None or provider in SERVER_PROVIDERS:
         stored = state.servers[endpoint]
         key = KEYLESS_SERVER_KEY if stored is None else stored
