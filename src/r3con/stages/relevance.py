@@ -24,7 +24,7 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
 null or empty summary keeps no quotes. Later stages read the summaries alone; the quotes
-are kept for inspection and for the quotes behind an answer (:func:`trail_quotes`).
+are kept for inspection and for the quotes behind an answer (:mod:`r3con.provenance`).
 
 Every document has an id for the run (:func:`draw_document_ids`), and each snippet
 carries its document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in
@@ -35,7 +35,7 @@ Round k reads the *frozen* round-(k-1) set, so within a round the per-document c
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`). Downstream stages consume the
 **final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept for
-inspection and for :func:`trail_quotes`, the quotes behind an answer.
+inspection and for the answer's trail back through them (:mod:`r3con.provenance`).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, TypedDict
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -56,7 +56,7 @@ from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
-from r3con.stages.provenance import (
+from r3con.stages.citing import (
     CitingRequest,
     citing_schema,
     lenient_list,
@@ -94,8 +94,8 @@ class RelevantContext:
 
     ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
     (one for a document read whole). Earlier rounds are kept for inspection and for
-    :func:`trail_quotes`; the final round is what downstream stages consume, as
-    :attr:`snippets`.
+    the answer's trail (:mod:`r3con.provenance`); the final round is what downstream
+    stages consume, as :attr:`snippets`.
     """
 
     records: list[list[list[SnippetRecord]]]
@@ -122,49 +122,6 @@ class RelevantContext:
 
     def _final_round(self) -> list[list[SnippetRecord]]:
         return self.records[-1] if self.records else []
-
-
-class TrailQuote(TypedDict):
-    """A quote behind an answer, ``{document, start, end, text}``: the id of the
-    document it is in, where it is there (``documents[i][start:end]`` for the document
-    whose id is ``document``), and the model's copy of it, which for a ``fuzzy`` match
-    differs slightly from that slice."""
-
-    document: str
-    start: int
-    end: int
-    text: str
-
-
-def trail_quotes(
-    relevance: RelevantContext, cited: Iterable[str], document_ids: Sequence[str]
-) -> list[TrailQuote]:
-    """The quotes found in their document of every snippet on the trail from the
-    final-round snippets ``cited`` names, back round by round through the ids each
-    snippet on it cites (:attr:`SnippetRecord.provenance`). Each place is given once,
-    the first quote met there keeping its text, in the order of ``document_ids``, then
-    by ``start``."""
-    by_place: dict[tuple[str, int, int], TrailQuote] = {}
-    for record in _trail(relevance, set(cited)):
-        document = record.id.partition(".")[0]
-        for quote in record.quotes:
-            start, end = quote["start"], quote["end"]
-            if start is not None and end is not None:
-                found = TrailQuote(
-                    document=document, start=start, end=end, text=quote["text"]
-                )
-                by_place.setdefault((document, start, end), found)
-    order = {id_: i for i, id_ in enumerate(document_ids)}
-    return sorted(by_place.values(), key=lambda q: (order[q["document"]], q["start"]))
-
-
-def _trail(relevance: RelevantContext, cited: set[str]) -> Iterator[SnippetRecord]:
-    """The final-round snippets ``cited`` names, then, round by round back, those the
-    snippets just given cite."""
-    for round_ in reversed(relevance.records):
-        records = [record for parts in round_ for record in parts if record.id in cited]
-        yield from records
-        cited = {id_ for record in records for id_ in record.provenance}
 
 
 def draw_document_ids(n: int) -> list[str]:
@@ -304,7 +261,7 @@ def _read(
     request: CitingRequest, part: str, *, kind: str, max_attempts: int, **llm_call: Any
 ) -> tuple[str, list[str], list[str]]:
     """``part`` (a document or one part of one) read under ``request`` by
-    :func:`~r3con.stages.provenance.read_citing`: its snippet, stripped, its quotes,
+    :func:`~r3con.stages.citing.read_citing`: its snippet, stripped, its quotes,
     none for an empty snippet, and the shown ids it used."""
     reply, provenance = read_citing(
         request,

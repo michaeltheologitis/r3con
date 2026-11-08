@@ -271,6 +271,8 @@ p { margin: 0; }
   pointer-events: none;
 }
 .trash[hidden] + .panel-hint { left: 1.5ch; }
+.panel-hint .remove-all { pointer-events: auto; }
+.trash:has(+ .panel-hint .remove-all:is(:hover, :focus-visible)) { color: var(--fg); }
 .panel-tools {
   position: absolute;
   left: 1.5ch;
@@ -543,6 +545,10 @@ mark[title] { cursor: help; }
   flex-direction: column;
   gap: 0.9em;
 }
+/* A full line pushes remove all under the head, never into it. */
+.files-top { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 2ch; }
+.files-top .remove-all { margin-left: auto; }
+.remove-all { min-height: 24px; }
 .file-list { list-style: none; margin: 0; padding: 0; }
 .file-list li { display: flex; align-items: baseline; gap: 2ch; }
 .file-list button { min-height: 24px; }

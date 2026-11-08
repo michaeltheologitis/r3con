@@ -50,7 +50,7 @@
             <path d="M14 13.5v9M18 13.5v9"/>
           </svg>
         </div>
-        <div class="panel-hint" id="panel-hint" hidden></div>
+        <div class="panel-hint" id="panel-hint" hidden><span id="panel-hint-text"></span><button class="btn remove-all" id="panel-remove-all" type="button" hidden></button></div>
         <div class="panel-tools">
           <button class="btn" id="arrange-btn" type="button">arrange</button>
           <button class="btn" id="fit-btn" type="button">fit</button>
@@ -90,7 +90,10 @@
       <section class="pane" id="files-pane" role="tabpanel" aria-labelledby="tab-files" hidden>
         <div class="files" id="file-list-view">
           <div>
-            <div class="dim" id="files-head"></div>
+            <div class="files-top">
+              <span class="dim" id="files-head"></span>
+              <button class="btn remove-all" id="files-remove-all" type="button" hidden></button>
+            </div>
             <p class="dim" id="files-said" aria-live="polite"></p>
           </div>
           <ul class="file-list" id="file-list"></ul>

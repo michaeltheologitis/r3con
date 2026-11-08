@@ -8,19 +8,23 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
-    result.provenance             # the snippets, parses and quotes behind the answer
+    result.provenance             # the snippets, parses, quotes and trail behind it
     result.schema_code            # the schema proposed for this question
 
 The answer cites its two views separately: the relevance snippets it used
 (``result.provenance["summary_ids"]``) and the documents whose parsed records it used
 (``result.provenance["parse_ids"]``). Each document's relevance snippet and its parse
 also record the snippets they used (``result.relevance_provenance``,
-``result.parsing_provenance``), and ``result.provenance["quotes"]`` holds the sentences
-behind the answer (:attr:`~r3con.pipeline.Answer.provenance`).
+``result.parsing_provenance``). ``result.provenance["trail"]`` is what the answer
+reaches through those citations, and ``result.provenance["quotes"]`` the sentences
+behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
+:mod:`r3con.provenance`).
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
-:func:`ask` reruns only reasoning over a finished run, for a new question.
+:func:`ask` reruns only reasoning over a finished run, for a new question, and
+:func:`trace` builds a saved answer's provenance again, under any rule, calling no
+model.
 
 ``documents`` is the documents themselves: their texts, each under its name, or a plain
 list of them. To read them off disk, :func:`read_documents` turns a folder, a glob or a
@@ -71,9 +75,11 @@ from r3con.pipeline import (
     ask_config,
     ask_pipeline,
     names_and_texts,
+    read_answer,
     read_representation,
     run_pipeline,
 )
+from r3con.provenance import DEFAULT_RULE, Provenance
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
@@ -493,9 +499,9 @@ def run(
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
-        it used, and the quotes behind it (``.provenance``: ids from ``.document_ids``,
-        a part's snippet as ``<id>.<k>``, whose document is the part before the dot,
-        each quote with its document's name; see
+        it used, its trail and the quotes on it (``.provenance``: ids from
+        ``.document_ids``, a part's snippet as ``<id>.<k>``, whose document is the part
+        before the dot, each quote with its document's name; see
         :attr:`~r3con.pipeline.Answer.provenance`), each document's name
         (``.document_names``), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
@@ -615,13 +621,14 @@ def ask(
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
-        reasoning (its quotes from the run's snippets of every round), and whose other
-        fields are the run's; ``run_dir`` is the ask's own folder, which holds its
-        manifest, calls and transcript.
+        reasoning (its trail and quotes through the run's snippets of every round and
+        its parses), and whose other fields are the run's; ``run_dir`` is the ask's own
+        folder, which holds its manifest, calls and transcript.
 
     Raises:
-        FileNotFoundError: if ``source`` is not a run folder, if its run never finished
-            parsing, or if a prompt version it pins has no file.
+        FileNotFoundError: if ``source`` is neither a run folder nor an ask's folder in
+            the ``asks/`` of the run it asked over, if its run never finished parsing,
+            or if a prompt version it pins has no file.
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
             with ``save_artifacts=False``), if a file in its folder is not as this
             r3con writes it (one an older r3con wrote, say), if it leaves a prompt
@@ -634,13 +641,7 @@ def ask(
         ``cancel`` is set.
     """
     load_dotenv(find_dotenv(usecwd=True))
-    run_dir = source.run_dir if isinstance(source, Answer) else Path(source)
-    if run_dir is None:
-        raise ValueError(
-            "ask needs the run folder, and this Answer has none: its run was made with "
-            "save_artifacts=False."
-        )
-    built = read_representation(run_dir)
+    built = read_representation(_folder_of(source, "ask"))
     config = ask_config(built, model=model, reasoning=reasoning, params=params)
     return ask_pipeline(
         built,
@@ -654,6 +655,48 @@ def ask(
     )
 
 
+def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
+    """The provenance of the answer ``source`` saved, its trail walked under ``rule``
+    (:mod:`r3con.provenance`), built from the files of its folder alone.
+
+    It calls no model, and reads neither the run's config nor its prompts, so a run
+    whose config or prompts this r3con no longer runs is traced all the same.
+
+    Args:
+        source: an :class:`Answer` from :func:`run` or :func:`ask`, whose ``run_dir``
+            is read, or the path of a run folder or of an ask's folder: an ask's answer
+            is its own, and its snippets and parses those of the run it asked over.
+        rule: the name of a rule in :data:`r3con.provenance.RULES`. Under the default,
+            the provenance is the one the answer was saved with.
+
+    Raises:
+        ValueError: if no rule is named ``rule``, before anything is read; if
+            ``source`` is an Answer without a ``run_dir``; or, in one line naming the
+            folder that holds it, if a file it reads is not as this r3con writes it.
+        FileNotFoundError: if ``source`` is neither a run folder nor an ask's folder in
+            the ``asks/`` of the run it asked over, or it holds no answer, as when its
+            reasoning failed.
+    """
+    return read_answer(_folder_of(source, "trace"), rule)
+
+
+def _folder_of(source: Answer | str | Path, reader: str) -> Path:
+    """The folder ``source`` names for ``reader``: an Answer's ``run_dir``, or the path
+    given.
+
+    Raises:
+        ValueError: if ``source`` is an Answer without a ``run_dir``.
+    """
+    if not isinstance(source, Answer):
+        return Path(source)
+    if source.run_dir is None:
+        raise ValueError(
+            f"{reader} needs the run folder, and this Answer has none: its run was "
+            "made with save_artifacts=False."
+        )
+    return source.run_dir
+
+
 __all__ = [
     "TEXT_SUFFIXES",
     "Answer",
@@ -661,5 +704,6 @@ __all__ = [
     "ask",
     "read_documents",
     "run",
+    "trace",
     "unique_names",
 ]

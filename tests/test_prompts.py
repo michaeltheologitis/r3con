@@ -108,9 +108,9 @@ def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example
     )
     assert set(reply) == {"answer", "provenance_ids"}
     assert set(reply["provenance_ids"]) == {"summary_ids", "parse_ids"}
-    assert (result.answer, result.provenance) == (
+    assert (result.answer, result.citations) == (
         reply["answer"],
-        {**reply["provenance_ids"], "quotes": []},
+        reply["provenance_ids"],
     )
     assert len(llm.requests) == 1
 
@@ -188,7 +188,7 @@ def test_each_coding_example_runs_and_commits_ids_it_shows(llm, example):
         f"<observation>\n{text}\n\n</observation>" for text in printed
     ]
     assert committed is not None
-    assert result.provenance == {**ast.literal_eval(committed[1]), "quotes": []}
+    assert result.citations == ast.literal_eval(committed[1])
 
 
 def test_the_overlay_is_searched_before_the_package(tmp_path, monkeypatch):

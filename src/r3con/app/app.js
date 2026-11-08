@@ -12,6 +12,8 @@
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
   // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
   /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
+  /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
+  /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ name: string, size: number } & FileRead} DocumentRead */
   /**
@@ -101,6 +103,8 @@
    * @typedef {object} Tab
    * @property {number} id
    * @property {LoadedFile[]} files
+   * @property {Removed | null} removed while undo can put it back
+   * @property {number} reading how many batches of files are being read for it, or wait to be
    * @property {string} filesSaid
    * @property {string} filesError
    * @property {string} draft
@@ -789,6 +793,13 @@
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
   const ADD_FILES = `${NO_FILES} · add them in the files tab`;
+  const REMOVE_ALL = 'remove all';
+  const REMOVE_ALL_NAME = 'remove all documents';
+  const UNDO = 'undo';
+  /** @param {string} count */
+  const undoName = (count) => `undo remove all (${count})`;
+  // A press on remove all or undo this soon after the last is the same gesture going on: a double-click, a held key.
+  const PRESS_GUARD_MS = 400;
   const LOCKED_DROP = 'This tab has run, so its files are locked: press + for a new tab.';
   const RAN_FIRST = "The tab's run started first, so its files are locked.";
   const DROP_ADDS = 'drop to add files';
@@ -852,6 +863,7 @@
   const modelRemove = $('model-remove', HTMLButtonElement);
   const frame = $('frame');
   const trash = $('trash');
+  const removeAllButtons = [$('files-remove-all'), $('panel-remove-all')];
   const side = $('side');
   const resizer = $('resizer');
 
@@ -903,6 +915,8 @@
     const tab = {
       id,
       files,
+      removed: null,
+      reading: 0,
       filesSaid: '',
       filesError: '',
       draft: '',
@@ -952,7 +966,7 @@
   // The recorded replay needs the whole sample set.
   /** @param {string} question @param {LoadedFile[]} [files] */
   const replaysRecording = (question, files = state.shown.files) => files === SAMPLE_FILES && question === SAMPLE.question;
-  const fileCount = (tab = state.shown) => plural(tab.files.length, 'document');
+  const fileCount = (files = state.shown.files) => plural(files.length, 'document');
 
   // ---------- small helpers ----------
 
@@ -2519,12 +2533,19 @@
   }
 
   function updateHint() {
-    const { run, files } = state.shown;
-    const hint = $('panel-hint');
-    if (run) hint.textContent = '';
-    else hint.textContent = files.length ? `${fileCount()} · ready to run` : ADD_FILES;
-    hint.hidden = !hint.textContent;
-    trash.hidden = Boolean(run) || !files.length;
+    const { run, files, removed, reading } = state.shown;
+    const listed = removed?.files ?? files;
+    const count = fileCount(listed);
+    trash.hidden = Boolean(run) || !listed.length;
+    // Not while a batch is read: undo would put files back under it, past the tab's room.
+    const offered = !trash.hidden && !reading;
+    $('panel-hint').hidden = Boolean(run);
+    $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : ADD_FILES;
+    for (const button of removeAllButtons) {
+      button.hidden = !offered;
+      button.textContent = removed ? UNDO : REMOVE_ALL;
+      button.ariaLabel = button.title = removed ? undoName(count) : REMOVE_ALL_NAME;
+    }
   }
 
   // `action` is ask, over the run on the panel, or run, a new one over the files.
@@ -2971,7 +2992,7 @@
   function startRun(question) {
     const from = state.shown;
     const at = docPositions(from);
-    const opened = from.run ? openTab(newTab(from.files, from.view)) : from;
+    const opened = from.run ? copyTab(from) : from;
     const tab = Object.assign(opened, { run: { ...mode.newRun(question, opened.files), lit: null }, turn: addTurn(opened, question) });
     if (tab === from) renderFiles();
     else showTabContents(tab);
@@ -3064,8 +3085,13 @@
     tab.button.append(tabLabel(tab));
     $('run-tabs').append(tab.button, tab.close);
     $('ask-form').before(tab.chat);
-    if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab)}.`);
+    if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab.files)}.`);
     return tab;
+  }
+
+  /** @param {Tab} from */
+  function copyTab(from) {
+    return openTab(newTab(from.files, from.view));
   }
 
   function updateTabs() {
@@ -3114,8 +3140,8 @@
     for (const el of [tab.button, tab.close]) if (!el.hidden) el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }
 
-  /** @param {Tab} tab */
-  function switchTab(tab) {
+  /** @param {Tab} tab @param {Map<string, Point>} [at] where to draw document nodes the tab hasn't drawn yet */
+  function switchTab(tab, at) {
     if (tab === state.shown) return;
     // Each tab keeps its question. Once shown its draft is emptied: new run leaves a tab without saving the box.
     state.shown.draft = questionEl.value;
@@ -3123,7 +3149,7 @@
     tab.draft = '';
     showTabContents(tab);
     // Nodes drawn while their tab was hidden had no size to fit by.
-    syncDocNodes(tab);
+    syncDocNodes(tab, { at });
     showStatus(tab);
     updateComposer();
     revealTab(tab);
@@ -3175,7 +3201,7 @@
   function renderFiles() {
     const { files, run } = state.shown;
     const sampleOnly = files.length > 0 && files.every((f) => f.sample);
-    const head = `${fileCount()} · ${fmtBytes(totalBytes(files))} · ${sampleOnly ? 'sample memos' : 'your files'}`;
+    const head = `${fileCount()} · ${fmtBytes(totalBytes(files))}${sampleOnly ? ' · sample memos' : ''}`;
     $('files-head').textContent = files.length ? head : NO_FILES;
     $('file-list').replaceChildren(
       ...files.map((f) =>
@@ -3289,7 +3315,15 @@
   /** @param {Picked} batch @param {Tab} [tab] */
   function addFiles(batch, tab = state.shown) {
     tellFiles(tab, { filesError: '' });
-    tab.adding = tab.adding.then(() => addBatch(batch, tab)).catch((error) => failedToAdd(tab, error));
+    tab.reading += 1;
+    updateHint();
+    tab.adding = tab.adding
+      .then(() => addBatch(batch, tab))
+      .catch((error) => failedToAdd(tab, error))
+      .finally(() => {
+        tab.reading -= 1;
+        updateHint();
+      });
   }
 
   /** @param {Tab} tab @param {{ filesSaid?: string, filesError?: string }} lines */
@@ -3337,10 +3371,11 @@
     const picked = pickFiles(files);
     if (tab.run) return addFilesError(tab, notAdded([...failed, ...picked.map((f) => f.name)], RAN_FIRST) || RAN_FIRST);
     if (!picked.length && !failed.length) return addFilesError(tab, skipped ? noDocuments(skipped) : 'No files found there. Try picking the files themselves.');
-    const kept = tab.files.filter((f) => !f.sample);
+    // Read again after each wait, as files can be removed while a batch is read.
+    const kept = () => tab.files.filter((f) => !f.sample);
     /** @type {LoadedFile[]} */
     const read = [];
-    const room = () => MAX_FILES - kept.length - read.length;
+    const room = () => MAX_FILES - kept().length - read.length;
     /** @type {Map<string, string[]>} */
     const refused = new Map(failed.length ? [[BROWSER_COULD_NOT_READ, failed]] : []);
     /** @param {string} why @param {string} name */
@@ -3367,6 +3402,9 @@
     const rest = picked.slice(next).map((f) => f.name);
     if (tab.run) rest.forEach((name) => refuse(RAN_FIRST, name));
     else unread += rest.length;
+    // The tab can hold more now than when the batch counted its room.
+    const left = kept();
+    unread += read.splice(Math.max(0, MAX_FILES - left.length)).length;
     for (const [why, names] of refused) addFilesError(tab, notAdded(names, why));
     if (unread) addFilesError(tab, notAdded([plural(unread, 'file')], TOO_MANY_FILES));
     if (!read.length) {
@@ -3374,8 +3412,8 @@
       return;
     }
     // Files added over the sample memos take the place of any that are left.
-    const replaced = tab.files.length - kept.length;
-    tab.files = [...kept, ...read];
+    const replaced = tab.files.length - left.length;
+    tab.files = [...left, ...read];
     const added = `${plural(read.length, 'file')} added`;
     const said = replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added;
     filesChanged(tab, skipped ? `${said}; ${skipped} skipped` : said);
@@ -3384,29 +3422,49 @@
   // The re-render drops the clicked button, and the focus with it.
   /** @param {LoadedFile} file @param {{ refocus?: boolean }} [options] */
   function removeFile(file, { refocus = true } = {}) {
-    const tab = state.shown;
-    const i = tab.files.indexOf(file);
-    tab.files = tab.files.filter((f) => f !== file);
-    tellFiles(tab, { filesError: '' });
-    filesChanged(tab, `Removed ${file.name}`);
+    const { files } = state.shown;
+    const i = files.indexOf(file);
+    changeFiles(files.filter((f) => f !== file), `Removed ${file.name}`);
     if (!refocus) return;
     /** @type {NodeListOf<HTMLButtonElement>} */
     const buttons = $('file-list').querySelectorAll('.remove');
     (buttons[Math.min(i, buttons.length - 1)] ?? $('file-input')).focus();
   }
 
-  /** @param {Tab} tab @param {string} what */
-  function filesChanged(tab, what) {
+  let lastPress = -Infinity;
+
+  function removeAllOrUndo() {
+    const tooSoon = performance.now() - lastPress < PRESS_GUARD_MS;
+    lastPress = performance.now();
+    if (tooSoon) return;
+    const tab = state.shown;
+    const { files, removed } = tab;
+    if (removed) changeFiles(removed.files, `Restored ${fileCount(removed.files)}`, { at: removed.at });
+    else changeFiles([], `Removed ${fileCount()}`, { removed: { files, at: docPositions(tab) } });
+  }
+
+  /** @param {LoadedFile[]} files @param {string} what @param {FilesChange} [change] */
+  function changeFiles(files, what, change) {
+    const tab = state.shown;
+    tab.files = files;
+    tellFiles(tab, { filesError: '' });
+    filesChanged(tab, what, change);
+  }
+
+  // Undo stays only until the tab's files change some other way.
+  /** @param {Tab} tab @param {string} what @param {FilesChange} [change] */
+  function filesChanged(tab, what, { removed, at } = {}) {
+    tab.removed = removed ?? null;
     // Rendered again for another tab's files, the pane would close the shown tab's open file, and drop the focus.
     if (tab === state.shown) {
       closeFile();
       renderFiles();
     }
     updateComposer();
-    syncDocNodes(tab);
+    syncDocNodes(tab, { at });
     readyStatus();
     tellFiles(tab, { filesSaid: `${what}.` });
-    tellChat(tab, `${what}: the next question runs over ${fileCount(tab)}.`);
+    tellChat(tab, `${what}: the next question runs over ${fileCount(tab.files)}.`);
   }
 
   // How a file in a dropped or picked folder is taken, by its path below that folder, mirroring r3con's folder walk:
@@ -3910,7 +3968,7 @@
   function onPointerDown(e) {
     const { view } = state.shown;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (targetOf(e).closest('.inspector, .panel-tools')) return;
+    if (targetOf(e).closest('.inspector, .panel-tools, .remove-all')) return;
     gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (gesture.pointers.size === 2) return startPinch();
     if (gesture.pointers.size > 2) return;
@@ -4178,11 +4236,18 @@
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(runTab(state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
     $('new-tab-btn').addEventListener('click', () => {
-      const tab = openTab(newTab([]));
-      switchTab(tab);
-      showTab('files');
-      tab.button.focus();
+      const from = state.shown;
+      const tab = copyTab(from);
+      switchTab(tab, docPositions(from));
+      if (tab.files.length) {
+        showTab('chat');
+        questionEl.focus();
+      } else {
+        showTab('files');
+        tab.button.focus();
+      }
     });
+    for (const button of removeAllButtons) button.addEventListener('click', removeAllOrUndo);
     $('chat-pane').addEventListener('click', onChatClick);
     $('theme-btn').addEventListener('click', toggleTheme);
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
