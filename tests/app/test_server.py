@@ -51,12 +51,17 @@ QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 # A bare OpenAI name that litellm's model map places from its floor, 1.103, on.
 BARE_OPENAI_MODEL = "gpt-5"
+# litellm's way to a model an OpenAI-compatible server serves: openai/ and its name.
+SERVED_OPENAI_MODEL = "openai/google/gemma-4-12B-it"
 OPENAI_KEY = "sk-stored-openai-key-1234"
 OTHER_KEY = "other-endpoint-key-5678"
 ENVIRONMENT_KEY = "key-from-the-environment-9012"
 ENDPOINT = "http://127.0.0.1:9/v1"
 SECOND_ENDPOINT = "http://127.0.0.1:11/v1"
 SECOND_KEY = "second-server-key-3456"
+# A known provider's URL, by which litellm places a bare name with that provider.
+GROQ_ENDPOINT = "https://api.groq.com/openai/v1"
+CUSTOM_HEADERS = "Authorization: Bearer custom-header-key-7890\nX-Gateway-Key: gate"
 STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
@@ -182,8 +187,10 @@ def run_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
     return events_of(client, f"/api/runs/{run_id}/events")
 
 
-def ask_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
-    response = client.post(f"/api/runs/{run_id}/asks", json=ASK)
+def ask_events(
+    client: TestClient, run_id: str, ask: dict[str, Any] = ASK
+) -> list[dict[str, Any]]:
+    response = client.post(f"/api/runs/{run_id}/asks", json=ask)
     assert response.status_code == 202, response.text
     return events_of(client, f"/api/asks/{response.json()['ask_id']}/events")
 
@@ -463,6 +470,7 @@ def test_a_server_url_with_trailing_slashes_is_the_same_server(
     [
         (STORED_OPENAI, MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, BARE_OPENAI_MODEL, {"api_key": OPENAI_KEY}),
+        (STORED_OPENAI, SERVED_OPENAI_MODEL, {"api_key": OPENAI_KEY}),
         (STORED_OPENAI, "anthropic/claude-sonnet-5-5", {}),
         (OTHER, "hosted_vllm/qwen", {}),
         (OTHER, BARE_OPENAI_MODEL, {}),
@@ -529,19 +537,44 @@ def test_a_keyless_server_is_sent_a_placeholder_never_a_key_from_the_environment
             SECOND_ENDPOINT,
             {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
         ),
+        (
+            SERVED_OPENAI_MODEL,
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            SERVED_OPENAI_MODEL,
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
+        (
+            MODEL,
+            ENDPOINT,
+            {"api_key": KEYLESS_SERVER_KEY.get_secret_value(), "api_base": ENDPOINT},
+        ),
+        (
+            BARE_OPENAI_MODEL,
+            SECOND_ENDPOINT,
+            {"api_key": SECOND_KEY, "api_base": SECOND_ENDPOINT},
+        ),
     ],
 )
-def test_a_model_on_a_server_reaches_that_server_with_its_key(
+def test_a_model_on_a_server_reaches_it_as_typed_with_its_key_in_a_run_and_an_ask(
     client: TestClient,
     llm: FakeLLM,
+    monkeypatch: pytest.MonkeyPatch,
     model_name: str,
     endpoint: str,
     sent: dict[str, str],
 ):
+    monkeypatch.setenv("OPENAI_API_KEY", ENVIRONMENT_KEY)
     client.post("/api/keys", json=STORED_OPENAI)
     client.post("/api/keys", json=KEYLESS_OTHER)
     client.post("/api/keys", json=SECOND_SERVER)
-    finished_run(client, model_name, endpoint)
+    run_id = finished_run(client, model_name, endpoint)
+    ask = {**ASK, "model": model_name, "endpoint": endpoint}
+    assert ask_events(client, run_id, ask)[-1]["type"] == "ask_finished"
+    assert {call["model"] for call in llm.requests} == {model_name}
     assert transport(llm) == [sent] * len(llm.requests)
 
 
@@ -549,12 +582,22 @@ def test_a_model_on_a_server_reaches_that_server_with_its_key(
     ("model_name", "endpoint", "wrong"),
     [
         ("hosted_vllm/qwen", "http://127.0.0.1:10/v1", "isn't in settings"),
-        (MODEL, ENDPOINT, f"{MODEL} isn't a self-hosted model"),
-        (BARE_OPENAI_MODEL, ENDPOINT, "isn't a self-hosted model"),
-        ("anthropic/claude-sonnet-5-5", ENDPOINT, "isn't a self-hosted model"),
+        (
+            "anthropic/claude-sonnet-5-5",
+            ENDPOINT,
+            "anthropic/claude-sonnet-5-5 isn't a self-hosted or openai/ model",
+        ),
+        ("gemini/gemini-2.5-pro", ENDPOINT, "isn't a self-hosted or openai/ model"),
+        (BARE_OPENAI_MODEL, GROQ_ENDPOINT, "isn't a self-hosted or openai/ model"),
+        (
+            SERVED_OPENAI_MODEL,
+            ENDPOINT,
+            "would send the server the headers in OPENAI_CUSTOM_HEADERS",
+        ),
+        ("lm_studio/qwen", ENDPOINT, "OPENAI_CUSTOM_HEADERS"),
     ],
 )
-def test_an_unknown_server_or_a_hosted_model_on_a_server_is_refused(
+def test_an_unknown_server_or_a_model_that_would_send_it_other_credentials_is_refused(
     client: TestClient,
     llm: FakeLLM,
     monkeypatch: pytest.MonkeyPatch,
@@ -563,8 +606,10 @@ def test_an_unknown_server_or_a_hosted_model_on_a_server_is_refused(
     wrong: str,
 ):
     monkeypatch.setenv("ANTHROPIC_API_KEY", ENVIRONMENT_KEY)
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", CUSTOM_HEADERS)
     client.post("/api/keys", json=STORED_OPENAI)
     client.post("/api/keys", json=KEYLESS_OTHER)
+    client.post("/api/keys", json={"provider": "other", "endpoint": GROQ_ENDPOINT})
     run_id = finished_run(client)
     llm.requests.clear()
     responses = [
@@ -578,6 +623,18 @@ def test_an_unknown_server_or_a_hosted_model_on_a_server_is_refused(
         assert response.status_code == 422
         assert wrong in response.json()["error"]
     assert llm.requests == []
+
+
+def test_a_hosted_vllm_model_on_a_server_runs_while_openai_custom_headers_is_set(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", CUSTOM_HEADERS)
+    client.post("/api/keys", json=KEYLESS_OTHER)
+    finished_run(client, "hosted_vllm/qwen", ENDPOINT)
+    placeholder = KEYLESS_SERVER_KEY.get_secret_value()
+    assert transport(llm) == [{"api_key": placeholder, "api_base": ENDPOINT}] * len(
+        llm.requests
+    )
 
 
 def test_a_name_litellm_cannot_place_is_sent_to_its_server_which_litellm_then_refuses(
