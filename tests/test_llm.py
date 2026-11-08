@@ -2,6 +2,8 @@ import logging
 import random
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
 from email.utils import parsedate_to_datetime
@@ -52,6 +54,44 @@ SCRIPTED_ERROR = {"error": {"message": "scripted error", "type": "server_error"}
 UNKNOWN_PARAMETER = {
     "error": {"message": "unknown parameter: tone", "type": "invalid_request_error"}
 }
+# A new process's documents make its first model calls at once, as relevance does,
+# and every line of pydantic's model rebuild hands the GIL to another thread: before
+# pydantic 2.14, two threads building one of litellm's deferred models raced there.
+FIRST_CALLS_AT_ONCE = """
+import threading, time
+import litellm, pydantic
+from r3con.parallel import parallel_map
+from r3con.runtime.llm import litellm_chat_completion_full
+
+REBUILD = pydantic.BaseModel.model_rebuild.__func__.__code__
+DOCUMENTS = 5
+rebuilt = []
+
+
+def hand_over_each_line(frame, event, arg):
+    if event == "line":
+        time.sleep(0.001)
+    return hand_over_each_line
+
+
+def trace_rebuilds(frame, event, arg):
+    if frame.f_code is not REBUILD:
+        return None
+    rebuilt.append(frame.f_locals["cls"].__name__)
+    return hand_over_each_line
+
+
+threading.settrace(trace_rebuilds)
+parallel_map(
+    lambda i, _: litellm_chat_completion_full(
+        model="hosted_vllm/fake", system_prompt="s", user_prompt=str(i),
+        completion=litellm.completion, mock_response="ok",
+    ),
+    range(DOCUMENTS),
+    max_workers=DOCUMENTS,
+)
+assert rebuilt, "no thread ran BaseModel.model_rebuild, so this run forced no race"
+"""
 QUOTA_SPENT = {
     "error": {
         "message": "You exceeded your current quota, please check your plan.",
@@ -1083,3 +1123,13 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
         "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
     )
+
+
+def test_first_model_calls_made_at_once_in_a_new_process_all_get_replies():
+    first_calls = subprocess.run(
+        [sys.executable, "-c", FIRST_CALLS_AT_ONCE],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert first_calls.returncode == 0, first_calls.stderr
