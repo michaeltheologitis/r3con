@@ -2949,6 +2949,12 @@
     return h('details', { class: className }, h('summary', {}, summary), h('div', { class: 'fold-body' }, body));
   }
 
+  /** @param {Run} run @param {string} id */
+  function provenanceFold(run, id) {
+    const provenance = cites(run, id);
+    return fold(`provenance ${provenance.length}`, refs(provenance), 'fold provenance');
+  }
+
   /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
   function sentenceButton(file, at, className, text = null) {
     return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, text);
@@ -2997,13 +3003,12 @@
   function snippetBody(tab, kind, d) {
     const { run } = tab;
     const id = `${kind}-${d}`;
-    const provenance = cites(run, id);
     return [
       textBlock(run[kind][d].summary),
       trailLine(tab, id),
       row('read', refs([docId(run.docs[d])])),
       quotesFold(tab, kind, d),
-      kind === 'r2' ? fold(`provenance ${provenance.length}`, refs(provenance)) : null,
+      kind === 'r2' ? provenanceFold(run, id) : null,
       callMeta(run, id),
       openFileButton(run.docs[d], 'open document ›'),
     ];
@@ -3029,11 +3034,10 @@
     }
     if (kind === 'parsed') {
       const filled = Object.entries(run.parsed[d].parse).filter(([, records]) => records.length > 0);
-      const provenance = cites(run, id);
       return [
         filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
-        fold(`provenance ${provenance.length}`, refs(provenance)),
+        provenanceFold(run, id),
         row('used', refs(['schema'])),
         callMeta(run, id),
         openFileButton(run.docs[d], 'open document ›'),
@@ -3046,7 +3050,7 @@
       row('question', answer.question),
       answer.simulated ? h('div', { class: 'flag' }, SIMULATED_LABEL) : null,
       h('p', { class: 'insp-text strong' }, answer.text),
-      row('provenance', refs(cites(run, id))),
+      provenanceFold(run, id),
       quoted && h('div', { class: 'used' }, quoted),
       h('div', { class: 'k' }, answer.summary),
     ];

@@ -79,7 +79,7 @@ const POPUP_ROWS = {
   'r2-3': ['read'],
   schema: ['reasoning'],
   'parsed-0': ['read', 'used'],
-  'answer-0': ['question', 'provenance'],
+  'answer-0': ['question'],
 };
 const MODEL_KEY = 'r3con-proto-model';
 const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
@@ -577,12 +577,24 @@ function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
   };
 }
 
-// What the open popup's provenance row lists, by name.
-const provenanceListed = (page) =>
-  page.$$eval('#inspector .row', (rows) => {
-    const provenance = rows.find((r) => r.firstChild.textContent === 'provenance');
-    return [...(provenance?.querySelectorAll('.ref') ?? [])].map((el) => el.textContent);
-  });
+// What the open popup's provenance fold lists, by name, open or not.
+const provenanceListed = (page) => page.$$eval('#inspector details.provenance .ref', (els) => els.map((el) => el.textContent));
+
+// In-page: the open popup's provenance fold: its summary, whether it is open, the marker before it, and whether what it
+// lists is shown; null if it has none.
+function provenanceFoldIn() {
+  const fold = document.querySelector('#inspector details.provenance');
+  if (!fold) return null;
+  const summary = fold.querySelector('summary');
+  return { name: summary.textContent, open: fold.open, marker: getComputedStyle(summary, '::before').content, shown: fold.querySelector('.fold-body').checkVisibility() };
+}
+
+// What an answer over the sample cites, from its recorded provenance, as its popup names them: its round-2 summaries,
+// then its parses.
+const citedNames = (sample, { summary_ids, parse_ids }) => [
+  ...summary_ids.map((id) => `${stem(docIndexIn(sample, id))} · round 2`),
+  ...parse_ids.map((id) => `${stem(docIndexIn(sample, id))} · parsed`),
+];
 
 // What simulated answer `id` over the sample memos lights: what its provenance cites, as its popup lists it, and the
 // document of each summary among them. Opening its popup lights it.
@@ -2210,14 +2222,28 @@ async function popupArea() {
       check('popup', `${id} shows ${expected.join(', ')}`, isDeepStrictEqual(rows, expected), rows.join(', '));
     }
     const sample = recordedSample();
-    const { summary_ids, parse_ids } = sample.answer.provenance;
     const roundNames = (await page.$$eval('.node.r1, .node.r2', (els) => els.map((el) => el.getAttribute('aria-label')))).sort();
     const snippetNames = [1, 2].flatMap((round) => sample.docs.map((_, i) => `${stem(i)}, round ${round} relevance snippet`)).sort();
     check('popup', "each round's node is named for its document and its relevance snippet", isDeepStrictEqual(roundNames, snippetNames), roundNames[0]);
-    const cited = [...summary_ids.map((id) => `${stem(docIndexIn(sample, id))} · round 2`), ...parse_ids.map((id) => `${stem(docIndexIn(sample, id))} · parsed`)];
+    const cited = citedNames(sample, sample.answer.provenance);
     await inspect(page, 'answer-0');
     const listed = await provenanceListed(page);
     check('popup', "the answer's provenance lists the round-2 nodes it drew on, then the parsed ones", isDeepStrictEqual(listed, cited), listed.join(' · '));
+    const folded = await page.evaluate(provenanceFoldIn);
+    const foldName = `provenance ${cited.length}`;
+    const foldedName = "the answer's popup folds its provenance, counted and ▸ closed, what it lists hidden";
+    check('popup', foldedName, isDeepStrictEqual(folded, { name: foldName, open: false, marker: '"▸ "', shown: false }), JSON.stringify(folded));
+    await page.click('#inspector details.provenance > summary');
+    const opened = { ...(await page.evaluate(provenanceFoldIn)), listed: await provenanceListed(page) };
+    const openedName = "a click opens the answer's provenance ▾ to exactly the nodes it cites";
+    check('popup', openedName, isDeepStrictEqual(opened, { name: foldName, open: true, marker: '"▾ "', shown: true, listed: cited }), JSON.stringify(opened));
+    await inspect(page, 'answer-0');
+    await page.focus('#inspector details.provenance > summary');
+    const focused = await page.evaluate(() => document.activeElement?.matches('#inspector details.provenance > summary') ?? false);
+    await page.keyboard.press('Enter');
+    const byEnter = await page.evaluate(provenanceFoldIn);
+    const keyName = "from the keyboard, the answer's provenance fold takes the focus, and Enter opens it";
+    check('popup', keyName, focused && byEnter?.open && byEnter.shown, `focused ${focused}; ${JSON.stringify(byEnter)}`);
     const opening = await page.$$eval('#inspector > :not(.insp-head)', (els) => els.slice(0, 2).map((el) => [el.textContent, getComputedStyle(el).fontWeight]));
     const questionFirst = isDeepStrictEqual(opening, [[`question ${sample.question}`, '400'], [sample.answer.text, '600']]);
     check('popup', "the answer's popup gives its question first, then the answer in bold", questionFirst, JSON.stringify(opening));
@@ -3100,9 +3126,13 @@ async function answersOnTheRun(sample, asks) {
     const told = isDeepStrictEqual(askLog.after, [asks[0].text, quoted]) && !askLog.open && askLog.folded.startsWith(`ready · ${asks[0].model} · $`);
     const shown = await inspect(page, 'answer-1');
     const rows = await page.$$eval('#inspector .row', (els) => els.map((r) => r.firstChild.textContent));
-    const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']);
+    const askCited = citedNames(sample, asks[0].provenance);
+    await page.click('#inspector details.provenance > summary');
+    const askFold = { ...(await page.evaluate(provenanceFoldIn)), listed: await provenanceListed(page) };
+    const citesShown = askFold.name === `provenance ${askCited.length}` && askFold.shown && isDeepStrictEqual(askFold.listed, askCited);
+    const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']) && citesShown;
     const toldName = "a recorded ask's chat gives its real answer with only its sentences' line under it, its folded log its model and cost, and its popup its citations and source";
-    check('answers', toldName, told && inPopup, `${askLog.folded}; ${askLog.after.join(' | ')}`);
+    check('answers', toldName, told && inPopup, `${askLog.folded}; ${askLog.after.join(' | ')}; ${askFold.name}: ${askFold.listed.join(' · ')}`);
     const label = await page.textContent(`${nodeSel('answer-1')} .label`);
     check('answers', 'an answer node is labelled with a short form of its question, and its model', label === ASK_LABEL, label);
     const kept = await positionOf(page, 'answer-0');
