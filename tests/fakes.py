@@ -239,6 +239,12 @@ def cited_documents(provenance: Mapping[str, Any]) -> set[str]:
     return {id_.partition(".")[0] for ids in views for id_ in ids}
 
 
+def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
+    pins."""
+    return {key: value for key, value in provenance.items() if key != "trail"}
+
+
 def request_tokens(request: Request) -> int:
     """A request's cl100k tokens as a provider counts them: its messages' contents and
     its response format's schema as JSON."""

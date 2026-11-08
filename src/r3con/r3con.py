@@ -8,15 +8,17 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
-    result.provenance             # the snippets, parses and quotes behind the answer
+    result.provenance             # the snippets, parses, quotes and trail behind it
     result.schema_code            # the schema proposed for this question
 
 The answer cites its two views separately: the relevance snippets it used
 (``result.provenance["summary_ids"]``) and the documents whose parsed records it used
 (``result.provenance["parse_ids"]``). Each document's relevance snippet and its parse
 also record the snippets they used (``result.relevance_provenance``,
-``result.parsing_provenance``), and ``result.provenance["quotes"]`` holds the sentences
-behind the answer (:attr:`~r3con.pipeline.Answer.provenance`).
+``result.parsing_provenance``). ``result.provenance["trail"]`` is what the answer
+reaches through those citations, and ``result.provenance["quotes"]`` the sentences
+behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
+:mod:`r3con.provenance`).
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
@@ -493,9 +495,9 @@ def run(
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
-        it used, and the quotes behind it (``.provenance``: ids from ``.document_ids``,
-        a part's snippet as ``<id>.<k>``, whose document is the part before the dot,
-        each quote with its document's name; see
+        it used, its trail and the quotes on it (``.provenance``: ids from
+        ``.document_ids``, a part's snippet as ``<id>.<k>``, whose document is the part
+        before the dot, each quote with its document's name; see
         :attr:`~r3con.pipeline.Answer.provenance`), each document's name
         (``.document_names``), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
@@ -615,9 +617,9 @@ def ask(
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
-        reasoning (its quotes from the run's snippets of every round), and whose other
-        fields are the run's; ``run_dir`` is the ask's own folder, which holds its
-        manifest, calls and transcript.
+        reasoning (its trail and quotes through the run's snippets of every round and
+        its parses), and whose other fields are the run's; ``run_dir`` is the ask's own
+        folder, which holds its manifest, calls and transcript.
 
     Raises:
         FileNotFoundError: if ``source`` is not a run folder, if its run never finished

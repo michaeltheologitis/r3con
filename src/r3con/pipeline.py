@@ -54,6 +54,7 @@ from r3con.config import (
 )
 from r3con.logging_setup import get_logger
 from r3con.masking import masked, one_line
+from r3con.provenance import build_graph, walk
 from r3con.runs import (
     Emit,
     EventRecorder,
@@ -74,7 +75,6 @@ from r3con.stages.relevance import (
     draw_document_ids,
     join_parts,
     surface_relevance,
-    trail_quotes,
 )
 from r3con.stages.structuring.parsing import parse_documents
 from r3con.stages.structuring.schema import propose_schema
@@ -175,12 +175,14 @@ class Answer:
     - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
       the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of a
       document read in parts), ``provenance["parse_ids"]``, those of the documents
-      whose records in ``structured_context`` it used (an id can be in both), and
-      ``provenance["quotes"]``, the sentences behind it
-      (:class:`~r3con.stages.reasoning.NamedQuote`), each naming its document by id
-      and by name: the quotes of the snippets it cites and of those the parses it
-      cites cite, followed back round by round
-      (:func:`~r3con.stages.relevance.trail_quotes`).
+      whose records in ``structured_context`` it used (an id can be in both),
+      ``provenance["trail"]``, the answer's trail under the default rule
+      (:class:`~r3con.provenance.Trail`): the snippets and parses it cites, the
+      snippets they cite, round by round back, and the documents those snippets
+      summarize, and ``provenance["quotes"]``, the sentences behind it, the trail's
+      quotes (:class:`~r3con.provenance.NamedQuote`), each naming its document by id
+      and by name. :func:`r3con.provenance.trail` walks a saved run again, under any
+      rule.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
       of each document, aligned 1:1 with the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
@@ -402,7 +404,7 @@ def run_pipeline(
       parts' records in order), and the ids of the relevance snippets the parse used,
       ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
-      ``answer``, ``provenance`` (``{summary_ids, parse_ids, quotes}``, as
+      ``answer``, ``provenance`` (``{summary_ids, parse_ids, quotes, trail}``, as
       :attr:`Answer.provenance`), ``path``, ``fallback``.
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
@@ -607,7 +609,7 @@ def run_pipeline(
         )
         result = replace(
             result,
-            provenance=_with_quotes(
+            provenance=_with_trail(
                 result.provenance, relevance, extraction.provenance, names
             ),
         )
@@ -792,7 +794,7 @@ def ask_pipeline(
         )
         result = replace(
             result,
-            provenance=_with_quotes(
+            provenance=_with_trail(
                 result.provenance,
                 built.relevance,
                 built.parsing_provenance,
@@ -841,25 +843,25 @@ def _llm_kwargs(
     return llm_kwargs
 
 
-def _with_quotes(
+def _with_trail(
     provenance: reasoning.Provenance,
     relevance: RelevantContext,
     parsing_provenance: list[list[str]],
     names: dict[str, str],
 ) -> reasoning.Provenance:
-    """The answer's ``provenance`` with its ``quotes``: those on the trail
-    (:func:`trail_quotes`) from the snippets it cites and those the parses it cites
-    cite, each with its document's name from ``names``, each document's by its id in
-    document order."""
-    parses = dict(zip(names, parsing_provenance, strict=True))
-    cited = set(provenance["summary_ids"]).union(
-        *(parses[id_] for id_ in provenance["parse_ids"])
+    """The answer's ``provenance`` with its trail under the default rule
+    (:func:`r3con.provenance.walk`) and the trail's quotes, over the run's
+    ``relevance`` and each document's parse citing what ``parsing_provenance`` lists,
+    ``names`` giving each document's name by its id, in document order."""
+    graph = build_graph(
+        summary_ids=provenance["summary_ids"],
+        parse_ids=provenance["parse_ids"],
+        relevance=relevance,
+        parsing_provenance=parsing_provenance,
+        names=names,
     )
-    quotes = [
-        reasoning.NamedQuote(**quote, name=names[quote["document"]])
-        for quote in trail_quotes(relevance, cited, list(names))
-    ]
-    return {**provenance, "quotes": quotes}
+    trail = walk(graph)
+    return {**provenance, "quotes": trail["quotes"], "trail": trail}
 
 
 def _reasoning_outcome(result: reasoning.ReasoningResult) -> dict[str, Any]:

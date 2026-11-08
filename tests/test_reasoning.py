@@ -7,6 +7,7 @@ import pytest
 
 from r3con import settings
 from r3con.config import REASONING_PATHS
+from r3con.provenance import answer_alone
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.reasoning import _sample_record_per_field, reason
 from tests.fakes import citable_lists
@@ -38,7 +39,9 @@ THREE_DOCUMENTS = {
     "source_docs": {"rows": [0, 1]},
     "document_ids": IDS[:3],
 }
-NO_IDS = {"summary_ids": [], "parse_ids": [], "quotes": []}
+# What reasoning leaves to the pipeline: no quote, and the answer alone on its trail.
+UNTRACED = {"quotes": [], "trail": answer_alone()}
+NO_IDS = {"summary_ids": [], "parse_ids": [], **UNTRACED}
 EMPTY_ANSWER = {"answer": " \n", "provenance_ids": NO_IDS}
 KEYS_WARNING = (
     "coding: provenance_ids must map summary_ids and parse_ids to lists of ids; got "
@@ -277,7 +280,7 @@ def test_a_missing_list_cites_nothing_and_an_unknown_key_is_ignored(llm, caplog)
 def test_a_commit_may_pass_its_provenance_ids_second_by_position(llm):
     given = {"summary_ids": [IDS[0]], "parse_ids": [IDS[1]]}
     result = cite(llm, "coding", committing(f", {given!r}"))
-    assert (result.answer, result.provenance) == ("ok", {**given, "quotes": []})
+    assert (result.answer, result.provenance) == ("ok", {**given, **UNTRACED})
 
 
 def test_a_coding_v2_commit_still_answers_and_its_provenance_list_cites_nothing(

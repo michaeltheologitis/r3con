@@ -31,7 +31,7 @@ document boundaries through the relevance snippets.
 
 from importlib import metadata as _metadata
 
-from r3con import r3con, settings
+from r3con import provenance, r3con, settings
 from r3con.config import RunConfig, load_config
 from r3con.pipeline import Answer, run_pipeline
 from r3con.prompts import load_prompt
@@ -91,6 +91,7 @@ __all__ = [
     "parse_documents",
     "parse_one_document",
     "propose_schema",
+    "provenance",
     "r3con",
     "read_documents",
     "reason",

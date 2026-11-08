@@ -34,6 +34,7 @@ from tests.fakes import (
     citable_lists,
     cited_documents,
     is_later_round,
+    without_trail,
 )
 
 # A paragraph whose second run Word tracks as inserted, and third as deleted.
@@ -386,7 +387,7 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         logs_dir=tmp_path,
     )
     assert result.answer == "Halloran memo; Merrow memo"
-    assert result.provenance == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": result.document_ids,
         "quotes": [],
@@ -1190,7 +1191,7 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         "end": 11,
         "text": "Merrow memo",
     }
-    assert asked.provenance == {
+    assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "quotes": [merrow],
@@ -1213,7 +1214,11 @@ def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_noth
     ran, asked_request = answering_llm.requests_for("reasoning")
     assert asked_request["messages"][0] == ran["messages"][0]
     ids = quoted_run.document_ids
-    assert asked.provenance == {"summary_ids": [ids[0]], "parse_ids": [], "quotes": []}
+    assert without_trail(asked.provenance) == {
+        "summary_ids": [ids[0]],
+        "parse_ids": [],
+        "quotes": [],
+    }
 
 
 def test_a_run_that_never_finished_parsing_cannot_be_asked(answering_llm, tmp_path):

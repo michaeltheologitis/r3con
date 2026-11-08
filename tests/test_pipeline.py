@@ -22,9 +22,10 @@ from r3con.config import (
     load_config,
 )
 from r3con.pipeline import run_pipeline
+from r3con.provenance import answer_alone
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
-from tests.fakes import citable_lists, is_later_round
+from tests.fakes import citable_lists, is_later_round, without_trail
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -460,11 +461,12 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
         }
 
     # 0's summary cites 1's round 1; 2's parse cites its own, which cites 0's round 1.
-    assert result.provenance == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [ids[2]],
         "quotes": [line(0, 0), line(0, 1), line(1, 0), line(2, 1)],
     }
+    assert result.provenance["trail"]["quotes"] == result.provenance["quotes"]
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
     assert finished["provenance"] == result.provenance
@@ -503,7 +505,7 @@ def test_a_config_that_pins_reasoning_v2_still_answers(
     [prompt] = system_prompts(llm, "reasoning")
     assert "- `provenance`: The IDs of the documents above" in prompt
     parse_ids = result.document_ids if cites_the_parse else []
-    assert result.provenance == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": parse_ids,
         "quotes": [],
@@ -593,11 +595,14 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     shows_the_notes_and_the_stamped_parse(system, "direct", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     cited = {"summary_ids": [ids[0]], "parse_ids": [ids[1]], "quotes": []}
-    assert (result.answer, result.provenance) == ("Halloran and Merrow.", cited)
+    assert (result.answer, without_trail(result.provenance)) == (
+        "Halloran and Merrow.",
+        cited,
+    )
     reasoning = read_json(logger, "reasoning/result")
     assert (reasoning["answer"], reasoning["provenance"]) == (
         "Halloran and Merrow.",
-        cited,
+        result.provenance,
     )
     assert (reasoning["path"], reasoning["fallback"]) == ("direct", None)
     assert reasoning["totals"]["n_steps"] == 1
@@ -618,7 +623,12 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
     shows_the_notes_and_the_stamped_parse(system, "coding", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     assert ast.literal_eval(result.answer) == stamped(ids)
-    assert result.provenance == {"summary_ids": [], "parse_ids": [], "quotes": []}
+    assert result.provenance == {
+        "summary_ids": [],
+        "parse_ids": [],
+        "quotes": [],
+        "trail": answer_alone(),
+    }
     reasoning = read_json(logger, "reasoning/result")
     assert (reasoning["path"], reasoning["fallback"]) == ("coding", None)
     assert (reasoning["terminated_by"], reasoning["n_turns"]) == ("final_answer", 1)
