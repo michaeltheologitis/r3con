@@ -95,6 +95,7 @@
    * @property {Record<PerDocumentKind, number[]>} [order]
    * @property {string | null} [id]
    * @property {string[]} ids
+   * @property {Map<string, number>} indexes each document id's index
    * @property {string | null} [lit]
    */
   /**
@@ -2017,23 +2018,19 @@
     }
   }
 
-  /** @type {WeakMap<string[], Map<string, number>>} */
-  const docIndexes = new WeakMap();
+  /** @param {string[]} ids @returns {Pick<Run, 'ids' | 'indexes'>} */
+  const withIds = (ids) => ({ ids, indexes: new Map(ids.map((id, d) => [id, d])) });
 
   // r3con names a snippet by its document's id, or `<id>.<k>` for part k of a document read in parts.
-  /** @param {Pick<Run, 'ids'>} run @param {string} id */
-  function docIndex(run, id) {
-    let index = docIndexes.get(run.ids);
-    if (!index) docIndexes.set(run.ids, (index = new Map(run.ids.map((own, d) => [own, d]))));
-    return index.get(id.split('.')[0]);
-  }
+  /** @param {Pick<Run, 'indexes'>} run @param {string} id */
+  const docIndex = (run, id) => run.indexes.get(id.split('.')[0]);
 
-  /** @param {Pick<Run, 'ids'>} run @param {string[]} ids */
+  /** @param {Pick<Run, 'indexes'>} run @param {string[]} ids */
   function docIndices(run, ids) {
     return [...new Set(ids.flatMap((id) => docIndex(run, id) ?? []))];
   }
 
-  /** @param {Pick<Run, 'ids'>} run @param {R3conProvenance} provenance @returns {Provenance} */
+  /** @param {Pick<Run, 'indexes'>} run @param {Omit<R3conProvenance, 'quotes'>} provenance @returns {Provenance} */
   function provenanceOf(run, { summary_ids, parse_ids, trail }) {
     return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids), trail };
   }
@@ -2114,7 +2111,7 @@
     const run = {
       simulated: false,
       docs: SAMPLE_FILES,
-      ids: SAMPLE.ids,
+      ...withIds(SAMPLE.ids),
       r1: inUnits(SAMPLE.r1, 1),
       r2: inUnits(SAMPLE.r2, 2),
       schema: SAMPLE.schema,
@@ -2137,22 +2134,22 @@
   }
 
   // As r3con does, it cites only non-empty round-2 summaries and parses with records; its trail goes one hop.
-  /** @param {Pick<Run, 'docs' | 'ids' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
+  /** @param {Pick<Run, 'docs' | 'ids' | 'indexes' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
   function madeUpAnswer(run, question, shift) {
     /** @param {number} stride @param {(i: number) => boolean} citable */
-    const every = (stride, citable) => range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES);
+    const every = (stride, citable) =>
+      range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES).map((d) => run.ids[d]);
     const summary_ids = every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary));
     const parse_ids = every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i]));
-    const summaries = summary_ids.map((d) => summaryNode(ROUNDS, run.ids[d]));
-    const documents = summary_ids.map((d) => documentNode(run.ids[d]));
-    const cited = [...summaries, ...parse_ids.map((d) => parseNode(run.ids[d]))];
+    const cited = [...summary_ids.map((id) => summaryNode(ROUNDS, id)), ...parse_ids.map(parseNode)];
     const edges = [
       ...cited.map((to) => /** @type {TrailEdge} */ ([TRAIL_ANSWER, to, 'cites'])),
-      ...summaries.map((from, k) => /** @type {TrailEdge} */ ([from, documents[k], 'summarizes'])),
+      ...summary_ids.map((id) => /** @type {TrailEdge} */ ([summaryNode(ROUNDS, id), documentNode(id), 'summarizes'])),
     ];
+    const trail = { rule: ONE_HOP, nodes: [TRAIL_ANSWER, ...cited, ...summary_ids.map(documentNode)], edges };
     return {
       text: `r3con's answer to “${question}” would appear here. The documents it cites are made up.`,
-      provenance: { summary_ids, parse_ids, trail: { rule: ONE_HOP, nodes: [TRAIL_ANSWER, ...cited, ...documents], edges } },
+      provenance: provenanceOf(run, { summary_ids, parse_ids, trail }),
     };
   }
 
@@ -2172,7 +2169,7 @@
     const run = {
       simulated: true,
       docs: files,
-      ids: order.map(String),
+      ...withIds(order.map(String)),
       r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]), quotes: /** @type {RunQuote[]} */ ([]) })),
       r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)), quotes: /** @type {RunQuote[]} */ ([]) })),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
@@ -2189,7 +2186,7 @@
   function liveRun(question, model, endpoint, docs) {
     /** @type {Pick<Run, 'r1' | 'r2' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
     const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
-    return { simulated: false, id: null, ids: [], docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
+    return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
   /** @param {boolean} simulated @param {Totals | null | undefined} totals */
@@ -2260,10 +2257,10 @@
   }
 
   // r3con walks the trail from the answer, so a summary's first edge on it comes from the node nearest the answer.
-  /** @param {Run} run @param {string} answerId @returns {Trail | null} */
+  /** @param {Run} run @param {string} answerId @returns {Trail | null} none until the answer lands, or if none of it is on the page */
   function trailOf(run, answerId) {
     const trail = answerAt(run, answerId).provenance?.trail;
-    if (!trail?.edges.length) return null;
+    if (!trail) return null;
     const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
     /** @type {Trail} */
     const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
@@ -2276,8 +2273,12 @@
       if (kind === 'summarizes') drawn.quoting.add(from);
     }
     drawn.quoted = run.docs.map((_, d) => quotedIn(run, drawn.quoting, d));
-    return drawn;
+    return drawn.edges.size ? drawn : null;
   }
+
+  // The lit answer's trail is the tab's, unless its panel was cleared since.
+  /** @param {RunTab} tab @param {string} id */
+  const answerTrail = (tab, id) => (id === tab.run.lit && tab.trail) || trailOf(tab.run, id);
 
   // What `quoting` quotes of document d, by part and by sentence; quotes that overlap join, quotes that only meet don't.
   /** @param {Run} run @param {Set<string>} quoting the trail nodes of the summaries whose quotes count @param {number} d @returns {Quoted} */
@@ -2312,10 +2313,15 @@
     return kind === 'parsed' ? `the ${docLabel(runTab(tab).run, d)} parse` : nodeName(tab, id);
   }
 
-  // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary.
+  // A mark's hover text: each summary that quotes its span, and what on the trail cites that summary, if the page draws it.
   /** @param {Tab} tab @param {Trail} trail @param {Span} span */
   function quotedBy(tab, trail, span) {
-    return ['quoted by', ...span.by.map((id) => `${nodeName(tab, id)} (cited by ${citerName(tab, /** @type {string} */ (trail.citedBy.get(id)))})`)].join('\n');
+    /** @param {string} id */
+    const quoter = (id) => {
+      const citer = trail.citedBy.get(id);
+      return citer ? `${nodeName(tab, id)} (cited by ${citerName(tab, citer)})` : nodeName(tab, id);
+    };
+    return ['quoted by', ...span.by.map(quoter)].join('\n');
   }
 
   // ---------- panel: view ----------
@@ -2965,8 +2971,9 @@
   function trailLine(tab, id) {
     return trailPart(tab, h('div', { class: 'trail-line' }), (trail) => {
       if (!trail) return null;
+      if (!trail.nodes.has(id)) return h('span', { class: 'k' }, "not on the answer's trail");
       const citer = trail.citedBy.get(id);
-      return citer ? h('span', { class: 'used' }, `on the answer's trail · cited by ${citerName(tab, citer)}`) : h('span', { class: 'k' }, "not on the answer's trail");
+      return h('span', { class: 'used' }, citer ? `on the answer's trail · cited by ${citerName(tab, citer)}` : "on the answer's trail");
     });
   }
 
@@ -3033,7 +3040,7 @@
       ];
     }
     const answer = answerOf(run, id);
-    const trail = trailOf(run, id);
+    const trail = answerTrail(tab, id);
     const quoted = trail && sentencesFrom(trail);
     return [
       row('question', answer.question),
@@ -3536,7 +3543,7 @@
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
   /** @param {RunTab} tab @param {string} id */
   function sentenceList(tab, id) {
-    const trail = trailOf(tab.run, id);
+    const trail = answerTrail(tab, id);
     const line = trail && sentencesFrom(trail);
     if (!trail || !line) return null;
     /** @param {LoadedFile} file @param {TextRange[]} sentences */
@@ -3658,7 +3665,7 @@
     switch (event.type) {
       case 'run_started':
         if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
-        run.ids = event.document_ids;
+        Object.assign(run, withIds(event.document_ids));
         narr.log('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
@@ -3709,7 +3716,7 @@
   function addSnippet(tab, narr, i, { round, doc_id, part, summary, provenance, quotes }) {
     const { run } = tab;
     const kind = /** @type {'r1' | 'r2'} */ (`r${round}`);
-    const node = summaryNode(round, part === null ? doc_id : `${doc_id}.${part}`);
+    const node = summaryNode(round, part == null ? doc_id : `${doc_id}.${part}`);
     const earlier = run[kind][i] ?? { summary: '', provenance: [], quotes: [] };
     run[kind][i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),

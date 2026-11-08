@@ -560,17 +560,20 @@ function sourcesOf(sample, docIds, id) {
 }
 
 // r3con's trail of answer `answerId` with its nodes and edges named as the page names its nodes and lines, by `ids`,
-// r3con's document ids, and `docIds`, the page's document nodes, both in document order.
+// r3con's document ids, and `docIds`, the page's document nodes, both in document order. A node the page doesn't draw,
+// of a document it doesn't hold or a round past its ROUNDS, is left out, with its edges.
 function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
   const named = (node) => {
     if (node === 'answer') return answerId;
     const [kind, ...rest] = node.split(':');
     const d = ids.indexOf(rest.at(-1).split('.')[0]);
+    if (d < 0 || (kind === 'summary' && Number(rest[0]) > ROUNDS)) return null;
     return { summary: `r${rest[0]}-${d}`, parse: `parsed-${d}`, document: docIds[d] }[kind];
   };
+  const edges = trail.edges.map(([from, to]) => [named(from), named(to)]).filter(([from, to]) => from && to);
   return {
-    nodes: [...new Set(trail.nodes.map(named))].sort(),
-    edges: [...new Set(trail.edges.map(([from, to]) => `${named(to)}>${named(from)}`))].sort(),
+    nodes: [...new Set(trail.nodes.map(named).filter(Boolean))].sort(),
+    edges: [...new Set(edges.map(([from, to]) => `${to}>${from}`))].sort(),
   };
 }
 
@@ -2350,13 +2353,15 @@ function touchingHalves(sample) {
   return sample;
 }
 
-// The sample with its answer's trail also reaching nodes the page has none of: a third round's summary of its first
-// memo, and the summary of a document it doesn't hold.
+// The sample with its answer's trail also naming nodes the page has none of: the summary of a document it doesn't hold,
+// and a third round's summary of its first memo, now the only node citing that memo's round-2 summary.
 function trailBeyondPage(sample) {
   const { trail } = sample.answer.provenance;
-  const [third, unknown] = [`summary:3:${sample.ids[0]}`, 'summary:2:ffffff'];
+  const [id] = sample.ids;
+  const [second, third, unknown] = [`summary:2:${id}`, `summary:3:${id}`, 'summary:2:ffffff'];
   trail.nodes.push(third, unknown, 'document:ffffff');
-  trail.edges.push(['answer', unknown, 'cites'], [unknown, third, 'cites'], [unknown, 'document:ffffff', 'summarizes']);
+  trail.edges = trail.edges.filter(([from, to]) => from !== 'answer' || to !== second);
+  trail.edges.push(['answer', third, 'cites'], [third, second, 'cites'], ['answer', unknown, 'cites'], [unknown, 'document:ffffff', 'summarizes']);
   return sample;
 }
 
@@ -2716,13 +2721,22 @@ async function quotesArea() {
   });
 
   await withPage('quotes', { before: serving(withSample(trailBeyondPage)) }, async (page) => {
+    const docIds = await docIdsOf(page);
     const lit = await litOnPanel(page);
-    const expected = trailOnPage(sample.answer.provenance.trail, sample.ids, await docIdsOf(page));
+    const expected = trailOnPage(trailBeyondPage(structuredClone(sample)).answer.provenance.trail, sample.ids, docIds);
     await inspect(page, 'answer-0');
     const said = await page.textContent('#inspector');
     const [list] = await page.evaluate(sentenceLists);
     const beyondName = "an answer whose trail also names nodes the page has none of lights the rest, and its popup and its sentences show as before";
-    check('quotes', beyondName, isDeepStrictEqual(lit, expected) && said.includes(SAMPLE_QUOTED.line) && list?.line === SAMPLE_QUOTED.line, `${lit.edges.length} lines lit; ${list?.line}`);
+    const offPage = !lit.edges.includes('r2-0>answer-0') && lit.nodes.includes('r2-0');
+    check('quotes', beyondName, offPage && isDeepStrictEqual(lit, expected) && said.includes(SAMPLE_QUOTED.line) && list?.line === SAMPLE_QUOTED.line, `${lit.edges.length} lines lit; ${list?.line}`);
+    await inspect(page, docIds[0]);
+    const title = (await page.evaluate(marksIn, '#inspector')).marks[0]?.title;
+    await inspect(page, 'r2-0');
+    const line = await trailLine(page);
+    const uncited = SAMPLE_QUOTED.title[1].replace(' (cited by the answer)', '');
+    const uncitedName = "a summary on the trail cited only by a node the page doesn't draw is named without a citer, where its quotes are marked and in its popup";
+    check('quotes', uncitedName, title === uncited && line === "on the answer's trail", `${JSON.stringify(title)}; ${line}`);
   });
 
   await withPage('quotes', { before: serving(withSample(unlocatedFirstMemo)) }, async (page) => {
@@ -4461,9 +4475,13 @@ async function liveQuotes(url) {
   });
 }
 
-// Long enough that fake_server.py refuses it whole, and relevant throughout, so each of its two parts quotes a line.
+// Lines of about 70 characters: past fake_server.py's PART_CHARS, 2,000, so it refuses them whole, and few enough
+// that each half fits, so r3con reads them in exactly two parts.
+const TWO_PART_LINES = 48;
+
+// Relevant throughout, so each of its two parts quotes a line.
 function twoPartMemo() {
-  const lines = Array.from({ length: 48 }, (_, i) => `Northfield site, note ${i + 1}: an equipment incident was logged in Q3.`);
+  const lines = Array.from({ length: TWO_PART_LINES }, (_, i) => `Northfield site, note ${i + 1}: an equipment incident was logged in Q3.`);
   return memo('01a_two_parts.txt', lines.join('\n\n'));
 }
 
@@ -4481,8 +4499,13 @@ async function livePartQuotes(url) {
     const [list] = await page.evaluate(sentenceLists);
     const [answer] = await page.evaluate(answersRead);
     const two = answer.ids[1];
-    const summarized = (part) => answer.trail.edges.some(([from, , kind]) => kind === 'summarizes' && from.endsWith(`:${two}.${part}`));
-    const quotedAt = (part) => page.evaluate(([id, k]) => window.events.some((e) => e.type === 'relevance_finished' && e.doc_id === id && e.part === k && e.quotes.some((q) => q.start !== null)), [two, part]);
+    // In the last round, whose summaries the answer cites.
+    const summarized = (part) => answer.trail.edges.some(([from, , kind]) => kind === 'summarizes' && from === `summary:${ROUNDS}:${two}.${part}`);
+    const quotedAt = (part) =>
+      page.evaluate(
+        ([id, k, round]) => window.events.some((e) => e.type === 'relevance_finished' && e.round === round && e.doc_id === id && e.part === k && e.quotes.some((q) => q.start !== null)),
+        [two, part, ROUNDS],
+      );
     const oneOfTwo = summarized(1) && !summarized(2) && (await quotedAt(1)) && (await quotedAt(2));
     const docs = memos.map((m) => ({ name: m.name, text: m.buffer.toString() }));
     const fromQuotes = quotesListed(docs, answer.ids, answer.quotes);
