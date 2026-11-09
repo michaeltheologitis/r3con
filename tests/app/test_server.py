@@ -826,9 +826,9 @@ def test_an_ask_that_would_send_a_masked_param_fails_naming_it_and_sends_nothing
         ("ask_failed", None)
     ]
     assert events[0]["error"] == (
-        "ValueError: `extra_headers.Authorization` would be sent with REDACTED, the "
-        "mask a run's manifest saves in place of a credential: pass the real value in "
-        "`params`, which replaces all of the run's params."
+        "ValueError: REDACTED, the mask a run's manifest saves in place of a "
+        "credential, would be sent: pass the real value in `params`, which replaces "
+        "all of the run's params. Masked params: `extra_headers.Authorization`."
     )
     assert llm.requests[sent:] == []
 

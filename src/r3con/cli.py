@@ -30,6 +30,7 @@ from r3con.pipeline import (
     ask_config,
     ask_pipeline,
     read_representation,
+    refuse_masked,
     run_pipeline,
 )
 from r3con.r3con import read_documents
@@ -42,6 +43,11 @@ APP_PACKAGES = frozenset({"platformdirs", "starlette", "uvicorn"})
 APP_EXTRA_HINT = (
     'the app needs its extra: uv tool install "r3context[app]" '
     '(or pip install "r3context[app]")'
+)
+# How an ask refused for a masked param gets past it here, where it takes no params.
+MASKED_PARAM_ADVICE = (
+    "pass --api-key or --base-url in place of a masked `api_key` or `api_base`, or ask "
+    "with another --model, which sends none of the run's params"
 )
 
 
@@ -247,6 +253,12 @@ def _ask(args: argparse.Namespace) -> int:
         settings_snapshot()
         built = read_representation(Path(args.run_dir))
         config = ask_config(built, model=args.model, reasoning=args.reasoning)
+        refuse_masked(
+            config.params,
+            api_base=args.base_url,
+            api_key=args.api_key,
+            advice=MASKED_PARAM_ADVICE,
+        )
     except (FileNotFoundError, ValueError) as e:
         _error(str(e))
         return 2

@@ -91,9 +91,9 @@ REFUSED_LINE = (
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 GATEWAY_HEADER = {"extra_headers": {"Authorization": f"Bearer {KEY}"}}
 MASKED_HEADER_REFUSAL = (
-    "`extra_headers.Authorization` would be sent with REDACTED, the mask a run's "
-    "manifest saves in place of a credential: pass the real value in `params`, which "
-    "replaces all of the run's params."
+    "REDACTED, the mask a run's manifest saves in place of a credential, would be "
+    "sent: pass the real value in `params`, which replaces all of the run's params. "
+    "Masked params: `extra_headers.Authorization`."
 )
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
@@ -1733,10 +1733,19 @@ def test_an_ask_sends_the_real_value_its_caller_gives_for_a_masked_param(
         ({"extra_body": {"api_key": "REDACTED"}}, "extra_body.api_key"),
         ({"api_base": "https://REDACTED@gateway.example"}, "api_base"),
         ({"fallbacks": [{"api_key": "REDACTED"}]}, "fallbacks.0.api_key"),
+        (
+            {
+                "vertex_credentials": {
+                    "private_key": "REDACTED",
+                    "client_id": "REDACTED",
+                }
+            },
+            "vertex_credentials",
+        ),
     ],
-    ids=["nested-in-a-dict", "inside-a-longer-value", "in-a-list"],
+    ids=["nested-in-a-dict", "inside-a-longer-value", "in-a-list", "twice-named-once"],
 )
-def test_an_ask_finds_a_masked_param_at_any_depth_and_inside_a_longer_value(
+def test_an_ask_names_the_path_to_a_masked_param_or_the_param_alone_if_it_holds_more(
     answering_llm, tmp_path, saved, path
 ):
     built = finished_run(answering_llm, tmp_path)
@@ -1747,5 +1756,5 @@ def test_an_ask_finds_a_masked_param_at_any_depth_and_inside_a_longer_value(
     sent = len(answering_llm.requests)
     with pytest.raises(ValueError) as refused:
         ask(built, "Who else?", completion=answering_llm)
-    assert str(refused.value).startswith(f"`{path}` would be sent with REDACTED")
+    assert str(refused.value).endswith(f" Masked params: `{path}`.")
     assert answering_llm.requests[sent:] == []

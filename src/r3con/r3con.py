@@ -634,8 +634,8 @@ def ask(
             with ``save_artifacts=False``), if a file in its folder is not as this
             r3con writes it (one an older r3con wrote, say), if it leaves a prompt
             version unpinned, if an override is not valid for its setting, if a param
-            it would send holds ``REDACTED``, at any depth, naming each one's path, or
-            if a setting in :mod:`r3con.settings` is out of range.
+            it would send holds ``REDACTED``, at any depth, naming each one, or if a
+            setting in :mod:`r3con.settings` is out of range.
         Each of these is raised in one line, before any request and before the ask's
         folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left
