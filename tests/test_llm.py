@@ -161,6 +161,8 @@ RETRY_AFTER_SECONDS = 0.1
 SERVED = "Qwen/Qwen3-8B-2504"
 FINGERPRINT = "fp_3f1c2d"
 THOUGHT = "The user wants OK."
+CALLERS_METADATA = {"trace": "run-7"}
+CREDENTIAL_NAME = "team-openai"
 
 
 class Flat(BaseModel):
@@ -411,6 +413,40 @@ def test_sampling_params_reach_the_request_untouched(llm):
     request = llm.requests[0]
     assert {key: request[key] for key in sampling} == sampling
     assert request["extra_body"] == extra_body
+
+
+def test_what_litellm_writes_into_a_calls_metadata_never_reaches_the_next_call(
+    llm, own_trace, logged
+):
+    metadata = {"trace": own_trace}
+    for _ in range(2):
+        ask(llm.replies("ok"), metadata=metadata)
+        assert logged.acquire(timeout=THREAD_TIMEOUT_SECONDS)
+    sent = [request["metadata"] for request in llm.requests]
+    assert sent == [{"trace": own_trace}] * 2
+
+
+def test_a_routers_credential_tag_stays_out_of_the_callers_tags(
+    llm, monkeypatch, router, own_trace, logged
+):
+    monkeypatch.setattr(litellm, "completion", llm.replies("ok", "ok"))
+    routing = router({"model": MODEL, "litellm_credential_name": CREDENTIAL_NAME})
+    metadata = {"trace": own_trace, "tags": ["r3con"]}
+    for _ in range(2):
+        ask(routing.completion, metadata=metadata)
+        assert logged.acquire(timeout=THREAD_TIMEOUT_SECONDS)
+    assert metadata == {"trace": own_trace, "tags": ["r3con"]}
+    sent = [request["metadata"]["tags"] for request in llm.requests]
+    assert sent == [["r3con", f"Credential: {CREDENTIAL_NAME}"]] * 2
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize("name", ["metadata", "litellm_metadata"])
+def test_litellms_timing_of_a_call_stays_out_of_the_callers_dict(httpserver, name):
+    answers_in_turn(httpserver, OK)
+    given = dict(CALLERS_METADATA)
+    ask_server(httpserver, model=OPENAI, **{name: given})
+    assert given == CALLERS_METADATA
 
 
 def test_the_callers_completion_makes_the_request_and_is_not_sent_in_it(llm):
