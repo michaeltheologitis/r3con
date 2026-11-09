@@ -5,9 +5,10 @@ its token, then serves until killed.
 The model answers every stage as one would, citing real ids, so a run draws its whole
 panel: each summary is its document's first line that is not ``QUIET`` (none if all
 are), quoting that line, and each parse its first line as a memo's title, its other
-lines nested under it; round 2 cites the first summary it is shown, each parse its own
-document's note, and the answer the first two documents' summaries and parses. It
-refuses a document over ``PART_CHARS`` as too long, so that r3con reads it in parts.
+lines nested under it; each round after the first cites the first summary it is shown,
+each parse its own document's note, and the answer the first two documents' summaries
+and parses. It refuses a document over ``PART_CHARS`` as too long, so that r3con reads
+it in parts.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding

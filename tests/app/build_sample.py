@@ -47,7 +47,8 @@ RUN_FOLDER = Path(__file__).resolve().parent / "sample" / "20261105T173546Z_bb4f
 MEMOS = REPO / "examples" / "memos"
 APP_JS = REPO / "src" / "r3con" / "app" / "app.js"
 
-ROUNDS_DRAWN = 2
+# check.mjs reads the sample as a run of r3con's default two rounds.
+SAMPLE_ROUNDS = 2
 # What the page reads of each quote: its text, and where it is in its document, in code points.
 QUOTE_FIELDS = ("text", "start", "end")
 
@@ -147,10 +148,8 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         for p in files
     ]
     assert len(docs) == len(ids) == manifest["n_docs"], "one memo per document id"
-    assert relevance["n_rounds"] == ROUNDS_DRAWN, (
-        "the page draws exactly two relevance rounds"
-    )
-    first, second = (round_summaries(r["snippets"], ids) for r in relevance["rounds"])
+    assert relevance["n_rounds"] == SAMPLE_ROUNDS, "check.mjs reads a two-round sample"
+    rounds = [round_summaries(r["snippets"], ids) for r in relevance["rounds"]]
     parses = document_parses(run, ids)
     return {
         "question": manifest["task"],
@@ -160,8 +159,7 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         "created": manifest["created"],
         "docs": docs,
         "ids": sorted(ids, key=ids.__getitem__),
-        "r1": first,
-        "r2": second,
+        "rounds": rounds,
         "schema": {"code": schema["schema_code"], "thought": schema["thought"]},
         "parsed": [
             {"parse": parse, "provenance": [ids[c] for c in cited]}

@@ -60,11 +60,14 @@ opened URL's fragment, ``#token=...``.
   encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
   unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, endpoint?, documents: [text, ...], names?:
-  [name, ...]}``) starts ``r3con.run`` and answers ``{run_id}``; ``GET
-  /api/runs/{run_id}/events`` streams its events as ``text/event-stream``, from the
-  first, until ``run_finished`` or ``run_failed``. ``names``, one per document, are the
-  documents' names, a name given again numbered (``r3con.unique_names``: ``notes.txt
-  (2)``); without them, r3con names the documents by index.
+  [name, ...], relevance_rounds?}``) starts ``r3con.run`` and answers ``{run_id}``;
+  ``GET /api/runs/{run_id}/events`` streams its events as ``text/event-stream``, from
+  the first, until ``run_finished`` or ``run_failed``. ``names``, one per document, are
+  the documents' names, a name given again numbered (``r3con.unique_names``:
+  ``notes.txt (2)``); without them, r3con names the documents by index.
+  ``relevance_rounds``, from 1 to ``MAX_RELEVANCE_ROUNDS``, is how many relevance
+  rounds the run builds its representation over, ``DEFAULT_RELEVANCE_ROUNDS`` if not
+  given. An ask reuses its run's representation, so it takes none.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model, endpoint?}``) starts
   ``r3con.ask`` over a run that has ended and answers ``{ask_id}``;
   ``GET /api/asks/{ask_id}/events`` streams its events until ``ask_finished`` or
@@ -220,6 +223,9 @@ CUSTOM_HEADERS_WOULD_REACH_SERVER = (
     "variable, or type the model as hosted_vllm/<its name>."
 )
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
+# r3con's default config runs two rounds; each one more is another call per document.
+DEFAULT_RELEVANCE_ROUNDS = 2
+MAX_RELEVANCE_ROUNDS = 4
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
 logger = get_logger("app")
@@ -262,6 +268,9 @@ class RunRequest(BaseModel):
     endpoint: Endpoint | None = None
     documents: list[Text] = Field(min_length=1)
     names: list[Text] | None = None
+    relevance_rounds: Annotated[
+        int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)
+    ] = DEFAULT_RELEVANCE_ROUNDS
 
     @field_validator("names")
     @classmethod
@@ -650,6 +659,7 @@ async def start_run(request: Request) -> Response:
         r3con.run,
         body.question,
         _named(body),
+        relevance_rounds=body.relevance_rounds,
         logs_dir=state.logs_dir,
         **_model_options(state, body.model, body.endpoint),
     )

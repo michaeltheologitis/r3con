@@ -209,8 +209,10 @@ const OFF_SCHEMA = '(the model answers off schema)';
 const RELEASE_FILE = 'release';
 const QUIET = '(nothing relevant here)';
 const SPLIT_MEMO = '06_split_memo';
-// The relevance rounds r3con's default config runs, and the page draws.
+// The relevance rounds r3con's default config runs: the recorded sample's, and a live run's that posts no others.
 const ROUNDS = 2;
+// Other counts of rounds, which a live run of each, posting them, is checked to draw in full.
+const OTHER_ROUNDS = [1, 3];
 const SCRIPTED_ANSWER = "The check's scripted model answers this.";
 // The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
 const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
@@ -595,19 +597,19 @@ function sourcesOf(sample, docIds, id) {
   const cited = (ids, prefix) => ids.map((id) => `${prefix}-${docIndexIn(sample, id)}`);
   if (kind === 'answer') return [...cited(summary_ids, 'r2'), ...cited(parse_ids, 'parsed')];
   if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((d) => `r2-${d}`)];
-  if (kind === 'r2') return [...own, ...sample.r2[i].provenance.map((d) => `r1-${d}`)];
+  if (kind === 'r2') return [...own, ...sample.rounds[1][i].provenance.map((d) => `r1-${d}`)];
   return own;
 }
 
 // r3con's trail of answer `answerId` with its nodes and edges named as the page names its nodes and lines, by `ids`,
 // r3con's document ids, and `docIds`, the page's document nodes, both in document order. A node the page doesn't draw,
-// of a document it doesn't hold or a round past its ROUNDS, is left out, with its edges.
-function trailOnPage(trail, ids, docIds, answerId = 'answer-0') {
+// of a document it doesn't hold or a round past the run's `rounds`, is left out, with its edges.
+function trailOnPage(trail, ids, docIds, answerId = 'answer-0', rounds = ROUNDS) {
   const named = (node) => {
     if (node === 'answer') return answerId;
     const [kind, ...rest] = node.split(':');
     const d = ids.indexOf(rest.at(-1).split('.')[0]);
-    if (d < 0 || (kind === 'summary' && Number(rest[0]) > ROUNDS)) return null;
+    if (d < 0 || (kind === 'summary' && Number(rest[0]) > rounds)) return null;
     return { summary: `r${rest[0]}-${d}`, parse: `parsed-${d}`, document: docIds[d] }[kind];
   };
   const edges = trail.edges.map(([from, to]) => [named(from), named(to)]).filter(([from, to]) => from && to);
@@ -1349,7 +1351,7 @@ async function chatLog() {
     const openName = "its chevron opens the log: each step in turn, each document's line under its own step and linked to its node, and no line repeats ready";
     check('chat log', openName, opened.open && isDeepStrictEqual(stepsOf(opened), REPLAY_STEPS), JSON.stringify(stepsOf(opened)));
     const roundLines = opened.steps.slice(1, 1 + ROUNDS).flatMap(({ nested }) => nested).sort();
-    const settled = ['r1', 'r2'].flatMap((kind) => sample[kind].map(({ summary }, i) => `${stem(i)} — ${summary ? SNIPPET_READY : 'nothing relevant'}`)).sort();
+    const settled = sample.rounds.flatMap((summaries) => summaries.map(({ summary }, i) => `${stem(i)} — ${summary ? SNIPPET_READY : 'nothing relevant'}`)).sort();
     check('chat log', "each round's line says its document's snippet is ready, or that nothing was relevant", isDeepStrictEqual(roundLines, settled), roundLines[0]);
     const parseLines = parsedLines(opened);
     const filled = sample.parsed.map(({ parse }, i) => `${stem(i)} — ${Object.keys(filledFields(parse)).length ? STRUCTURE_READY : NOTHING_PARSED}`).sort();
@@ -2430,7 +2432,7 @@ function quotesListed(docs, ids, quotes) {
 const prefixed = (prefix) => (sample) => {
   const shift = Array.from(prefix).length;
   sample.docs[0].text = prefix + sample.docs[0].text;
-  for (const kind of ['r1', 'r2']) sample[kind][0].quotes = sample[kind][0].quotes.map((q) => ({ ...q, start: q.start + shift, end: q.end + shift }));
+  for (const summaries of sample.rounds) summaries[0].quotes = summaries[0].quotes.map((q) => ({ ...q, start: q.start + shift, end: q.end + shift }));
   return sample;
 };
 // An emoji, two UTF-16 code units and one code point, then lines enough to scroll the memo's popup.
@@ -2440,19 +2442,19 @@ const PAST_PREVIEW = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(PREV
 
 // The sample with nothing located in its first memo: round 1 quotes nothing, and round 2 one sentence r3con didn't find.
 function unlocatedFirstMemo(sample) {
-  sample.r1[0].quotes = [];
-  sample.r2[0].quotes = [{ ...sample.r2[0].quotes[0], start: null, end: null }];
+  sample.rounds[0][0].quotes = [];
+  sample.rounds[1][0].quotes = [{ ...sample.rounds[1][0].quotes[0], start: null, end: null }];
   return sample;
 }
 
 // The sample with its first memo's first sentence quoted by round 2 alone, in two halves that meet.
 function touchingHalves(sample) {
-  const [first, ...rest] = sample.r2[0].quotes;
+  const [first, ...rest] = sample.rounds[1][0].quotes;
   const chars = Array.from(sample.docs[0].text);
   const half = (start, end) => ({ ...first, text: chars.slice(start, end).join(''), start, end });
   const middle = Math.floor((first.start + first.end) / 2);
-  sample.r1[0].quotes = [];
-  sample.r2[0].quotes = [half(first.start, middle), half(middle, first.end), ...rest];
+  sample.rounds[0][0].quotes = [];
+  sample.rounds[1][0].quotes = [half(first.start, middle), half(middle, first.end), ...rest];
   return sample;
 }
 
@@ -2625,9 +2627,9 @@ async function quotesArea() {
     const closed = await page.evaluate(foldsIn);
     for (const summary of await page.$$('#inspector summary')) await summary.click();
     const opened = await page.evaluate(foldsIn);
-    const quoteRows = sample.r2[3].quotes.map((q) => [q.text, true, true]);
-    const provenance = sample.r2[3].provenance.map((i) => `${stem(i)} · round 1`).join(' · ');
-    const names = [`quotes ${sample.r2[3].quotes.length}`, `provenance ${sample.r2[3].provenance.length}`];
+    const quoteRows = sample.rounds[1][3].quotes.map((q) => [q.text, true, true]);
+    const provenance = sample.rounds[1][3].provenance.map((i) => `${stem(i)} · round 1`).join(' · ');
+    const names = [`quotes ${sample.rounds[1][3].quotes.length}`, `provenance ${sample.rounds[1][3].provenance.length}`];
     const folded = isDeepStrictEqual(closed.map((f) => [f.name, f.open, f.marker]), names.map((name) => [name, false, '"▸ "']));
     const unfolded = isDeepStrictEqual(opened.map((f) => [f.name, f.open, f.marker]), names.map((name) => [name, true, '"▾ "']));
     const held = isDeepStrictEqual(opened[0]?.quotes, quoteRows) && opened[1]?.body === provenance;
@@ -2635,7 +2637,7 @@ async function quotesArea() {
     check('quotes', r2Name, folded && unfolded && held, JSON.stringify(opened.map((f) => [f.name, f.marker, f.body.slice(0, 40)])));
     await inspect(page, 'r1-0');
     const roundOne = (await page.evaluate(foldsIn)).map((f) => f.name);
-    check('quotes', "a round-1 summary's popup folds its quotes, and has no provenance", isDeepStrictEqual(roundOne, [`quotes ${sample.r1[0].quotes.length}`]), roundOne.join(', '));
+    check('quotes', "a round-1 summary's popup folds its quotes, and has no provenance", isDeepStrictEqual(roundOne, [`quotes ${sample.rounds[0][0].quotes.length}`]), roundOne.join(', '));
     await inspect(page, 'parsed-0');
     const parseFolds = await page.evaluate(foldsIn);
     await page.click('#inspector summary');
@@ -2645,7 +2647,7 @@ async function quotesArea() {
     const parseOk = isDeepStrictEqual(parseFolds.map((f) => [f.name, f.open]), [[`provenance ${sample.parsed[0].provenance.length}`, false]]) && parseOpened[0].open && parseOpened[0].body === cited;
     check('quotes', parseName, parseOk, JSON.stringify(parseOpened));
 
-    const target = sample.r2[3].quotes.at(-1);
+    const target = sample.rounds[1][3].quotes.at(-1);
     await quotesOf(page, 'r2-3');
     await page.click('#inspector .quote >> nth=-1');
     const shown = { title: (await popup(page))?.title, flash: await page.evaluate(flashed) };
@@ -2796,7 +2798,7 @@ async function quotesArea() {
     await page.click('#inspector .quote >> nth=0');
     const flash = await page.evaluate(flashed);
     const unitsName = 'a memo with an emoji before its quotes, one code point to r3con and two UTF-16 units here, marks its sentences where they are, and a quote clicked scrolls its long popup to the flashed sentence';
-    const unitsOk = isDeepStrictEqual(marks, quotesShown(sample, [], SAMPLE_QUOTED).marks[0]) && flash?.text === sample.r2[0].quotes[0].text && flash.inView;
+    const unitsOk = isDeepStrictEqual(marks, quotesShown(sample, [], SAMPLE_QUOTED).marks[0]) && flash?.text === sample.rounds[1][0].quotes[0].text && flash.inView;
     check('quotes', unitsName, unitsOk, `${JSON.stringify(marks)}; flashed ${JSON.stringify(flash?.text)} in view ${flash?.inView}`);
   });
 
@@ -2809,7 +2811,7 @@ async function quotesArea() {
     await openSentences(page);
     await page.click('.sentences .sentence >> nth=0');
     const fromChat = await page.evaluate(flashed);
-    const sentence = sample.r2[0].quotes[0].text;
+    const sentence = sample.rounds[1][0].quotes[0].text;
     const windowed = /characters [\d,]+–[\d,]+ shown/.test(fromQuote.meta);
     const pastName = 'a sentence past the preview is counted, and a quote or a chat sentence opens its popup at it, the text around it shown, marked and flashed';
     const shownThere = [fromQuote.flash, fromChat].every((f) => f?.text === sentence && f.marked && f.inView);
@@ -2851,7 +2853,7 @@ async function quotesArea() {
     const pill = (await page.evaluate(pillsOn))[docIds[0]] ?? null;
     await page.click('#tab-files');
     const count = (await page.evaluate(fileCounts))[0].count;
-    const plain = isDeepStrictEqual(quotes, [[sample.r2[0].quotes[0].text, false, false]]);
+    const plain = isDeepStrictEqual(quotes, [[sample.rounds[1][0].quotes[0].text, false, false]]);
     const usedName = "a document on the trail with no sentence located says used, with no pill and no count, and a quote r3con didn't find is listed plain, with no null anywhere";
     check('quotes', usedName, doc.meta.endsWith(' · used') && doc.marks.length === 0 && pill === null && count === null && plain && nothingNull, `${doc.meta}; ${JSON.stringify(quotes)}`);
   });
@@ -4621,6 +4623,121 @@ async function livePartQuotes(url) {
   });
 }
 
+// The page as it will post a run of `rounds` relevance rounds: until it has a setting for them, the route adds them to
+// the run's request. Each event streamed is kept in window.events.
+function postingRounds(rounds) {
+  return async (page) => {
+    await page.addInitScript(recordEvents);
+    await page.route('**/api/runs', (route) => route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), relevance_rounds: rounds }) }));
+  };
+}
+
+// In-page: each node's id, place, labels and name, and whether it is still working or stopped; each line's key and kind.
+function drawnRun() {
+  const kinds = ['cite', 'context', 'self', 'flow'];
+  return {
+    nodes: [...document.querySelectorAll('#world .node')].map((el) => ({
+      id: el.dataset.id,
+      x: parseFloat(el.style.left),
+      labels: [...el.querySelectorAll('.label')].map((label) => label.textContent),
+      name: el.getAttribute('aria-label'),
+      unsettled: el.matches('.working, .failed'),
+    })),
+    edges: [...document.querySelectorAll('#world .edge')].map((el) => ({ key: el.dataset.key, kind: kinds.find((kind) => el.classList.contains(kind)) })),
+  };
+}
+
+// A live run of each of OTHER_ROUNDS relevance rounds draws every round, wired as r3con's events say.
+async function liveRounds(url) {
+  for (const rounds of OTHER_ROUNDS) {
+    await withPage('live', { url, sample: false, before: postingRounds(rounds) }, async (page) => {
+      await page.click('#run-btn');
+      const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+      const run = `a run of ${rounds} round${rounds === 1 ? '' : 's'}`;
+      const kinds = Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
+      const final = kinds.at(-1);
+      const kindOf = (id) => id.split('-')[0];
+      const roundOf = (id) => Number(kindOf(id).slice(1));
+      const docOf = (id) => Number(id.split('-')[1]);
+      const isRound = (id) => /^r\d+-/.test(id);
+      const docs = Array.from({ length: SAMPLE_DOCS }, (_, d) => d);
+      const events = await page.evaluate(() => window.events);
+      const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
+      const at = (id) => ids.indexOf(id.split('.')[0]);
+      const finished = (round, d) => events.find((e) => e.type === 'relevance_finished' && e.round === round && at(e.doc_id) === d);
+      const docIds = await docIdsOf(page);
+      const { nodes, edges } = await page.evaluate(drawnRun);
+      // A call's lines in: faint from what it was shown, or solid from what of that it cites, in place of the faint one.
+      const lines = (kinds, into) => edges.filter((e) => kinds.includes(e.kind) && into(e.key.split('>')[1])).map((e) => e.key).sort();
+      const shownTo = (into) => lines(['context', 'cite'], into);
+
+      const roundNodes = nodes.filter((n) => isRound(n.id));
+      const columns = ['doc', ...kinds, 'schema', 'parsed', 'answer'].map((kind) => [...new Set(nodes.filter((n) => kindOf(n.id) === kind).map((n) => n.x))]);
+      const gaps = columns.slice(1, -1).map(([x], c) => x - columns[c][0]);
+      const placed = columns.every((xs) => xs.length === 1) && gaps.every((gap) => gap > 0 && gap === gaps[0]) && columns.at(-1)[0] > columns.at(-2)[0];
+      const counted = nodes.length === SAMPLE_DOCS * (rounds + 2) + 2 && kinds.every((kind) => roundNodes.filter((n) => kindOf(n.id) === kind).length === SAMPLE_DOCS);
+      const named = roundNodes.every((n) => isDeepStrictEqual(n.labels, [stem(docOf(n.id)), `round ${roundOf(n.id)}`]) && n.name === `${stem(docOf(n.id))}, round ${roundOf(n.id)} relevance snippet`);
+      const columnsName = `${run} draws a column of ${SAMPLE_DOCS} nodes per round, in order between the documents and the structure, each labelled and named for its round`;
+      check('live', columnsName, done && counted && placed && named, `${nodes.length} nodes; columns at ${columns.map((xs) => xs.join('/')).join(', ')}`);
+      const geometry = await page.evaluate(dottedLineHits);
+      const clear = geometry.dotted === SAMPLE_DOCS * rounds && geometry.hits.length === 0;
+      check('live', `${run}: no dotted line passes through an icon or a label`, clear, `${geometry.dotted} dotted lines; ${geometry.hits.slice(0, 3).join(', ')}`);
+
+      const cited = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => (finished(k + 2, d)?.provenance ?? []).map((id) => `${kinds[k]}-${at(id)}>${kind}-${d}`)));
+      const citing = lines(['cite'], isRound);
+      const previous = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => docs.filter((j) => j !== d).map((j) => `${kinds[k]}-${j}>${kind}-${d}`)));
+      const linesIn = shownTo(isRound);
+      const citesName = `${run}: each round after the first cites the round before it, line for line as its events say, and is shown that round's other summaries`;
+      check('live', citesName, isDeepStrictEqual(citing, cited.sort()) && (rounds === 1 || citing.length > 0) && isDeepStrictEqual(linesIn, previous.sort()), `${citing.length} cite lines: ${citing.slice(0, 4).join(' ')}; ${linesIn.length} lines in`);
+
+      const fromFinal = (to) => docs.map((d) => `${final}-${d}>${to}`);
+      const intoSchema = shownTo((to) => to === 'schema');
+      const intoParses = shownTo((to) => to.startsWith('parsed-'));
+      const intoAnswer = shownTo((to) => to === 'answer-0').map(kindOf);
+      const fed =
+        isDeepStrictEqual(intoSchema, fromFinal('schema').sort()) &&
+        isDeepStrictEqual(intoParses, docs.flatMap((d) => fromFinal(`parsed-${d}`)).sort()) &&
+        intoAnswer.includes(final) &&
+        intoAnswer.every((kind) => kind === final || kind === 'parsed');
+      const fedName = `${run}: its last round alone feeds the structure, the parses and the answer`;
+      check('live', fedName, fed, `into the structure ${intoSchema.join(' ')}; into the answer from ${[...new Set(intoAnswer)].join(' ')}`);
+
+      const [answer] = await page.evaluate(answersRead);
+      const lit = await litOnPanel(page);
+      const trail = answer ? trailOnPage(answer.trail, answer.ids, docIds, 'answer-0', rounds) : null;
+      const throughAll = kinds.every((kind) => lit.nodes.some((id) => kindOf(id) === kind));
+      const trailName = `${run}: the lit trail is the one its reasoning_finished event carried, through every round`;
+      check('live', trailName, lit.edges.length > 0 && isDeepStrictEqual(lit, trail) && throughAll, `${lit.edges.length} lines lit, ${trail?.edges.length} on the trail`);
+
+      const shown = [];
+      for (const n of roundNodes) shown.push([n.id, await inspect(page, n.id, '#inspector .insp-text')]);
+      const filled = roundNodes.every((n) => !n.unsettled) && shown.every(([id, text]) => text === finished(roundOf(id), docOf(id))?.summary);
+      await page.keyboard.press('Escape');
+      await page.focus('.log-toggle');
+      await page.keyboard.press('Enter');
+      const steps = stepsOf(await page.evaluate(logOf)).slice(1);
+      const logged = [...kinds.map((kind) => [`round ${roundOf(kind)} · extracting relevance`, SAMPLE_DOCS, perDocument(kind)]), ...RUN_STEPS.slice(ROUNDS)];
+      const progressName = `${run}: its events fill every round's nodes with their summaries, and its log has a step for each round`;
+      check('live', progressName, filled && isDeepStrictEqual(steps, logged), JSON.stringify(steps.map(([step, lines]) => `${step} (${lines})`)));
+
+      const popups = [];
+      for (const kind of kinds) {
+        await inspect(page, `${kind}-0`);
+        popups.push({ title: (await popup(page))?.title, folds: (await page.evaluate(foldsIn)).map((f) => f.name.split(' ')[0]), provenance: await provenanceListed(page) });
+      }
+      const ownProvenance = (k) => (finished(k, 0)?.provenance ?? []).map((id) => `${stem(at(id))} · round ${k - 1}`);
+      const opened = popups.every(({ title, folds, provenance }, k) =>
+        title === `● ${stem(0)} · round ${k + 1}` && folds.includes('provenance') === k > 0 && isDeepStrictEqual(provenance, k > 0 ? ownProvenance(k + 1) : []),
+      );
+      await inspect(page, 'answer-0');
+      const answerListed = await provenanceListed(page);
+      const answerCited = answer ? [...answer.summary_ids.map((id) => `${stem(at(id))} · round ${rounds}`), ...answer.parse_ids.map((id) => `${stem(at(id))} · parsed`)] : null;
+      const popupsName = `${run}: each round's popup opens, a later round's listing the summaries it cites of the round before, and the answer's its last round's`;
+      check('live', popupsName, opened && isDeepStrictEqual(answerListed, answerCited), `${JSON.stringify(popups.map((p) => p.title))}; answer ${answerListed.join(' · ')}`);
+    });
+  }
+}
+
 // Holds the ask's last event until its popup is open.
 async function liveAnswers(url) {
   const before = async (page) => {
@@ -5600,6 +5717,7 @@ async function live() {
     await liveParts(url);
     await liveQuotes(url);
     await livePartQuotes(url);
+    await liveRounds(url);
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);
