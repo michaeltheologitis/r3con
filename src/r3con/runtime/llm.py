@@ -145,9 +145,9 @@ _PUBLIC_HEADERS = frozenset(
 # A JSON Schema's own names, its fields' and its definitions', are no parameters' names:
 # a schema anywhere (a tool's parameters, guided_json) may name a field auth_token.
 _SCHEMA_NAMES = frozenset({"properties", "$defs", "definitions"})
-# Azure's API version, by its name in lower case: any other value in a URL's query is
-# taken for a key.
-_PUBLIC_QUERY_NAMES = frozenset({"api-version"})
+# Azure's API version and watsonx's, which litellm adds, by their names in lower case:
+# any other value in a URL's query is taken for a key.
+_PUBLIC_QUERY_NAMES = frozenset({"api-version", "version"})
 # A "<scheme> <token>" value's words, as in "Bearer <token>".
 _SCHEMED_WORDS = 2
 # Where a reply's body has its usage report and model: OpenAI's names, then Gemini's.
@@ -501,8 +501,8 @@ def register_credentials(
     (:data:`_PUBLIC_HEADERS`); each in a parameter with a credential's name
     (:func:`r3con.masking.is_credential_name`), ``api_key`` and ``metadata``'s
     ``langfuse_secret_key`` among them, all of a dict's (``vertex_credentials``), but a
-    file's path (:func:`r3con.masking.is_path`); in a URL, its password, or its user
-    name when it has none, and every value in its query but a public one
+    path that exists (:func:`r3con.masking.is_path`); in a URL, its password, or its
+    user name when it has none, and every value in its query but a public one
     (:func:`_url_secrets`); and the token alone of a ``<scheme> <token>`` one
     (``Bearer``, ``Basic``). The names a JSON Schema gives its fields and definitions
     (:data:`_SCHEMA_NAMES`) are not parameters' names, wherever the schema sits. When

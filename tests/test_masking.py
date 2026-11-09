@@ -45,8 +45,6 @@ def invalid(reply: str) -> ValidationError:
         ("GITHUB_TOKEN", "short-tok-12", False),
         ("SORT_KEY", "created_at_descending", False),
         ("S3_OBJECT_KEY", "documents-2026-q3-report", False),
-        ("GOOGLE_APPLICATION_CREDENTIALS", "/home/u/service-account.json", False),
-        ("HF_TOKEN_PATH", "~/.cache/huggingface/token", False),
         ("SLACK_TOKEN_LABEL", "the build server's token", False),
         ("OPENAI_BASE_URL", KEY, False),
         ("GIT_AUTHOR_EMAIL", "michael@memos.example.com", False),
@@ -65,8 +63,6 @@ def invalid(reply: str) -> ValidationError:
         "short-token",
         "bare-key",
         "bare-key-long",
-        "credentials-path",
-        "token-path",
         "whitespace",
         "not-a-credential",
         "author",
@@ -78,6 +74,29 @@ def test_an_environment_value_is_masked_when_its_name_and_shape_say_secret(
     monkeypatch.setenv(name, value)
     text = f"refused for {value}, see logs"
     assert masked(text) == ("refused for REDACTED, see logs" if secret else text)
+
+
+def test_a_credential_named_variable_holding_an_existing_folder_is_not_masked(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("GITHUB_COPILOT_TOKEN_DIR", str(tmp_path))
+    text = f"{tmp_path / 'memo.txt'}: resolves outside {tmp_path}; skipping it"
+    assert masked(text) == text
+
+
+def test_a_credential_named_variable_holding_an_existing_file_is_not_masked(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    credentials = tmp_path / "service-account.json"
+    token = tmp_path / ".cache" / "huggingface" / "token"
+    token.parent.mkdir(parents=True)
+    credentials.touch()
+    token.touch()
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials))
+    monkeypatch.setenv("HF_TOKEN_PATH", "~/.cache/huggingface/token")
+    text = f"could not read {credentials} or ~/.cache/huggingface/token"
+    assert masked(text) == text
 
 
 # Each name, and whether it says that what it holds is a credential.

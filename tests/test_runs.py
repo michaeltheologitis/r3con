@@ -142,10 +142,8 @@ CREDENTIAL_FREE_PARAMS = {
         }
     },
     "anthropic-beta": {"extra_headers": {"anthropic-beta": "context-1m-2025-08-07"}},
-    "vertex-credentials-path": {
-        "vertex_credentials": "/home/me/.config/gcloud/memo-reader.json"
-    },
     "api-version-in-any-case": {"api_base": f"{SERVER}?API-Version=2024-10-21"},
+    "watsonx-version": {"api_base": f"{SERVER}?version=2024-05-31"},
     "prompt-cache-key": {"prompt_cache_key": "summaries-cache-2026"},
 }
 

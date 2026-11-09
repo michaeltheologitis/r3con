@@ -23,18 +23,20 @@ are:
   ``headers``, an MCP tool's ``headers``), whatever the header's name, but a
   known-public header (``Content-Type``, ``anthropic-beta``); in a parameter with a
   credential's name (:func:`is_credential_name`), such as ``api_key`` or ``metadata``'s
-  ``langfuse_secret_key``, unless it is a file's path (:func:`is_path`); and in a URL,
-  such as ``api_base``, as its password, or its user name when it has none, or as any
-  value in its query but a public one (``api-version``). The names a JSON Schema gives
-  its fields and definitions are not parameters' names, wherever the schema sits (a
-  tool's ``parameters``, ``response_format``, ``guided_json``). The keys of a
-  ``litellm.Router`` whose ``.completion`` is the run's ``completion`` are registered
-  too. Every string in a dict-valued ``vertex_credentials`` is masked, the public
-  ``token_uri`` too, since a service account's field names do not say which are
-  secret. A ``completion`` wrapper that adds a key of its own must register it;
+  ``langfuse_secret_key``, unless it is a path that exists (:func:`is_path`); and in a
+  URL, such as ``api_base``, as its password, or its user name when it has none, or as
+  any value in its query but a public one (Azure's ``api-version``, watsonx's
+  ``version``). The names a JSON Schema gives its fields and definitions are not
+  parameters' names, wherever the schema sits (a tool's ``parameters``,
+  ``response_format``, ``guided_json``). The keys of a ``litellm.Router`` whose
+  ``.completion`` is the run's ``completion`` are registered too. Every string in a
+  dict-valued ``vertex_credentials`` is masked, the public ``token_uri`` too, since a
+  service account's field names do not say which are secret. A ``completion`` wrapper
+  that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
-  a provider's key, unless it holds whitespace or is a file's path (:func:`is_path`),
-  as ``GOOGLE_APPLICATION_CREDENTIALS`` is, or is shorter than
+  a provider's key, unless it holds whitespace or is a path that exists
+  (:func:`is_path`), as ``GOOGLE_APPLICATION_CREDENTIALS`` and
+  ``GITHUB_COPILOT_TOKEN_DIR`` hold, or is shorter than
   :data:`_MIN_ENVIRONMENT_SECRET_CHARS`, or :data:`_MIN_MASKED_KEY_CHARS` for a name
   that ends in ``api_key`` or ``apikey``, a provider's key.
 
@@ -92,12 +94,21 @@ def is_credential_name(name: str) -> bool:
 
 
 def is_path(value: str) -> bool:
-    """Whether ``value``, held under a credential's name, is the path of a file litellm
-    reads the credential from (``vertex_credentials``,
-    ``GOOGLE_APPLICATION_CREDENTIALS``) rather than the credential: it starts with
-    ``/`` or ``~`` and holds a ``.``, which no base64 key does, though one may start
-    with ``/``, as about one AWS secret key in 64 does."""
-    return value.startswith(_PATH_STARTS) and "." in value
+    """Whether ``value``, held under a credential's name, is the path of a file or
+    folder litellm reads a credential from or keeps one in (``vertex_credentials``,
+    ``GOOGLE_APPLICATION_CREDENTIALS``, ``GITHUB_COPILOT_TOKEN_DIR``) rather than the
+    credential: it starts with ``/`` or ``~`` and the path exists. A base64 key may
+    start with ``/``, as about one AWS secret key in 64 does, but names no path, so it
+    is masked, as is a path not made yet: a path masked, never a key shown. A value
+    too long or otherwise invalid as a path is not one."""
+    if not value.startswith(_PATH_STARTS):
+        return False
+    try:
+        return os.path.exists(os.path.expanduser(value))
+    except ValueError:
+        # exists() answers False for any invalid path; expanduser() raises on a NUL
+        # in a ~user name.
+        return False
 
 
 def masked(text: str) -> str:

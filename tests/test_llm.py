@@ -1253,6 +1253,14 @@ def test_a_credential_is_registered_whatever_its_shape_or_place_in_the_params(
     assert masked(f"refused {credential}") == "refused REDACTED"
 
 
+def test_a_vertex_credentials_path_that_exists_is_not_registered(tmp_path):
+    credentials = tmp_path / "memo-reader.json"
+    credentials.touch()
+    register_credentials({"vertex_credentials": str(credentials)})
+    text = f"could not read {credentials}"
+    assert masked(text) == text
+
+
 def test_a_one_shot_iterator_among_the_params_reaches_the_completion_whole(llm):
     llm.replies("ok")
     litellm_chat_completion(
