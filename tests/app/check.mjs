@@ -222,7 +222,6 @@ const OTHER_ROUNDS = [FEWER_ROUNDS, MORE_ROUNDS, MAX_ROUNDS];
 const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
-const ROUNDS_HINT = 'Kept as soon as you choose it. Each round adds one model call per document.';
 // What storage may hold that r3con app would refuse as a count of rounds.
 const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
 // Frames drawn while a run's request is held, before r3con app has said anything of the run.
@@ -2316,10 +2315,9 @@ async function savedModels(page, checkAt) {
   checkAt(staysName, listed.value === PROVIDER_MODEL && stays, `${JSON.stringify(listed)} → ${JSON.stringify(unsaved)}`);
 }
 
-// The relevance rounds control: its value, its options, the text of what describes it, and what storage holds for it.
+// The relevance rounds control: its value, its options, what describes it, what its block holds, and what storage holds for it.
 function roundsControl(key) {
   const select = document.getElementById('rounds');
-  const describedBy = (select.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean);
   let stored;
   try {
     stored = localStorage.getItem(key);
@@ -2329,7 +2327,8 @@ function roundsControl(key) {
   return {
     value: select.value,
     options: [...select.options].map((o) => o.value),
-    hint: describedBy.map((id) => document.getElementById(id).textContent).join(' '),
+    describedBy: select.getAttribute('aria-describedby'),
+    block: [...select.parentElement.children].map((el) => el.localName),
     stored,
   };
 }
@@ -2337,11 +2336,12 @@ function roundsControl(key) {
 function roundsFit() {
   const settings = document.getElementById('settings');
   const box = settings.getBoundingClientRect();
-  const inside = (id) => {
-    const r = document.getElementById(id).getBoundingClientRect();
+  const inside = (el) => {
+    const r = el.getBoundingClientRect();
     return r.left >= box.left && r.right <= box.right && r.width > 0;
   };
-  return inside('rounds') && inside('rounds-hint') && settings.scrollWidth <= settings.clientWidth;
+  const select = document.getElementById('rounds');
+  return inside(select.labels[0]) && inside(select) && settings.scrollWidth <= settings.clientWidth;
 }
 
 // In-page, before the page's own script: storage throws on any use, as when the browser blocks it.
@@ -2363,10 +2363,11 @@ async function roundsSetting(page, checkAt) {
   await page.click('#settings-btn');
   const fresh = await control();
   const named = await page.getByRole('combobox', { name: 'relevance rounds', exact: true }).evaluateAll((els) => els.map((el) => el.id));
-  const offered = isDeepStrictEqual(named, ['rounds']) && isDeepStrictEqual(fresh, { value: String(ROUNDS), options: counts, hint: ROUNDS_HINT, stored: null });
-  const offeredName = `the settings offer relevance rounds 1 to ${MAX_ROUNDS}, ${ROUNDS} by default, named by its label and described by its hint, and store nothing until one is chosen`;
+  const bare = { value: String(ROUNDS), options: counts, describedBy: null, block: ['label', 'select'], stored: null };
+  const offered = isDeepStrictEqual(named, ['rounds']) && isDeepStrictEqual(fresh, bare);
+  const offeredName = `the settings offer relevance rounds 1 to ${MAX_ROUNDS}, ${ROUNDS} by default, named by its label, with no text under it or description, and store nothing until one is chosen`;
   checkAt(offeredName, offered, JSON.stringify({ named, ...fresh }));
-  checkAt('the rounds control and its hint fit inside the settings, which do not scroll sideways', await page.evaluate(roundsFit));
+  checkAt('the rounds label and control fit inside the settings, which do not scroll sideways', await page.evaluate(roundsFit));
 
   await page.focus('#key-other');
   for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'rounds'; tabs++) await page.keyboard.press('Tab');
