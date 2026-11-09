@@ -189,13 +189,17 @@ def resolve_config_path(name: str) -> Path | None:
 def _refused(error: Mapping[str, Any], name: str, overridden: Collection[str]) -> str:
     """One setting pydantic refused: whether it was an override or set in config
     ``name``, its path, a short repr of the value given (a refused key is already in
-    the path), and why."""
+    the path), or for ``params``, which may hold a credential not yet registered for
+    masking, the value's type alone, and why."""
     where = "override" if error["loc"][0] in overridden else f"config {name!r}"
     setting = ".".join(str(part) for part in error["loc"] if part != "[key]")
     if error["type"] == "missing":
         return f"{where}: `{setting}` is empty or missing"
     if error["loc"][-1] == "[key]":
         return f"{where}: `{setting}`: {error['msg']}"
+    if error["loc"][0] == "params":
+        kind = type(error["input"]).__name__
+        return f"{where}: `{setting}` is a {kind}: {error['msg']}"
     return f"{where}: `{setting}={reprlib.repr(error['input'])}`: {error['msg']}"
 
 

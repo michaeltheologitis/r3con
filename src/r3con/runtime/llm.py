@@ -99,7 +99,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import is_credential_name, one_line, register_key
+from r3con.masking import is_credential_name, one_line, plain, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -121,8 +121,23 @@ _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
 # Every value of these is a credential, whatever the header's name: x-functions-key say.
 _HEADER_PARAMS = frozenset({"extra_headers", "headers"})
-# A request's data, which may quote a document: no credential of the caller's.
-_REQUEST_DATA = frozenset({"messages", "response_format"})
+# A request's data, at any depth (extra_body.guided_json say), may quote a document or
+# name a field auth_token: no credential of the caller's.
+_REQUEST_DATA = frozenset(
+    {
+        "messages",
+        "response_format",
+        "tools",
+        "functions",
+        "prediction",
+        "metadata",
+        "litellm_metadata",
+        "guided_json",
+    }
+)
+# Azure's API version: every other value in a URL's query is taken for a key.
+_PUBLIC_QUERY_NAMES = frozenset({"api-version"})
+# A "<scheme> <token>" value's words, as in "Bearer <token>".
 _SCHEMED_WORDS = 2
 # Where a reply's body has its usage report and model: OpenAI's names, then Gemini's.
 _USAGE_FIELDS = ("usage", "usageMetadata")
@@ -460,17 +475,18 @@ def register_credentials(
     params: Mapping[str, Any], completion: Callable[..., Any] | None = None
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
-    request with ``params`` sends, at any depth of its dicts and lists, its
-    ``messages`` and ``response_format`` aside: each string in a header dict
-    (``extra_headers``, ``headers``), whatever the header's name, and in a parameter
-    with a credential's name (:func:`r3con.masking.is_credential_name`), ``api_key``
-    among them, all of a dict's (``vertex_credentials``); the password and each key's
-    value in a URL's query (:func:`_url_secrets`); and the token alone of a
-    ``<scheme> <token>`` one (``Bearer``, ``Basic``). When ``completion`` is a
-    ``litellm.Router``'s, the same of each of its deployments' ``litellm_params``,
-    where the Router has already read an ``os.environ/NAME`` from the environment."""
-    sent = {name: value for name, value in params.items() if name not in _REQUEST_DATA}
-    for value in _credentials(sent):
+    request with ``params`` sends, at any depth of a plain copy of them
+    (:func:`r3con.masking.plain`), the request's data aside wherever it sits
+    (:data:`_REQUEST_DATA`): each string or integer in a header dict (``extra_headers``,
+    ``headers``), whatever the header's name, and in a parameter with a credential's
+    name (:func:`r3con.masking.is_credential_name`), ``api_key`` among them, all of a
+    dict's (``vertex_credentials``); in a URL, its password, or its user name when it
+    has none, and every value in its query but a public one (:func:`_url_secrets`); and
+    the token alone of a ``<scheme> <token>`` one (``Bearer``, ``Basic``). When
+    ``completion`` is a ``litellm.Router``'s, the same of each of its deployments'
+    ``litellm_params``, where the Router has already read an ``os.environ/NAME`` from
+    the environment."""
+    for value in _credentials(plain(params)):
         register_key(value)
         # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
         words = value.split()
@@ -482,26 +498,32 @@ def register_credentials(
             register_credentials(deployment.get("litellm_params") or {})
 
 
-def _credentials(data: Any, *, secret: bool = False) -> Iterator[str]:
-    """Each credential among the strings in ``data``, as :func:`register_credentials`
-    says: every one of them when ``data`` is ``secret``."""
-    if isinstance(data, str):
-        if secret:
-            yield data
-        yield from _url_secrets(data)
-    elif isinstance(data, Mapping):
-        for name, value in data.items():
-            named = name in _HEADER_PARAMS or is_credential_name(str(name))
-            yield from _credentials(value, secret=secret or named)
-    elif isinstance(data, (list, tuple)):
+def _credentials(data: Any, name: str = "", *, secret: bool = False) -> Iterator[str]:
+    """Each credential in plain ``data``, sent under ``name``, as
+    :func:`register_credentials` says: every string and integer in it when it is
+    ``secret``, as all under a header dict or a credential's name is, whatever the
+    names within."""
+    if name in _REQUEST_DATA and not secret:
+        return
+    secret = secret or name in _HEADER_PARAMS or is_credential_name(name)
+    if isinstance(data, dict):
+        for key, value in data.items():
+            yield from _credentials(value, key, secret=secret)
+    elif isinstance(data, list):
         for item in data:
             yield from _credentials(item, secret=secret)
+    elif secret and isinstance(data, (str, int)):
+        # An integer too: YAML reads a key of unquoted digits as one.
+        yield str(data)
+    if isinstance(data, str):
+        yield from _url_secrets(data)
 
 
 def _url_secrets(text: str) -> list[str]:
-    """``text``'s password and the value of each query parameter whose name ends in
-    ``key`` or is a credential's, when ``text`` is a URL with a host
-    (``https://user:password@host/v1?key=...``), each as written and percent-decoded."""
+    """When ``text`` is a URL with a host, its password, or its user name when it has
+    none (``https://<token>@host``, which httpx sends as Basic auth), and the value of
+    each query parameter but a public one (:data:`_PUBLIC_QUERY_NAMES`), each as
+    written and percent-decoded."""
     try:
         url = urlsplit(text)
     except ValueError:
@@ -509,13 +531,9 @@ def _url_secrets(text: str) -> list[str]:
     if not url.netloc:
         return []
     pairs = (pair.partition("=") for pair in url.query.split("&"))
-    keys = [value for name, _, value in pairs if _is_query_key(name)]
-    written = [url.password or "", *keys]
+    values = [value for name, _, value in pairs if name not in _PUBLIC_QUERY_NAMES]
+    written = [url.password or url.username or "", *values]
     return [*written, *map(unquote, written)]
-
-
-def _is_query_key(name: str) -> bool:
-    return name.lower().endswith("key") or is_credential_name(name)
 
 
 def count_tokens(text: str) -> int:

@@ -17,13 +17,17 @@ are:
 
 - every key registered with :func:`register_key`, which r3con does, before a run's
   first request, for each credential it sends
-  (:func:`r3con.runtime.llm.register_credentials`): at any depth of the request's
-  parameters, each string in ``extra_headers`` or ``headers``, whatever the header's
-  name, and in a parameter with a credential's name (:func:`is_credential_name`), such
-  as ``api_key``, or a dict-valued ``vertex_credentials``, all of whose strings are;
-  the password and each key's value in the query of a URL, such as ``api_base``; and
-  the keys of a ``litellm.Router`` whose ``.completion`` is the run's ``completion``.
-  A ``completion`` wrapper that adds a key of its own must register it;
+  (:func:`r3con.runtime.llm.register_credentials`). It looks at every depth of a plain
+  copy of the request's parameters (:func:`plain`), but not into the request's data
+  (``messages``, ``tools``, a schema, ``metadata``) wherever it sits, and takes each
+  string or integer in ``extra_headers`` or ``headers``, whatever the header's name,
+  and in a parameter with a credential's name (:func:`is_credential_name`), such as
+  ``api_key``; in a URL, such as ``api_base``, its password, or its user name when it
+  has none, and every value in its query but a public one (``api-version``); and the
+  keys of a ``litellm.Router`` whose ``.completion`` is the run's ``completion``. Every
+  string in a dict-valued ``vertex_credentials`` is masked, the public ``token_uri``
+  too, since a service account's field names do not say which are secret. A
+  ``completion`` wrapper that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
   a provider's key, unless it holds whitespace or starts with ``/`` or ``~``, as a path
   does (``GOOGLE_APPLICATION_CREDENTIALS``), or is shorter than
@@ -43,6 +47,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from pydantic import ValidationError
+from pydantic_core import to_jsonable_python
 
 _MASK = "REDACTED"
 # A shorter key is a placeholder, and masking one as short as "x" garbles "maximum".
@@ -85,16 +90,33 @@ def masked(text: str) -> str:
     return text
 
 
+def plain(data: Any) -> Any:
+    """``data`` in JSON's dicts, lists, strings and numbers, so each walk over it sees
+    the same shapes: a pydantic model, a dataclass or any other mapping as a dict, a set
+    or a tuple as a list, and a value pydantic has no JSON form for as its ``repr``."""
+    return to_jsonable_python(data, fallback=_plain_fallback)
+
+
 def masked_values(data: Any) -> Any:
-    """``data`` with each string among its dicts' values and its lists' items masked
-    (:func:`masked`), so a key that JSON or a ``repr`` would escape is still found."""
-    if isinstance(data, str):
-        return masked(data)
+    """``data`` made plain (:func:`plain`), with each string and integer among its
+    dicts' values and its lists' items masked (:func:`masked`), so a key that JSON or a
+    ``repr`` would escape is still found, as is one YAML read as a number."""
+    return _masked_leaves(plain(data))
+
+
+def _masked_leaves(data: Any) -> Any:
     if isinstance(data, dict):
-        return {name: masked_values(value) for name, value in data.items()}
-    if isinstance(data, (list, tuple)):
-        return [masked_values(item) for item in data]
+        return {name: _masked_leaves(value) for name, value in data.items()}
+    if isinstance(data, list):
+        return [_masked_leaves(item) for item in data]
+    if isinstance(data, (str, int)):
+        shown = masked(str(data))
+        return data if shown == str(data) else shown
     return data
+
+
+def _plain_fallback(value: Any) -> Any:
+    return dict(value) if isinstance(value, Mapping) else repr(value)
 
 
 def one_line(error: BaseException) -> str:

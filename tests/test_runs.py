@@ -1,6 +1,7 @@
 import importlib.metadata
 import json
 import threading
+from types import MappingProxyType
 
 import litellm
 import pytest
@@ -18,6 +19,7 @@ from r3con.runs import (
     normalize_model_name,
     write_manifest,
 )
+from r3con.runtime.llm import register_credentials
 from r3con.settings import settings_snapshot
 
 MODEL = "openai/gpt-6-luna"
@@ -38,6 +40,43 @@ PLAIN_PARAMS = {
     "prompt_cache_key": "summaries-cache-2026",
     "api_base": f"{SERVER}?api-version=2024-10-21",
 }
+NUMBER_KEY = 123456789012345678
+# A request's data, whose names look like a credential's: written as it is.
+REQUEST_DATA = {
+    "metadata": {"author": "Halloran memo desk"},
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "sign_in",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "auth_token": {
+                            "type": "string",
+                            "description": "The session's sign-in token",
+                        }
+                    },
+                },
+            },
+        }
+    ],
+}
+GUIDED_JSON = {
+    "type": "object",
+    "properties": {
+        "token_count": {
+            "type": "integer",
+            "description": "How many tokens the memo spends",
+        }
+    },
+}
+
+
+class GatewayKey(BaseModel):
+    api_key: str
+
+
 # Each run's params, and its manifest's record of them.
 RECORDED_PARAMS = {
     "nested-in-extra-body": (
@@ -60,6 +99,26 @@ RECORDED_PARAMS = {
     "url-key": (
         {"api_base": f"{SERVER}?key={KEY}"},
         {"api_base": f"{SERVER}?key=REDACTED"},
+    ),
+    "url-user-name": (
+        {"api_base": f"https://{KEY}@llm.example.com/v1"},
+        {"api_base": "https://REDACTED@llm.example.com/v1"},
+    ),
+    "url-code-beside-a-public-api-version": (
+        {"api_base": f"{SERVER}?api-version=2024-10-21&code={KEY}"},
+        {"api_base": f"{SERVER}?api-version=2024-10-21&code=REDACTED"},
+    ),
+    "an-integer-key": ({"api_key": NUMBER_KEY}, {"api_key": "REDACTED"}),
+    "in-a-pydantic-model": (
+        {"extra_body": GatewayKey(api_key=KEY)},
+        {"extra_body": {"api_key": "REDACTED"}},
+    ),
+    "request-data-beside-a-key": (
+        {**REQUEST_DATA, "extra_body": {"api_key": KEY, "guided_json": GUIDED_JSON}},
+        {
+            **REQUEST_DATA,
+            "extra_body": {"api_key": "REDACTED", "guided_json": GUIDED_JSON},
+        },
     ),
     "no-credential": (PLAIN_PARAMS, PLAIN_PARAMS),
 }
@@ -434,6 +493,14 @@ def test_a_run_records_each_credential_among_its_params_masked(
         )
     manifest = json.loads((logger.dir / "manifest.json").read_text())
     assert manifest["config"]["params"] == recorded
+
+
+def test_the_manifest_records_a_mapping_among_the_params_as_a_dict_masked(logger):
+    params = {"extra_headers": MappingProxyType({"Authorization": f"Bearer {KEY}"})}
+    register_credentials(params)
+    write_manifest(logger, task="q", config=config(params=params), n_docs=1)
+    recorded = json.loads((logger.dir / "manifest.json").read_text())["config"]
+    assert recorded["params"] == {"extra_headers": {"Authorization": "REDACTED"}}
 
 
 def test_a_provider_error_that_echoes_the_servers_password_is_written_masked(
