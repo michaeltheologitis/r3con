@@ -3118,7 +3118,34 @@ async function gestures() {
   });
 }
 
+// Every animation or transition a faint line starts, from the page's load.
+function recordFaintMotion() {
+  window.faintMotion = [];
+  for (const type of ['animationstart', 'transitionrun']) {
+    const record = (e) => e.target.matches?.('.edge.context') && window.faintMotion.push(`${type} ${e.animationName ?? e.propertyName}`);
+    document.addEventListener(type, record, true);
+  }
+}
+
+// The faint lines on the panel, how many animations or transitions they started, how many still run, and how many would ease.
+async function faintMotion() {
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const lines = [...document.querySelectorAll('#world .edge.context')];
+  const running = document.getAnimations().filter((a) => a.effect?.target?.matches?.('.edge.context')).length;
+  const eased = lines.filter((el) => getComputedStyle(el).transitionDuration.split(',').some((d) => parseFloat(d) > 0)).length;
+  return { lines: lines.length, started: window.faintMotion.length, first: window.faintMotion[0] ?? null, running, eased };
+}
+
 async function scale() {
+  // With motion on: faint lines grow as n², and thousands animating at once would stall the page.
+  await withPage('scale', { sample: false, before: (page) => page.addInitScript(recordFaintMotion) }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    const lit = await becomes(page, () => document.querySelector('#world .is-lit') !== null, null, REPLAY_MS);
+    const motion = await page.evaluate(faintMotion);
+    const still = lit && motion.lines > 0 && motion.started === 0 && motion.running === 0 && motion.eased === 0;
+    check('scale', 'with motion on, faint lines neither fade in nor ease as a replay draws them and its answer lights', still, JSON.stringify(motion));
+  });
   const memos = Array.from({ length: LARGE_RUN_DOCS }, (_, i) => ({
     name: `doc_${String(i + 1).padStart(2, '0')}.txt`,
     mimeType: 'text/plain',
