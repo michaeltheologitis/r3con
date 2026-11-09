@@ -152,7 +152,7 @@ from pydantic import BaseModel
 # same normalized name the run label does.
 from r3con.config import normalize_model_name
 from r3con.logging_setup import get_logger
-from r3con.masking import masked
+from r3con.masking import masked_values
 from r3con.settings import active_logs_dir
 
 _log = get_logger("runs")
@@ -342,7 +342,7 @@ def write_manifest(
     if "model" in overrides:
         overrides["model"] = normalize_model_name(overrides["model"])
     # Its params may hold a credential, an extra header say, registered at run start.
-    config_block = _masked_values(config_block)
+    config_block = masked_values(config_block)
     manifest = {
         "r3con_version": __version__,
         "litellm_version": importlib.metadata.version("litellm"),
@@ -370,18 +370,6 @@ def write_manifest(
     if ask_of is not None:
         manifest["ask_of"] = ask_of
     return task_logger.write_json("manifest", manifest)
-
-
-def _masked_values(data: Any) -> Any:
-    """``data`` with each string among its dicts' values and its lists' items masked
-    (:func:`r3con.masking.masked`), so a key JSON would escape is still found."""
-    if isinstance(data, str):
-        return masked(data)
-    if isinstance(data, dict):
-        return {name: _masked_values(value) for name, value in data.items()}
-    if isinstance(data, (list, tuple)):
-        return [_masked_values(item) for item in data]
-    return data
 
 
 def _sources(

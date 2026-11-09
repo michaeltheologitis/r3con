@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import re
@@ -6,9 +7,11 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
 from typing import Literal
+from urllib.parse import quote
 
 import litellm
 import openai
@@ -29,7 +32,9 @@ from r3con.runtime.llm import (
     litellm_chat_completion_full,
     quiet_litellm,
     register_credentials,
+    schema_as_sent,
 )
+from tests.fakes import DIGITS_KEY, GatewayKey, on_your_data
 
 MODEL = "openai/gpt-6-luna"
 VLLM = "hosted_vllm/fake"
@@ -122,6 +127,7 @@ NOW = "Tue, 27 Oct 2026 12:00:00 GMT"
 KEY = "sk-not-a-real-key-0123456789"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+SERVER = "https://llm.example.com/v1"
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 LONG_RETRY_AFTER_SECONDS = 60
@@ -1163,6 +1169,173 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     assert masked(f"{sent} end-user-0123456789 summaries-cache-2026 4096") == (
         "REDACTED " * 7 + "end-user-0123456789 summaries-cache-2026 4096"
     )
+
+
+class Credential(BaseModel):
+    auth_token: str = Field(description="The token the memo says the gateway takes")
+
+
+class CredentialAudit(BaseModel):
+    credentials: list[Credential]
+
+
+def test_a_structured_requests_documents_and_schema_are_data_not_credentials(llm):
+    document = "The memo's gateway is https://reader:memo-password-2026@gw.example.com"
+    llm.replies({"credentials": []})
+    litellm_chat_completion(
+        system_prompt="List the credentials the memo names.",
+        user_prompt=document,
+        model=MODEL,
+        schema=CredentialAudit,
+        completion=llm,
+    )
+    data = f"{document} {json.dumps(schema_as_sent(CredentialAudit))}"
+    assert masked(data) == data
+
+
+@dataclass
+class TenantKey:
+    api_key: str
+
+
+# Each request's params, and the credential among them a provider may echo.
+SENT_CREDENTIALS = {
+    "url-user-name": (
+        {"api_base": f"https://{PLAIN_KEY}@llm.example.com/v1"},
+        PLAIN_KEY,
+    ),
+    "url-code": ({"api_base": f"{SERVER}?code={PLAIN_KEY}"}, PLAIN_KEY),
+    "url-sig": ({"api_base": f"{SERVER}?sv=2026-01-01&sig={PLAIN_KEY}"}, PLAIN_KEY),
+    "url-signature": ({"api_base": f"{SERVER}?signature={PLAIN_KEY}"}, PLAIN_KEY),
+    "in-a-pydantic-model": ({"extra_body": GatewayKey(api_key=PLAIN_KEY)}, PLAIN_KEY),
+    "in-a-dataclass": ({"extra_body": TenantKey(api_key=PLAIN_KEY)}, PLAIN_KEY),
+    "in-a-set": ({"extra_body": {"auth_tokens": {PLAIN_KEY}}}, PLAIN_KEY),
+    "an-integer": ({"api_key": DIGITS_KEY}, str(DIGITS_KEY)),
+    "header-named-like-request-data": ({"headers": {"metadata": PLAIN_KEY}}, PLAIN_KEY),
+    "callback-key-in-metadata": (
+        {"metadata": {"langfuse_secret_key": PLAIN_KEY}},
+        PLAIN_KEY,
+    ),
+    "callback-key-in-litellm-metadata": (
+        {"litellm_metadata": {"langsmith_api_key": PLAIN_KEY}},
+        PLAIN_KEY,
+    ),
+    "key-in-extra-body-metadata": (
+        {"extra_body": {"metadata": {"api_key": PLAIN_KEY}}},
+        PLAIN_KEY,
+    ),
+    "mcp-tool-header": (
+        {
+            "tools": [
+                {"type": "mcp", "headers": {"Authorization": f"Bearer {PLAIN_KEY}"}}
+            ]
+        },
+        PLAIN_KEY,
+    ),
+    "header-of-a-tool-in-extra-body": (
+        {"extra_body": {"tools": [{"headers": {"X-Key": PLAIN_KEY}}]}},
+        PLAIN_KEY,
+    ),
+    "base64-key-starting-with-a-slash": (
+        {"aws_secret_access_key": f"/{PLAIN_KEY}"},
+        f"/{PLAIN_KEY}",
+    ),
+    "azure-on-your-data-search-key": (
+        on_your_data({"authentication": {"type": "api_key", "key": PLAIN_KEY}}),
+        PLAIN_KEY,
+    ),
+    "azure-on-your-data-embedding-key": (
+        on_your_data(
+            {
+                "embedding_dependency": {
+                    "type": "endpoint",
+                    "endpoint": f"{SERVER}/embeddings",
+                    "authentication": {"type": "api_key", "key": PLAIN_KEY},
+                }
+            }
+        ),
+        PLAIN_KEY,
+    ),
+    "elasticsearch-key-and-key-id": (
+        on_your_data(
+            {
+                "authentication": {
+                    "type": "key_and_key_id",
+                    "key": PLAIN_KEY,
+                    "key_id": "memo-reader",
+                }
+            }
+        ),
+        PLAIN_KEY,
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("params", "credential"), SENT_CREDENTIALS.values(), ids=SENT_CREDENTIALS
+)
+def test_a_credential_is_registered_whatever_its_shape_or_place_in_the_params(
+    params, credential
+):
+    register_credentials(params)
+    assert masked(f"refused {credential}") == "refused REDACTED"
+
+
+def test_a_vertex_credentials_path_that_exists_is_not_registered(tmp_path):
+    credentials = tmp_path / "memo-reader.json"
+    credentials.touch()
+    register_credentials({"vertex_credentials": str(credentials)})
+    text = f"could not read {credentials}"
+    assert masked(text) == text
+
+
+def test_a_header_holding_a_path_that_exists_is_still_registered(tmp_path):
+    token = tmp_path / "gateway-token"
+    token.touch()
+    register_credentials({"extra_headers": {"X-Auth-Token": str(token)}})
+    assert masked(f"refused {token}") == "refused REDACTED"
+
+
+def test_a_document_starting_with_a_url_is_data_its_password_and_query_unregistered(
+    llm,
+):
+    password, memo_id = "memo-password-2026", "q3-memos-2026"
+    document = f"https://reader:{password}@gw.example.com/memo?id={memo_id}"
+    llm.replies("ok")
+    litellm_chat_completion(
+        system_prompt="Summarize the memo.",
+        user_prompt=document,
+        model=MODEL,
+        completion=llm,
+    )
+    assert masked(f"{password} {memo_id}") == f"{password} {memo_id}"
+
+
+def test_a_one_shot_iterator_among_the_params_reaches_the_completion_whole(llm):
+    llm.replies("ok")
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        completion=llm,
+        stop=iter(["END", "STOP"]),
+    )
+    [request] = llm.requests
+    assert list(request["stop"]) == ["END", "STOP"]
+
+
+def test_bytes_that_are_not_text_among_the_params_reach_the_completion(llm):
+    llm.replies("ok")
+    ask(llm, extra_body={"blob": b"\xff"})
+    [request] = llm.requests
+    assert request["extra_body"] == {"blob": b"\xff"}
+
+
+def test_a_url_key_is_masked_as_written_and_percent_decoded():
+    key = "not-a-real/key+q7RkT2mXv9LpA4sW="
+    url = f"{SERVER}?key={quote(key, safe='')}"
+    register_credentials({"api_base": url})
+    assert masked(f"{url} {key}") == f"{SERVER}?key=REDACTED REDACTED"
 
 
 def test_first_model_calls_made_at_once_in_a_new_process_all_get_replies():

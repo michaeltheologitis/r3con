@@ -24,7 +24,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import REASONING_PATHS, available_configs, load_config
 from r3con.logging_setup import configure_logging, get_logger
-from r3con.masking import masked
+from r3con.masking import masked, masked_values
 from r3con.pipeline import (
     ASKS_FOLDER,
     ask_config,
@@ -35,6 +35,7 @@ from r3con.pipeline import (
 )
 from r3con.r3con import read_documents
 from r3con.runs import TaskLogger, new_run_folder
+from r3con.runtime.llm import register_credentials
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
 _log = get_logger("cli")
@@ -227,8 +228,10 @@ def _run(args: argparse.Namespace) -> int:
         task_logger = TaskLogger(new_run_folder(), root=root)
 
     # Progress and provenance go to stderr; only the answer goes to stdout, so the
-    # command composes in a pipe.
-    print(f"{len(documents)} document(s) · {config.label()}", file=sys.stderr)
+    # command composes in a pipe. The label shows the params: their keys masked.
+    register_credentials(config.params)
+    shown = config.model_copy(update={"params": masked_values(config.params)})
+    print(f"{len(documents)} document(s) · {shown.label()}", file=sys.stderr)
     if task_logger is not None:
         print(f"artifacts: {task_logger.dir}", file=sys.stderr)
 

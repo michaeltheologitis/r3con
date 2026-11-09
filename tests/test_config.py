@@ -8,6 +8,7 @@ from r3con.config import PROMPT_STAGES, RunConfig, available_configs, load_confi
 
 PROMPTS = dict.fromkeys(PROMPT_STAGES, "v1")
 CODING = "reasoning/coding"
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 FULL = {
     "model": "openai/gpt-6-luna",
     "relevance_rounds": 3,
@@ -214,19 +215,18 @@ BAD_SETTINGS = [
     ("relevance_rounds", True, NOT_AN_INTEGER),
     ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
     ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
-    ("params", "temperature=0.7", "Input should be a valid dictionary"),
-    ("params", ["temperature", 0.7], "Input should be a valid dictionary"),
     ("model", 5, "Input should be a valid string"),
     ("model", "", "String should have at least 1 character"),
 ]
-
-
-@pytest.mark.parametrize(("field", "value", "reason"), BAD_SETTINGS)
-@pytest.mark.parametrize(
+SET_IN_EITHER_PLACE = pytest.mark.parametrize(
     ("name", "where"),
     [("default", "override"), ("bad", "config 'bad'")],
     ids=["override", "file"],
 )
+
+
+@pytest.mark.parametrize(("field", "value", "reason"), BAD_SETTINGS)
+@SET_IN_EITHER_PLACE
 def test_a_bad_setting_is_refused_in_one_line_naming_it(
     configs, name, where, field, value, reason
 ):
@@ -235,6 +235,24 @@ def test_a_bad_setting_is_refused_in_one_line_naming_it(
     with pytest.raises(ValueError) as refused:
         load_config(name, **overrides)
     assert str(refused.value) == f"{where}: `{field}={value!r}`: {reason}."
+
+
+@pytest.mark.parametrize(
+    ("params", "kind"),
+    [("temperature=0.7", "str"), ([{"api_key": KEY}], "list")],
+    ids=["str", "list-holding-a-key"],
+)
+@SET_IN_EITHER_PLACE
+def test_refused_params_are_named_by_their_type_not_their_value(
+    configs, name, where, params, kind
+):
+    configs(bad={**FULL, "params": params})
+    overrides = {"params": params} if where == "override" else {}
+    with pytest.raises(ValueError) as refused:
+        load_config(name, **overrides)
+    assert str(refused.value) == (
+        f"{where}: `params` is a {kind}: Input should be a valid dictionary."
+    )
 
 
 def test_every_refused_setting_is_named_in_one_line_with_where_it_was_set(configs):
@@ -249,10 +267,10 @@ def test_every_refused_setting_is_named_in_one_line_with_where_it_was_set(config
 
 def test_a_long_refused_value_is_shortened():
     with pytest.raises(ValueError) as refused:
-        load_config("default", params=["temperature"] * 100)
+        load_config("default", model=["gpt-6-luna"] * 100)
     assert str(refused.value) == (
-        "override: `params=['temperature', 'temperature', 'temperature', 'temperature', "
-        "'temperature', 'temperature', ...]`: Input should be a valid dictionary."
+        "override: `model=['gpt-6-luna', 'gpt-6-luna', 'gpt-6-luna', 'gpt-6-luna', "
+        "'gpt-6-luna', 'gpt-6-luna', ...]`: Input should be a valid string."
     )
 
 
