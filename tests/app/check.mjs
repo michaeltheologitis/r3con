@@ -209,10 +209,19 @@ const OFF_SCHEMA = '(the model answers off schema)';
 const RELEASE_FILE = 'release';
 const QUIET = '(nothing relevant here)';
 const SPLIT_MEMO = '06_split_memo';
-// The relevance rounds r3con's default config runs: the recorded sample's, and a live run's that posts no others.
+// The relevance rounds r3con's default config runs: the recorded sample's, and the setting's until another is chosen.
 const ROUNDS = 2;
-// Other counts of rounds, which a live run of each, posting them, is checked to draw in full.
+// Other counts of rounds, which a live run of each, chosen in the settings, is checked to send and draw in full.
 const OTHER_ROUNDS = [1, 3];
+// r3con app's MAX_RELEVANCE_ROUNDS: the setting offers 1 to this many.
+const MAX_ROUNDS = 4;
+const ROUNDS_KEY = 'r3con-proto-rounds';
+const ROUNDS_HINT = 'Each round adds one model call per document.';
+// What storage may hold that r3con app would refuse as a count of rounds.
+const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
+// Frames drawn while a run's request is held, before r3con app has said anything of the run.
+const HELD_FRAMES = 3;
+const SIMULATED_DONE = /^● done · simulated run · .+ · nothing was sent$/;
 const SCRIPTED_ANSWER = "The check's scripted model answers this.";
 // The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
 const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
@@ -1166,6 +1175,32 @@ function recordViews([tab, ms, timeout]) {
   });
 }
 
+// In-page: each kind of node the panel draws, left to right, with the places across that its nodes stand at.
+function columnsDrawn() {
+  const columns = new Map();
+  for (const el of document.querySelectorAll('#world .node')) {
+    const kind = el.dataset.id.split('-')[0];
+    columns.set(kind, [...new Set([...(columns.get(kind) ?? []), parseFloat(el.style.left)])]);
+  }
+  return [...columns].sort(([, [a]], [, [b]]) => a - b);
+}
+
+// Whether `columns`, as columnsDrawn gives them, are a whole run of `rounds` rounds: the documents', each round's in
+// turn, the structure's, the parses' and the answers', each kind of node in a column of its own.
+function runOfRounds(columns, rounds) {
+  const kinds = ['doc', ...Array.from({ length: rounds }, (_, k) => `r${k + 1}`), 'schema', 'parsed', 'answer'];
+  return isDeepStrictEqual(columns.map(([kind]) => kind), kinds) && columns.every(([, xs]) => xs.length === 1);
+}
+
+const columnsShown = (columns) => columns.map(([kind, xs]) => `${kind}@${xs.join('/')}`).join(' ');
+
+// Opens the settings, chooses `rounds` relevance rounds, and closes them.
+async function pickRounds(page, rounds) {
+  await page.click('#settings-btn');
+  await page.selectOption('#rounds', String(rounds));
+  await page.keyboard.press('Escape');
+}
+
 // ---------- areas ----------
 
 async function load() {
@@ -2001,6 +2036,7 @@ async function settings() {
       await serverMenu(page, checkAt);
       await picker(page, checkAt);
       await savedModels(page, checkAt);
+      await roundsSetting(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
       checkAt('no console message holds the key', leaks === 0, `${messages.length} messages`);
     });
@@ -2272,6 +2308,114 @@ async function savedModels(page, checkAt) {
   const stays = listed.remove !== null && listed.saved.length === 0 && unsaved.value === PROVIDER_MODEL && unsaved.stored === null && unsaved.remove === null;
   const staysName = "a saved model that a provider with a key also lists can be removed, and stays picked in its provider's group";
   checkAt(staysName, listed.value === PROVIDER_MODEL && stays, `${JSON.stringify(listed)} → ${JSON.stringify(unsaved)}`);
+}
+
+// The relevance rounds control: its value, its options, the text of what describes it, and what storage holds for it.
+function roundsControl(key) {
+  const select = document.getElementById('rounds');
+  const describedBy = (select.getAttribute('aria-describedby') ?? '').split(' ').filter(Boolean);
+  let stored;
+  try {
+    stored = localStorage.getItem(key);
+  } catch {
+    stored = 'blocked';
+  }
+  return {
+    value: select.value,
+    options: [...select.options].map((o) => o.value),
+    hint: describedBy.map((id) => document.getElementById(id).textContent).join(' '),
+    stored,
+  };
+}
+
+function roundsFit() {
+  const settings = document.getElementById('settings');
+  const box = settings.getBoundingClientRect();
+  const inside = (id) => {
+    const r = document.getElementById(id).getBoundingClientRect();
+    return r.left >= box.left && r.right <= box.right && r.width > 0;
+  };
+  return inside('rounds') && inside('rounds-hint') && settings.scrollWidth <= settings.clientWidth;
+}
+
+// In-page, before the page's own script: storage throws on any use, as when the browser blocks it.
+function blockStorage() {
+  Object.defineProperty(window, 'localStorage', {
+    get() {
+      throw new DOMException('storage is blocked', 'SecurityError');
+    },
+  });
+}
+
+// The relevance rounds setting, last: what it stores would be found by the other settings checks.
+async function roundsSetting(page, checkAt) {
+  const control = () => page.evaluate(roundsControl, ROUNDS_KEY);
+  const drawn = () => page.evaluate(columnsDrawn);
+  const store = (value) => page.evaluate(([key, held]) => localStorage.setItem(key, held), [ROUNDS_KEY, value]);
+  const counts = Array.from({ length: MAX_ROUNDS }, (_, k) => String(k + 1));
+  const [, more] = OTHER_ROUNDS;
+  await page.reload();
+  await page.click('#settings-btn');
+  const fresh = await control();
+  const named = await page.getByRole('combobox', { name: 'relevance rounds', exact: true }).evaluateAll((els) => els.map((el) => el.id));
+  const offered = isDeepStrictEqual(named, ['rounds']) && isDeepStrictEqual(fresh, { value: String(ROUNDS), options: counts, hint: ROUNDS_HINT, stored: null });
+  const offeredName = `the settings offer relevance rounds 1 to ${MAX_ROUNDS}, ${ROUNDS} by default, named by its label and described by its hint, and store nothing until one is chosen`;
+  checkAt(offeredName, offered, JSON.stringify({ named, ...fresh }));
+  checkAt('the rounds control and its hint fit inside the settings, which do not scroll sideways', await page.evaluate(roundsFit));
+
+  await page.focus('#key-other');
+  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'rounds'; tabs++) await page.keyboard.press('Tab');
+  const ring = await page.$eval('#rounds', (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+  await page.keyboard.press('ArrowDown');
+  const down = await control();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  const up = await control();
+  const keyboard = ring && down.value === '3' && down.stored === '3' && up.value === '1' && up.stored === '1';
+  const keyboardName = 'from the keyboard alone, Tab reaches relevance rounds, its focus shows, and the arrow keys choose a count, stored at once';
+  checkAt(keyboardName, keyboard, `focus ring ${ring}; ${down.value} stored ${down.stored}, then ${up.value} stored ${up.stored}`);
+
+  await page.selectOption('#rounds', String(more));
+  await page.keyboard.press('Escape');
+  await page.reload();
+  const reloaded = await control();
+  checkAt(`${more} rounds chosen are still chosen after a reload`, reloaded.value === String(more) && reloaded.stored === String(more), JSON.stringify(reloaded));
+
+  await page.click('#run-btn');
+  const recorded = (await becomes(page, statusIs, SAMPLE_STATUS)) && runOfRounds(await drawn(), ROUNDS);
+  await page.fill('#question', NEW_QUESTION);
+  await page.click('#new-run-btn');
+  const simulated = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), more);
+  checkAt(`with ${more} rounds chosen the recorded run still replays its own ${ROUNDS}, and a simulated run draws ${more}`, recorded && simulated, `recorded ${recorded}, simulated ${simulated}`);
+
+  const [fewer] = OTHER_ROUNDS;
+  await pickRounds(page, fewer);
+  await page.click('#replay-btn');
+  await page.click('#arrange-btn');
+  const kept = await drawn();
+  await page.fill('#question', NEW_QUESTION);
+  await page.click('#new-run-btn');
+  const next = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), fewer);
+  const keptName = `a simulated run keeps its ${more} rounds once ${fewer} is chosen, replayed and arranged, and the next run draws ${fewer}`;
+  checkAt(keptName, runOfRounds(kept, more) && next, `${columnsShown(kept)}; next ${next}`);
+
+  const refused = [];
+  for (const held of REFUSED_ROUNDS) {
+    await store(held);
+    await page.reload();
+    refused.push((await control()).value);
+  }
+  await store(String(more));
+  await page.addInitScript(blockStorage);
+  await page.reload();
+  const blocked = await control();
+  const fallsBack = refused.every((value) => value === String(ROUNDS)) && blocked.value === String(ROUNDS) && blocked.stored === 'blocked';
+  checkAt(`storage that throws, or holds a count r3con app would refuse, reads as ${ROUNDS}`, fallsBack, `${REFUSED_ROUNDS.map((held, i) => `${held} → ${refused[i]}`).join(', ')}; blocked → ${blocked.value}`);
+  await pickRounds(page, more);
+  await page.fill('#question', NEW_QUESTION);
+  await page.click('#run-btn');
+  const held = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), more);
+  checkAt(`with storage blocked, ${more} rounds chosen still hold for this visit's runs`, held, columnsShown(await drawn()));
 }
 
 async function popupArea() {
@@ -4623,13 +4767,17 @@ async function livePartQuotes(url) {
   });
 }
 
-// The page as it will post a run of `rounds` relevance rounds: until it has a setting for them, the route adds them to
-// the run's request. Each event streamed is kept in window.events.
-function postingRounds(rounds) {
-  return async (page) => {
-    await page.addInitScript(recordEvents);
-    await page.route('**/api/runs', (route) => route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), relevance_rounds: rounds }) }));
+// In-page: from the first frame after the run button is pressed, each frame's view and every round node's place
+// across, until window.stopFrames is set.
+function recordRunFrames() {
+  window.runFrames = [];
+  const world = document.getElementById('world');
+  const frame = () => {
+    const rounds = [...world.querySelectorAll('.node')].filter((el) => /^r\d+-/.test(el.dataset.id)).map((el) => [el.dataset.id, parseFloat(el.style.left)]);
+    window.runFrames.push({ view: world.style.transform, rounds });
+    if (!window.stopFrames) requestAnimationFrame(frame);
   };
+  document.getElementById('run-btn').addEventListener('click', () => requestAnimationFrame(frame), { capture: true, once: true });
 }
 
 // In-page: each node's id, place, labels and name, and whether it is still working or stopped; each line's key and kind.
@@ -4647,12 +4795,27 @@ function drawnRun() {
   };
 }
 
-// A live run of each of OTHER_ROUNDS relevance rounds draws every round, wired as r3con's events say.
+// A live run of each of OTHER_ROUNDS relevance rounds, chosen in the settings, is sent them, planned for them from its
+// first frame, and draws every round, wired as r3con's events say.
 async function liveRounds(url) {
   for (const rounds of OTHER_ROUNDS) {
-    await withPage('live', { url, sample: false, before: postingRounds(rounds) }, async (page) => {
+    await withPage('live', { url, sample: false, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+      let posted = null;
+      // Held for some frames, so what they show is the page's own plan, before r3con app has said a thing.
+      await page.route('**/api/runs', async (route) => {
+        posted = route.request().postDataJSON();
+        await page.waitForFunction((frames) => window.runFrames.length >= frames, HELD_FRAMES);
+        await route.continue();
+      });
+      await pickRounds(page, rounds);
+      await page.evaluate(recordRunFrames);
       await page.click('#run-btn');
       const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+      const frames = await page.evaluate(() => {
+        window.stopFrames = true;
+        return window.runFrames;
+      });
+      const view = await transform(page);
       const run = `a run of ${rounds} round${rounds === 1 ? '' : 's'}`;
       const kinds = Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
       const final = kinds.at(-1);
@@ -4672,6 +4835,12 @@ async function liveRounds(url) {
       const shownTo = (into) => lines(['context', 'cite'], into);
 
       const roundNodes = nodes.filter((n) => isRound(n.id));
+      const placedAt = new Map(roundNodes.map((n) => [n.id, n.x]));
+      const sent = posted?.relevance_rounds === rounds && events.find((e) => e.type === 'run_started')?.rounds === rounds;
+      const still = frames.length > HELD_FRAMES && frames.every((f) => f.view === view && f.rounds.every(([id, x]) => placedAt.get(id) === x));
+      const moved = frames.filter((f) => f.view !== view).length;
+      const plannedName = `${run}, chosen in the settings, is sent ${rounds} and planned for ${rounds} from its first frame: neither the view nor any round's column moves`;
+      check('live', plannedName, done && sent && still, `sent ${posted?.relevance_rounds}; ${moved} of ${frames.length} frames off the run's view`);
       const columns = ['doc', ...kinds, 'schema', 'parsed', 'answer'].map((kind) => [...new Set(nodes.filter((n) => kindOf(n.id) === kind).map((n) => n.x))]);
       const gaps = columns.slice(1, -1).map(([x], c) => x - columns[c][0]);
       const placed = columns.every((xs) => xs.length === 1) && gaps.every((gap) => gap > 0 && gap === gaps[0]) && columns.at(-1)[0] > columns.at(-2)[0];
@@ -4736,6 +4905,51 @@ async function liveRounds(url) {
       check('live', popupsName, opened && isDeepStrictEqual(answerListed, answerCited), `${JSON.stringify(popups.map((p) => p.title))}; answer ${answerListed.join(' · ')}`);
     });
   }
+}
+
+// A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a new run.
+async function liveRoundsKept(url) {
+  const [fewer, more] = OTHER_ROUNDS;
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = [];
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'POST' && /^\/api\/runs(\/\w+\/asks)?$/.test(path)) posts.push({ path, body: request.postDataJSON() });
+    });
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route('**/api/runs', async (route) => {
+      await held;
+      await route.continue();
+    });
+    await pickRounds(page, more);
+    await page.click('#run-btn');
+    await pickRounds(page, fewer);
+    release();
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    await page.click('#arrange-btn');
+    const kept = await page.evaluate(columnsDrawn);
+    const keptName = `a run keeps the ${more} rounds it started with once ${fewer} is chosen while it runs: it is sent ${more} and draws ${more}, arranged too`;
+    check('live', keptName, done && posts[0]?.body.relevance_rounds === more && runOfRounds(kept, more), `sent ${posts[0]?.body.relevance_rounds}; ${columnsShown(kept)}`);
+
+    await page.fill('#question', 'Which memo is the registry?');
+    await page.click('#run-btn');
+    const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, `ready · ${DEFAULT_MODEL} · $`], LIVE_RUN_MS);
+    const ask = posts.find(({ path }) => path.endsWith('/asks'))?.body;
+    const afterAsk = await page.evaluate(columnsDrawn);
+    const askName = `an ask sends no round count, and its run still draws its ${more} rounds`;
+    check('live', askName, answered && ask !== undefined && !('relevance_rounds' in ask) && runOfRounds(afterAsk, more), `${JSON.stringify(ask)}; ${columnsShown(afterAsk)}`);
+
+    await page.fill('#question', NEW_QUESTION);
+    await page.click('#new-run-btn');
+    const again = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
+    const fresh = await page.evaluate(columnsDrawn);
+    await page.locator('.run-tab').first().click();
+    const first = await page.evaluate(columnsDrawn);
+    const sent = posts.filter(({ path }) => path === '/api/runs').map(({ body }) => body.relevance_rounds);
+    const nextName = `a new run after the change is sent ${fewer} and draws ${fewer} in a tab of its own, and the first tab still draws ${more}`;
+    check('live', nextName, again && isDeepStrictEqual(sent, [more, fewer]) && runOfRounds(fresh, fewer) && runOfRounds(first, more), `sent ${sent.join(', ')}; ${columnsShown(fresh)}`);
+  });
 }
 
 // Holds the ask's last event until its popup is open.
@@ -5718,6 +5932,7 @@ async function live() {
     await liveQuotes(url);
     await livePartQuotes(url);
     await liveRounds(url);
+    await liveRoundsKept(url);
     await liveFailure(url);
     await liveUnreadable(url);
     await livePdf(url);

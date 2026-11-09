@@ -335,6 +335,11 @@ p { margin: 0; }
 }
 .field:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
 .field-row { display: flex; align-items: baseline; gap: 2ch; }
+/* Kept at once, unlike the keys above it, so it stands apart from their save. */
+.rounds { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45em 2ch; padding-top: 0.9em; border-top: 1px solid var(--line); }
+.rounds label { font-weight: 600; }
+#rounds { width: auto; }
+#rounds-hint { flex-basis: 100%; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
