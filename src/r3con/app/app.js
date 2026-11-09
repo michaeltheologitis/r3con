@@ -814,7 +814,8 @@
  }
 };
 
-  // Real r3con.ask answers over SAMPLE's run folder, converted from its asks/ folders by a script.
+  // Real r3con.ask answers over SAMPLE's run folder, tests/app/sample/20261105T173546Z_bb4f0c37/, converted
+  // from its asks/ folders, as SAMPLE is from the rest, by tests/app/build_sample.py.
   /** @type {RecordedAsk[]} */
   const RECORDED_ASKS = [
  {

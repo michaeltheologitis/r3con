@@ -1,0 +1,223 @@
+{
+  "n_rounds": 2,
+  "n_docs": 5,
+  "rounds": [
+    {
+      "round": 1,
+      "snippets": [
+        {
+          "id": "17f027",
+          "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies contractor code CT-118 as responsible for planned maintenance at the site, contributing Northgate’s incident count to the contractor comparison.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 5.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+              "start": 141,
+              "end": 218,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": []
+        },
+        {
+          "id": "964bc2",
+          "summary": "A Q3 operations review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; this is one site's contribution to the overall contractor comparison.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 9.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+              "start": 136,
+              "end": 213,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": []
+        },
+        {
+          "id": "9e02b3",
+          "summary": "A Q3 operations review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118, contributing a total of 6 incidents for that contractor in this document.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 6.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+              "start": 164,
+              "end": 241,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": []
+        },
+        {
+          "id": "d9add2",
+          "summary": "An approved contractor registry excerpt mapping contractor codes to names and maintenance scopes. It may help identify contractors in site paperwork: CT-118 is Halloran Services Ltd (mechanical and electrical maintenance), and CT-204 is Merrow Facilities Group (HVAC and compressed air). It provides no Q3 equipment-incident counts, so it cannot establish which contractor had the most incidents.",
+          "quotes": [
+            {
+              "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+              "start": 54,
+              "end": 127,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+              "start": 128,
+              "end": 189,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+              "start": 248,
+              "end": 328,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": []
+        },
+        {
+          "id": "7109a9",
+          "summary": "",
+          "quotes": [],
+          "provenance": []
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "snippets": [
+        {
+          "id": "17f027",
+          "summary": "A Q3 operations memo for the Northgate site, reporting 5 equipment incidents under contractor code CT-118. The registry identifies CT-118 as Halloran Services Ltd; these incidents add to that contractor’s overall tally.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 5.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+              "start": 141,
+              "end": 218,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": [
+            "9e02b3",
+            "d9add2"
+          ]
+        },
+        {
+          "id": "964bc2",
+          "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204 for planned maintenance; the contractor registry maps CT-204 to Merrow Facilities Group. This adds 9 incidents to that contractor’s total.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 9.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+              "start": 136,
+              "end": 213,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": [
+            "d9add2"
+          ]
+        },
+        {
+          "id": "9e02b3",
+          "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents under maintenance contractor code CT-118, identified in the contractor registry as Halloran Services Ltd; this is Riverside’s contribution to the contractor comparison.",
+          "quotes": [
+            {
+              "text": "Equipment incidents logged this quarter: 6.",
+              "start": 45,
+              "end": 88,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+              "start": 164,
+              "end": 241,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": [
+            "d9add2"
+          ]
+        },
+        {
+          "id": "d9add2",
+          "summary": "An approved contractor-registry extract that maps site paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd; the site reports show CT-118 sites logged 11 incidents in total, more than CT-204’s 9, so this document supplies the contractor name for the leading total.",
+          "quotes": [
+            {
+              "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+              "start": 54,
+              "end": 127,
+              "match": "exact",
+              "score": null
+            },
+            {
+              "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+              "start": 248,
+              "end": 328,
+              "match": "exact",
+              "score": null
+            }
+          ],
+          "provenance": [
+            "17f027",
+            "964bc2",
+            "9e02b3"
+          ]
+        },
+        {
+          "id": "7109a9",
+          "summary": "",
+          "quotes": [],
+          "provenance": []
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "n_steps": 10,
+    "tokens": {
+      "prompt": 11752,
+      "completion": 1964,
+      "total": 13716
+    },
+    "usd": 0.002331475
+  }
+}
