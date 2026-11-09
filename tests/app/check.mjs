@@ -4244,7 +4244,7 @@ async function dropArea() {
     await page.evaluate(dropItems, { on: 'panel', items: [['many', [...pdfs, ...many.map((name) => [name, `${name}\n`])].reverse()]] });
     await removeButton(page, many.at(-1)).waitFor();
     const dropped = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
-    const droppedName = `a folder of ${MANY_FILES} files, walked in any order, adds every one by name, refuses only those it can't read, and says none is too many`;
+    const droppedName = `a folder of ${MANY_FILES} text files and ${pdfs.length} PDFs, walked in any order, adds every text file by name, and refuses only the PDFs, which the prototype can't read`;
     const droppedExpected = { names: many, error: `Not added: a_0.pdf, a_1.pdf, a_2.pdf. ${NEEDS_APP}`, said: `${MANY_FILES} files added.` };
     check('drop', droppedName, isDeepStrictEqual(dropped, droppedExpected), shortly(dropped));
 
@@ -4254,7 +4254,7 @@ async function dropArea() {
     await removeButton(page, many.at(-1)).waitFor();
     const picked = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
     const pickedExpected = { names: many, error: null, said: `${MANY_FILES} files added.` };
-    check('drop', `${MANY_FILES} files picked at once are all added, by name, and none is said to be too many`, isDeepStrictEqual(picked, pickedExpected), shortly(picked));
+    check('drop', `${MANY_FILES} text files picked at once are all added, by name, with none refused`, isDeepStrictEqual(picked, pickedExpected), shortly(picked));
 
     await showRunTab(page, 1);
     await page.click('#tab-chat');
@@ -5363,7 +5363,7 @@ async function liveZip(url) {
     await removeButton(page, many.at(-1)).waitFor();
     const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page) };
     const expected = { names: many, said: `${MANY_FILES} files added, in place of the 5 sample memos.`, error: null };
-    check('live', `a zip of ${MANY_FILES} documents adds every one, by name, and none is said to be too many`, isDeepStrictEqual(pane, expected), JSON.stringify({ ...pane, names: pane.names.length }));
+    check('live', `a zip of ${MANY_FILES} documents adds every one, by name, with none refused`, isDeepStrictEqual(pane, expected), JSON.stringify({ ...pane, names: pane.names.length }));
   });
 }
 
@@ -5554,38 +5554,15 @@ async function liveRemoveWhileReading(url) {
     const release = await holdExtraction(page);
     await page.setInputFiles('#file-input', documents['01_memo.pdf']);
     const reading = await becomes(page, () => document.getElementById('files-said').textContent === 'Reading 1 file…');
-    const whileReading = (await page.evaluate(removeAllButtons)).map((b) => b.offered);
+    const whileReading = { offered: (await page.evaluate(removeAllButtons)).map((b) => b.offered), hint: await page.innerText('#panel-hint') };
     await removeButton(page, earlier[0]).click();
     release();
     await removeButton(page, '01_memo.pdf').waitFor();
     const landed = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), offered: (await page.evaluate(removeAllButtons)).map((b) => b.offered) };
     const kept = [earlier[1], '01_memo.pdf'];
-    const expected = { whileReading: [true, true], landed: { names: kept, docs: kept, offered: [true, true] } };
-    const name = `while a batch is read ${REMOVE_ALL} is offered, and a file removed meanwhile stays removed once the batch lands`;
+    const expected = { whileReading: { offered: [false, false], hint: '2 documents' }, landed: { names: kept, docs: kept, offered: [true, true] } };
+    const name = `while a batch is read ${REMOVE_ALL} is not offered, and a file removed meanwhile stays removed once the batch lands, ${REMOVE_ALL} offered again`;
     check('live', name, reading && isDeepStrictEqual({ whileReading, landed }, expected), JSON.stringify({ reading, whileReading, landed }));
-  });
-}
-
-// Holds PDFs' text at the server while undo puts the tab's files back.
-async function liveUndoWhileReading(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
-    await page.click('#tab-files');
-    const earlier = memoNames(0, 30);
-    await page.setInputFiles('#file-input', earlier.map((name) => memo(name, `${name}\n`)));
-    await removeButton(page, earlier.at(-1)).waitFor();
-    await pressRemoveAll(page, '#files-remove-all');
-    const release = await holdExtraction(page);
-    const pdfs = Array.from({ length: 11 }, (_, i) => ({ ...documents['01_memo.pdf'], name: `pdf_${String(i).padStart(2, '0')}.pdf` }));
-    await page.setInputFiles('#file-input', pdfs);
-    const reading = await becomes(page, (n) => document.getElementById('files-said').textContent === `Reading ${n} files…`, pdfs.length);
-    const whileReading = (await page.evaluate(removeAllButtons)).map((b) => b.offered);
-    await pressRemoveAll(page, '#files-remove-all');
-    release();
-    await removeButton(page, pdfs.at(-1).name).waitFor({ timeout: LIVE_RUN_MS });
-    const after = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
-    const expected = { names: [...earlier, ...pdfs.map((f) => f.name)], error: null, said: `${pdfs.length} files added.` };
-    const name = `${UNDO} is offered while a batch is read, and pressed, puts the files back with the batch landing after them, all ${expected.names.length} kept`;
-    check('live', name, reading && isDeepStrictEqual(whileReading, [true, true]) && isDeepStrictEqual(after, expected), JSON.stringify({ reading, whileReading, ...after, names: after.names.length }));
   });
 }
 
@@ -5961,7 +5938,6 @@ async function live() {
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
     await liveRemoveWhileReading(url);
-    await liveUndoWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });

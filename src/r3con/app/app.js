@@ -123,6 +123,7 @@
    * @property {number} id
    * @property {LoadedFile[]} files
    * @property {Removed | null} removed while undo can put it back
+   * @property {number} reading how many batches of files are being read for it, or wait to be
    * @property {string} filesSaid
    * @property {string} filesError
    * @property {string} draft
@@ -1682,6 +1683,7 @@
       id,
       files,
       removed: null,
+      reading: 0,
       filesSaid: '',
       filesError: '',
       draft: '',
@@ -3388,11 +3390,12 @@
   }
 
   function updateHint() {
-    const { run, files, removed } = state.shown;
+    const { run, files, removed, reading } = state.shown;
     const listed = removed?.files ?? files;
     const count = fileCount(listed);
     trash.hidden = Boolean(run) || !listed.length;
-    const offered = !trash.hidden;
+    // Not while a batch is read: its landing would end undo, and what remove all took couldn't be put back.
+    const offered = !trash.hidden && !reading;
     $('panel-hint').hidden = Boolean(run);
     $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : ADD_FILES;
     for (const button of removeAllButtons) {
@@ -4178,7 +4181,15 @@
   /** @param {Picked} batch @param {Tab} [tab] */
   function addFiles(batch, tab = state.shown) {
     tellFiles(tab, { filesError: '' });
-    tab.adding = tab.adding.then(() => addBatch(batch, tab)).catch((error) => failedToAdd(tab, error));
+    tab.reading += 1;
+    updateHint();
+    tab.adding = tab.adding
+      .then(() => addBatch(batch, tab))
+      .catch((error) => failedToAdd(tab, error))
+      .finally(() => {
+        tab.reading -= 1;
+        updateHint();
+      });
   }
 
   /** @param {Tab} tab @param {{ filesSaid?: string, filesError?: string }} lines */

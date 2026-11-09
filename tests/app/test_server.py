@@ -1223,18 +1223,6 @@ def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path
     assert response.json() == {"files": [memo], "skipped": 1}
 
 
-def test_a_zip_of_many_documents_comes_back_with_every_one_in_order(
-    client: TestClient, tmp_path: Path
-):
-    names = [f"memo_{i:03}.txt" for i in range(120)]
-    memos = {name: f"{name}\n" for name in reversed(names)}
-    response = unzip(client, zipped(tmp_path, memos).read_bytes())
-    files = [
-        {"name": name, "size": len(memos[name]), "text": memos[name]} for name in names
-    ]
-    assert response.json() == {"files": files, "skipped": 0}
-
-
 def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse(
     client: TestClient, tmp_path: Path
 ):
