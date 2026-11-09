@@ -7,18 +7,21 @@ import subprocess
 import sys
 import threading
 import time
+from collections import UserList, deque
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from types import SimpleNamespace
-from typing import Literal
+from typing import Literal, NamedTuple
 from urllib.parse import quote
 
 import litellm
 import openai
 import pytest
+import yarl
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, MongoDsn, create_model
+from pydantic_core import Url
 
 from r3con import settings
 from r3con.masking import masked
@@ -1198,6 +1201,16 @@ class TenantKey:
     api_key: str
 
 
+class RegionKey(NamedTuple):
+    region: str
+    api_key: str
+
+
+class RegionKeyHidingItsKey(RegionKey):
+    def _asdict(self) -> dict[str, str]:
+        return {"region": self.region}
+
+
 # Each request's params, and the credential among them a provider may echo.
 SENT_CREDENTIALS = {
     "url-user-name": (
@@ -1209,6 +1222,30 @@ SENT_CREDENTIALS = {
     "url-signature": ({"api_base": f"{SERVER}?signature={PLAIN_KEY}"}, PLAIN_KEY),
     "in-a-pydantic-model": ({"extra_body": GatewayKey(api_key=PLAIN_KEY)}, PLAIN_KEY),
     "in-a-dataclass": ({"extra_body": TenantKey(api_key=PLAIN_KEY)}, PLAIN_KEY),
+    "in-a-named-tuple": ({"extra_body": RegionKey("eu", PLAIN_KEY)}, PLAIN_KEY),
+    "named-tuple-whose-asdict-hides-the-key": (
+        {"extra_body": RegionKeyHidingItsKey("eu", PLAIN_KEY)},
+        PLAIN_KEY,
+    ),
+    "in-a-user-list": ({"fallbacks": UserList([{"api_key": PLAIN_KEY}])}, PLAIN_KEY),
+    "in-a-deque": ({"fallbacks": deque([{"api_key": PLAIN_KEY}])}, PLAIN_KEY),
+    "in-a-namespace": ({"extra_body": SimpleNamespace(api_key=PLAIN_KEY)}, PLAIN_KEY),
+    "pydantic-url-password": (
+        {"extra_body": {"url": AnyHttpUrl(f"https://u:{PLAIN_KEY}@llm.example.com")}},
+        PLAIN_KEY,
+    ),
+    "pydantic-multi-host-url-password": (
+        {"extra_body": {"url": MongoDsn(f"mongodb://u:{PLAIN_KEY}@db1,db2/memos")}},
+        PLAIN_KEY,
+    ),
+    "pydantic-core-url-password": (
+        {"extra_body": {"url": Url(f"https://u:{PLAIN_KEY}@llm.example.com")}},
+        PLAIN_KEY,
+    ),
+    "yarl-url-password": (
+        {"extra_body": {"url": yarl.URL(f"https://u:{PLAIN_KEY}@llm.example.com")}},
+        PLAIN_KEY,
+    ),
     "in-a-set": ({"extra_body": {"auth_tokens": {PLAIN_KEY}}}, PLAIN_KEY),
     "an-integer": ({"api_key": DIGITS_KEY}, str(DIGITS_KEY)),
     "header-named-like-request-data": ({"headers": {"metadata": PLAIN_KEY}}, PLAIN_KEY),

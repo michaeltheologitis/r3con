@@ -36,14 +36,18 @@ are:
   ``token_uri`` too, since a service account's field names do not say which are
   secret. A ``completion`` wrapper that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
-  a provider's key, unless it holds whitespace or is a path that exists
+  a provider's key, or one of the names litellm reads a credential under that do not
+  say so (:data:`_UNNAMED_CREDENTIAL_VARIABLES`, such as ``SNOWFLAKE_JWT`` and
+  ``DD_APP_KEY``), unless it holds whitespace or is a path that exists
   (:func:`is_path`), as ``GOOGLE_APPLICATION_CREDENTIALS`` and
   ``GITHUB_COPILOT_TOKEN_DIR`` hold, or is shorter than
   :data:`_MIN_ENVIRONMENT_SECRET_CHARS`, or :data:`_MIN_MASKED_KEY_CHARS` for a name
   that ends in ``api_key`` or ``apikey``, a provider's key.
 
 A key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as vLLM's
-``EMPTY``, and is left alone.
+``EMPTY``, and is left alone. A secret in a URL's path, as some hosted MCP servers
+take (``/s/<token>/mcp``), is not found: nothing tells it from ``/api/v1/mcp`` or
+``/<owner>/<repo>``, whose masking would garble errors and refuse the run to ``ask``.
 """
 
 from __future__ import annotations
@@ -53,10 +57,18 @@ import datetime
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from types import SimpleNamespace
 from typing import Any
 
-from pydantic import BaseModel, ValidationError
+from pydantic import AnyUrl, BaseModel, MongoDsn, NatsDsn, PostgresDsn, ValidationError
+from pydantic_core import MultiHostUrl, Url
+
+try:
+    from yarl import URL as YarlUrl
+except ImportError:  # yarl comes with aiohttp, which litellm needs and r3con doesn't.
+    YarlUrl = None
 
 MASK = "REDACTED"
 # A shorter key is a placeholder, and masking one as short as "x" garbles "maximum".
@@ -64,6 +76,18 @@ _MIN_MASKED_KEY_CHARS = 8
 _MIN_ENVIRONMENT_SECRET_CHARS = 16
 _ERROR_CHARS = 300
 _PROVIDER_KEY_NAME = re.compile("api_?key$", re.IGNORECASE)
+# Where litellm reads a credential under a name no rule tells from SORT_KEY's:
+# Snowflake's JWT, OpenAI's admin key and four logging callbacks' keys.
+_UNNAMED_CREDENTIAL_VARIABLES = frozenset(
+    {
+        "SNOWFLAKE_JWT",
+        "OPENAI_ADMIN_KEY",
+        "AZURE_STORAGE_ACCOUNT_KEY",
+        "DD_APP_KEY",
+        "NEW_RELIC_LICENSE_KEY",
+        "SUPABASE_KEY",
+    }
+)
 _CREDENTIAL_NAME = re.compile(
     "api_?key$|^oci_key$|token|secret|password|credential|webhook", re.IGNORECASE
 )
@@ -75,6 +99,15 @@ _AUTH_WORDS = frozenset({"auth", "authentication", "authorization"})
 _AUTH = "auth"
 # Not "~name": expanding one looks the user up, through NSS or LDAP on some hosts.
 _PATH_STARTS = ("/", "~/")
+# pydantic's URL types wrap pydantic_core's rather than subclass them: AnyUrl is the
+# base of each single-host one, and these three DSNs are its multi-host ones.
+_URL_TYPES = tuple(
+    url
+    for url in (Url, MultiHostUrl, AnyUrl, PostgresDsn, MongoDsn, NatsDsn, YarlUrl)
+    if url is not None
+)
+# Sequences of bytes, kept as their repr rather than lists of numbers.
+_BYTES = (bytes, bytearray, memoryview)
 _registered: set[str] = set()
 _lock = threading.Lock()
 
@@ -131,17 +164,23 @@ def masked(text: str) -> str:
 def plain(data: Any) -> Any:
     """``data`` in dicts with string keys, lists, strings, numbers, booleans and
     ``None``, so each walk over it sees the same shapes: a date, time or datetime as
-    its ISO 8601 text (``isoformat()``), a mapping as a dict, a list,
-    tuple, set or frozenset as a list, a pydantic model as its ``model_dump()``, a
-    dataclass as a dict of its fields, and anything else, an iterator or a generator
-    among them, as its ``repr``, never iterated, so a request still sends all of it."""
+    its ISO 8601 text (``isoformat()``), a mapping as a dict, a named tuple as a dict
+    of its fields, any other sequence or set but bytes (a list, tuple, ``deque``, set,
+    frozenset, …) as a list, a pydantic model as its ``model_dump()``, a dataclass as a
+    dict of its fields, a ``SimpleNamespace`` as a dict of its attributes, a pydantic
+    or yarl URL as its string, and anything else, an iterator or a generator among
+    them, as its ``repr``, never iterated, so a request still sends all of it."""
     if data is None or isinstance(data, (str, int, float)):
         return data
     if isinstance(data, (datetime.date, datetime.time)):
         return data.isoformat()
     if isinstance(data, Mapping):
         return {str(name): plain(value) for name, value in data.items()}
-    if isinstance(data, (list, tuple, set, frozenset)):
+    # A named tuple by its class's field names: its own _asdict() could leave one out.
+    fields = isinstance(data, tuple) and getattr(type(data), "_fields", None)
+    if isinstance(fields, tuple) and len(fields) == len(data):
+        return dict(zip(map(str, fields), map(plain, data), strict=True))
+    if isinstance(data, (Sequence, AbstractSet)) and not isinstance(data, _BYTES):
         return [plain(item) for item in data]
     if isinstance(data, BaseModel):
         return plain(data.model_dump())
@@ -149,6 +188,10 @@ def plain(data: Any) -> Any:
         # Each field as it is: dataclasses.asdict deep-copies them, and fails on a lock.
         fields = dataclasses.fields(data)
         return {field.name: plain(getattr(data, field.name)) for field in fields}
+    if isinstance(data, SimpleNamespace):
+        return plain(vars(data))
+    if isinstance(data, _URL_TYPES):
+        return str(data)
     return repr(data)
 
 
@@ -195,7 +238,8 @@ def _environment_secrets() -> list[str]:
 
 
 def _is_secret(name: str, value: str) -> bool:
-    if not is_credential_name(name) or any(map(str.isspace, value)):
+    credential = is_credential_name(name) or name in _UNNAMED_CREDENTIAL_VARIABLES
+    if not credential or any(map(str.isspace, value)):
         return False
     provider_key = _PROVIDER_KEY_NAME.search(name)
     floor = _MIN_MASKED_KEY_CHARS if provider_key else _MIN_ENVIRONMENT_SECRET_CHARS

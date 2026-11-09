@@ -46,9 +46,16 @@ def invalid(reply: str) -> ValidationError:
         ("OCI_KEY", KEY, True),
         ("SLACK_WEBHOOK_URL", f"https://hooks.slack.com/services/{KEY}", True),
         ("AWS_SECRET_ACCESS_KEY", f"/{KEY}", True),
+        ("SNOWFLAKE_JWT", KEY, True),
+        ("OPENAI_ADMIN_KEY", KEY, True),
+        ("AZURE_STORAGE_ACCOUNT_KEY", KEY, True),
+        ("DD_APP_KEY", KEY, True),
+        ("NEW_RELIC_LICENSE_KEY", KEY, True),
+        ("SUPABASE_KEY", KEY, True),
         ("GITHUB_TOKEN", "short-tok-12", False),
         ("SORT_KEY", "created_at_descending", False),
         ("S3_OBJECT_KEY", "documents-2026-q3-report", False),
+        ("GPG_KEY", "0123456789ABCDEF0123456789ABCDEF01234567", False),
         ("SLACK_TOKEN_LABEL", "the build server's token", False),
         ("OPENAI_BASE_URL", KEY, False),
         ("GIT_AUTHOR_EMAIL", "michael@memos.example.com", False),
@@ -64,9 +71,16 @@ def invalid(reply: str) -> ValidationError:
         "oci-key",
         "webhook-url",
         "base64-key-starting-with-a-slash",
+        "snowflake-jwt",
+        "openai-admin-key",
+        "azure-storage-callback-key",
+        "datadog-callback-key",
+        "new-relic-callback-key",
+        "supabase-callback-key",
         "short-token",
         "bare-key",
         "bare-key-long",
+        "gpg-key-fingerprint",
         "whitespace",
         "not-a-credential",
         "author",
@@ -174,6 +188,26 @@ def test_a_registered_key_is_masked_from_then_on_the_longest_first_but_a_placeho
 )
 def test_a_date_or_a_time_is_made_plain_as_its_iso_8601_text(value, text):
     assert plain(value) == text
+
+
+class ShortFields(tuple):
+    _fields = ("region",)
+
+    def _asdict(self) -> dict[str, str]:
+        return {"region": self[0]}
+
+
+def test_a_tuple_with_fewer_field_names_than_items_is_made_plain_whole_as_a_list():
+    assert plain(ShortFields(("eu", KEY))) == ["eu", KEY]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"\xff", bytearray(b"\xff"), memoryview(b"\xff")],
+    ids=["bytes", "bytearray", "memoryview"],
+)
+def test_bytes_are_made_plain_as_their_repr_not_a_list_of_numbers(data):
+    assert plain(data) == repr(data)
 
 
 @pytest.mark.parametrize(
