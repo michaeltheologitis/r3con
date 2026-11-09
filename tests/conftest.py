@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 import litellm
 import pytest
+import pytest_socket
 
 # Its import-time IPv6 probe opens a socket: here, before sockets are blocked.
 import urllib3  # noqa: F401
@@ -448,8 +449,8 @@ def _refused(provider: str) -> Callable[[object], NoReturn]:
     return refuse
 
 
-# Never undone: a worker thread a test leaves running can still ask between tests or at
-# exit, after pytest-socket has let go.
+# Never undone: a worker thread a test leaves running can still ask while a later test
+# allows sockets.
 for authenticator, method, provider in TOKEN_REQUESTS:
     setattr(authenticator, method, _refused(provider))
 
@@ -466,6 +467,35 @@ def _no_litellm_sign_in(
     yield
     # litellm turns the refusal into a failed lookup, which code under test may pass.
     assert not tokens_asked_for, sorted(set(tokens_asked_for))
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup() -> None:
+    """Lifts the last test's pytest-socket guard, as pytest-socket's setup expects."""
+    pytest_socket._remove_restrictions()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown() -> Iterator[None]:
+    """Keeps the test's pytest-socket guard up through its fixtures' teardown, until
+    the next test's setup lifts it."""
+    # pytest-socket's own teardown hook lifts the guard before pytest's tears them down.
+    lift_guard = pytest_socket._remove_restrictions
+    pytest_socket._remove_restrictions = lambda: None
+    try:
+        yield
+    finally:
+        pytest_socket._remove_restrictions = lift_guard
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Puts the run's guard back for good before pytest's own session-end work: a
+    thread a test left running may outlive the session."""
+    config = session.config
+    blocked = config.getoption("--disable-socket", default=False)
+    if blocked and not config.getoption("--force-enable-socket"):
+        pytest_socket.disable_socket(config.getoption("--allow-unix-socket"))
 
 
 @pytest.fixture(scope="session")
