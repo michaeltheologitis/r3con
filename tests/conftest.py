@@ -9,7 +9,7 @@ import logging
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import litellm
 import pytest
@@ -17,6 +17,10 @@ import pytest
 # Its import-time IPv6 probe opens a socket: here, before sockets are blocked.
 import urllib3  # noqa: F401
 import yaml
+from litellm.llms.chatgpt.authenticator import Authenticator as ChatGPTAuthenticator
+from litellm.llms.github_copilot.authenticator import (
+    Authenticator as CopilotAuthenticator,
+)
 
 from r3con.config import normalize_model_name
 from tests.fakes import (
@@ -44,6 +48,12 @@ ROUTER_CALLBACKS = (
     "failure_callback",
     "_async_success_callback",
     "_async_failure_callback",
+)
+TOKEN_DIR_VARIABLES = ("GITHUB_COPILOT_TOKEN_DIR", "CHATGPT_TOKEN_DIR")
+TOKEN_REQUESTS = (
+    (CopilotAuthenticator, "get_api_key", "Copilot"),
+    (CopilotAuthenticator, "get_access_token", "Copilot"),
+    (ChatGPTAuthenticator, "get_access_token", "ChatGPT"),
 )
 ANSWERING_CODE = (
     '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
@@ -398,6 +408,41 @@ def _isolated(
         monkeypatch.setattr(litellm, "completion", FakeLLM())
     if not request.node.get_closest_marker("live"):
         request.getfixturevalue("waits")
+
+
+tokens_asked_for: list[str] = []
+
+
+def _refused(provider: str) -> Callable[[object], NoReturn]:
+    """An authenticator method that records a request for a ``provider`` token in
+    ``tokens_asked_for``, then refuses it."""
+    message = f"a test asked litellm for a {provider} token, starting its sign-in"
+
+    def refuse(self: object) -> NoReturn:
+        tokens_asked_for.append(message)
+        raise RuntimeError(message)
+
+    return refuse
+
+
+# Never undone: a worker thread a test leaves running can still ask between tests or at
+# exit, after pytest-socket has let go.
+for authenticator, method, provider in TOKEN_REQUESTS:
+    setattr(authenticator, method, _refused(provider))
+
+
+@pytest.fixture(autouse=True)
+def _no_litellm_sign_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[None]:
+    """Gives litellm the test's own token folder, and fails a test that asks it for a
+    Copilot or ChatGPT token."""
+    for variable in TOKEN_DIR_VARIABLES:
+        monkeypatch.setenv(variable, str(tmp_path))
+    tokens_asked_for.clear()
+    yield
+    # litellm turns the refusal into a failed lookup, which code under test may pass.
+    assert not tokens_asked_for, sorted(set(tokens_asked_for))
 
 
 @pytest.fixture(scope="session")
