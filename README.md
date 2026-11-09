@@ -14,6 +14,12 @@ organizes the relevant information, then reasons over it to produce an answer.
 
 ## App
 
+First install uv:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 Run r3con in your browser:
 
 ```bash
