@@ -1,8 +1,9 @@
 (() => {
   'use strict';
 
-  /** @typedef {'doc' | 'r1' | 'r2' | 'schema' | 'parsed' | 'answer'} NodeKind */
-  /** @typedef {'r1' | 'r2' | 'parsed'} PerDocumentKind */
+  /** @typedef {`r${number}`} RoundKind Relevance round k's kind, `r<k>`, its nodes `r<k>-<d>`, one per document d. */
+  /** @typedef {'doc' | RoundKind | 'schema' | 'parsed' | 'answer'} NodeKind */
+  /** @typedef {RoundKind | 'parsed'} PerDocumentKind */
   /** @typedef {Exclude<NodeKind, 'doc'>} StageKind */
   /** @typedef {'flow' | 'cite' | 'self' | 'context'} EdgeKind */
   /** @typedef {{ x: number, y: number }} Point */
@@ -55,7 +56,7 @@
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
   /**
-   * An answer's provenance: the documents whose round-2 summaries and parses it cites, by index, and its trail.
+   * An answer's provenance: the documents whose final-round summaries and parses it cites, by index, and its trail.
    * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail }} Provenance
    */
   /**
@@ -78,21 +79,19 @@
    * @property {string | null} [id]
    */
   /**
-   * A recorded, simulated or live run; answers[0] is its own, the rest asks over it. A replay has the
-   * order its calls finished in; a live run, the server's id for it. Its document ids are r3con's, or made up for a
-   * simulated run.
+   * A recorded, simulated or live run; answers[0] is its own, the rest asks over it. A live run has the server's id
+   * for it. Its document ids are r3con's, or made up for a simulated run. Each relevance round's summaries are in
+   * `rounds`, round k's at k - 1, so it has as many rounds as that has entries.
    * @typedef {object} Run
    * @property {boolean} simulated
    * @property {LoadedFile[]} docs
-   * @property {Summary[]} r1
-   * @property {Summary[]} r2
+   * @property {Summary[][]} rounds
    * @property {Schema | null} schema
    * @property {Parse[]} parsed
    * @property {Answer[]} answers
    * @property {Record<string, Call> | null} calls
    * @property {Totals | null} totals
    * @property {string} [source]
-   * @property {Record<PerDocumentKind, number[]>} [order]
    * @property {string | null} [id]
    * @property {string[]} ids
    * @property {Map<string, number>} indexes each document id's index
@@ -107,8 +106,7 @@
    * @property {string} created
    * @property {{ name: string, text: string, size: number }[]} docs
    * @property {string[]} ids
-   * @property {RecordedSummary[]} r1
-   * @property {RecordedSummary[]} r2
+   * @property {RecordedSummary[][]} rounds
    * @property {Schema} schema
    * @property {Parse[]} parsed
    * @property {{ text: string, provenance: R3conProvenance }} answer
@@ -157,10 +155,10 @@
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
   /**
    * An event r3con app streams, with the fields this page reads (r3con.pipeline.run_pipeline lists
-   * them all). A round is 1 or 2, since the page refuses a run with more.
+   * them all).
    * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
-   *   | { type: 'relevance_started', round: 1 | 2, doc_id: string }
-   *   | { type: 'relevance_finished', round: 1 | 2, doc_id: string, part: number | null, summary: string, quotes: Quote[],
+   *   | { type: 'relevance_started', round: number, doc_id: string }
+   *   | { type: 'relevance_finished', round: number, doc_id: string, part: number | null, summary: string, quotes: Quote[],
    *       provenance: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
@@ -248,180 +246,182 @@
   "d9add2",
   "7109a9"
  ],
- "r1": [
-  {
-   "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies contractor code CT-118 as responsible for planned maintenance at the site, contributing Northgate’s incident count to the contractor comparison.",
-   "provenance": [],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 5.",
-     "start": 45,
-     "end": 88,
-     "snippet": "17f027"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
-     "start": 141,
-     "end": 218,
-     "snippet": "17f027"
-    }
-   ]
-  },
-  {
-   "summary": "A Q3 operations review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; this is one site's contribution to the overall contractor comparison.",
-   "provenance": [],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 9.",
-     "start": 45,
-     "end": 88,
-     "snippet": "964bc2"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
-     "start": 136,
-     "end": 213,
-     "snippet": "964bc2"
-    }
-   ]
-  },
-  {
-   "summary": "A Q3 operations review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118, contributing a total of 6 incidents for that contractor in this document.",
-   "provenance": [],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 6.",
-     "start": 45,
-     "end": 88,
-     "snippet": "9e02b3"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
-     "start": 164,
-     "end": 241,
-     "snippet": "9e02b3"
-    }
-   ]
-  },
-  {
-   "summary": "An approved contractor registry excerpt mapping contractor codes to names and maintenance scopes. It may help identify contractors in site paperwork: CT-118 is Halloran Services Ltd (mechanical and electrical maintenance), and CT-204 is Merrow Facilities Group (HVAC and compressed air). It provides no Q3 equipment-incident counts, so it cannot establish which contractor had the most incidents.",
-   "provenance": [],
-   "quotes": [
-    {
-     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
-     "start": 54,
-     "end": 127,
-     "snippet": "d9add2"
-    },
-    {
-     "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
-     "start": 128,
-     "end": 189,
-     "snippet": "d9add2"
-    },
-    {
-     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
-     "start": 248,
-     "end": 328,
-     "snippet": "d9add2"
-    }
-   ]
-  },
-  {
-   "summary": "",
-   "provenance": [],
-   "quotes": []
-  }
- ],
- "r2": [
-  {
-   "summary": "A Q3 operations memo for the Northgate site, reporting 5 equipment incidents under contractor code CT-118. The registry identifies CT-118 as Halloran Services Ltd; these incidents add to that contractor’s overall tally.",
-   "provenance": [
-    2,
-    3
-   ],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 5.",
-     "start": 45,
-     "end": 88,
-     "snippet": "17f027"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
-     "start": 141,
-     "end": 218,
-     "snippet": "17f027"
-    }
-   ]
-  },
-  {
-   "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204 for planned maintenance; the contractor registry maps CT-204 to Merrow Facilities Group. This adds 9 incidents to that contractor’s total.",
-   "provenance": [
-    3
-   ],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 9.",
-     "start": 45,
-     "end": 88,
-     "snippet": "964bc2"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
-     "start": 136,
-     "end": 213,
-     "snippet": "964bc2"
-    }
-   ]
-  },
-  {
-   "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents under maintenance contractor code CT-118, identified in the contractor registry as Halloran Services Ltd; this is Riverside’s contribution to the contractor comparison.",
-   "provenance": [
-    3
-   ],
-   "quotes": [
-    {
-     "text": "Equipment incidents logged this quarter: 6.",
-     "start": 45,
-     "end": 88,
-     "snippet": "9e02b3"
-    },
-    {
-     "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
-     "start": 164,
-     "end": 241,
-     "snippet": "9e02b3"
-    }
-   ]
-  },
-  {
-   "summary": "An approved contractor-registry extract that maps site paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd; the site reports show CT-118 sites logged 11 incidents in total, more than CT-204’s 9, so this document supplies the contractor name for the leading total.",
-   "provenance": [
-    0,
-    1,
-    2
-   ],
-   "quotes": [
-    {
-     "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
-     "start": 54,
-     "end": 127,
-     "snippet": "d9add2"
-    },
-    {
-     "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
-     "start": 248,
-     "end": 328,
-     "snippet": "d9add2"
-    }
-   ]
-  },
-  {
-   "summary": "",
-   "provenance": [],
-   "quotes": []
-  }
+ "rounds": [
+  [
+   {
+    "summary": "A Q3 operations-review memo for the Northgate site. It reports 5 equipment incidents and identifies contractor code CT-118 as responsible for planned maintenance at the site, contributing Northgate’s incident count to the contractor comparison.",
+    "provenance": [],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 5.",
+      "start": 45,
+      "end": 88,
+      "snippet": "17f027"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+      "start": 141,
+      "end": 218,
+      "snippet": "17f027"
+     }
+    ]
+   },
+   {
+    "summary": "A Q3 operations review memo for the Eastfield site. It reports 9 equipment incidents and identifies maintenance contractor code CT-204; this is one site's contribution to the overall contractor comparison.",
+    "provenance": [],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 9.",
+      "start": 45,
+      "end": 88,
+      "snippet": "964bc2"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+      "start": 136,
+      "end": 213,
+      "snippet": "964bc2"
+     }
+    ]
+   },
+   {
+    "summary": "A Q3 operations review memo for the Riverside site. It reports 6 equipment incidents and identifies maintenance contractor code CT-118, contributing a total of 6 incidents for that contractor in this document.",
+    "provenance": [],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 6.",
+      "start": 45,
+      "end": 88,
+      "snippet": "9e02b3"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+      "start": 164,
+      "end": 241,
+      "snippet": "9e02b3"
+     }
+    ]
+   },
+   {
+    "summary": "An approved contractor registry excerpt mapping contractor codes to names and maintenance scopes. It may help identify contractors in site paperwork: CT-118 is Halloran Services Ltd (mechanical and electrical maintenance), and CT-204 is Merrow Facilities Group (HVAC and compressed air). It provides no Q3 equipment-incident counts, so it cannot establish which contractor had the most incidents.",
+    "provenance": [],
+    "quotes": [
+     {
+      "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+      "start": 54,
+      "end": 127,
+      "snippet": "d9add2"
+     },
+     {
+      "text": "CT-204 .... Merrow Facilities Group — HVAC and compressed air",
+      "start": 128,
+      "end": 189,
+      "snippet": "d9add2"
+     },
+     {
+      "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+      "start": 248,
+      "end": 328,
+      "snippet": "d9add2"
+     }
+    ]
+   },
+   {
+    "summary": "",
+    "provenance": [],
+    "quotes": []
+   }
+  ],
+  [
+   {
+    "summary": "A Q3 operations memo for the Northgate site, reporting 5 equipment incidents under contractor code CT-118. The registry identifies CT-118 as Halloran Services Ltd; these incidents add to that contractor’s overall tally.",
+    "provenance": [
+     2,
+     3
+    ],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 5.",
+      "start": 45,
+      "end": 88,
+      "snippet": "17f027"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+      "start": 141,
+      "end": 218,
+      "snippet": "17f027"
+     }
+    ]
+   },
+   {
+    "summary": "A Q3 operations-review memo for the Eastfield site. It reports 9 equipment incidents and identifies contractor code CT-204 for planned maintenance; the contractor registry maps CT-204 to Merrow Facilities Group. This adds 9 incidents to that contractor’s total.",
+    "provenance": [
+     3
+    ],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 9.",
+      "start": 45,
+      "end": 88,
+      "snippet": "964bc2"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-204.",
+      "start": 136,
+      "end": 213,
+      "snippet": "964bc2"
+     }
+    ]
+   },
+   {
+    "summary": "A Q3 operations-review memo for the Riverside site. It reports 6 equipment incidents under maintenance contractor code CT-118, identified in the contractor registry as Halloran Services Ltd; this is Riverside’s contribution to the contractor comparison.",
+    "provenance": [
+     3
+    ],
+    "quotes": [
+     {
+      "text": "Equipment incidents logged this quarter: 6.",
+      "start": 45,
+      "end": 88,
+      "snippet": "9e02b3"
+     },
+     {
+      "text": "Planned maintenance at this site is carried out under contractor code CT-118.",
+      "start": 164,
+      "end": 241,
+      "snippet": "9e02b3"
+     }
+    ]
+   },
+   {
+    "summary": "An approved contractor-registry extract that maps site paperwork codes to contractor names. It identifies CT-118 as Halloran Services Ltd; the site reports show CT-118 sites logged 11 incidents in total, more than CT-204’s 9, so this document supplies the contractor name for the leading total.",
+    "provenance": [
+     0,
+     1,
+     2
+    ],
+    "quotes": [
+     {
+      "text": "CT-118 .... Halloran Services Ltd — mechanical and electrical maintenance",
+      "start": 54,
+      "end": 127,
+      "snippet": "d9add2"
+     },
+     {
+      "text": "Codes are used in site paperwork; the registry is the authority for the mapping.",
+      "start": 248,
+      "end": 328,
+      "snippet": "d9add2"
+     }
+    ]
+   },
+   {
+    "summary": "",
+    "provenance": [],
+    "quotes": []
+   }
+  ]
  ],
  "schema": {
   "code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count associated with a contractor.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period\")\n    incident_type: str | None = Field(description=\"The incident category as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(description=\"The contractor code associated with the incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping from a paperwork code to a contractor name.\"\"\"\n    contractor_code: str | None = Field(description=\"The code shown in the registry\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
@@ -1426,7 +1426,6 @@
   const SPIN_FRAME_MS = 140;
 
   const GRID = { colGap: 230, rowGap: 112 };
-  const COLUMN = { doc: 0, r1: 1, r2: 2, schema: 3, parsed: 4, answer: 5 };
   /** @param {string} name */
   const cssPx = (name) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
   const ICON_PX = cssPx('--icon-size');
@@ -1439,10 +1438,10 @@
   const EDGE_GAP = 6;
   const MIN_CURVE = 40;
   const LABEL_LINE_PX = 21;
-  const TOP_ROW_HOPS = COLUMN.parsed - COLUMN.doc - 1;
-  const LANE_GAP = (GRID.rowGap - 2 * ICON_HALF - 2 * LABEL_LINE_PX) / TOP_ROW_HOPS;
+  // Above a row and below the labels of the row over it: where its bridges run, a lane per node they hop.
+  const LANE_ROOM = GRID.rowGap - 2 * ICON_HALF - 2 * LABEL_LINE_PX;
   const BRIDGE_RAMP = 40;
-  const BRIDGE_CLEARANCE = ICON_HALF + TOP_ROW_HOPS * LANE_GAP;
+  const BRIDGE_CLEARANCE = ICON_HALF + LANE_ROOM;
   const LABEL_MAX = 24;
   const NODE_PAD_PX = 12;
   const ZOOM = { min: 0.05, max: 2.5, fitMax: 1.15 };
@@ -1527,16 +1526,10 @@
   const ARRANGE_MS = 420;
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
-  const KIND_SUFFIX = { r1: 'round 1', r2: 'round 2', parsed: 'parsed' };
-  const ARIA_KIND = { doc: 'document', r1: 'round 1 relevance snippet', r2: 'round 2 relevance snippet', parsed: 'parsed structure', schema: 'proposed schema' };
-  // The node kinds made once per document, in its row.
-  /** @type {Set<NodeKind>} */
-  const PER_DOCUMENT = new Set(['r1', 'r2', 'parsed']);
-  /** @type {('r1' | 'r2')[]} */
-  const SUMMARY_KINDS = ['r1', 'r2'];
-  const STAGE_PHASE = { r1: 'round 1', r2: 'round 2', schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
-  // The relevance rounds the panel has columns for, as r3con's default config runs them.
-  const ROUNDS = 2;
+  const ARIA_KIND = { doc: 'document', parsed: 'parsed structure', schema: 'proposed schema' };
+  const STAGE_PHASE = { schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
+  // The relevance rounds r3con's default config runs: a simulated run's, and a live run's until r3con app says.
+  const DEFAULT_ROUNDS = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -1549,8 +1542,8 @@
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
-  // The r3con stage, as its events name it, that each kind of node is drawn in; a replay reads first.
-  const STAGE_OF = { r1: 'relevance', r2: 'relevance', schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
+  // The r3con stage, as its events name it, that each kind of node but a round's is drawn in; a replay reads first.
+  const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
@@ -1850,6 +1843,33 @@
     return /** @type {[NodeKind, number]} */ ([kind, doc === undefined ? null : Number(doc)]);
   }
 
+  /** @param {number} round @returns {RoundKind} */
+  const roundKind = (round) => `r${round}`;
+  /** @param {NodeKind} kind @returns {kind is RoundKind} */
+  const isRound = (kind) => /^r\d+$/.test(kind);
+  /** @param {RoundKind} kind */
+  const roundOf = (kind) => Number(kind.slice(1));
+  /** @param {RoundKind} kind */
+  const roundName = (kind) => `round ${roundOf(kind)}`;
+  /** @param {number} rounds @returns {Summary[][]} */
+  const emptyRounds = (rounds) => range(rounds).map(() => []);
+  /** @param {number} rounds */
+  const roundKinds = (rounds) => range(rounds).map((k) => roundKind(k + 1));
+  // The final round's summaries are what the structure, the parses and the answers are shown.
+  /** @param {Pick<Run, 'rounds'>} run */
+  const finalRound = (run) => roundKind(run.rounds.length);
+  /** @param {Pick<Run, 'rounds'>} run @param {RoundKind} kind */
+  const summariesIn = (run, kind) => run.rounds[roundOf(kind) - 1];
+  /** @param {NodeKind} kind @returns {kind is PerDocumentKind} */
+  const isPerDocument = (kind) => kind === 'parsed' || isRound(kind);
+  // A kind of node's column in a panel of `rounds` rounds: the documents', each round's, the structure's, the
+  // parses' and the answers'.
+  /** @param {NodeKind} kind @param {number} rounds */
+  const column = (kind, rounds) => (isRound(kind) ? roundOf(kind) : { doc: 0, schema: rounds + 1, parsed: rounds + 2, answer: rounds + 3 }[kind]);
+  // The rounds a tab's panel has columns for: its run's, or r3con's default before it has one.
+  /** @param {Tab} tab */
+  const roundsOf = (tab) => tab.run?.rounds.length ?? DEFAULT_ROUNDS;
+
   /** @param {Run} run @param {number} i */
   function docLabel(run, i) {
     return stripExt(run.docs[i].name);
@@ -1862,7 +1882,7 @@
     if (kind === 'schema') return 'structure';
     const { run } = runTab(tab);
     if (kind === 'answer') return answerLabel(answerAt(run, id));
-    return `${docLabel(run, d)} · ${KIND_SUFFIX[kind]}`;
+    return `${docLabel(run, d)} · ${kind === 'parsed' ? 'parsed' : roundName(kind)}`;
   }
 
   /** @param {string} code */
@@ -2099,9 +2119,6 @@
 
   /** @returns {Run} */
   function sampleRun() {
-    /** @param {PerDocumentKind} prefix */
-    const finishOrder = (prefix) =>
-      range(SAMPLE.docs.length).sort((a, b) => SAMPLE.calls[`${prefix}-${a}`].step - SAMPLE.calls[`${prefix}-${b}`].step);
     /** @param {RecordedSummary[]} summaries @param {number} round @returns {Summary[]} */
     const inUnits = (summaries, round) =>
       summaries.map((s, i) => ({
@@ -2113,14 +2130,12 @@
       simulated: false,
       docs: SAMPLE_FILES,
       ...withIds(SAMPLE.ids),
-      r1: inUnits(SAMPLE.r1, 1),
-      r2: inUnits(SAMPLE.r2, 2),
+      rounds: SAMPLE.rounds.map((summaries, k) => inUnits(summaries, k + 1)),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       source: 'recorded run',
-      order: { r1: finishOrder('r1'), r2: finishOrder('r2'), parsed: finishOrder('parsed') },
     };
     const { text, provenance } = SAMPLE.answer;
     return { ...run, answers: [{ question: SAMPLE.question, model: SAMPLE.model, text, provenance: provenanceOf(run, provenance) }] };
@@ -2134,18 +2149,21 @@
     return cites;
   }
 
-  // As r3con does, it cites only non-empty round-2 summaries and parses with records; its trail goes one hop.
-  /** @param {Pick<Run, 'docs' | 'ids' | 'indexes' | 'r2' | 'parsed'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
+  // As r3con does, it cites only non-empty final-round summaries and parses with records; its trail goes one hop.
+  /** @param {Pick<Run, 'docs' | 'ids' | 'indexes' | 'rounds' | 'parsed'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
   function madeUpAnswer(run, question, shift) {
     /** @param {number} stride @param {(i: number) => boolean} citable */
     const every = (stride, citable) =>
       range(run.docs.length).filter((i) => citable(i) && (i + shift) % stride === 0).slice(0, MAX_SIMULATED_CITES).map((d) => run.ids[d]);
-    const summary_ids = every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(run.r2[i].summary));
+    const final = summariesIn(run, finalRound(run));
+    const summary_ids = every(SIMULATED_SUMMARY_STRIDE, (i) => Boolean(final[i].summary));
     const parse_ids = every(SIMULATED_PARSE_STRIDE, (i) => hasRecords(run.parsed[i]));
-    const cited = [...summary_ids.map((id) => summaryNode(ROUNDS, id)), ...parse_ids.map(parseNode)];
+    /** @param {string} id */
+    const summary = (id) => summaryNode(run.rounds.length, id);
+    const cited = [...summary_ids.map(summary), ...parse_ids.map(parseNode)];
     const edges = [
       ...cited.map((to) => /** @type {TrailEdge} */ ([TRAIL_ANSWER, to, 'cites'])),
-      ...summary_ids.map((id) => /** @type {TrailEdge} */ ([summaryNode(ROUNDS, id), documentNode(id), 'summarizes'])),
+      ...summary_ids.map((id) => /** @type {TrailEdge} */ ([summary(id), documentNode(id), 'summarizes'])),
     ];
     const trail = { rule: ONE_HOP, nodes: [TRAIL_ANSWER, ...cited, ...summary_ids.map(documentNode)], edges };
     return {
@@ -2157,36 +2175,36 @@
   /** @param {LoadedFile[]} files @param {string} question @param {string} model @returns {Run} */
   function simulatedRun(files, question, model) {
     const n = files.length;
-    const order = range(n);
     /** @param {LoadedFile} f */
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
     const parses = files.map((f) => ({ excerpts: f.text.trim() ? [{ source: f.name, excerpt: excerpt(f.text, EXCERPT_CHARS) }] : [] }));
-    // As in r3con: only a non-empty summary or a parse with records cites, and only non-empty summaries.
+    // As in r3con: only a non-empty summary past round 1 or a parse with records cites, and only non-empty summaries.
     /** @param {number} j */
     const hasSummary = (j) => Boolean(summary(files[j]));
     /** @param {number} i @param {boolean} hasOutput */
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
+    /** @param {number} k @returns {Summary[]} */
+    const round = (k) => files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, k > 0 && hasSummary(i)), quotes: [] }));
     /** @type {Omit<Run, 'answers'>} */
     const run = {
       simulated: true,
       docs: files,
-      ...withIds(order.map(String)),
-      r1: files.map((f) => ({ summary: summary(f), provenance: /** @type {number[]} */ ([]), quotes: /** @type {RunQuote[]} */ ([]) })),
-      r2: files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, hasSummary(i)), quotes: /** @type {RunQuote[]} */ ([]) })),
+      ...withIds(range(n).map(String)),
+      rounds: range(DEFAULT_ROUNDS).map(round),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
       calls: null,
       totals: null,
-      order: { r1: order, r2: order, parsed: order },
     };
     return { ...run, answers: [{ question, model, ...madeUpAnswer(run, question, 0) }] };
   }
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
+  // Its rounds are r3con's default until its run_started event says how many it has.
   /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @returns {Run} */
   function liveRun(question, model, endpoint, docs) {
-    /** @type {Pick<Run, 'r1' | 'r2' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
-    const empty = { r1: [], r2: [], schema: null, parsed: [], calls: null, totals: null };
+    /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
+    const empty = { rounds: emptyRounds(DEFAULT_ROUNDS), schema: null, parsed: [], calls: null, totals: null };
     return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
@@ -2225,23 +2243,26 @@
   /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
+  // An answer and a parse cite final-round summaries, and a summary of round k, those of round k - 1.
   /** @param {Run} run @param {string} id */
   function cites(run, id) {
     const [kind, i] = splitId(id);
+    const final = finalRound(run);
     if (kind === 'answer') {
       // Only an answer that has landed is asked what it cites.
       const { summary_ids, parse_ids } = /** @type {Provenance} */ (answerAt(run, id).provenance);
-      return [...summary_ids.map((d) => `r2-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
+      return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
-    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `r2-${d}`);
-    if (kind === 'r2') return run.r2[i].provenance.map((d) => `r1-${d}`);
-    return [];
+    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${final}-${d}`);
+    if (!isRound(kind) || roundOf(kind) === 1) return [];
+    const previous = roundKind(roundOf(kind) - 1);
+    return summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`);
   }
 
   /** @param {Run} run @param {string} id */
   function ownDocument(run, id) {
     const [kind, i] = splitId(id);
-    return PER_DOCUMENT.has(kind) ? docId(run.docs[i]) : null;
+    return isPerDocument(kind) ? docId(run.docs[i]) : null;
   }
 
   // Trail node `node` as the page names it, or null where the page has no node for it.
@@ -2253,8 +2274,8 @@
     if (d === undefined || !run.docs[d]) return null;
     if (kind === 'parse') return run.parsed[d] ? `parsed-${d}` : null;
     if (kind === 'document') return docId(run.docs[d]);
-    const summaries = SUMMARY_KINDS[Number(rest[0]) - 1];
-    return summaries && run[summaries][d] ? `${summaries}-${d}` : null;
+    const round = Number(rest[0]);
+    return run.rounds[round - 1]?.[d] ? `${roundKind(round)}-${d}` : null;
   }
 
   // r3con walks the trail from the answer, so a summary's first edge on it comes from the node nearest the answer.
@@ -2284,8 +2305,8 @@
   // What `quoting` quotes of document d, by part and by sentence; quotes that overlap join, quotes that only meet don't.
   /** @param {Run} run @param {Set<string>} quoting the trail nodes of the summaries whose quotes count @param {number} d @returns {Quoted} */
   function quotedIn(run, quoting, d) {
-    const quotes = SUMMARY_KINDS.flatMap((kind) =>
-      (run[kind][d]?.quotes ?? []).filter((q) => quoting.has(q.summary)).filter(located).map((q) => ({ start: q.start, end: q.end, by: `${kind}-${d}` })),
+    const quotes = run.rounds.flatMap((summaries, k) =>
+      (summaries[d]?.quotes ?? []).filter((q) => quoting.has(q.summary)).filter(located).map((q) => ({ start: q.start, end: q.end, by: `${roundKind(k + 1)}-${d}` })),
     );
     const cuts = cutsOf(quotes);
     const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
@@ -2363,23 +2384,26 @@
 
   const charPx = measureCharWidth();
 
-  /** @param {LoadedFile[]} files @param {Origin} origin @returns {Map<string, Point>} */
-  function gridLayout(files, origin) {
+  /** @param {LoadedFile[]} files @param {Origin} origin @param {number} rounds @returns {Map<string, Point>} */
+  function gridLayout(files, origin, rounds) {
     const layout = new Map();
     const origins = files.map((f, i) => origin(i, f));
     if (!origins.length) return layout;
+    /** @type {PerDocumentKind[]} */
+    const perDocument = [...roundKinds(rounds), 'parsed'];
     files.forEach((f, i) => {
       layout.set(docId(f), origins[i]);
-      for (const kind of PER_DOCUMENT) layout.set(`${kind}-${i}`, { x: origins[i].x + COLUMN[kind] * GRID.colGap, y: origins[i].y });
+      for (const kind of perDocument) layout.set(`${kind}-${i}`, { x: origins[i].x + column(kind, rounds) * GRID.colGap, y: origins[i].y });
     });
     const ys = origins.map((o) => o.y);
-    layout.set('schema', { x: origins[0].x + COLUMN.schema * GRID.colGap, y: origins[0].y });
-    layout.set(RUN_ANSWER, { x: Math.max(...origins.map((o) => o.x)) + COLUMN.answer * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
+    layout.set('schema', { x: origins[0].x + column('schema', rounds) * GRID.colGap, y: origins[0].y });
+    layout.set(RUN_ANSWER, { x: Math.max(...origins.map((o) => o.x)) + column('answer', rounds) * GRID.colGap, y: (Math.min(...ys) + Math.max(...ys)) / 2 });
     return layout;
   }
 
+  // Documents stand in the first column.
   /** @param {number} i */
-  const tidyOrigin = (i) => ({ x: COLUMN.doc * GRID.colGap, y: i * GRID.rowGap });
+  const tidyOrigin = (i) => ({ x: 0, y: i * GRID.rowGap });
 
   /** @param {Tab} tab @returns {Origin} */
   function nodeOrigin(tab) {
@@ -2410,7 +2434,7 @@
 
   /** @param {Tab} tab @param {Origin} origin */
   function plan(tab, origin) {
-    const layout = gridLayout(tab.files, origin);
+    const layout = gridLayout(tab.files, origin, roundsOf(tab));
     const first = layout.get(RUN_ANSWER);
     if (!tab.run || !first) return layout;
     tab.run.answers.forEach((_, k) => layout.set(answerId(k), answerSpot(first, k)));
@@ -2470,7 +2494,7 @@
   /** @param {NodeKind} kind @param {boolean} settled */
   function iconFor(kind, settled) {
     if (kind === 'doc') return ICONS.document;
-    if (kind === 'r1' || kind === 'r2') return ICONS.snippet;
+    if (isRound(kind)) return ICONS.snippet;
     if (kind === 'answer') return `<span class="glyph" aria-hidden="true">${MARK}</span>`;
     return ICONS.tree(kind === 'parsed' && settled);
   }
@@ -2479,7 +2503,7 @@
   function nodeLabels(tab, id, kind, file) {
     if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
     const label = fileLabel(/** @type {LoadedFile} */ (file));
-    return kind === 'doc' || kind === 'parsed' ? [label] : [label, KIND_SUFFIX[kind]];
+    return kind === 'doc' || kind === 'parsed' ? [label] : [label, roundName(kind)];
   }
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
@@ -2489,8 +2513,9 @@
       const { question, model } = answerAt(runTab(tab).run, node.id);
       return `answer to ${question} · ${model}${stopped}`;
     }
-    if (!node.file) return `${nodeName(tab, node.id)}, ${ARIA_KIND[node.kind]}${stopped}`;
-    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${ARIA_KIND[node.kind]}${stopped}`;
+    const what = isRound(node.kind) ? `${roundName(node.kind)} relevance snippet` : ARIA_KIND[node.kind];
+    if (!node.file) return `${nodeName(tab, node.id)}, ${what}${stopped}`;
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}`;
     return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${plural(sentences, 'highlighted sentence')}` : ''}`;
   }
 
@@ -2516,7 +2541,7 @@
   /** @param {RunTab} tab @param {string} id */
   function addNode(tab, id) {
     const [kind, d] = splitId(id);
-    return createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: PER_DOCUMENT.has(kind) ? tab.run.docs[d] : null });
+    return createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: isPerDocument(kind) ? tab.run.docs[d] : null });
   }
 
   /** @param {Tab} tab @param {LoadedFile} file @param {Point} [pos] */
@@ -2707,7 +2732,9 @@
       const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
       return `M${sx} ${pa.y} C${sx + c} ${pa.y} ${tx - c} ${pb.y} ${tx} ${pb.y}`;
     }
-    const top = Math.min(pa.y, pb.y) - ICON_HALF - LANE_GAP * hops;
+    // A lane for each node the longest bridge hops: a document's dotted line to its parse, over each round and the structure.
+    const lane = LANE_ROOM / (roundsOf(tab) + 1);
+    const top = Math.min(pa.y, pb.y) - ICON_HALF - lane * hops;
     const ramp = Math.min(BRIDGE_RAMP / hops, (tx - sx) / 4);
     return `M${sx} ${pa.y} Q${sx + ramp} ${top} ${sx + 2 * ramp} ${top} H${tx - 2 * ramp} Q${tx - ramp} ${top} ${tx} ${pb.y}`;
   }
@@ -2962,9 +2989,9 @@
   }
 
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
-  /** @param {RunTab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  /** @param {RunTab} tab @param {RoundKind} kind @param {number} d */
   function quotesFold(tab, kind, d) {
-    const { quotes } = tab.run[kind][d];
+    const { quotes } = summariesIn(tab.run, kind)[d];
     if (!quotes.length) return null;
     /** @param {RunQuote} quote */
     const item = (quote) => {
@@ -2993,23 +3020,25 @@
   function docBody(file, at) {
     const { run, nodes } = state.shown;
     const index = run ? run.docs.indexOf(file) : -1;
+    const snippet = `${roundKind(1)}-${index}`;
     return [
       markedFile(state.shown, file, at),
-      index >= 0 && nodes.has(`r1-${index}`) ? row('relevance snippet', refs([`r1-${index}`])) : null,
+      index >= 0 && nodes.has(snippet) ? row('relevance snippet', refs([snippet])) : null,
       openFileButton(file, 'open in files ›'),
     ];
   }
 
-  /** @param {RunTab} tab @param {'r1' | 'r2'} kind @param {number} d */
+  // Round 1 reads each document alone, so only a later round's snippet has provenance.
+  /** @param {RunTab} tab @param {RoundKind} kind @param {number} d */
   function snippetBody(tab, kind, d) {
     const { run } = tab;
     const id = `${kind}-${d}`;
     return [
-      textBlock(run[kind][d].summary),
+      textBlock(summariesIn(run, kind)[d].summary),
       trailLine(tab, id),
       row('read', refs([docId(run.docs[d])])),
       quotesFold(tab, kind, d),
-      kind === 'r2' ? provenanceFold(run, id) : null,
+      roundOf(kind) > 1 ? provenanceFold(run, id) : null,
       callMeta(run, id),
       openFileButton(run.docs[d], 'open document ›'),
     ];
@@ -3024,7 +3053,7 @@
     const { run } = tab;
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
-    if (kind === 'r1' || kind === 'r2') return snippetBody(tab, kind, d);
+    if (isRound(kind)) return snippetBody(tab, kind, d);
     if (kind === 'schema') {
       const schema = /** @type {Schema} */ (run.schema);
       return [
@@ -3443,10 +3472,12 @@
     const [kind, i] = splitId(id);
     /** @param {string} step @param {(j: number) => unknown} [keep] */
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
-    if (kind === 'r2') return every('r1', (j) => j !== i && run.r1[j].summary);
-    if (kind === 'parsed' || kind === 'schema') return every('r2');
-    if (kind === 'answer') return [...every('r2'), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
-    return [];
+    const final = finalRound(run);
+    if (kind === 'parsed' || kind === 'schema') return every(final);
+    if (kind === 'answer') return [...every(final), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
+    if (!isRound(kind) || roundOf(kind) === 1) return [];
+    const previous = roundKind(roundOf(kind) - 1);
+    return every(previous, (j) => j !== i && summariesIn(run, previous)[j].summary);
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
@@ -3472,22 +3503,21 @@
 
   /** @param {RunTab} tab @param {StageKind} kind */
   function showProgress(tab, kind) {
+    const phase = isRound(kind) ? roundName(kind) : STAGE_PHASE[kind];
     const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
-    tabStatus(tab, `running · ${STAGE_PHASE[kind]}${progress}`);
+    tabStatus(tab, `running · ${phase}${progress}`);
+  }
+
+  /** @param {Run} run @param {StageKind} kind */
+  function stepLine(run, kind) {
+    if (isRound(kind)) return `${roundName(kind)} · extracting relevance`;
+    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : STAGE_PHASE[kind];
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
-    /** @type {Record<StageKind, string>} */
-    const steps = {
-      r1: 'round 1 · extracting relevance',
-      r2: 'round 2 · extracting relevance',
-      schema: STAGE_PHASE.schema,
-      parsed: `parsing ${plural(tab.run.docs.length, 'document')}`,
-      answer: STAGE_PHASE.answer,
-    };
-    narr.log('main', steps[kind]);
-    narr.stage = STAGE_OF[kind];
+    narr.log('main', stepLine(tab.run, kind));
+    narr.stage = isRound(kind) ? 'relevance' : STAGE_OF[kind];
     showProgress(tab, kind);
   }
 
@@ -3495,7 +3525,7 @@
   function appear(tab, id) {
     const [kind, i] = splitId(id);
     addNode(tab, id);
-    if (kind === 'r1') return addEdge(tab, docId(tab.run.docs[i]), id, 'flow', 'draw');
+    if (kind === roundKind(1)) return addEdge(tab, docId(tab.run.docs[i]), id, 'flow', 'draw');
     if (kind === 'parsed') addEdge(tab, 'schema', id, 'flow', 'draw');
     showInputs(tab, id);
   }
@@ -3503,14 +3533,14 @@
   /** @param {Run} run @param {string} id */
   function isVoid(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'r1' || kind === 'r2') return !run[kind][i].summary;
+    if (isRound(kind)) return !summariesIn(run, kind)[i].summary;
     return kind === 'parsed' && !hasRecords(run.parsed[i]);
   }
 
   /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'r1' || kind === 'r2') return `${docLabel(run, i)} — ${run[kind][i].summary ? 'snippet ready' : 'nothing relevant'}`;
+    if (isRound(kind)) return `${docLabel(run, i)} — ${summariesIn(run, kind)[i].summary ? 'snippet ready' : 'nothing relevant'}`;
     if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'structure ready';
     return `${docLabel(run, i)} — ${hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed'}`;
   }
@@ -3590,8 +3620,12 @@
     /** @param {number} t @param {() => void} fn */
     const at = (t, fn) => steps.push({ at: t, run: fn });
     const n = run.docs.length;
+    const { calls } = run;
+    // A recorded run's nodes settle in the order its calls finished; a simulated run's, in document order.
+    /** @param {PerDocumentKind} kind */
+    const finishOrder = (kind) => (calls ? range(n).sort((a, b) => calls[`${kind}-${a}`].step - calls[`${kind}-${b}`].step) : range(n));
     /** @param {number} t0 @param {PerDocumentKind} kind */
-    const perDocument = (t0, kind) => stage(at, t0, /** @type {Record<PerDocumentKind, number[]>} */ (run.order)[kind], n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
+    const perDocument = (t0, kind) => stage(at, t0, finishOrder(kind), n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
     let t = TIMING.start;
 
     at(t, () => {
@@ -3613,7 +3647,7 @@
       narr.stage = null;
     });
 
-    for (const kind of /** @type {const} */ (['r1', 'r2'])) {
+    for (const kind of roundKinds(run.rounds.length)) {
       t += TIMING.phaseGap;
       at(t, () => beginStage(tab, narr, kind));
       t = perDocument(t, kind);
@@ -3669,13 +3703,13 @@
     const doc = (id) => /** @type {number} */ (docIndex(run, id));
     switch (event.type) {
       case 'run_started':
-        if (event.rounds !== ROUNDS) throw new Error(`this page draws ${ROUNDS} relevance rounds, and r3con app is set to ${event.rounds}`);
         Object.assign(run, withIds(event.document_ids));
+        if (event.rounds !== run.rounds.length) makeRoomForRounds(tab, event.rounds);
         narr.log('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
-        if (!hasNodes(tab, `r${event.round}`)) beginStage(tab, narr, `r${event.round}`);
-        appear(tab, `r${event.round}-${doc(event.doc_id)}`);
+        if (!hasNodes(tab, roundKind(event.round))) beginStage(tab, narr, roundKind(event.round));
+        appear(tab, `${roundKind(event.round)}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
         addSnippet(tab, narr, doc(event.doc_id), event);
@@ -3720,15 +3754,23 @@
   /** @param {RunTab} tab @param {Narrator} narr @param {number} i @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
   function addSnippet(tab, narr, i, { round, doc_id, part, summary, provenance, quotes }) {
     const { run } = tab;
-    const kind = /** @type {'r1' | 'r2'} */ (`r${round}`);
+    const summaries = run.rounds[round - 1];
     const node = summaryNode(round, part == null ? doc_id : `${doc_id}.${part}`);
-    const earlier = run[kind][i] ?? { summary: '', provenance: [], quotes: [] };
-    run[kind][i] = {
+    const earlier = summaries[i] ?? { summary: '', provenance: [], quotes: [] };
+    summaries[i] = {
       summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
       provenance: [...new Set([...earlier.provenance, ...docIndices(run, provenance)])],
       quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes).map((q) => ({ ...q, summary: node }))],
     };
-    settle(tab, narr, `${kind}-${i}`);
+    settle(tab, narr, `${roundKind(round)}-${i}`);
+  }
+
+  // A live run is planned for r3con's default rounds until its first event says how many it has, before any is drawn.
+  /** @param {RunTab} tab @param {number} rounds */
+  function makeRoomForRounds(tab, rounds) {
+    tab.run.rounds = emptyRounds(rounds);
+    tab.layout = plan(tab, nodeOrigin(tab));
+    if (tab === state.shown) fitShown(true);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
