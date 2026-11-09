@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from r3con import settings
 from r3con.config import PROMPT_STAGES, RunConfig
-from r3con.masking import register_key
+from r3con.masking import masked, register_key
 from r3con.pipeline import run_pipeline
 from r3con.runs import (
     StageRun,
@@ -21,6 +21,7 @@ from r3con.runs import (
 )
 from r3con.runtime.llm import register_credentials
 from r3con.settings import settings_snapshot
+from tests.fakes import DIGITS_KEY, GatewayKey
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -36,45 +37,25 @@ THOUGHT = "Count the memos first."
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 PEM = f"-----BEGIN PRIVATE KEY-----\n{KEY}\n-----END PRIVATE KEY-----\n"
 SERVER = "https://llm.example.com/v1"
-PLAIN_PARAMS = {
-    "prompt_cache_key": "summaries-cache-2026",
-    "api_base": f"{SERVER}?api-version=2024-10-21",
-}
-NUMBER_KEY = 123456789012345678
-# A request's data, whose names look like a credential's: written as it is.
-REQUEST_DATA = {
-    "metadata": {"author": "Halloran memo desk"},
-    "tools": [
-        {
-            "type": "function",
-            "function": {
-                "name": "sign_in",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "auth_token": {
-                            "type": "string",
-                            "description": "The session's sign-in token",
-                        }
-                    },
-                },
-            },
-        }
-    ],
-}
-GUIDED_JSON = {
+# A JSON Schema whose fields' names look like a credential's.
+SCHEMA = {
     "type": "object",
     "properties": {
+        "author": {"type": "string", "description": "The memo's signed author"},
+        "auth_token": {"type": "string", "description": "The session's sign-in token"},
         "token_count": {
             "type": "integer",
             "description": "How many tokens the memo spends",
-        }
+        },
     },
 }
-
-
-class GatewayKey(BaseModel):
-    api_key: str
+TOOLS = [{"type": "function", "function": {"name": "sign_in", "parameters": SCHEMA}}]
+MCP_TOOL = {
+    "type": "mcp",
+    "server_label": "memos",
+    "server_url": "https://mcp.example.com/sse",
+    "headers": {"Authorization": f"Bearer {KEY}"},
+}
 
 
 # Each run's params, and its manifest's record of them.
@@ -108,19 +89,64 @@ RECORDED_PARAMS = {
         {"api_base": f"{SERVER}?api-version=2024-10-21&code={KEY}"},
         {"api_base": f"{SERVER}?api-version=2024-10-21&code=REDACTED"},
     ),
-    "an-integer-key": ({"api_key": NUMBER_KEY}, {"api_key": "REDACTED"}),
+    "an-integer-key": ({"api_key": DIGITS_KEY}, {"api_key": "REDACTED"}),
     "in-a-pydantic-model": (
         {"extra_body": GatewayKey(api_key=KEY)},
         {"extra_body": {"api_key": "REDACTED"}},
     ),
-    "request-data-beside-a-key": (
-        {**REQUEST_DATA, "extra_body": {"api_key": KEY, "guided_json": GUIDED_JSON}},
-        {
-            **REQUEST_DATA,
-            "extra_body": {"api_key": "REDACTED", "guided_json": GUIDED_JSON},
-        },
+    "schemas-beside-a-key": (
+        {"tools": TOOLS, "extra_body": {"api_key": KEY, "guided_json": SCHEMA}},
+        {"tools": TOOLS, "extra_body": {"api_key": "REDACTED", "guided_json": SCHEMA}},
     ),
-    "no-credential": (PLAIN_PARAMS, PLAIN_PARAMS),
+}
+# Credentials litellm reads from within what a request sends, and the run's record.
+WITHIN_REQUEST_DATA = {
+    "callback-key-in-metadata": (
+        {"metadata": {"langfuse_secret_key": KEY}},
+        {"metadata": {"langfuse_secret_key": "REDACTED"}},
+    ),
+    "callback-key-in-litellm-metadata": (
+        {"litellm_metadata": {"langsmith_api_key": KEY}},
+        {"litellm_metadata": {"langsmith_api_key": "REDACTED"}},
+    ),
+    "key-in-extra-body-metadata": (
+        {"extra_body": {"metadata": {"api_key": KEY}}},
+        {"extra_body": {"metadata": {"api_key": "REDACTED"}}},
+    ),
+    "mcp-tool-header": (
+        {"tools": [MCP_TOOL]},
+        {"tools": [{**MCP_TOOL, "headers": {"Authorization": "REDACTED"}}]},
+    ),
+    "header-of-a-tool-in-extra-body": (
+        {"extra_body": {"tools": [{"headers": {"X-Key": KEY}}]}},
+        {"extra_body": {"tools": [{"headers": {"X-Key": "REDACTED"}}]}},
+    ),
+}
+# Params with no credential, though names in them look like one's.
+CREDENTIAL_FREE_PARAMS = {
+    "metadata-author": {"metadata": {"author": "Halloran memo desk"}},
+    "tool-schema": {"tools": TOOLS},
+    "structured-outputs-schema": {
+        "extra_body": {"structured_outputs": {"json": SCHEMA}}
+    },
+    "response-format-schema": {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "memo", "schema": SCHEMA},
+        }
+    },
+    "openrouter-headers": {
+        "extra_headers": {
+            "HTTP-Referer": "https://memos.example.com",
+            "X-Title": "Halloran memo desk",
+        }
+    },
+    "anthropic-beta": {"extra_headers": {"anthropic-beta": "context-1m-2025-08-07"}},
+    "vertex-credentials-path": {
+        "vertex_credentials": "/home/me/.config/gcloud/memo-reader.json"
+    },
+    "api-version-in-any-case": {"api_base": f"{SERVER}?API-Version=2024-10-21"},
+    "prompt-cache-key": {"prompt_cache_key": "summaries-cache-2026"},
 }
 
 
@@ -476,6 +502,18 @@ def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
     }
 
 
+def refused_with(llm, logger, params, error: Exception) -> None:
+    """Run with ``params`` until relevance's first request raises ``error``."""
+    with pytest.raises(type(error)):
+        run_pipeline(
+            task="q",
+            documents=["d"],
+            config=config(params=params),
+            task_logger=logger,
+            completion=llm.answers(relevance=error),
+        )
+
+
 @pytest.mark.parametrize(
     ("params", "recorded"), RECORDED_PARAMS.values(), ids=RECORDED_PARAMS
 )
@@ -483,16 +521,38 @@ def test_a_run_records_each_credential_among_its_params_masked(
     llm, logger, params, recorded
 ):
     refused = litellm.AuthenticationError("refused", llm_provider="openai", model=MODEL)
-    with pytest.raises(litellm.AuthenticationError):
-        run_pipeline(
-            task="q",
-            documents=["d"],
-            config=config(params=params),
-            task_logger=logger,
-            completion=llm.answers(relevance=refused),
-        )
+    refused_with(llm, logger, params, refused)
     manifest = json.loads((logger.dir / "manifest.json").read_text())
     assert manifest["config"]["params"] == recorded
+
+
+@pytest.mark.parametrize(
+    ("params", "recorded"), WITHIN_REQUEST_DATA.values(), ids=WITHIN_REQUEST_DATA
+)
+def test_a_credential_within_the_requests_data_is_registered_and_recorded_masked(
+    llm, logger, params, recorded
+):
+    echoed = litellm.AuthenticationError(
+        f"refused {KEY}", llm_provider="openai", model=MODEL
+    )
+    refused_with(llm, logger, params, echoed)
+    written = [path.read_text() for path in logger.dir.rglob("*") if path.is_file()]
+    assert not [text for text in written if KEY in text]
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == recorded
+
+
+@pytest.mark.parametrize(
+    "params", CREDENTIAL_FREE_PARAMS.values(), ids=CREDENTIAL_FREE_PARAMS
+)
+def test_params_with_no_credential_are_not_registered_and_recorded_as_they_are(
+    llm, logger, params
+):
+    refused = litellm.AuthenticationError("refused", llm_provider="openai", model=MODEL)
+    refused_with(llm, logger, params, refused)
+    assert masked(json.dumps(params)) == json.dumps(params)
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == params
 
 
 def test_the_manifest_records_a_mapping_among_the_params_as_a_dict_masked(logger):

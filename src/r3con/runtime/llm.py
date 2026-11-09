@@ -100,7 +100,7 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import is_credential_name, one_line, plain, register_key
+from r3con.masking import is_credential_name, is_path, one_line, plain, register_key
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -122,23 +122,31 @@ _MAX_ENUM_VALUES = 1000
 # OpenAI strict mode refuses a pattern with a lookaround: (?=, (?!, (?<= or (?<!.
 _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
-# Every value of these is a credential, whatever the header's name: x-functions-key say.
+# What a request sends of the documents: their text, no credential of the caller's.
+_DOCUMENTS = "messages"
+# Each value in these is a credential, whatever the header's name (x-functions-key, say),
+# wherever they sit (an MCP tool's headers), but a public header's.
 _HEADER_PARAMS = frozenset({"extra_headers", "headers"})
-# A request's data, at any depth (extra_body.guided_json say), may quote a document or
-# name a field auth_token: no credential of the caller's.
-_REQUEST_DATA = frozenset(
+# The headers whose values are public, by their names in lower case.
+_PUBLIC_HEADERS = frozenset(
     {
-        "messages",
-        "response_format",
-        "tools",
-        "functions",
-        "prediction",
-        "metadata",
-        "litellm_metadata",
-        "guided_json",
+        # OpenRouter's, which litellm itself sets from OR_SITE_URL and OR_APP_NAME.
+        "http-referer",
+        "x-title",
+        # Anthropic's beta features and API version.
+        "anthropic-beta",
+        "anthropic-version",
+        # The body's media type, the reply's wanted, and the client's name.
+        "content-type",
+        "accept",
+        "user-agent",
     }
 )
-# Azure's API version: every other value in a URL's query is taken for a key.
+# A JSON Schema's own names, its fields' and its definitions', are no parameters' names:
+# a schema anywhere (a tool's parameters, guided_json) may name a field auth_token.
+_SCHEMA_NAMES = frozenset({"properties", "$defs", "definitions"})
+# Azure's API version, by its name in lower case: any other value in a URL's query is
+# taken for a key.
 _PUBLIC_QUERY_NAMES = frozenset({"api-version"})
 # A "<scheme> <token>" value's words, as in "Bearer <token>".
 _SCHEMED_WORDS = 2
@@ -486,18 +494,23 @@ def register_credentials(
     params: Mapping[str, Any], completion: Callable[..., Any] | None = None
 ) -> None:
     """Register for masking (:func:`r3con.masking.register_key`) every credential a
-    request with ``params`` sends, at any depth of a plain copy of them
-    (:func:`r3con.masking.plain`), the request's data aside wherever it sits
-    (:data:`_REQUEST_DATA`): each string or integer in a header dict (``extra_headers``,
-    ``headers``), whatever the header's name, and in a parameter with a credential's
-    name (:func:`r3con.masking.is_credential_name`), ``api_key`` among them, all of a
-    dict's (``vertex_credentials``); in a URL, its password, or its user name when it
-    has none, and every value in its query but a public one (:func:`_url_secrets`); and
-    the token alone of a ``<scheme> <token>`` one (``Bearer``, ``Basic``). When
+    request with ``params`` sends, by where it sits, at any depth of a plain copy of
+    them (:func:`r3con.masking.plain`) but in ``messages``, the documents: each string
+    or integer in a header dict (``extra_headers``, ``headers``, an MCP tool's
+    ``headers``), whatever the header's name, but a public header's
+    (:data:`_PUBLIC_HEADERS`); each in a parameter with a credential's name
+    (:func:`r3con.masking.is_credential_name`), ``api_key`` and ``metadata``'s
+    ``langfuse_secret_key`` among them, all of a dict's (``vertex_credentials``), but a
+    file's path (:func:`r3con.masking.is_path`); in a URL, its password, or its user
+    name when it has none, and every value in its query but a public one
+    (:func:`_url_secrets`); and the token alone of a ``<scheme> <token>`` one
+    (``Bearer``, ``Basic``). The names a JSON Schema gives its fields and definitions
+    (:data:`_SCHEMA_NAMES`) are not parameters' names, wherever the schema sits. When
     ``completion`` is a ``litellm.Router``'s, the same of each of its deployments'
     ``litellm_params``, where the Router has already read an ``os.environ/NAME`` from
     the environment."""
-    for value in _credentials(plain(params)):
+    sent = {name: value for name, value in params.items() if name != _DOCUMENTS}
+    for value in _credentials(plain(sent)):
         register_key(value)
         # A gateway may echo a "<scheme> <token>" value's token without its scheme word.
         words = value.split()
@@ -512,14 +525,17 @@ def register_credentials(
 def _credentials(data: Any, name: str = "", *, secret: bool = False) -> Iterator[str]:
     """Each credential in plain ``data``, sent under ``name``, as
     :func:`register_credentials` says: every string and integer in it when it is
-    ``secret``, as all under a header dict or a credential's name is, whatever the
-    names within."""
-    if name in _REQUEST_DATA and not secret:
+    ``secret``, as all is in a header or under a credential's name, whatever the names
+    within."""
+    named = not secret and is_credential_name(name)
+    if named and isinstance(data, str) and is_path(data):
         return
-    secret = secret or name in _HEADER_PARAMS or is_credential_name(name)
+    secret = secret or named
     if isinstance(data, dict):
         for key, value in data.items():
-            yield from _credentials(value, key, secret=secret)
+            header = name in _HEADER_PARAMS and key.lower() not in _PUBLIC_HEADERS
+            under = "" if name in _SCHEMA_NAMES else key
+            yield from _credentials(value, under, secret=secret or header)
     elif isinstance(data, list):
         for item in data:
             yield from _credentials(item, secret=secret)
@@ -533,8 +549,8 @@ def _credentials(data: Any, name: str = "", *, secret: bool = False) -> Iterator
 def _url_secrets(text: str) -> list[str]:
     """When ``text`` is a URL with a host, its password, or its user name when it has
     none (``https://<token>@host``, which httpx sends as Basic auth), and the value of
-    each query parameter but a public one (:data:`_PUBLIC_QUERY_NAMES`), each as
-    written and percent-decoded."""
+    each query parameter but a public one (:data:`_PUBLIC_QUERY_NAMES`, in any case),
+    each as written and percent-decoded."""
     try:
         url = urlsplit(text)
     except ValueError:
@@ -542,7 +558,9 @@ def _url_secrets(text: str) -> list[str]:
     if not url.netloc:
         return []
     pairs = (pair.partition("=") for pair in url.query.split("&"))
-    values = [value for name, _, value in pairs if name not in _PUBLIC_QUERY_NAMES]
+    values = [
+        value for name, _, value in pairs if name.lower() not in _PUBLIC_QUERY_NAMES
+    ]
     written = [url.password or url.username or "", *values]
     return [*written, *map(unquote, written)]
 

@@ -1,7 +1,13 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from r3con.masking import _ERROR_CHARS, masked, one_line, register_key
+from r3con.masking import (
+    _ERROR_CHARS,
+    is_credential_name,
+    masked,
+    one_line,
+    register_key,
+)
 
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 ECHOED = f"Incorrect API key provided: {KEY}"
@@ -34,6 +40,8 @@ def invalid(reply: str) -> ValidationError:
         ("GIGACHAT_CREDENTIALS", KEY, True),
         ("VERTEX_CLIENT_SECRET", KEY, True),
         ("OCI_KEY", KEY, True),
+        ("SLACK_WEBHOOK_URL", f"https://hooks.slack.com/services/{KEY}", True),
+        ("AWS_SECRET_ACCESS_KEY", f"/{KEY}", True),
         ("GITHUB_TOKEN", "short-tok-12", False),
         ("SORT_KEY", "created_at_descending", False),
         ("S3_OBJECT_KEY", "documents-2026-q3-report", False),
@@ -41,6 +49,7 @@ def invalid(reply: str) -> ValidationError:
         ("HF_TOKEN_PATH", "~/.cache/huggingface/token", False),
         ("SLACK_TOKEN_LABEL", "the build server's token", False),
         ("OPENAI_BASE_URL", KEY, False),
+        ("GIT_AUTHOR_EMAIL", "michael@memos.example.com", False),
     ],
     ids=[
         "api-key",
@@ -51,6 +60,8 @@ def invalid(reply: str) -> ValidationError:
         "credentials",
         "secret",
         "oci-key",
+        "webhook-url",
+        "base64-key-starting-with-a-slash",
         "short-token",
         "bare-key",
         "bare-key-long",
@@ -58,6 +69,7 @@ def invalid(reply: str) -> ValidationError:
         "token-path",
         "whitespace",
         "not-a-credential",
+        "author",
     ],
 )
 def test_an_environment_value_is_masked_when_its_name_and_shape_say_secret(
@@ -66,6 +78,44 @@ def test_an_environment_value_is_masked_when_its_name_and_shape_say_secret(
     monkeypatch.setenv(name, value)
     text = f"refused for {value}, see logs"
     assert masked(text) == ("refused for REDACTED, see logs" if secret else text)
+
+
+# Each name, and whether it says that what it holds is a credential.
+CREDENTIAL_NAMES = {
+    "api_key": True,
+    "OPENAI_API_KEY": True,
+    "WATSONX_APIKEY": True,
+    "oci_key": True,
+    "azure_ad_token": True,
+    "langfuse_secret_key": True,
+    "AZURE_PASSWORD": True,
+    "vertex_credentials": True,
+    "auth": True,
+    "Authorization": True,
+    "x-auth-token": True,
+    "auth_token": True,
+    "basic_auth": True,
+    "proxy_auth": True,
+    "PROXY_AUTH": True,
+    "basicAuth": True,
+    "slack_webhook_url": True,
+    "author": False,
+    "GIT_AUTHOR_EMAIL": False,
+    "authority": False,
+    "AZURE_AUTHORITY_HOST": False,
+    "prompt_cache_key": False,
+    "cache_key": False,
+    "langfuse_public_key": False,
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "credential"), CREDENTIAL_NAMES.items(), ids=CREDENTIAL_NAMES
+)
+def test_a_name_says_credential_by_its_words_and_auth_only_as_a_whole_word(
+    name, credential
+):
+    assert is_credential_name(name) is credential
 
 
 def test_a_registered_key_is_masked_from_then_on_the_longest_first_but_a_placeholder():

@@ -17,20 +17,24 @@ are:
 
 - every key registered with :func:`register_key`, which r3con does, before a run's
   first request, for each credential it sends
-  (:func:`r3con.runtime.llm.register_credentials`). It looks at every depth of a plain
-  copy of the request's parameters (:func:`plain`), but not into the request's data
-  (``messages``, ``tools``, a schema, ``metadata``) wherever it sits, and takes each
-  string or integer in ``extra_headers`` or ``headers``, whatever the header's name,
-  and in a parameter with a credential's name (:func:`is_credential_name`), such as
-  ``api_key``; in a URL, such as ``api_base``, its password, or its user name when it
-  has none, and every value in its query but a public one (``api-version``); and the
-  keys of a ``litellm.Router`` whose ``.completion`` is the run's ``completion``. Every
-  string in a dict-valued ``vertex_credentials`` is masked, the public ``token_uri``
-  too, since a service account's field names do not say which are secret. A
-  ``completion`` wrapper that adds a key of its own must register it;
+  (:func:`r3con.runtime.llm.register_credentials`). A value is a credential by where
+  it sits, at any depth of a plain copy of the request's parameters (:func:`plain`),
+  but in ``messages``, the documents: in a header dict (``extra_headers``,
+  ``headers``, an MCP tool's ``headers``), whatever the header's name, but a
+  known-public header (``Content-Type``, ``anthropic-beta``); in a parameter with a
+  credential's name (:func:`is_credential_name`), such as ``api_key`` or ``metadata``'s
+  ``langfuse_secret_key``, unless it is a file's path (:func:`is_path`); and in a URL,
+  such as ``api_base``, as its password, or its user name when it has none, or as any
+  value in its query but a public one (``api-version``). The names a JSON Schema gives
+  its fields and definitions are not parameters' names, wherever the schema sits (a
+  tool's ``parameters``, ``response_format``, ``guided_json``). The keys of a
+  ``litellm.Router`` whose ``.completion`` is the run's ``completion`` are registered
+  too. Every string in a dict-valued ``vertex_credentials`` is masked, the public
+  ``token_uri`` too, since a service account's field names do not say which are
+  secret. A ``completion`` wrapper that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
-  a provider's key, unless it holds whitespace or starts with ``/`` or ``~``, as a path
-  does (``GOOGLE_APPLICATION_CREDENTIALS``), or is shorter than
+  a provider's key, unless it holds whitespace or is a file's path (:func:`is_path`),
+  as ``GOOGLE_APPLICATION_CREDENTIALS`` is, or is shorter than
   :data:`_MIN_ENVIRONMENT_SECRET_CHARS`, or :data:`_MIN_MASKED_KEY_CHARS` for a name
   that ends in ``api_key`` or ``apikey``, a provider's key.
 
@@ -40,14 +44,14 @@ A key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as vLLM'
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import threading
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import ValidationError
-from pydantic_core import to_jsonable_python
+from pydantic import BaseModel, ValidationError
 
 MASK = "REDACTED"
 # A shorter key is a placeholder, and masking one as short as "x" garbles "maximum".
@@ -56,8 +60,12 @@ _MIN_ENVIRONMENT_SECRET_CHARS = 16
 _ERROR_CHARS = 300
 _PROVIDER_KEY_NAME = re.compile("api_?key$", re.IGNORECASE)
 _CREDENTIAL_NAME = re.compile(
-    "api_?key$|^oci_key$|token|secret|password|credential|auth", re.IGNORECASE
+    "api_?key$|^oci_key$|token|secret|password|credential|webhook", re.IGNORECASE
 )
+# A name's words, whatever its case: snake_case, kebab-case, camelCase, SCREAMING_CASE.
+_NAME_WORDS = re.compile("[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+# Whole words only: "auth" begins "author" and "authority", which name no credential.
+_AUTH_WORDS = frozenset({"auth", "authorization"})
 _PATH_STARTS = ("/", "~")
 _registered: set[str] = set()
 _lock = threading.Lock()
@@ -74,10 +82,22 @@ def register_key(key: str | None) -> None:
 def is_credential_name(name: str) -> bool:
     """Whether a parameter or environment variable called ``name`` holds a credential:
     its name, in any case, ends in ``api_key`` or ``apikey``, is ``oci_key``, OCI's
-    private key and the one credential litellm reads under a bare ``key``, or says
-    token, secret, password, credential or auth. Any other bare ``key``, as in
-    ``prompt_cache_key`` or litellm's ``cache_key``, does not."""
-    return bool(_CREDENTIAL_NAME.search(name))
+    private key and the one credential litellm reads under a bare ``key``, says token,
+    secret, password, credential or webhook (``slack_webhook_url``, whose secret is its
+    URL's path), or has auth or authorization as a word of its own (``x-auth-token``,
+    ``basicAuth``), not within another (``author``, ``authority``). Any other bare
+    ``key``, as in ``prompt_cache_key`` or litellm's ``cache_key``, does not."""
+    words = {word.lower() for word in _NAME_WORDS.findall(name)}
+    return bool(_CREDENTIAL_NAME.search(name)) or not _AUTH_WORDS.isdisjoint(words)
+
+
+def is_path(value: str) -> bool:
+    """Whether ``value``, held under a credential's name, is the path of a file litellm
+    reads the credential from (``vertex_credentials``,
+    ``GOOGLE_APPLICATION_CREDENTIALS``) rather than the credential: it starts with
+    ``/`` or ``~`` and holds a ``.``, which no base64 key does, though one may start
+    with ``/``, as about one AWS secret key in 64 does."""
+    return value.startswith(_PATH_STARTS) and "." in value
 
 
 def masked(text: str) -> str:
@@ -91,10 +111,24 @@ def masked(text: str) -> str:
 
 
 def plain(data: Any) -> Any:
-    """``data`` in JSON's dicts, lists, strings and numbers, so each walk over it sees
-    the same shapes: a pydantic model, a dataclass or any other mapping as a dict, a set
-    or a tuple as a list, and a value pydantic has no JSON form for as its ``repr``."""
-    return to_jsonable_python(data, fallback=_plain_fallback)
+    """``data`` in dicts with string keys, lists, strings, numbers, booleans and
+    ``None``, so each walk over it sees the same shapes: a mapping as a dict, a list,
+    tuple, set or frozenset as a list, a pydantic model as its ``model_dump()``, a
+    dataclass as a dict of its fields, and anything else, an iterator or a generator
+    among them, as its ``repr``, never iterated, so a request still sends all of it."""
+    if data is None or isinstance(data, (str, int, float)):
+        return data
+    if isinstance(data, Mapping):
+        return {str(name): plain(value) for name, value in data.items()}
+    if isinstance(data, (list, tuple, set, frozenset)):
+        return [plain(item) for item in data]
+    if isinstance(data, BaseModel):
+        return plain(data.model_dump())
+    if dataclasses.is_dataclass(data) and not isinstance(data, type):
+        # Each field as it is: dataclasses.asdict deep-copies them, and fails on a lock.
+        fields = dataclasses.fields(data)
+        return {field.name: plain(getattr(data, field.name)) for field in fields}
+    return repr(data)
 
 
 def masked_values(data: Any) -> Any:
@@ -113,10 +147,6 @@ def _masked_leaves(data: Any) -> Any:
         shown = masked(str(data))
         return data if shown == str(data) else shown
     return data
-
-
-def _plain_fallback(value: Any) -> Any:
-    return dict(value) if isinstance(value, Mapping) else repr(value)
 
 
 def one_line(error: BaseException) -> str:
@@ -144,7 +174,7 @@ def _environment_secrets() -> list[str]:
 
 
 def _is_secret(name: str, value: str) -> bool:
-    if not is_credential_name(name) or value.startswith(_PATH_STARTS):
+    if not is_credential_name(name) or is_path(value):
         return False
     if any(map(str.isspace, value)):
         return False

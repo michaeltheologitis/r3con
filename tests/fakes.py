@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 import litellm
 from litellm.exceptions import AuthenticationError, ContextWindowExceededError
+from pydantic import BaseModel
 
 _completion = litellm.completion
 
@@ -51,6 +52,14 @@ TWO_LINE_MEMOS = {
     "calder.pdf": "Calder memo\nThe Calder memo logs two sites.",
 }
 """Three memos of two lines each, by name."""
+# A key of unquoted digits, which YAML reads as an integer.
+DIGITS_KEY = 123456789012345678
+
+
+class GatewayKey(BaseModel):
+    """A caller's own credential object, passed among a run's params."""
+
+    api_key: str
 
 
 class UnscriptedRequest(AssertionError):

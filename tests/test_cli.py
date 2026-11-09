@@ -415,8 +415,12 @@ def test_a_failed_run_shows_no_key_on_stderr(answering, capsys):
             {"vertex_credentials": {"private_key": f"-----BEGIN KEY-----\n{KEY}\n"}},
             "params={vertex_credentials={'private_key': 'REDACTED'}}",
         ),
+        (
+            {"metadata": {"langfuse_secret_key": KEY}},
+            "params={metadata={'langfuse_secret_key': 'REDACTED'}}",
+        ),
     ],
-    ids=["header", "escaped-in-the-label"],
+    ids=["header", "escaped-in-the-label", "callback-key-in-metadata"],
 )
 def test_a_run_shows_its_label_with_the_credentials_in_its_params_masked(
     answering, configs, capsys, params, shown

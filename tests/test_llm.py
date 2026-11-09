@@ -1,3 +1,4 @@
+import json
 import logging
 import random
 import re
@@ -31,7 +32,9 @@ from r3con.runtime.llm import (
     litellm_chat_completion_full,
     quiet_litellm,
     register_credentials,
+    schema_as_sent,
 )
+from tests.fakes import DIGITS_KEY, GatewayKey
 
 MODEL = "openai/gpt-6-luna"
 VLLM = "hosted_vllm/fake"
@@ -125,7 +128,6 @@ KEY = "sk-not-a-real-key-0123456789"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 SERVER = "https://llm.example.com/v1"
-DIGITS_KEY = 123456789012345678
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 LONG_RETRY_AFTER_SECONDS = 60
@@ -1169,20 +1171,26 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     )
 
 
-def test_a_requests_messages_and_schema_are_data_not_credentials():
+class Credential(BaseModel):
+    auth_token: str = Field(description="The token the memo says the gateway takes")
+
+
+class CredentialAudit(BaseModel):
+    credentials: list[Credential]
+
+
+def test_a_structured_requests_documents_and_schema_are_data_not_credentials(llm):
     document = "The memo's gateway is https://reader:memo-password-2026@gw.example.com"
-    field = {"description": "How the site signs its users in"}
-    request = {
-        "messages": [{"role": "user", "content": document}],
-        "response_format": {"json_schema": {"schema": {"auth_method": field}}},
-    }
-    register_credentials(request)
-    text = f"{document}; {field['description']}"
-    assert masked(text) == text
-
-
-class GatewayKey(BaseModel):
-    api_key: str
+    llm.replies({"credentials": []})
+    litellm_chat_completion(
+        system_prompt="List the credentials the memo names.",
+        user_prompt=document,
+        model=MODEL,
+        schema=CredentialAudit,
+        completion=llm,
+    )
+    data = f"{document} {json.dumps(schema_as_sent(CredentialAudit))}"
+    assert masked(data) == data
 
 
 @dataclass
@@ -1204,6 +1212,34 @@ SENT_CREDENTIALS = {
     "in-a-set": ({"extra_body": {"auth_tokens": {PLAIN_KEY}}}, PLAIN_KEY),
     "an-integer": ({"api_key": DIGITS_KEY}, str(DIGITS_KEY)),
     "header-named-like-request-data": ({"headers": {"metadata": PLAIN_KEY}}, PLAIN_KEY),
+    "callback-key-in-metadata": (
+        {"metadata": {"langfuse_secret_key": PLAIN_KEY}},
+        PLAIN_KEY,
+    ),
+    "callback-key-in-litellm-metadata": (
+        {"litellm_metadata": {"langsmith_api_key": PLAIN_KEY}},
+        PLAIN_KEY,
+    ),
+    "key-in-extra-body-metadata": (
+        {"extra_body": {"metadata": {"api_key": PLAIN_KEY}}},
+        PLAIN_KEY,
+    ),
+    "mcp-tool-header": (
+        {
+            "tools": [
+                {"type": "mcp", "headers": {"Authorization": f"Bearer {PLAIN_KEY}"}}
+            ]
+        },
+        PLAIN_KEY,
+    ),
+    "header-of-a-tool-in-extra-body": (
+        {"extra_body": {"tools": [{"headers": {"X-Key": PLAIN_KEY}}]}},
+        PLAIN_KEY,
+    ),
+    "base64-key-starting-with-a-slash": (
+        {"aws_secret_access_key": f"/{PLAIN_KEY}"},
+        f"/{PLAIN_KEY}",
+    ),
 }
 
 
@@ -1215,6 +1251,26 @@ def test_a_credential_is_registered_whatever_its_shape_or_place_in_the_params(
 ):
     register_credentials(params)
     assert masked(f"refused {credential}") == "refused REDACTED"
+
+
+def test_a_one_shot_iterator_among_the_params_reaches_the_completion_whole(llm):
+    llm.replies("ok")
+    litellm_chat_completion(
+        system_prompt="s",
+        user_prompt="u",
+        model=VLLM,
+        completion=llm,
+        stop=iter(["END", "STOP"]),
+    )
+    [request] = llm.requests
+    assert list(request["stop"]) == ["END", "STOP"]
+
+
+def test_bytes_that_are_not_text_among_the_params_reach_the_completion(llm):
+    llm.replies("ok")
+    ask(llm, extra_body={"blob": b"\xff"})
+    [request] = llm.requests
+    assert request["extra_body"] == {"blob": b"\xff"}
 
 
 def test_a_url_key_is_masked_as_written_and_percent_decoded():
