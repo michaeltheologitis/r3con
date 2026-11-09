@@ -239,6 +239,15 @@ def worker_of(job_id: str) -> threading.Thread:
     return next(t for t in threading.enumerate() if t.name == f"r3con-app-{job_id}")
 
 
+def wait_for_worker(job_id: str) -> None:
+    """Return once the thread the server started for the job ``job_id`` has ended, and
+    so has logged its failure, if any: the job's stream ends before that. A thread no
+    longer listed has ended."""
+    for thread in threading.enumerate():
+        if thread.name == f"r3con-app-{job_id}":
+            thread.join(GATE_TIMEOUT_SECONDS)
+
+
 def rate_limited(**request: Any) -> Any:
     """A ``litellm.completion`` that answers every request with a 429 asking for a
     wait longer than any test."""
@@ -716,7 +725,9 @@ def test_a_key_a_provider_quotes_in_its_error_is_masked_in_the_event_and_the_log
         key = ENVIRONMENT_KEY
     llm.answers(relevance=RuntimeError(f"Incorrect API key provided: {key}."))
     with caplog.at_level(logging.ERROR, logger="r3con.app"):
-        last = run_events(client, start_run(client))[-1]
+        run_id = start_run(client)
+        last = run_events(client, run_id)[-1]
+        wait_for_worker(run_id)
     assert last["type"] == "run_failed"
     assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
     logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
