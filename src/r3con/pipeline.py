@@ -53,7 +53,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
-from r3con.masking import masked, one_line
+from r3con.masking import MASK, masked, one_line
 from r3con.provenance import Citations, Provenance, build_provenance, check_rule
 from r3con.runs import (
     Emit,
@@ -86,6 +86,10 @@ _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
 # What reading a run folder raises when its files are not as this r3con writes them:
 # a pydantic ValidationError and a file that is not JSON among the ValueErrors.
 _UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValueError)
+# How an ask refused for a masked param gets past it in Python (:func:`refuse_masked`).
+PARAMS_ADVICE = (
+    "pass the real value in `params`, which replaces all of the run's params"
+)
 
 
 def names_and_texts(documents: Any) -> tuple[list[str], list[str]]:
@@ -832,6 +836,7 @@ def ask_pipeline(
     ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
     ``error``). ``cancel`` stops it as it stops :func:`run_pipeline`."""
     caps = settings_snapshot()
+    refuse_masked(config.params, api_base=api_base, api_key=api_key)
     llm_kwargs = _llm_kwargs(
         config.params,
         api_base=api_base,
@@ -925,6 +930,53 @@ def _llm_kwargs(
         llm_kwargs["cancel"] = cancel
     register_credentials(llm_kwargs, completion)
     return llm_kwargs
+
+
+def refuse_masked(
+    params: Mapping[str, Any],
+    *,
+    api_base: str | None,
+    api_key: str | None,
+    advice: str = PARAMS_ADVICE,
+) -> None:
+    """Refuse an ask whose requests would send :data:`~r3con.masking.MASK`, which a
+    run's manifest saves in place of a credential among its params, the real value
+    saved nowhere: anywhere in ``params``, at any depth, unless it is the ``api_base``
+    or ``api_key`` that the argument of that name replaces, as :func:`_llm_kwargs`
+    lays them over ``params``. A value of the caller's own that holds the mask is
+    refused too, since it can't be told from a saved one.
+
+    Raises:
+        ValueError: giving ``advice``, then naming each param that holds the mask, by
+            the path to it, or by its name alone when it holds it more than once.
+    """
+    transport = {"api_base": api_base, "api_key": api_key}
+    sent = {**params, **{name: value for name, value in transport.items() if value}}
+    holding: list[str] = []
+    for name, value in sent.items():
+        paths = list(_paths_holding_mask(value, (name,)))
+        holding += paths if len(paths) < 2 else [name]
+    if holding:
+        listed = ", ".join(f"`{param}`" for param in holding)
+        raise ValueError(
+            f"{MASK}, the mask a run's manifest saves in place of a credential, would "
+            f"be sent: {advice}. Masked params: {listed}."
+        )
+
+
+def _paths_holding_mask(data: Any, path: tuple[Any, ...]) -> Iterator[str]:
+    """The dotted path, from ``path``, of each string in ``data``, at any depth of its
+    dicts and lists, that holds the mask, even within a longer value: masking replaces
+    a key inside one, as in ``https://REDACTED@host``."""
+    if isinstance(data, str):
+        if MASK in data:
+            yield ".".join(map(str, path))
+    elif isinstance(data, Mapping):
+        for name, value in data.items():
+            yield from _paths_holding_mask(value, (*path, name))
+    elif isinstance(data, (list, tuple)):
+        for index, item in enumerate(data):
+            yield from _paths_holding_mask(item, (*path, index))
 
 
 def _reasoning_outcome(

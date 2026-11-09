@@ -89,6 +89,12 @@ REFUSED_LINE = (
     "REDACTED"
 )
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
+GATEWAY_HEADER = {"extra_headers": {"Authorization": f"Bearer {KEY}"}}
+MASKED_HEADER_REFUSAL = (
+    "REDACTED, the mask a run's manifest saves in place of a credential, would be "
+    "sent: pass the real value in `params`, which replaces all of the run's params. "
+    "Masked params: `extra_headers.Authorization`."
+)
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
 # Copies of one name that took a quadratic numbering seconds to tell apart.
@@ -1688,3 +1694,67 @@ def test_an_asks_manifest_holds_no_credential_of_its_params(answering_llm, tmp_p
     assert manifest["config"]["params"] == {
         "extra_headers": {"x-gateway-auth": "REDACTED"}
     }
+
+
+def test_an_ask_refuses_to_send_a_header_its_runs_manifest_saved_masked(
+    answering_llm, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path, params=GATEWAY_HEADER)
+    sent = len(answering_llm.requests)
+    with pytest.raises(ValueError) as refused:
+        ask(built, "Who else?", completion=answering_llm)
+    assert str(refused.value) == MASKED_HEADER_REFUSAL
+    assert answering_llm.requests[sent:] == []
+    assert not (built.run_dir / "asks").exists()
+
+
+@pytest.mark.parametrize(
+    ("saved", "options"),
+    [
+        (GATEWAY_HEADER, {"params": GATEWAY_HEADER}),
+        ({"api_key": KEY}, {"api_key": KEY}),
+    ],
+    ids=["a-header-in-params", "an-api-key-as-its-own-argument"],
+)
+def test_an_ask_sends_the_real_value_its_caller_gives_for_a_masked_param(
+    answering_llm, tmp_path, saved, options
+):
+    built = finished_run(answering_llm, tmp_path, params=saved)
+    manifest = json.loads((built.run_dir / "manifest.json").read_text())
+    assert "REDACTED" in json.dumps(manifest["config"]["params"])
+    ask(built, "Who else?", completion=answering_llm, **options)
+    asked = answering_llm.requests_for("reasoning")[-1]
+    assert {name: asked[name] for name in saved} == saved
+
+
+@pytest.mark.parametrize(
+    ("saved", "path"),
+    [
+        ({"extra_body": {"api_key": "REDACTED"}}, "extra_body.api_key"),
+        ({"api_base": "https://REDACTED@gateway.example"}, "api_base"),
+        ({"fallbacks": [{"api_key": "REDACTED"}]}, "fallbacks.0.api_key"),
+        (
+            {
+                "vertex_credentials": {
+                    "private_key": "REDACTED",
+                    "client_id": "REDACTED",
+                }
+            },
+            "vertex_credentials",
+        ),
+    ],
+    ids=["nested-in-a-dict", "inside-a-longer-value", "in-a-list", "twice-named-once"],
+)
+def test_an_ask_names_the_path_to_a_masked_param_or_the_param_alone_if_it_holds_more(
+    answering_llm, tmp_path, saved, path
+):
+    built = finished_run(answering_llm, tmp_path)
+    manifest_path = built.run_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["params"] = saved
+    manifest_path.write_text(json.dumps(manifest))
+    sent = len(answering_llm.requests)
+    with pytest.raises(ValueError) as refused:
+        ask(built, "Who else?", completion=answering_llm)
+    assert str(refused.value).endswith(f" Masked params: `{path}`.")
+    assert answering_llm.requests[sent:] == []
