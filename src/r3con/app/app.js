@@ -1469,6 +1469,8 @@
   // What r3con's folder walk reads, its TEXT_SUFFIXES, which tests/app/test_server.py holds this to.
   const FOLDER_SUFFIXES = [...PLAIN_TEXT_SUFFIXES, ...EXTRACTED_SUFFIXES];
   const ZIP_SUFFIX = '.zip';
+  // The browser keeps about six connections to r3con app: a batch's extractions leave the rest to its other requests.
+  const EXTRACTIONS_AT_ONCE = 4;
   const OLD_WORD_SUFFIX = '.doc';
   // A NUL byte this near a file's start means it isn't text, as git judges it.
   const SNIFF_BYTES = 8000;
@@ -5255,6 +5257,25 @@
     readKeys: async () => prototypeStatus(),
   };
 
+  let extracting = 0;
+  /** @type {(() => void)[]} */
+  const extractionsWaiting = [];
+
+  // Runs `extraction` once fewer than EXTRACTIONS_AT_ONCE are going, in the order they were asked for.
+  /** @template T @param {() => Promise<T>} extraction @returns {Promise<T>} */
+  async function inTurn(extraction) {
+    if (extracting < EXTRACTIONS_AT_ONCE) extracting += 1;
+    else await new Promise((resolve) => extractionsWaiting.push(() => resolve(undefined)));
+    try {
+      return await extraction();
+    } finally {
+      // A slot passes straight to the next in line, so a later call can't take it first.
+      const next = extractionsWaiting.shift();
+      if (next) next();
+      else extracting -= 1;
+    }
+  }
+
   // A provider whose variable is set where r3con app runs counts as having a key.
   /** @type {Mode} */
   const liveMode = {
@@ -5265,8 +5286,7 @@
     refuseFiles: unreadableFiles,
     async extract(file, noText) {
       try {
-        const extracted = await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
-        const { text } = await extracted.json();
+        const { text } = await inTurn(async () => (await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })).json());
         return text.trim() ? { text } : { why: noText };
       } catch (error) {
         return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a file's text")}.` };
@@ -5275,9 +5295,8 @@
     // A zipped document with no text is refused as a dropped one is, and so is a zip with none.
     async unzip(file) {
       try {
-        const unzipped = await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
         /** @type {{ files: { name: string, size: number, text: string }[], skipped: number }} */
-        const { files, skipped } = await unzipped.json();
+        const { files, skipped } = await inTurn(async () => (await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })).json());
         if (!files.length) return oneDocument(file, { why: noDocuments(skipped) });
         const noText = (/** @type {{ name: string }} */ f) => (hasSuffix(f, PDF_SUFFIX) ? NO_TEXT_LAYER : NO_TEXT);
         return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noText(f) })), skipped };

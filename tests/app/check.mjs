@@ -315,6 +315,10 @@ const NO_DOCUMENTS = 'No text, PDF or Word (.docx) files in it';
 const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
 // The page's NAMED_AT_MOST: a refusal names this many files, then counts the rest.
 const NAMED_AT_MOST = 5;
+// The page's EXTRACTIONS_AT_ONCE: how many files' text it asks r3con app for at once.
+const EXTRACTIONS_AT_ONCE = 4;
+// Long enough for every request the page sends at once to reach a route that holds them.
+const ROUTED_MS = 300;
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
@@ -5532,6 +5536,32 @@ function recordFilesLines() {
 
 const filesLines = async (page) => ({ said: await page.textContent('#files-said'), error: await filesError(page) });
 
+// Holds the PDFs' text at the server: the page asks for only a few at once, the first by name, and all are added.
+async function liveExtractionsAtOnce(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.click('#tab-files');
+    const asked = [];
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route('**/api/documents/text?*', async (route) => {
+      asked.push(new URL(route.request().url()).searchParams.get('name'));
+      await held;
+      await route.continue();
+    });
+    const names = Array.from({ length: 3 * EXTRACTIONS_AT_ONCE }, (_, i) => `pdf_${String(i).padStart(2, '0')}.pdf`);
+    await page.setInputFiles('#file-input', names.toReversed().map((name) => ({ ...documents['01_memo.pdf'], name })));
+    const reading = await becomes(page, (n) => document.getElementById('files-said').textContent === `Reading ${n} files…`, names.length);
+    await page.waitForTimeout(ROUTED_MS);
+    const atOnce = asked.toSorted();
+    release();
+    await removeButton(page, names.at(-1)).waitFor({ timeout: LIVE_RUN_MS });
+    const pane = (await page.evaluate(filesPane)).names;
+    const name = `a batch's PDFs are sent to r3con app ${EXTRACTIONS_AT_ONCE} at a time, the first ones by name, and every one is added`;
+    const bounded = isDeepStrictEqual(atOnce, names.slice(0, EXTRACTIONS_AT_ONCE)) && isDeepStrictEqual(asked.toSorted(), names) && isDeepStrictEqual(pane, names);
+    check('live', name, reading && bounded, JSON.stringify({ reading, atOnce, asked: asked.length, added: pane.length }));
+  });
+}
+
 // Holds the PDFs' text at the server until released.
 async function holdExtraction(page) {
   let release;
@@ -5976,6 +6006,7 @@ async function live() {
     await liveZip(url);
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
+    await liveExtractionsAtOnce(url);
     await liveRemoveWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
