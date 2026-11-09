@@ -1497,6 +1497,7 @@
   ].join('\n');
   const THEME_KEY = 'r3con-proto-theme';
   const MODEL_KEY = 'r3con-proto-model';
+  const ROUNDS_KEY = 'r3con-proto-rounds';
   const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
   // The side column's narrowest, where the composer and the files pane still fit, its widest as a share of the frame, and a key press's step.
   const SIDE_MIN_PX = 280;
@@ -1528,8 +1529,10 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const ARIA_KIND = { doc: 'document', parsed: 'parsed structure', schema: 'proposed schema' };
   const STAGE_PHASE = { schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
-  // The relevance rounds r3con's default config runs: a simulated run's, and a live run's until r3con app says.
+  // The relevance rounds r3con's default config runs, and a new run's until another count is chosen in the settings.
   const DEFAULT_ROUNDS = 2;
+  // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
+  const MAX_ROUNDS = 4;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -1627,6 +1630,7 @@
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelOther = $('model-other', HTMLInputElement);
   const modelRemove = $('model-remove', HTMLButtonElement);
+  const roundsPick = $('rounds', HTMLSelectElement);
   const frame = $('frame');
   const trash = $('trash');
   const removeAllButtons = [$('files-remove-all'), $('panel-remove-all')];
@@ -1851,6 +1855,8 @@
   const roundOf = (kind) => Number(kind.slice(1));
   /** @param {RoundKind} kind */
   const roundName = (kind) => `round ${roundOf(kind)}`;
+  /** @param {NodeKind} kind @returns {RoundKind | null} */
+  const previousRound = (kind) => (isRound(kind) && roundOf(kind) > 1 ? roundKind(roundOf(kind) - 1) : null);
   /** @param {number} rounds @returns {Summary[][]} */
   const emptyRounds = (rounds) => range(rounds).map(() => []);
   /** @param {number} rounds */
@@ -2172,8 +2178,8 @@
     };
   }
 
-  /** @param {LoadedFile[]} files @param {string} question @param {string} model @returns {Run} */
-  function simulatedRun(files, question, model) {
+  /** @param {LoadedFile[]} files @param {string} question @param {string} model @param {number} rounds @returns {Run} */
+  function simulatedRun(files, question, model, rounds) {
     const n = files.length;
     /** @param {LoadedFile} f */
     const summary = (f) => excerpt(f.text, SUMMARY_CHARS);
@@ -2190,7 +2196,7 @@
       simulated: true,
       docs: files,
       ...withIds(range(n).map(String)),
-      rounds: range(DEFAULT_ROUNDS).map(round),
+      rounds: range(rounds).map(round),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
       calls: null,
@@ -2200,11 +2206,11 @@
   }
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
-  // Its rounds are r3con's default until its run_started event says how many it has.
-  /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @returns {Run} */
-  function liveRun(question, model, endpoint, docs) {
+  // It is planned for the rounds it asks for, unless its run_started event says it has others.
+  /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @param {number} rounds @returns {Run} */
+  function liveRun(question, model, endpoint, docs, rounds) {
     /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
-    const empty = { rounds: emptyRounds(DEFAULT_ROUNDS), schema: null, parsed: [], calls: null, totals: null };
+    const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], calls: null, totals: null };
     return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
@@ -2254,9 +2260,9 @@
       return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${final}-${d}`);
-    if (!isRound(kind) || roundOf(kind) === 1) return [];
-    const previous = roundKind(roundOf(kind) - 1);
-    return summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`);
+    if (!isRound(kind)) return [];
+    const previous = previousRound(kind);
+    return previous ? summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`) : [];
   }
 
   /** @param {Run} run @param {string} id */
@@ -2401,7 +2407,6 @@
     return layout;
   }
 
-  // Documents stand in the first column.
   /** @param {number} i */
   const tidyOrigin = (i) => ({ x: 0, y: i * GRID.rowGap });
 
@@ -3475,9 +3480,8 @@
     const final = finalRound(run);
     if (kind === 'parsed' || kind === 'schema') return every(final);
     if (kind === 'answer') return [...every(final), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
-    if (!isRound(kind) || roundOf(kind) === 1) return [];
-    const previous = roundKind(roundOf(kind) - 1);
-    return every(previous, (j) => j !== i && summariesIn(run, previous)[j].summary);
+    const previous = previousRound(kind);
+    return previous ? every(previous, (j) => j !== i && summariesIn(run, previous)[j].summary) : [];
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
@@ -3501,17 +3505,19 @@
   /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
 
+  /** @param {StageKind} kind */
+  const phaseOf = (kind) => (isRound(kind) ? roundName(kind) : STAGE_PHASE[kind]);
+
   /** @param {RunTab} tab @param {StageKind} kind */
   function showProgress(tab, kind) {
-    const phase = isRound(kind) ? roundName(kind) : STAGE_PHASE[kind];
     const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
-    tabStatus(tab, `running · ${phase}${progress}`);
+    tabStatus(tab, `running · ${phaseOf(kind)}${progress}`);
   }
 
   /** @param {Run} run @param {StageKind} kind */
   function stepLine(run, kind) {
     if (isRound(kind)) return `${roundName(kind)} · extracting relevance`;
-    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : STAGE_PHASE[kind];
+    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : phaseOf(kind);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
@@ -3765,7 +3771,7 @@
     settle(tab, narr, `${roundKind(round)}-${i}`);
   }
 
-  // A live run is planned for r3con's default rounds until its first event says how many it has, before any is drawn.
+  // Should a live run's first event name other rounds than it asked for, it is planned again before any is drawn.
   /** @param {RunTab} tab @param {number} rounds */
   function makeRoomForRounds(tab, rounds) {
     tab.run.rounds = emptyRounds(rounds);
@@ -3779,7 +3785,7 @@
     const stream = openStream('run', tab, run);
     try {
       const { question, model, endpoint } = run.answers[0];
-      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) };
+      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name), relevance_rounds: run.rounds.length };
       const started = await api('/api/runs', { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
       await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
@@ -4695,8 +4701,18 @@
     return [...rows, h('span', { class: 'keys-label', id: 'servers-label', hidden: true }, 'Servers'), servers, h('label', { for: endpoint.id }, 'add server'), endpoint, key];
   }
 
+  // Storage is outside input: anything but a count r3con app takes reads as the default.
+  function readRounds() {
+    const rounds = Number(readStored(ROUNDS_KEY));
+    return Number.isInteger(rounds) && rounds >= 1 && rounds <= MAX_ROUNDS ? rounds : DEFAULT_ROUNDS;
+  }
+
+  const pickedRounds = () => Number(roundsPick.value);
+
   function buildSettings() {
     fill($('keys'), keyRows());
+    fill(roundsPick, range(MAX_ROUNDS).map((k) => h('option', { value: k + 1 }, k + 1 === DEFAULT_ROUNDS ? `${k + 1} · default` : String(k + 1))));
+    roundsPick.value = String(readRounds());
   }
 
   function clearSettings() {
@@ -5157,6 +5173,7 @@
       }
     });
     modelRemove.addEventListener('click', removeSavedModel);
+    roundsPick.addEventListener('change', () => writeStored(ROUNDS_KEY, roundsPick.value));
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
@@ -5230,7 +5247,7 @@
     refuseFiles: () => null,
     extract: async () => ({ why: NEEDS_APP }),
     unzip: async (file) => oneDocument(file, { why: NEEDS_APP }),
-    newRun: (question, files) => (replaysRecording(question, files) ? sampleRun() : simulatedRun(files, question, pickedModel())),
+    newRun: (question, files) => (replaysRecording(question, files) ? sampleRun() : simulatedRun(files, question, pickedModel(), pickedRounds())),
     play: playTimeline,
     // A replay is going once it was started with motion, and not cancelled, until its answer lands.
     runGoing: (tab) => tab.timers.length > 0 && !landed(tab, RUN_ANSWER),
@@ -5292,7 +5309,7 @@
         return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }
     },
-    newRun: (question, files) => liveRun(question, pickedModel(), pickedEndpoint(), files),
+    newRun: (question, files) => liveRun(question, pickedModel(), pickedEndpoint(), files, pickedRounds()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
