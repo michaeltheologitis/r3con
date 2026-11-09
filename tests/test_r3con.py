@@ -1533,8 +1533,16 @@ def test_a_failed_ask_reports_ask_failed_into_its_folder(
     assert events_in(Path(events[0]["ask_dir"])) == events
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"model": COPILOT},
+        {"model": "gpt-x", "params": {"custom_llm_provider": "github_copilot"}},
+    ],
+    ids=["by-its-prefix", "by-custom-llm-provider"],
+)
 def test_a_first_run_on_a_model_that_signs_in_starts_one_sign_in(
-    answering_llm, tmp_path, monkeypatch
+    answering_llm, tmp_path, monkeypatch, options
 ):
     sign_ins = []
     cached = []
@@ -1550,7 +1558,7 @@ def test_a_first_run_on_a_model_that_signs_in_starts_one_sign_in(
         return cached[0]
 
     monkeypatch.setattr(CopilotAuthenticator, "get_api_key", get_api_key)
-    result = finished_run(answering_llm, tmp_path, model=COPILOT)
+    result = finished_run(answering_llm, tmp_path, **options)
     assert len(sign_ins) == 1
     assert result.answer == JOINED
 
