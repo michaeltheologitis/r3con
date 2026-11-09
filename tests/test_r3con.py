@@ -14,6 +14,9 @@ from typing import Any
 
 import litellm
 import pytest
+from litellm.llms.github_copilot.authenticator import (
+    Authenticator as CopilotAuthenticator,
+)
 
 import r3con
 from r3con import Answer, RunConfig
@@ -76,6 +79,7 @@ NAMED_DOCS = dict(zip(NAMES, DOCS, strict=True))
 JOINED = "Halloran memo; Merrow memo; Calder memo"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 GPT_4O = "openai/gpt-4o"
+COPILOT = "github_copilot/gpt-x"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 NAMES_A_KEY = "The setup memo's example config reads api_key=abcdefgh12345."
@@ -97,6 +101,9 @@ MASKED_HEADER_REFUSAL = (
 )
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
+# How long the user takes to enter a device sign-in's code, long enough for every
+# document's first call to start meanwhile.
+USER_ENTERS_CODE_SECONDS = 0.2
 LOGGED_TIMEOUT_SECONDS = 5
 # Copies of one name that took a quadratic numbering seconds to tell apart.
 MANY_COPIES = 20_000
@@ -1524,6 +1531,41 @@ def test_a_failed_ask_reports_ask_failed_into_its_folder(
         "AuthenticationError: litellm.AuthenticationError: bad key",
     )
     assert events_in(Path(events[0]["ask_dir"])) == events
+
+
+def test_a_first_run_on_a_model_that_signs_in_starts_one_sign_in(
+    answering_llm, tmp_path, monkeypatch
+):
+    sign_ins = []
+    cached = []
+
+    def get_api_key(self: CopilotAuthenticator) -> str:
+        """litellm's Copilot key: the cached one, else a new device sign-in's, once
+        the user has entered its code."""
+        if cached:
+            return cached[0]
+        sign_ins.append(threading.current_thread().name)
+        time.sleep(USER_ENTERS_CODE_SECONDS)
+        cached.append("copilot-key")
+        return cached[0]
+
+    monkeypatch.setattr(CopilotAuthenticator, "get_api_key", get_api_key)
+    result = finished_run(answering_llm, tmp_path, model=COPILOT)
+    assert len(sign_ins) == 1
+    assert result.answer == JOINED
+
+
+def test_an_ordinary_models_first_calls_are_all_in_flight_at_once(
+    answering_llm, tmp_path
+):
+    all_sent = threading.Barrier(len(DOCS), timeout=BARRIER_TIMEOUT_SECONDS)
+
+    def note_once_all_are_sent(request: dict[str, Any]) -> str:
+        all_sent.wait()
+        return "Notes."
+
+    answering_llm.answers(relevance=note_once_all_are_sent)
+    assert finished_run(answering_llm, tmp_path).answer == JOINED
 
 
 def test_a_run_cancelled_during_relevance_sends_no_further_call_and_fails_there(
