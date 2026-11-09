@@ -313,6 +313,8 @@ const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads 
 const UNREADABLE_ZIP = "Couldn't unzip it: it's corrupt, or not a zip.";
 const NO_DOCUMENTS = 'No text, PDF or Word (.docx) files in it';
 const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
+// The page's NAMED_AT_MOST: a refusal names this many files, then counts the rest.
+const NAMED_AT_MOST = 5;
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
@@ -5333,6 +5335,16 @@ async function liveUnreadable(url) {
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
     check('live', 'once the unreadable file is removed, the next run sends only the readable one', isDeepStrictEqual(sent, ['A memo.\n']), JSON.stringify(sent));
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    const blanks = Array.from({ length: NAMED_AT_MOST + 2 }, (_, i) => memo(`blank_${i + 1}.txt`, '  \n'));
+    await page.setInputFiles('#file-input', [memo('01_memo.txt', 'A memo.\n'), ...blanks]);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, blanks.length + 1);
+    await page.click('#run-btn');
+    const status = await page.textContent('#run-status');
+    const named = blanks.slice(0, NAMED_AT_MOST).map((f) => f.name);
+    const expected = `no readable text in ${named.join(', ')} and 2 more; nothing was sent`;
+    check('live', `files with no readable text are named up to ${NAMED_AT_MOST}, and the rest counted`, status === expected, status);
   });
 }
 

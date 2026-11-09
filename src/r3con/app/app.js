@@ -4204,11 +4204,15 @@
     tellFiles(tab, { filesError: [tab.filesError, text].filter(Boolean).join(' ') });
   }
 
+  /** @param {string[]} names */
+  function someNames(names) {
+    const more = names.length - NAMED_AT_MOST;
+    return more > 0 ? `${names.slice(0, NAMED_AT_MOST).join(', ')} and ${more} more` : names.join(', ');
+  }
+
   /** @param {string[]} names @param {string} why */
   function notAdded(names, why) {
-    if (!names.length) return '';
-    const more = names.length - NAMED_AT_MOST;
-    return `Not added: ${more > 0 ? `${names.slice(0, NAMED_AT_MOST).join(', ')} and ${more} more` : names.join(', ')}. ${why}`;
+    return names.length ? `Not added: ${someNames(names)}. ${why}` : '';
   }
 
   // By path, a part at a time and by character code, as r3con's walk and r3con app's zips order files: a/b.txt before a-b/x.txt.
@@ -5297,7 +5301,7 @@
   /** @param {LoadedFile[]} files */
   function unreadableFiles(files) {
     const names = files.filter((f) => !f.text.trim()).map((f) => f.name);
-    return names.length ? `no readable text in ${names.join(', ')}; nothing was sent` : null;
+    return names.length ? `no readable text in ${someNames(names)}; nothing was sent` : null;
   }
 
   const mode = live ? liveMode : prototypeMode;
