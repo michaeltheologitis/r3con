@@ -1,0 +1,20 @@
+{
+  "schema_code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count associated with a contractor.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period\")\n    incident_type: str | None = Field(description=\"The incident category as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(description=\"The contractor code associated with the incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping from a paperwork code to a contractor name.\"\"\"\n    contractor_code: str | None = Field(description=\"The code shown in the registry\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
+  "thought": "The comparison must be computed across site-level reports, then linked to contractor names using registry mappings. Capture each report’s site, period, incident type, count, and contractor code, plus each code-to-name mapping; do not precompute totals.",
+  "attempts": [
+    {
+      "schema_code": "from pydantic import BaseModel, Field\n\nclass EquipmentIncidentReport(BaseModel):\n    \"\"\"A site's reported equipment-incident count associated with a contractor.\"\"\"\n    site: str | None = Field(description=\"The site named in the report\")\n    period: str | None = Field(description=\"The reporting period\")\n    incident_type: str | None = Field(description=\"The incident category as stated\")\n    incident_count: int | None = Field(description=\"The number of incidents reported\")\n    contractor_code: str | None = Field(description=\"The contractor code associated with the incidents\")\n\nclass ContractorMapping(BaseModel):\n    \"\"\"A mapping from a paperwork code to a contractor name.\"\"\"\n    contractor_code: str | None = Field(description=\"The code shown in the registry\")\n    contractor_name: str | None = Field(description=\"The contractor name mapped to that code\")\n\nclass Parse(BaseModel):\n    equipment_incident_reports: list[EquipmentIncidentReport]\n    contractor_mappings: list[ContractorMapping]",
+      "error": null,
+      "thought": "The comparison must be computed across site-level reports, then linked to contractor names using registry mappings. Capture each report’s site, period, incident type, count, and contractor code, plus each code-to-name mapping; do not precompute totals."
+    }
+  ],
+  "totals": {
+    "n_steps": 1,
+    "tokens": {
+      "prompt": 1853,
+      "completion": 529,
+      "total": 2382
+    },
+    "usd": 0.0004960499999999999
+  }
+}

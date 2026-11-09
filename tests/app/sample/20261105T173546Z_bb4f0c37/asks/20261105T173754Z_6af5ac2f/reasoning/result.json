@@ -1,0 +1,29 @@
+{
+  "answer": "Halloran Services Ltd maintains the Northgate and Riverside sites.",
+  "provenance": {
+    "summary_ids": [
+      "17f027",
+      "9e02b3",
+      "d9add2"
+    ],
+    "parse_ids": [
+      "17f027",
+      "9e02b3",
+      "d9add2"
+    ]
+  },
+  "path": "direct",
+  "fallback": null,
+  "terminated_by": "reply",
+  "n_turns": 0,
+  "turns": [],
+  "totals": {
+    "n_steps": 1,
+    "tokens": {
+      "prompt": 3177,
+      "completion": 111,
+      "total": 3288
+    },
+    "usd": 0.004525500000000001
+  }
+}

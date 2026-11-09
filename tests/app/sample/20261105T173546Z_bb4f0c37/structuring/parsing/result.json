@@ -1,0 +1,81 @@
+{
+  "parsed": {
+    "equipment_incident_reports": [
+      {
+        "site": "Northgate",
+        "period": "Q3",
+        "incident_type": "equipment incidents",
+        "incident_count": 5,
+        "contractor_code": "CT-118"
+      },
+      {
+        "site": "Eastfield",
+        "period": "Q3",
+        "incident_type": "equipment incidents",
+        "incident_count": 9,
+        "contractor_code": "CT-204"
+      },
+      {
+        "site": "Riverside",
+        "period": "Q3",
+        "incident_type": "equipment incidents",
+        "incident_count": 6,
+        "contractor_code": "CT-118"
+      }
+    ],
+    "contractor_mappings": [
+      {
+        "contractor_code": "CT-118",
+        "contractor_name": "Halloran Services Ltd"
+      },
+      {
+        "contractor_code": "CT-204",
+        "contractor_name": "Merrow Facilities Group"
+      },
+      {
+        "contractor_code": "CT-311",
+        "contractor_name": "Bellweather Grounds"
+      }
+    ]
+  },
+  "source_docs": {
+    "equipment_incident_reports": [
+      0,
+      1,
+      2
+    ],
+    "contractor_mappings": [
+      3,
+      3,
+      3
+    ]
+  },
+  "source_ids": {
+    "equipment_incident_reports": [
+      "17f027",
+      "964bc2",
+      "9e02b3"
+    ],
+    "contractor_mappings": [
+      "d9add2",
+      "d9add2",
+      "d9add2"
+    ]
+  },
+  "provenance": [
+    [],
+    [],
+    [],
+    [],
+    []
+  ],
+  "totals": {
+    "n_steps": 5,
+    "tokens": {
+      "prompt": 11319,
+      "completion": 1637,
+      "total": 12956
+    },
+    "usd": 0.00122514
+  }
+}

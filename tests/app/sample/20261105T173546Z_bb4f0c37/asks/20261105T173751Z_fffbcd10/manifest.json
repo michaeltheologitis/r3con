@@ -1,0 +1,53 @@
+{
+  "r3con_version": "0.6.4",
+  "task": "Which sites does Halloran Services maintain?",
+  "n_docs": 5,
+  "context_chars": null,
+  "run_folder": "20261105T173751Z_fffbcd10",
+  "config": {
+    "name": "default",
+    "model": "gpt-6-luna",
+    "relevance_rounds": 2,
+    "reasoning": "direct",
+    "prompts": {
+      "relevance/first-round": "v2",
+      "relevance/later-rounds": "v3",
+      "structuring/schema": "v1",
+      "structuring/parsing": "v3",
+      "reasoning/direct": "v3",
+      "reasoning/coding": "v3"
+    },
+    "params": {},
+    "overrides": {
+      "model": "gpt-6-luna"
+    }
+  },
+  "litellm_model": "openai/gpt-6-luna",
+  "sources": {
+    "config": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/configs/default.yaml",
+    "prompts": {
+      "relevance/first-round": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/relevance/first-round/v2.yaml",
+      "relevance/later-rounds": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/relevance/later-rounds/v3.yaml",
+      "structuring/schema": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/structuring/schema/v1.yaml",
+      "structuring/parsing": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/structuring/parsing/v3.yaml",
+      "reasoning/direct": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/reasoning/direct/v3.yaml",
+      "reasoning/coding": "/home/user/r3con/.claude/worktrees/app-quote-highlights/src/r3con/prompts/reasoning/coding/v3.yaml"
+    }
+  },
+  "settings": {
+    "doc_workers": 16,
+    "reasoning_max_turns": 30,
+    "relevance_max_attempts": 3,
+    "schema_max_attempts": 5,
+    "parsing_max_attempts": 5,
+    "reasoning_max_attempts": 3,
+    "llm_temporary_error_retries": 10,
+    "llm_retry_max_wait_seconds": 60,
+    "llm_retry_max_total_seconds": 300,
+    "llm_empty_content_retries": 3,
+    "reasoning_parse_max_toks": 16000,
+    "window_margin_percent": 15
+  },
+  "created": "2026-11-05T17:37:51+00:00",
+  "ask_of": "20261105T173546Z_bb4f0c37"
+}
