@@ -53,6 +53,7 @@ take (``/s/<token>/mcp``), is not found: nothing tells it from ``/api/v1/mcp`` o
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import os
 import re
 import threading
@@ -150,14 +151,17 @@ def masked(text: str) -> str:
 
 def plain(data: Any) -> Any:
     """``data`` in dicts with string keys, lists, strings, numbers, booleans and
-    ``None``, so each walk over it sees the same shapes: a mapping as a dict, a named
-    tuple as a dict of its fields, a list, tuple, set or frozenset as a list, a pydantic
-    model as its ``model_dump()``, a dataclass as a dict of its fields, a
-    ``SimpleNamespace`` as a dict of its attributes, a pydantic URL as its string, and
-    anything else, an iterator or a generator among them, as its ``repr``, never
-    iterated, so a request still sends all of it."""
+    ``None``, so each walk over it sees the same shapes: a date, time or datetime as
+    its ISO 8601 text (``isoformat()``), a mapping as a dict, a named tuple as a dict
+    of its fields, a list, tuple, set or frozenset as a list, a pydantic model as its
+    ``model_dump()``, a dataclass as a dict of its fields, a ``SimpleNamespace`` as a
+    dict of its attributes, a pydantic URL as its string, and anything else, an
+    iterator or a generator among them, as its ``repr``, never iterated, so a request
+    still sends all of it."""
     if data is None or isinstance(data, (str, int, float)):
         return data
+    if isinstance(data, (datetime.date, datetime.time)):
+        return data.isoformat()
     if isinstance(data, Mapping):
         return {str(name): plain(value) for name, value in data.items()}
     if isinstance(data, tuple) and hasattr(data, "_asdict"):
