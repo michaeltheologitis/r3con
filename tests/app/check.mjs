@@ -211,10 +211,14 @@ const QUIET = '(nothing relevant here)';
 const SPLIT_MEMO = '06_split_memo';
 // The relevance rounds r3con's default config runs: the recorded sample's, and the setting's until another is chosen.
 const ROUNDS = 2;
-// Other counts of rounds, which a live run of each, chosen in the settings, is checked to send and draw in full.
-const OTHER_ROUNDS = [1, 3];
 // r3con app's MAX_RELEVANCE_ROUNDS: the setting offers 1 to this many.
 const MAX_ROUNDS = 4;
+// Other counts of rounds, which a live run of each, chosen in the settings, is checked to send and draw in full; the
+// most is where a dotted line's lanes are tightest.
+const OTHER_ROUNDS = [1, 3, MAX_ROUNDS];
+// Besides its rounds' nodes, a run draws a document and a parse per document, then one structure and one answer.
+const DOCUMENT_AND_PARSE = 2;
+const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
 const ROUNDS_HINT = 'Each round adds one model call per document.';
 // What storage may hold that r3con app would refuse as a count of rounds.
@@ -4795,116 +4799,118 @@ function drawnRun() {
   };
 }
 
-// A live run of each of OTHER_ROUNDS relevance rounds, chosen in the settings, is sent them, planned for them from its
-// first frame, and draws every round, wired as r3con's events say.
 async function liveRounds(url) {
-  for (const rounds of OTHER_ROUNDS) {
-    await withPage('live', { url, sample: false, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
-      let posted = null;
-      // Held for some frames, so what they show is the page's own plan, before r3con app has said a thing.
-      await page.route('**/api/runs', async (route) => {
-        posted = route.request().postDataJSON();
-        await page.waitForFunction((frames) => window.runFrames.length >= frames, HELD_FRAMES);
-        await route.continue();
-      });
-      await pickRounds(page, rounds);
-      await page.evaluate(recordRunFrames);
-      await page.click('#run-btn');
-      const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-      const frames = await page.evaluate(() => {
-        window.stopFrames = true;
-        return window.runFrames;
-      });
-      const view = await transform(page);
-      const run = `a run of ${rounds} round${rounds === 1 ? '' : 's'}`;
-      const kinds = Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
-      const final = kinds.at(-1);
-      const kindOf = (id) => id.split('-')[0];
-      const roundOf = (id) => Number(kindOf(id).slice(1));
-      const docOf = (id) => Number(id.split('-')[1]);
-      const isRound = (id) => /^r\d+-/.test(id);
-      const docs = Array.from({ length: SAMPLE_DOCS }, (_, d) => d);
-      const events = await page.evaluate(() => window.events);
-      const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
-      const at = (id) => ids.indexOf(id.split('.')[0]);
-      const finished = (round, d) => events.find((e) => e.type === 'relevance_finished' && e.round === round && at(e.doc_id) === d);
-      const docIds = await docIdsOf(page);
-      const { nodes, edges } = await page.evaluate(drawnRun);
-      // A call's lines in: faint from what it was shown, or solid from what of that it cites, in place of the faint one.
-      const lines = (kinds, into) => edges.filter((e) => kinds.includes(e.kind) && into(e.key.split('>')[1])).map((e) => e.key).sort();
-      const shownTo = (into) => lines(['context', 'cite'], into);
+  for (const rounds of OTHER_ROUNDS) await liveRoundsOf(url, rounds);
+}
 
-      const roundNodes = nodes.filter((n) => isRound(n.id));
-      const placedAt = new Map(roundNodes.map((n) => [n.id, n.x]));
-      const sent = posted?.relevance_rounds === rounds && events.find((e) => e.type === 'run_started')?.rounds === rounds;
-      const still = frames.length > HELD_FRAMES && frames.every((f) => f.view === view && f.rounds.every(([id, x]) => placedAt.get(id) === x));
-      const moved = frames.filter((f) => f.view !== view).length;
-      const plannedName = `${run}, chosen in the settings, is sent ${rounds} and planned for ${rounds} from its first frame: neither the view nor any round's column moves`;
-      check('live', plannedName, done && sent && still, `sent ${posted?.relevance_rounds}; ${moved} of ${frames.length} frames off the run's view`);
-      const columns = ['doc', ...kinds, 'schema', 'parsed', 'answer'].map((kind) => [...new Set(nodes.filter((n) => kindOf(n.id) === kind).map((n) => n.x))]);
-      const gaps = columns.slice(1, -1).map(([x], c) => x - columns[c][0]);
-      const placed = columns.every((xs) => xs.length === 1) && gaps.every((gap) => gap > 0 && gap === gaps[0]) && columns.at(-1)[0] > columns.at(-2)[0];
-      const counted = nodes.length === SAMPLE_DOCS * (rounds + 2) + 2 && kinds.every((kind) => roundNodes.filter((n) => kindOf(n.id) === kind).length === SAMPLE_DOCS);
-      const named = roundNodes.every((n) => isDeepStrictEqual(n.labels, [stem(docOf(n.id)), `round ${roundOf(n.id)}`]) && n.name === `${stem(docOf(n.id))}, round ${roundOf(n.id)} relevance snippet`);
-      const columnsName = `${run} draws a column of ${SAMPLE_DOCS} nodes per round, in order between the documents and the structure, each labelled and named for its round`;
-      check('live', columnsName, done && counted && placed && named, `${nodes.length} nodes; columns at ${columns.map((xs) => xs.join('/')).join(', ')}`);
-      const geometry = await page.evaluate(dottedLineHits);
-      const clear = geometry.dotted === SAMPLE_DOCS * rounds && geometry.hits.length === 0;
-      check('live', `${run}: no dotted line passes through an icon or a label`, clear, `${geometry.dotted} dotted lines; ${geometry.hits.slice(0, 3).join(', ')}`);
-
-      const cited = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => (finished(k + 2, d)?.provenance ?? []).map((id) => `${kinds[k]}-${at(id)}>${kind}-${d}`)));
-      const citing = lines(['cite'], isRound);
-      const previous = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => docs.filter((j) => j !== d).map((j) => `${kinds[k]}-${j}>${kind}-${d}`)));
-      const linesIn = shownTo(isRound);
-      const citesName = `${run}: each round after the first cites the round before it, line for line as its events say, and is shown that round's other summaries`;
-      check('live', citesName, isDeepStrictEqual(citing, cited.sort()) && (rounds === 1 || citing.length > 0) && isDeepStrictEqual(linesIn, previous.sort()), `${citing.length} cite lines: ${citing.slice(0, 4).join(' ')}; ${linesIn.length} lines in`);
-
-      const fromFinal = (to) => docs.map((d) => `${final}-${d}>${to}`);
-      const intoSchema = shownTo((to) => to === 'schema');
-      const intoParses = shownTo((to) => to.startsWith('parsed-'));
-      const intoAnswer = shownTo((to) => to === 'answer-0').map(kindOf);
-      const fed =
-        isDeepStrictEqual(intoSchema, fromFinal('schema').sort()) &&
-        isDeepStrictEqual(intoParses, docs.flatMap((d) => fromFinal(`parsed-${d}`)).sort()) &&
-        intoAnswer.includes(final) &&
-        intoAnswer.every((kind) => kind === final || kind === 'parsed');
-      const fedName = `${run}: its last round alone feeds the structure, the parses and the answer`;
-      check('live', fedName, fed, `into the structure ${intoSchema.join(' ')}; into the answer from ${[...new Set(intoAnswer)].join(' ')}`);
-
-      const [answer] = await page.evaluate(answersRead);
-      const lit = await litOnPanel(page);
-      const trail = answer ? trailOnPage(answer.trail, answer.ids, docIds, 'answer-0', rounds) : null;
-      const throughAll = kinds.every((kind) => lit.nodes.some((id) => kindOf(id) === kind));
-      const trailName = `${run}: the lit trail is the one its reasoning_finished event carried, through every round`;
-      check('live', trailName, lit.edges.length > 0 && isDeepStrictEqual(lit, trail) && throughAll, `${lit.edges.length} lines lit, ${trail?.edges.length} on the trail`);
-
-      const shown = [];
-      for (const n of roundNodes) shown.push([n.id, await inspect(page, n.id, '#inspector .insp-text')]);
-      const filled = roundNodes.every((n) => !n.unsettled) && shown.every(([id, text]) => text === finished(roundOf(id), docOf(id))?.summary);
-      await page.keyboard.press('Escape');
-      await page.focus('.log-toggle');
-      await page.keyboard.press('Enter');
-      const steps = stepsOf(await page.evaluate(logOf)).slice(1);
-      const logged = [...kinds.map((kind) => [`round ${roundOf(kind)} · extracting relevance`, SAMPLE_DOCS, perDocument(kind)]), ...RUN_STEPS.slice(ROUNDS)];
-      const progressName = `${run}: its events fill every round's nodes with their summaries, and its log has a step for each round`;
-      check('live', progressName, filled && isDeepStrictEqual(steps, logged), JSON.stringify(steps.map(([step, lines]) => `${step} (${lines})`)));
-
-      const popups = [];
-      for (const kind of kinds) {
-        await inspect(page, `${kind}-0`);
-        popups.push({ title: (await popup(page))?.title, folds: (await page.evaluate(foldsIn)).map((f) => f.name.split(' ')[0]), provenance: await provenanceListed(page) });
-      }
-      const ownProvenance = (k) => (finished(k, 0)?.provenance ?? []).map((id) => `${stem(at(id))} · round ${k - 1}`);
-      const opened = popups.every(({ title, folds, provenance }, k) =>
-        title === `● ${stem(0)} · round ${k + 1}` && folds.includes('provenance') === k > 0 && isDeepStrictEqual(provenance, k > 0 ? ownProvenance(k + 1) : []),
-      );
-      await inspect(page, 'answer-0');
-      const answerListed = await provenanceListed(page);
-      const answerCited = answer ? [...answer.summary_ids.map((id) => `${stem(at(id))} · round ${rounds}`), ...answer.parse_ids.map((id) => `${stem(at(id))} · parsed`)] : null;
-      const popupsName = `${run}: each round's popup opens, a later round's listing the summaries it cites of the round before, and the answer's its last round's`;
-      check('live', popupsName, opened && isDeepStrictEqual(answerListed, answerCited), `${JSON.stringify(popups.map((p) => p.title))}; answer ${answerListed.join(' · ')}`);
+// A live run of `rounds` relevance rounds, chosen in the settings, is sent them, planned for them from its first frame,
+// and draws every round, wired as r3con's events say.
+async function liveRoundsOf(url, rounds) {
+  await withPage('live', { url, sample: false, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+    let posted = null;
+    // Held for some frames, so what they show is the page's own plan, before r3con app has said a thing.
+    await page.route('**/api/runs', async (route) => {
+      posted = route.request().postDataJSON();
+      await page.waitForFunction((frames) => window.runFrames.length >= frames, HELD_FRAMES);
+      await route.continue();
     });
-  }
+    await pickRounds(page, rounds);
+    await page.evaluate(recordRunFrames);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const frames = await page.evaluate(() => {
+      window.stopFrames = true;
+      return window.runFrames;
+    });
+    const view = await transform(page);
+    const run = `a run of ${rounds} round${rounds === 1 ? '' : 's'}`;
+    const kinds = Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
+    const final = kinds.at(-1);
+    const kindOf = (id) => id.split('-')[0];
+    const roundOf = (id) => Number(kindOf(id).slice(1));
+    const docOf = (id) => Number(id.split('-')[1]);
+    const isRound = (id) => /^r\d+-/.test(id);
+    const docs = Array.from({ length: SAMPLE_DOCS }, (_, d) => d);
+    const events = await page.evaluate(() => window.events);
+    const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
+    const at = (id) => ids.indexOf(id.split('.')[0]);
+    const finished = (round, d) => events.find((e) => e.type === 'relevance_finished' && e.round === round && at(e.doc_id) === d);
+    const docIds = await docIdsOf(page);
+    const { nodes, edges } = await page.evaluate(drawnRun);
+    // A call's lines in: faint from what it was shown, or solid from what of that it cites, in place of the faint one.
+    const lines = (kinds, into) => edges.filter((e) => kinds.includes(e.kind) && into(e.key.split('>')[1])).map((e) => e.key).sort();
+    const shownTo = (into) => lines(['context', 'cite'], into);
+
+    const roundNodes = nodes.filter((n) => isRound(n.id));
+    const placedAt = new Map(roundNodes.map((n) => [n.id, n.x]));
+    const sent = posted?.relevance_rounds === rounds && events.find((e) => e.type === 'run_started')?.rounds === rounds;
+    const still = frames.length > HELD_FRAMES && frames.every((f) => f.view === view && f.rounds.every(([id, x]) => placedAt.get(id) === x));
+    const moved = frames.filter((f) => f.view !== view).length;
+    const plannedName = `${run}, chosen in the settings, is sent ${rounds} and planned for ${rounds} from its first frame: neither the view nor any round's column moves`;
+    check('live', plannedName, done && sent && still, `sent ${posted?.relevance_rounds}; ${moved} of ${frames.length} frames off the run's view`);
+    const columns = ['doc', ...kinds, 'schema', 'parsed', 'answer'].map((kind) => [...new Set(nodes.filter((n) => kindOf(n.id) === kind).map((n) => n.x))]);
+    const gaps = columns.slice(1, -1).map(([x], c) => x - columns[c][0]);
+    const placed = columns.every((xs) => xs.length === 1) && gaps.every((gap) => gap > 0 && gap === gaps[0]) && columns.at(-1)[0] > columns.at(-2)[0];
+    const counted = nodes.length === SAMPLE_DOCS * (rounds + DOCUMENT_AND_PARSE) + STRUCTURE_AND_ANSWER && kinds.every((kind) => roundNodes.filter((n) => kindOf(n.id) === kind).length === SAMPLE_DOCS);
+    const named = roundNodes.every((n) => isDeepStrictEqual(n.labels, [stem(docOf(n.id)), `round ${roundOf(n.id)}`]) && n.name === `${stem(docOf(n.id))}, round ${roundOf(n.id)} relevance snippet`);
+    const columnsName = `${run} draws a column of ${SAMPLE_DOCS} nodes per round, in order between the documents and the structure, each labelled and named for its round`;
+    check('live', columnsName, done && counted && placed && named, `${nodes.length} nodes; columns at ${columns.map((xs) => xs.join('/')).join(', ')}`);
+    const geometry = await page.evaluate(dottedLineHits);
+    const clear = geometry.dotted === SAMPLE_DOCS * rounds && geometry.hits.length === 0;
+    check('live', `${run}: no dotted line passes through an icon or a label`, clear, `${geometry.dotted} dotted lines; ${geometry.hits.slice(0, 3).join(', ')}`);
+
+    const cited = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => (finished(k + 2, d)?.provenance ?? []).map((id) => `${kinds[k]}-${at(id)}>${kind}-${d}`)));
+    const citing = lines(['cite'], isRound);
+    const previous = kinds.slice(1).flatMap((kind, k) => docs.flatMap((d) => docs.filter((j) => j !== d).map((j) => `${kinds[k]}-${j}>${kind}-${d}`)));
+    const linesIn = shownTo(isRound);
+    const citesName = `${run}: each round after the first cites the round before it, line for line as its events say, and is shown that round's other summaries`;
+    check('live', citesName, isDeepStrictEqual(citing, cited.sort()) && (rounds === 1 || citing.length > 0) && isDeepStrictEqual(linesIn, previous.sort()), `${citing.length} cite lines: ${citing.slice(0, 4).join(' ')}; ${linesIn.length} lines in`);
+
+    const fromFinal = (to) => docs.map((d) => `${final}-${d}>${to}`);
+    const intoSchema = shownTo((to) => to === 'schema');
+    const intoParses = shownTo((to) => to.startsWith('parsed-'));
+    const intoAnswer = shownTo((to) => to === 'answer-0').map(kindOf);
+    const fed =
+      isDeepStrictEqual(intoSchema, fromFinal('schema').sort()) &&
+      isDeepStrictEqual(intoParses, docs.flatMap((d) => fromFinal(`parsed-${d}`)).sort()) &&
+      intoAnswer.includes(final) &&
+      intoAnswer.every((kind) => kind === final || kind === 'parsed');
+    const fedName = `${run}: its last round alone feeds the structure, the parses and the answer`;
+    check('live', fedName, fed, `into the structure ${intoSchema.join(' ')}; into the answer from ${[...new Set(intoAnswer)].join(' ')}`);
+
+    const [answer] = await page.evaluate(answersRead);
+    const lit = await litOnPanel(page);
+    const trail = answer ? trailOnPage(answer.trail, answer.ids, docIds, 'answer-0', rounds) : null;
+    const throughAll = kinds.every((kind) => lit.nodes.some((id) => kindOf(id) === kind));
+    const trailName = `${run}: the lit trail is the one its reasoning_finished event carried, through every round`;
+    check('live', trailName, lit.edges.length > 0 && isDeepStrictEqual(lit, trail) && throughAll, `${lit.edges.length} lines lit, ${trail?.edges.length} on the trail`);
+
+    const shown = [];
+    for (const n of roundNodes) shown.push([n.id, await inspect(page, n.id, '#inspector .insp-text')]);
+    const filled = roundNodes.every((n) => !n.unsettled) && shown.every(([id, text]) => text === finished(roundOf(id), docOf(id))?.summary);
+    await page.keyboard.press('Escape');
+    await page.focus('.log-toggle');
+    await page.keyboard.press('Enter');
+    const steps = stepsOf(await page.evaluate(logOf)).slice(1);
+    const logged = [...kinds.map((kind) => [`round ${roundOf(kind)} · extracting relevance`, SAMPLE_DOCS, perDocument(kind)]), ...RUN_STEPS.slice(ROUNDS)];
+    const progressName = `${run}: its events fill every round's nodes with their summaries, and its log has a step for each round`;
+    check('live', progressName, filled && isDeepStrictEqual(steps, logged), JSON.stringify(steps.map(([step, lines]) => `${step} (${lines})`)));
+
+    const popups = [];
+    for (const kind of kinds) {
+      await inspect(page, `${kind}-0`);
+      popups.push({ title: (await popup(page))?.title, folds: (await page.evaluate(foldsIn)).map((f) => f.name.split(' ')[0]), provenance: await provenanceListed(page) });
+    }
+    const ownProvenance = (k) => (finished(k, 0)?.provenance ?? []).map((id) => `${stem(at(id))} · round ${k - 1}`);
+    const opened = popups.every(({ title, folds, provenance }, k) =>
+      title === `● ${stem(0)} · round ${k + 1}` && folds.includes('provenance') === k > 0 && isDeepStrictEqual(provenance, k > 0 ? ownProvenance(k + 1) : []),
+    );
+    await inspect(page, 'answer-0');
+    const answerListed = await provenanceListed(page);
+    const answerCited = answer ? [...answer.summary_ids.map((id) => `${stem(at(id))} · round ${rounds}`), ...answer.parse_ids.map((id) => `${stem(at(id))} · parsed`)] : null;
+    const popupsName = `${run}: each round's popup opens, a later round's listing the summaries it cites of the round before, and the answer's its last round's`;
+    check('live', popupsName, opened && isDeepStrictEqual(answerListed, answerCited), `${JSON.stringify(popups.map((p) => p.title))}; answer ${answerListed.join(' · ')}`);
+  });
 }
 
 // A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a new run.

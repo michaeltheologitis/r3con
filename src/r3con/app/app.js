@@ -1855,6 +1855,9 @@
   const roundOf = (kind) => Number(kind.slice(1));
   /** @param {RoundKind} kind */
   const roundName = (kind) => `round ${roundOf(kind)}`;
+  // The round a summary of round k is shown and cites, k - 1; none for round 1 or any other kind of node.
+  /** @param {NodeKind} kind @returns {RoundKind | null} */
+  const previousRound = (kind) => (isRound(kind) && roundOf(kind) > 1 ? roundKind(roundOf(kind) - 1) : null);
   /** @param {number} rounds @returns {Summary[][]} */
   const emptyRounds = (rounds) => range(rounds).map(() => []);
   /** @param {number} rounds */
@@ -2258,9 +2261,9 @@
       return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${final}-${d}`);
-    if (!isRound(kind) || roundOf(kind) === 1) return [];
-    const previous = roundKind(roundOf(kind) - 1);
-    return summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`);
+    if (!isRound(kind)) return [];
+    const previous = previousRound(kind);
+    return previous ? summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`) : [];
   }
 
   /** @param {Run} run @param {string} id */
@@ -2405,7 +2408,6 @@
     return layout;
   }
 
-  // Documents stand in the first column.
   /** @param {number} i */
   const tidyOrigin = (i) => ({ x: 0, y: i * GRID.rowGap });
 
@@ -3479,9 +3481,8 @@
     const final = finalRound(run);
     if (kind === 'parsed' || kind === 'schema') return every(final);
     if (kind === 'answer') return [...every(final), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
-    if (!isRound(kind) || roundOf(kind) === 1) return [];
-    const previous = roundKind(roundOf(kind) - 1);
-    return every(previous, (j) => j !== i && summariesIn(run, previous)[j].summary);
+    const previous = previousRound(kind);
+    return previous ? every(previous, (j) => j !== i && summariesIn(run, previous)[j].summary) : [];
   }
 
   // Dotted: the call's own document, read again; faint: the other outputs it was shown.
@@ -3505,17 +3506,19 @@
   /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
 
+  /** @param {StageKind} kind */
+  const phaseOf = (kind) => (isRound(kind) ? roundName(kind) : STAGE_PHASE[kind]);
+
   /** @param {RunTab} tab @param {StageKind} kind */
   function showProgress(tab, kind) {
-    const phase = isRound(kind) ? roundName(kind) : STAGE_PHASE[kind];
     const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
-    tabStatus(tab, `running · ${phase}${progress}`);
+    tabStatus(tab, `running · ${phaseOf(kind)}${progress}`);
   }
 
   /** @param {Run} run @param {StageKind} kind */
   function stepLine(run, kind) {
-    if (isRound(kind)) return `${roundName(kind)} · extracting relevance`;
-    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : STAGE_PHASE[kind];
+    if (isRound(kind)) return `${phaseOf(kind)} · extracting relevance`;
+    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : phaseOf(kind);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
