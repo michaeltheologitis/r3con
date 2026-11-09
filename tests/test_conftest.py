@@ -13,32 +13,53 @@ LOCAL_HOST = "127.0.0.1"
 # Loopback too, so a connection the guard failed to refuse would not leave the machine.
 OTHER_LOCAL_HOST = "127.0.0.2"
 SESSION_TIMEOUT_SECONDS = 120
-# A test module for a session of its own, which writes to outcome.txt beside it whether
-# the thread its test left running could open a network socket once that session ended.
-LEFT_RUNNING = """\
+# A conftest.py for a session of its own. Outside any test, it tries to open a network
+# socket, as a thread a test left running might, and logs each try to outcomes.txt.
+OUTSIDE_TESTS = """\
 import socket
-import threading
 from pathlib import Path
 
 from pytest_socket import SocketBlockedError
 
-OUTCOME = Path(__file__).with_name("outcome.txt")
+OUTCOMES = Path(__file__).with_name("outcomes.txt")
 
 
-def open_a_network_socket(session_over):
-    session_over.wait()
+def try_a_network_socket(moment):
     try:
         socket.socket(socket.AF_INET, socket.SOCK_STREAM).close()
     except SocketBlockedError:
-        OUTCOME.write_text("refused")
+        outcome = "refused"
     else:
-        OUTCOME.write_text("opened")
+        outcome = "opened"
+    with OUTCOMES.open("a") as outcomes:
+        outcomes.write(f"{moment}: {outcome}\\n")
 
 
-def test_leaves_a_thread_running(pytestconfig):
-    session_over = threading.Event()
-    threading.Thread(target=open_a_network_socket, args=(session_over,)).start()
-    pytestconfig.add_cleanup(session_over.set)
+def pytest_runtest_logfinish(nodeid):
+    if nodeid.endswith("::test_blocked"):
+        try_a_network_socket("between tests")
+
+
+def pytest_sessionfinish():
+    # Where pytest does its own session-end work, such as deleting old temp folders.
+    try_a_network_socket("as the session finishes")
+
+
+def pytest_unconfigure():
+    try_a_network_socket("once the session is over")
+"""
+# Its tests: a blocked one, then a last one that allows sockets.
+TESTS = """\
+import pytest
+
+
+def test_blocked():
+    pass
+
+
+@pytest.mark.enable_socket
+def test_allows_sockets():
+    pass
 """
 
 # pytest-socket warns as it refuses a socket.
@@ -77,11 +98,13 @@ def test_a_fixtures_teardown_reaches_only_the_hosts_its_test_allows():
     pass
 
 
-def test_a_thread_left_running_cannot_open_a_network_socket_once_the_session_is_over(
-    tmp_path: Path,
+def test_sockets_stay_blocked_between_tests_and_once_the_session_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    module = tmp_path / "test_left_running.py"
-    module.write_text(LEFT_RUNNING)
+    (tmp_path / "conftest.py").write_text(OUTSIDE_TESTS)
+    module = tmp_path / "test_session.py"
+    module.write_text(TESTS)
+    monkeypatch.setenv("PYTHONPATH", str(REPO), prepend=os.pathsep)
     session = subprocess.run(
         [
             sys.executable,
@@ -95,11 +118,15 @@ def test_a_thread_left_running_cannot_open_a_network_socket_once_the_session_is_
             str(module),
         ],
         cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(REPO)},
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
         timeout=SESSION_TIMEOUT_SECONDS,
         check=False,
     )
     assert session.returncode == 0, session.stdout
-    assert (tmp_path / "outcome.txt").read_text() == "refused"
+    assert (tmp_path / "outcomes.txt").read_text().splitlines() == [
+        "between tests: refused",
+        "as the session finishes: refused",
+        "once the session is over: refused",
+    ]

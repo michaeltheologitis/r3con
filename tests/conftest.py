@@ -449,8 +449,8 @@ def _refused(provider: str) -> Callable[[object], NoReturn]:
     return refuse
 
 
-# Never undone: a worker thread a test leaves running can still ask between tests, while
-# pytest-socket has let go.
+# Never undone: a worker thread a test leaves running can still ask while a later test
+# allows sockets.
 for authenticator, method, provider in TOKEN_REQUESTS:
     setattr(authenticator, method, _refused(provider))
 
@@ -469,9 +469,16 @@ def _no_litellm_sign_in(
     assert not tokens_asked_for, sorted(set(tokens_asked_for))
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup() -> None:
+    """Lifts the last test's pytest-socket guard, as pytest-socket's setup expects."""
+    pytest_socket._remove_restrictions()
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_teardown() -> Iterator[None]:
-    """Keeps the test's pytest-socket guard up until its fixtures are torn down."""
+    """Keeps the test's pytest-socket guard up through its fixtures' teardown, until
+    the next test's setup lifts it."""
     # pytest-socket's own teardown hook lifts the guard before pytest's tears them down.
     lift_guard = pytest_socket._remove_restrictions
     pytest_socket._remove_restrictions = lambda: None
@@ -479,15 +486,14 @@ def pytest_runtest_teardown() -> Iterator[None]:
         yield
     finally:
         pytest_socket._remove_restrictions = lift_guard
-        lift_guard()
 
 
-@pytest.hookimpl(trylast=True)
+@pytest.hookimpl(tryfirst=True)
 def pytest_sessionfinish(session: pytest.Session) -> None:
-    """Puts the run's guard back for good once the tests are done: a thread one left
-    running may outlive the session."""
+    """Puts the run's guard back for good before pytest's own session-end work: a
+    thread a test left running may outlive the session."""
     config = session.config
-    blocked = config.getoption("--disable-socket")
+    blocked = config.getoption("--disable-socket", default=False)
     if blocked and not config.getoption("--force-enable-socket"):
         pytest_socket.disable_socket(config.getoption("--allow-unix-socket"))
 
