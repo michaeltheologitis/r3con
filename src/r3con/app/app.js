@@ -18,9 +18,8 @@
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
   /** @typedef {{ name: string, size: number } & FileRead} DocumentRead */
   /**
-   * A file's documents, many for a zip; how many files it left out by their suffix, and how many documents it
-   * didn't read for want of room.
-   * @typedef {{ docs: DocumentRead[], skipped: number, unread: number }} Unpacked
+   * A file's documents, many for a zip, and how many files it left out by their suffix.
+   * @typedef {{ docs: DocumentRead[], skipped: number }} Unpacked
    */
   /**
    * Files to add; how many files in their folders were left out by their suffix, and those the browser couldn't read.
@@ -124,7 +123,6 @@
    * @property {number} id
    * @property {LoadedFile[]} files
    * @property {Removed | null} removed while undo can put it back
-   * @property {number} reading how many batches of files are being read for it, or wait to be
    * @property {string} filesSaid
    * @property {string} filesError
    * @property {string} draft
@@ -191,7 +189,7 @@
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File, noText: string) => Promise<FileRead>} extract
-   * @property {(file: File, limit: number) => Promise<Unpacked>} unzip
+   * @property {(file: File) => Promise<Unpacked>} unzip
    * @property {(question: string, files: LoadedFile[]) => Run} newRun
    * @property {(tab: RunTab, narr: Narrator) => void} play
    * @property {(tab: Tab) => boolean} runGoing
@@ -1459,7 +1457,6 @@
   const PREVIEW_CHARS = 20000;
   const PREVIEW_LINES = 5000;
   const JSON_INDENT = 2;
-  const MAX_FILES = 40;
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
   const LOCK_FILE_PREFIX = '~$';
@@ -1553,7 +1550,6 @@
   const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
   const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} skipped` : ''}.`;
-  const TOO_MANY_FILES = `A tab takes ${MAX_FILES} files at most.`;
   const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
   // A refusal names this many files, then counts the rest.
   const NAMED_AT_MOST = 5;
@@ -1686,7 +1682,6 @@
       id,
       files,
       removed: null,
-      reading: 0,
       filesSaid: '',
       filesError: '',
       draft: '',
@@ -3393,12 +3388,11 @@
   }
 
   function updateHint() {
-    const { run, files, removed, reading } = state.shown;
+    const { run, files, removed } = state.shown;
     const listed = removed?.files ?? files;
     const count = fileCount(listed);
     trash.hidden = Boolean(run) || !listed.length;
-    // Not while a batch is read: undo would put files back under it, past the tab's room.
-    const offered = !trash.hidden && !reading;
+    const offered = !trash.hidden;
     $('panel-hint').hidden = Boolean(run);
     $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : ADD_FILES;
     for (const button of removeAllButtons) {
@@ -4173,33 +4167,18 @@
   }
 
   /** @param {File} file @param {FileRead} read @returns {Unpacked} */
-  const oneDocument = (file, read) => ({ docs: [{ name: file.name, size: file.size, ...read }], skipped: 0, unread: 0 });
+  const oneDocument = (file, read) => ({ docs: [{ name: file.name, size: file.size, ...read }], skipped: 0 });
 
-  /** @param {File} file @param {number} room how many more documents the tab takes */
-  async function readDocuments(file, room) {
-    return hasSuffix(file, ZIP_SUFFIX) ? mode.unzip(file, room) : oneDocument(file, await readFile(file));
-  }
-
-  // The next files to read at once: a zip on its own, as it can hold any number of documents, or up to `room` others.
-  /** @param {File[]} rest @param {number} room */
-  function nextChunk(rest, room) {
-    const zip = rest.findIndex((f) => hasSuffix(f, ZIP_SUFFIX));
-    return zip === 0 ? rest.slice(0, 1) : rest.slice(0, zip < 0 ? room : Math.min(room, zip));
+  /** @param {File} file */
+  async function readDocuments(file) {
+    return hasSuffix(file, ZIP_SUFFIX) ? mode.unzip(file) : oneDocument(file, await readFile(file));
   }
 
   // A tab's batches are read and added one after another, so that each one's lines in the files pane stand.
   /** @param {Picked} batch @param {Tab} [tab] */
   function addFiles(batch, tab = state.shown) {
     tellFiles(tab, { filesError: '' });
-    tab.reading += 1;
-    updateHint();
-    tab.adding = tab.adding
-      .then(() => addBatch(batch, tab))
-      .catch((error) => failedToAdd(tab, error))
-      .finally(() => {
-        tab.reading -= 1;
-        updateHint();
-      });
+    tab.adding = tab.adding.then(() => addBatch(batch, tab)).catch((error) => failedToAdd(tab, error));
   }
 
   /** @param {Tab} tab @param {{ filesSaid?: string, filesError?: string }} lines */
@@ -4239,7 +4218,6 @@
     addFilesError(tab, explain(error, "Couldn't add those files.", "couldn't add files"));
   }
 
-  // Files are read in order until the tab is full, so that one refused leaves its room to the next.
   /** @param {Picked} batch @param {Tab} tab */
   async function addBatch({ files, skipped, failed }, tab) {
     // A tab closed, or run, since its files were picked takes none of them, so they aren't read.
@@ -4247,11 +4225,8 @@
     const picked = pickFiles(files);
     if (tab.run) return addFilesError(tab, notAdded([...failed, ...picked.map((f) => f.name)], RAN_FIRST) || RAN_FIRST);
     if (!picked.length && !failed.length) return addFilesError(tab, skipped ? noDocuments(skipped) : 'No files found there. Try picking the files themselves.');
-    // Read again after each wait, as files can be removed while a batch is read.
-    const kept = () => tab.files.filter((f) => !f.sample);
     /** @type {LoadedFile[]} */
     const read = [];
-    const room = () => MAX_FILES - kept().length - read.length;
     /** @type {Map<string, string[]>} */
     const refused = new Map(failed.length ? [[BROWSER_COULD_NOT_READ, failed]] : []);
     /** @param {string} why @param {string} name */
@@ -4262,32 +4237,18 @@
       else if (tab.run) refuse(RAN_FIRST, r.name);
       else read.push(loaded({ name: r.name, size: r.size, text: r.text, sample: false }));
     };
-    const toRead = Math.min(picked.length, room());
-    if (toRead) tellFiles(tab, { filesSaid: `Reading ${plural(toRead, 'file')}…` });
-    let unread = 0;
-    let next = 0;
-    while (next < picked.length && room() > 0 && !tab.run) {
-      const chunk = nextChunk(picked.slice(next), room());
-      next += chunk.length;
-      const unpacked = await Promise.all(chunk.map((file) => readDocuments(file, room())));
-      if (!state.tabs.includes(tab)) return;
-      unpacked.flatMap((u) => u.docs).forEach(take);
-      skipped += unpacked.reduce((sum, u) => sum + u.skipped, 0);
-      unread += unpacked.reduce((sum, u) => sum + u.unread, 0);
-    }
-    const rest = picked.slice(next).map((f) => f.name);
-    if (tab.run) rest.forEach((name) => refuse(RAN_FIRST, name));
-    else unread += rest.length;
-    // The tab can hold more now than when the batch counted its room.
-    const left = kept();
-    unread += read.splice(Math.max(0, MAX_FILES - left.length)).length;
+    if (picked.length) tellFiles(tab, { filesSaid: `Reading ${plural(picked.length, 'file')}…` });
+    const unpacked = await Promise.all(picked.map(readDocuments));
+    if (!state.tabs.includes(tab)) return;
+    unpacked.flatMap((u) => u.docs).forEach(take);
+    skipped += unpacked.reduce((sum, u) => sum + u.skipped, 0);
     for (const [why, names] of refused) addFilesError(tab, notAdded(names, why));
-    if (unread) addFilesError(tab, notAdded([plural(unread, 'file')], TOO_MANY_FILES));
     if (!read.length) {
       tellFiles(tab, { filesSaid: '' });
       return;
     }
-    // Files added over the sample memos take the place of any that are left.
+    // Taken now, as files can be removed while a batch is read; files added over the sample memos take their place.
+    const left = tab.files.filter((f) => !f.sample);
     const replaced = tab.files.length - left.length;
     tab.files = [...left, ...read];
     const added = `${plural(read.length, 'file')} added`;
@@ -5297,14 +5258,14 @@
       }
     },
     // A zipped document with no text is refused as a dropped one is, and so is a zip with none.
-    async unzip(file, limit) {
+    async unzip(file) {
       try {
-        const unzipped = await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}&limit=${limit}`, { method: 'POST', body: file });
-        /** @type {{ files: { name: string, size: number, text: string }[], skipped: number, unread: number }} */
-        const { files, skipped, unread } = await unzipped.json();
+        const unzipped = await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file });
+        /** @type {{ files: { name: string, size: number, text: string }[], skipped: number }} */
+        const { files, skipped } = await unzipped.json();
         if (!files.length) return oneDocument(file, { why: noDocuments(skipped) });
         const noText = (/** @type {{ name: string }} */ f) => (hasSuffix(f, PDF_SUFFIX) ? NO_TEXT_LAYER : NO_TEXT);
-        return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noText(f) })), skipped, unread };
+        return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noText(f) })), skipped };
       } catch (error) {
         return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }

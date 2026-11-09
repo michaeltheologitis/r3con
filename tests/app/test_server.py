@@ -231,9 +231,9 @@ def zipped(tmp_path: Path, entries: Mapping[str, str | bytes]) -> Path:
     return path
 
 
-def unzip(client: TestClient, body: bytes, **params: str) -> httpx2.Response:
+def unzip(client: TestClient, body: bytes) -> httpx2.Response:
     """The server's answer for the zip ``body``, sent as it is."""
-    return client.post(DOCUMENT_ZIP, params={"name": ZIP_NAME, **params}, content=body)
+    return client.post(DOCUMENT_ZIP, params={"name": ZIP_NAME}, content=body)
 
 
 def unzipped_names(response: httpx2.Response) -> list[str]:
@@ -1136,7 +1136,7 @@ def test_a_zips_documents_come_back_by_path_as_a_folder_walk_reads_them(
     assert [file["size"] for file in unzipped["files"]] == [
         path.stat().st_size for path in files
     ]
-    assert unzipped["skipped"] == unzipped["unread"] == 0
+    assert unzipped["skipped"] == 0
 
 
 def test_a_zips_documents_come_in_the_order_read_documents_walks_a_folder(
@@ -1211,7 +1211,7 @@ def test_hidden_macos_and_lock_entries_are_left_out_uncounted_and_others_counted
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     assert response.status_code == 200
     memo = {"name": "01_memo.txt", "size": len(MEMO), "text": MEMO}
-    assert response.json() == {"files": [memo], "skipped": 2, "unread": 0}
+    assert response.json() == {"files": [memo], "skipped": 2}
 
 
 def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path):
@@ -1220,29 +1220,19 @@ def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path
     entries = {"outer_memo.txt": MEMO, "inner.zip": inner.read_bytes()}
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     memo = {"name": "outer_memo.txt", "size": len(MEMO), "text": MEMO}
-    assert response.json() == {"files": [memo], "skipped": 1, "unread": 0}
+    assert response.json() == {"files": [memo], "skipped": 1}
 
 
-def test_a_zip_read_to_a_limit_reads_its_first_documents_and_counts_the_rest(
+def test_a_zip_of_many_documents_comes_back_with_every_one_in_order(
     client: TestClient, tmp_path: Path
 ):
-    memos = {f"{i}.txt": f"Memo {i}.\n" for i in (3, 1, 2)}
-    response = unzip(client, zipped(tmp_path, memos).read_bytes(), limit="2")
-    assert unzipped_names(response) == ["1.txt", "2.txt"]
-    assert response.json()["unread"] == 1
-
-
-def test_a_zip_read_to_a_limit_counts_only_documents_with_text(
-    client: TestClient, tmp_path: Path
-):
-    memos = {
-        "1.txt": "",
-        "2.txt": " \n",
-        **{f"{i}.txt": f"Memo {i}.\n" for i in range(3, 7)},
-    }
-    response = unzip(client, zipped(tmp_path, memos).read_bytes(), limit="3")
-    assert unzipped_names(response) == ["1.txt", "2.txt", "3.txt", "4.txt", "5.txt"]
-    assert response.json()["unread"] == 1
+    names = [f"memo_{i:03}.txt" for i in range(120)]
+    memos = {name: f"{name}\n" for name in reversed(names)}
+    response = unzip(client, zipped(tmp_path, memos).read_bytes())
+    files = [
+        {"name": name, "size": len(memos[name]), "text": memos[name]} for name in names
+    ]
+    assert response.json() == {"files": files, "skipped": 0}
 
 
 def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse(
@@ -1259,7 +1249,6 @@ def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse
             {"name": "scan.pdf", "size": scan.stat().st_size, "text": ""},
         ],
         "skipped": 0,
-        "unread": 0,
     }
 
 
@@ -1326,17 +1315,13 @@ def test_a_zip_of_more_entries_than_the_cap_is_refused(
         assert response.json() == {"error": TOO_MANY_ENTRIES}
 
 
-# A document past the limit is not read, so it counts for nothing against the cap.
-@pytest.mark.parametrize(("limit", "status"), [(None, 422), ("1", 200)])
-def test_a_zip_whose_documents_read_would_unzip_past_the_cap_is_refused(
-    client: TestClient, tmp_path: Path, limit: str | None, status: int
+def test_a_zip_whose_documents_would_unzip_past_the_cap_is_refused(
+    client: TestClient, tmp_path: Path
 ):
     entries = {"a.txt": MEMO, "b.txt": b"a" * MAX_ZIP_BYTES}
-    body = zipped(tmp_path, entries).read_bytes()
-    response = unzip(client, body, **({} if limit is None else {"limit": limit}))
-    assert response.status_code == status
-    if status == 422:
-        assert response.json() == {"error": TOO_MANY_BYTES}
+    response = unzip(client, zipped(tmp_path, entries).read_bytes())
+    assert response.status_code == 422
+    assert response.json() == {"error": TOO_MANY_BYTES}
 
 
 @pytest.mark.parametrize(
@@ -1345,8 +1330,6 @@ def test_a_zip_whose_documents_read_would_unzip_past_the_cap_is_refused(
         ({}, "name: Field required"),
         ({"name": " "}, "name: must not be blank"),
         ({"name": ZIP_NAME, "pages": "1"}, "pages: Extra inputs are not permitted"),
-        ({"name": ZIP_NAME, "limit": "0"}, "limit: Input should be greater than"),
-        ({"name": ZIP_NAME, "limit": "all"}, "limit: Input should be a valid integer"),
     ],
 )
 def test_a_zip_without_a_valid_name_is_refused_with_what_is_wrong(

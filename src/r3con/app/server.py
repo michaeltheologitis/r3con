@@ -47,18 +47,17 @@ opened URL's fragment, ``#token=...``.
   ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
   scan, a file with no text or one that can't be read, as the server's log then says.
   The page sends each PDF and Word file it is given here, and reads other files itself.
-- ``POST /api/documents/zip?name=<file name>&limit=<n>``, with a zip's bytes as the
-  body, answers ``{files: [{name, size, text}], skipped, unread}``. Its documents are
-  the entries ``r3con.read_documents``' folder walk would read, judged by their paths
-  below the one top folder the zip's files share, if they do, ``__MACOSX/`` aside: by
-  suffix, and with no Office lock file and nothing hidden, in a hidden folder or under
-  ``__MACOSX/``. They are read in the walk's order, as that walk reads a file, until
-  ``limit`` of them have text; each is named by that path, and one with no text comes
-  back with ``""`` and doesn't count.
+- ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body,
+  answers ``{files: [{name, size, text}], skipped}``. Its documents are the entries
+  ``r3con.read_documents``' folder walk would read, judged by their paths below the
+  one top folder the zip's files share, if they do, ``__MACOSX/`` aside: by suffix,
+  and with no Office lock file and nothing hidden, in a hidden folder or under
+  ``__MACOSX/``. They are read in the walk's order, as that walk reads a file; each
+  is named by that path, and one with no text comes back with ``""``.
   ``skipped`` counts the files left out by their suffix, nested zips among them,
-  which are never opened; ``unread``, the documents not read. A zip that is corrupt,
-  encrypted, of more than ``MAX_ZIP_ENTRIES`` entries, or whose documents read would
-  unzip to more than ``MAX_ZIP_BYTES``, is refused (422).
+  which are never opened. A zip that is corrupt, encrypted, of more than
+  ``MAX_ZIP_ENTRIES`` entries, or whose documents would unzip to more than
+  ``MAX_ZIP_BYTES``, is refused (422).
 - ``POST /api/runs`` (``{question, model, endpoint?, documents: [text, ...], names?:
   [name, ...], relevance_rounds?}``) starts ``r3con.run`` and answers ``{run_id}``;
   ``GET /api/runs/{run_id}/events`` streams its events as ``text/event-stream``, from
@@ -286,12 +285,6 @@ class RunRequest(BaseModel):
 class DocumentQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Text
-
-
-class ZipQuery(BaseModel):
-    model_config = FORBID_EXTRA
-    name: Text
-    limit: int = Field(MAX_ZIP_ENTRIES, ge=1)
 
 
 class AskRequest(BaseModel):
@@ -582,7 +575,7 @@ def _refused_if_unreadable(name: str, call: Callable[[], Result]) -> Result:
         raise HTTPException(422, UNREADABLE_ZIP) from None
 
 
-def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
+def _unzipped(name: str, body: bytes) -> dict[str, Any]:
     """What ``POST /api/documents/zip`` answers for the zip ``body``, called ``name``.
     Only zipfile's own errors make it unreadable: an extractor gives ``""`` for a
     document it can't read."""
@@ -602,28 +595,21 @@ def _unzipped(name: str, body: bytes, limit: int) -> dict[str, Any]:
             ((parts, entry) for parts, entry in kept if r3con._walk_reads(parts[-1])),
             key=lambda document: document[0],
         )
-        unzipped = _read_until(archive, name, documents, limit)
-    return {
-        "files": unzipped,
-        "skipped": len(kept) - len(documents),
-        "unread": len(documents) - len(unzipped),
-    }
+        unzipped = _read_entries(archive, name, documents)
+    return {"files": unzipped, "skipped": len(kept) - len(documents)}
 
 
-def _read_until(
+def _read_entries(
     archive: zipfile.ZipFile,
     name: str,
     documents: list[tuple[list[str], zipfile.ZipInfo]],
-    limit: int,
 ) -> list[dict[str, Any]]:
-    """``documents``, each its entry and the parts it is named by, read in order until
-    ``limit`` of them have text; each is checked before it is read, and those with no
-    text come back too, for the page to refuse."""
+    """``documents``, each its entry and the parts it is named by, read in order; each
+    is checked before it is read, and those with no text come back too, for the page
+    to refuse."""
     unzipped: list[dict[str, Any]] = []
-    with_text = unzipped_bytes = 0
+    unzipped_bytes = 0
     for parts, entry in documents:
-        if with_text == limit:
-            break
         if entry.flag_bits & ZIP_ENCRYPTED_FLAG:
             raise HTTPException(422, ENCRYPTED_ZIP)
         unzipped_bytes += entry.file_size
@@ -632,16 +618,15 @@ def _read_until(
         # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
         data = _refused_if_unreadable(name, partial(archive.read, entry))
         text = r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data))
-        with_text += bool(text.strip())
         unzipped.append({"name": "/".join(parts), "size": len(data), "text": text})
     return unzipped
 
 
 async def document_zip(request: Request) -> Response:
-    query = _valid(ZipQuery.model_validate, dict(request.query_params))
+    query = _valid(DocumentQuery.model_validate, dict(request.query_params))
     body = await request.body()
     # As in document_text: on the event loop, it would hold up every other request.
-    unzipped = await run_in_threadpool(_unzipped, query.name, body, query.limit)
+    unzipped = await run_in_threadpool(_unzipped, query.name, body)
     return JSONResponse(unzipped)
 
 
