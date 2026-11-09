@@ -1415,32 +1415,37 @@ def a_quote_placed_by_a_list(result: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    ("name", "make_malformed", "error"),
+    ("name", "make_malformed", "error", "reason"),
     [
         (
             "structuring/parsing/result.json",
             a_parse_citation_short,
-            "ValueError: zip() argument 2 is shorter than argument 1",
+            "ValueError",
+            "zip() argument 2 is shorter than argument 1",
         ),
-        ("relevance/result.json", a_quote_without_text, "KeyError: 'text'"),
+        ("relevance/result.json", a_quote_without_text, "KeyError", "'text'"),
         (
             "relevance/result.json",
             a_quote_placed_by_a_list,
-            "TypeError: unhashable type: 'list'",
+            "TypeError",
+            "unhashable type: 'list'",
         ),
     ],
     ids=["a-parse-citation-short", "a-quote-without-text", "a-quote-placed-by-a-list"],
 )
 def test_an_ask_refuses_malformed_saved_records_in_one_line_before_any_request(
-    answering_llm, cited_run, name, make_malformed, error
+    answering_llm, cited_run, name, make_malformed, error, reason
 ):
     in_json(name, make_malformed)(cited_run.run_dir)
     sent = len(answering_llm.requests)
     with pytest.raises(ValueError) as refused:
         ask(cited_run, "Who else?", completion=answering_llm)
-    assert str(refused.value) == (
-        f"can't read {cited_run.run_dir} as a run folder: {error}"
-    )
+    message = str(refused.value)
+    refusal = f"can't read {cited_run.run_dir} as a run folder: {error}: "
+    assert message.startswith(refusal)
+    # Python words the reason, and 3.14 reworded the TypeError around these words.
+    assert reason in message.removeprefix(refusal)
+    assert "\n" not in message
     assert len(answering_llm.requests) == sent
     assert not (cited_run.run_dir / "asks").exists()
 
