@@ -190,6 +190,26 @@ def test_a_date_or_a_time_is_made_plain_as_its_iso_8601_text(value, text):
     assert plain(value) == text
 
 
+class ShortFields(tuple):
+    _fields = ("region",)
+
+    def _asdict(self) -> dict[str, str]:
+        return {"region": self[0]}
+
+
+def test_a_tuple_with_fewer_field_names_than_items_is_made_plain_whole_as_a_list():
+    assert plain(ShortFields(("eu", KEY))) == ["eu", KEY]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"\xff", bytearray(b"\xff"), memoryview(b"\xff")],
+    ids=["bytes", "bytearray", "memoryview"],
+)
+def test_bytes_are_made_plain_as_their_repr_not_a_list_of_numbers(data):
+    assert plain(data) == repr(data)
+
+
 @pytest.mark.parametrize(
     ("error", "line"),
     [

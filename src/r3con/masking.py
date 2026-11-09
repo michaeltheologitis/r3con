@@ -57,12 +57,18 @@ import datetime
 import os
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from types import SimpleNamespace
 from typing import Any
 
 from pydantic import AnyUrl, BaseModel, MongoDsn, NatsDsn, PostgresDsn, ValidationError
 from pydantic_core import MultiHostUrl, Url
+
+try:
+    from yarl import URL as YarlUrl
+except ImportError:  # yarl comes with aiohttp, which litellm needs and r3con doesn't.
+    YarlUrl = None
 
 MASK = "REDACTED"
 # A shorter key is a placeholder, and masking one as short as "x" garbles "maximum".
@@ -95,7 +101,13 @@ _AUTH = "auth"
 _PATH_STARTS = ("/", "~/")
 # pydantic's URL types wrap pydantic_core's rather than subclass them: AnyUrl is the
 # base of each single-host one, and these three DSNs are its multi-host ones.
-_URL_TYPES = (Url, MultiHostUrl, AnyUrl, PostgresDsn, MongoDsn, NatsDsn)
+_URL_TYPES = tuple(
+    url
+    for url in (Url, MultiHostUrl, AnyUrl, PostgresDsn, MongoDsn, NatsDsn, YarlUrl)
+    if url is not None
+)
+# Sequences of bytes, kept as their repr rather than lists of numbers.
+_BYTES = (bytes, bytearray, memoryview)
 _registered: set[str] = set()
 _lock = threading.Lock()
 
@@ -153,20 +165,22 @@ def plain(data: Any) -> Any:
     """``data`` in dicts with string keys, lists, strings, numbers, booleans and
     ``None``, so each walk over it sees the same shapes: a date, time or datetime as
     its ISO 8601 text (``isoformat()``), a mapping as a dict, a named tuple as a dict
-    of its fields, a list, tuple, set or frozenset as a list, a pydantic model as its
-    ``model_dump()``, a dataclass as a dict of its fields, a ``SimpleNamespace`` as a
-    dict of its attributes, a pydantic URL as its string, and anything else, an
-    iterator or a generator among them, as its ``repr``, never iterated, so a request
-    still sends all of it."""
+    of its fields, any other sequence or set but bytes (a list, tuple, ``deque``, set,
+    frozenset, …) as a list, a pydantic model as its ``model_dump()``, a dataclass as a
+    dict of its fields, a ``SimpleNamespace`` as a dict of its attributes, a pydantic
+    or yarl URL as its string, and anything else, an iterator or a generator among
+    them, as its ``repr``, never iterated, so a request still sends all of it."""
     if data is None or isinstance(data, (str, int, float)):
         return data
     if isinstance(data, (datetime.date, datetime.time)):
         return data.isoformat()
     if isinstance(data, Mapping):
         return {str(name): plain(value) for name, value in data.items()}
-    if isinstance(data, tuple) and hasattr(data, "_asdict"):
-        return plain(data._asdict())  # pyright: ignore[reportAttributeAccessIssue]
-    if isinstance(data, (list, tuple, set, frozenset)):
+    # A named tuple by its class's field names: its own _asdict() could leave one out.
+    fields = isinstance(data, tuple) and getattr(type(data), "_fields", None)
+    if isinstance(fields, tuple) and len(fields) == len(data):
+        return dict(zip(map(str, fields), map(plain, data), strict=True))
+    if isinstance(data, (Sequence, AbstractSet)) and not isinstance(data, _BYTES):
         return [plain(item) for item in data]
     if isinstance(data, BaseModel):
         return plain(data.model_dump())
