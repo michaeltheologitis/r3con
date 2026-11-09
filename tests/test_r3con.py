@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ import pytest
 import r3con
 from r3con import Answer, RunConfig
 from r3con import r3con as namespace
-from r3con.config import PROMPT_STAGES, REASONING_PATHS
+from r3con.config import PROMPT_STAGES, REASONING_PATHS, load_config
 from r3con.r3con import ask, read_documents, run, trace, unique_names
 from tests.documents import (
     CORRUPT_DOCX,
@@ -90,6 +91,9 @@ REFUSED_LINE = (
 )
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 GATEWAY_HEADER = {"extra_headers": {"Authorization": f"Bearer {KEY}"}}
+# An Azure api_version as YAML reads one written unquoted: a date.
+DATED_PARAMS = {"api_version": date(2024, 10, 21)}
+SAVED_DATED_PARAMS = {"api_version": "2024-10-21"}
 MASKED_HEADER_REFUSAL = (
     "REDACTED, the mask a run's manifest saves in place of a credential, would be "
     "sent: pass the real value in `params`, which replaces all of the run's params. "
@@ -1052,6 +1056,37 @@ def test_an_ask_sends_the_runs_params_only_on_the_runs_model_unless_given_its_ow
     [folder] = (result.run_dir / "asks").iterdir()
     manifest = json.loads((folder / "manifest.json").read_text())
     assert (manifest["litellm_model"], manifest["config"]["params"]) == (model, params)
+
+
+def test_a_date_among_a_runs_params_is_sent_as_it_is_and_saved_as_its_iso_date(
+    answering_llm, tmp_path
+):
+    result = finished_run(answering_llm, tmp_path, params=DATED_PARAMS)
+    [sent] = answering_llm.requests_for("reasoning")
+    assert sent["api_version"] == DATED_PARAMS["api_version"]
+    manifest = json.loads((result.run_dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == SAVED_DATED_PARAMS
+
+
+def test_an_unquoted_date_in_a_config_files_params_is_saved_as_its_iso_date(
+    answering_llm, configs, tmp_path
+):
+    default = load_config().model_dump(exclude={"name", "overrides"})
+    configs(dated={**default, "params": DATED_PARAMS})
+    written = (tmp_path / "configs" / "dated.yaml").read_text()
+    assert "api_version: 2024-10-21\n" in written
+    result = finished_run(answering_llm, tmp_path, config="dated")
+    manifest = json.loads((result.run_dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == SAVED_DATED_PARAMS
+
+
+def test_an_ask_over_a_run_with_a_date_among_its_params_sends_its_iso_date(
+    answering_llm, tmp_path
+):
+    built = finished_run(answering_llm, tmp_path, params=DATED_PARAMS)
+    ask(built, "Who else?", completion=answering_llm)
+    asked = answering_llm.requests_for("reasoning")[-1]
+    assert asked["api_version"] == SAVED_DATED_PARAMS["api_version"]
 
 
 def test_an_ask_over_a_run_recorded_without_its_litellm_model_uses_the_bare_name(

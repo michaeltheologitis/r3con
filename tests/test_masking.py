@@ -1,4 +1,5 @@
 import pwd
+from datetime import UTC, date, datetime, time
 
 import pytest
 from pydantic import BaseModel, ValidationError
@@ -8,6 +9,7 @@ from r3con.masking import (
     is_credential_name,
     masked,
     one_line,
+    plain,
     register_key,
 )
 
@@ -159,6 +161,19 @@ def test_a_registered_key_is_masked_from_then_on_the_longest_first_but_a_placeho
     assert (
         masked(text) == f"REDACTED, then REDACTED, sent as EMPTY to {LOOKS_LIKE_A_KEY}"
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (date(2024, 10, 21), "2024-10-21"),
+        (datetime(2024, 10, 21, 9, 30, tzinfo=UTC), "2024-10-21T09:30:00+00:00"),
+        (time(9, 30), "09:30:00"),
+    ],
+    ids=["date", "datetime", "time"],
+)
+def test_a_date_or_a_time_is_made_plain_as_its_iso_8601_text(value, text):
+    assert plain(value) == text
 
 
 @pytest.mark.parametrize(
