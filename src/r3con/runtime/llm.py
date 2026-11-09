@@ -2,12 +2,11 @@
 
 **The connection is litellm's, not ours.** ``model`` is a litellm model string, credentials
 come from the provider's own environment variable, and ``**kwargs`` reaches
-``litellm.completion`` verbatim, but for a ``metadata`` or ``litellm_metadata`` dict:
-litellm writes into those, so each call sends its own copy, and the caller's is left as
-it was. There is deliberately no model registry, no provider abstraction and no
-r3con-branded credential variable here — litellm already is that abstraction, and
-re-implementing it would be building a framework inside a package that exists not to be
-one.
+``litellm.completion`` verbatim. Only ``metadata`` and ``litellm_metadata`` are copied
+first, with the lists and dicts in them, because litellm writes into them. There is
+deliberately no model registry, no provider abstraction and no r3con-branded credential
+variable here — litellm already is that abstraction, and re-implementing it would be
+building a framework inside a package that exists not to be one.
 
 The one escape hatch is ``completion=``, the callable that makes each request (default
 ``litellm.completion``): hand it a configured ``litellm.Router``'s ``.completion``, or any
@@ -276,7 +275,12 @@ def litellm_chat_completion_full(
     }
     for name in _WRITTEN_BY_LITELLM:
         if isinstance(request.get(name), dict):
-            request[name] = dict(request[name])
+            # One level down, where a Router appends to ``tags``: litellm writes no
+            # deeper, and a deeper copy fails on a value that holds a lock.
+            request[name] = {
+                key: value.copy() if isinstance(value, (list, dict)) else value
+                for key, value in request[name].items()
+            }
     if api_base is not None:
         request["api_base"] = api_base
     if api_key is not None:

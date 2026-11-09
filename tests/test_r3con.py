@@ -91,6 +91,7 @@ REFUSED_LINE = (
 RUN_PARAMS = {"temperature": 0.3, "extra_body": {"top_k": 20}}
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 BARRIER_TIMEOUT_SECONDS = 10
+LOGGED_TIMEOUT_SECONDS = 5
 # Copies of one name that took a quadratic numbering seconds to tell apart.
 MANY_COPIES = 20_000
 AT_ONCE_SECONDS = 1
@@ -387,6 +388,20 @@ def test_run_answers_through_the_callers_completion(answering_llm):
         "Who?", ["Halloran memo"], completion=answering_llm, save_artifacts=False
     )
     assert result.answer == "Halloran memo"
+
+
+def test_a_run_leaves_the_callers_metadata_as_it_was(answering_llm, own_trace, logged):
+    metadata = {"trace": own_trace}
+    run(
+        "Who?",
+        DOCS[:2],
+        params={"metadata": metadata},
+        completion=answering_llm,
+        save_artifacts=False,
+    )
+    for _ in answering_llm.requests:
+        assert logged.acquire(timeout=LOGGED_TIMEOUT_SECONDS)
+    assert metadata == {"trace": own_trace}
 
 
 @pytest.mark.parametrize("save_artifacts", [True, False])
