@@ -215,12 +215,14 @@ const ROUNDS = 2;
 const MAX_ROUNDS = 4;
 // Other counts of rounds, which a live run of each, chosen in the settings, is checked to send and draw in full; the
 // most is where a dotted line's lanes are tightest.
-const OTHER_ROUNDS = [1, 3, MAX_ROUNDS];
+const FEWER_ROUNDS = 1;
+const MORE_ROUNDS = 3;
+const OTHER_ROUNDS = [FEWER_ROUNDS, MORE_ROUNDS, MAX_ROUNDS];
 // Besides its rounds' nodes, a run draws a document and a parse per document, then one structure and one answer.
 const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
-const ROUNDS_HINT = 'Each round adds one model call per document.';
+const ROUNDS_HINT = 'Kept as soon as you choose it. Each round adds one model call per document.';
 // What storage may hold that r3con app would refuse as a count of rounds.
 const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
 // Frames drawn while a run's request is held, before r3con app has said anything of the run.
@@ -2357,7 +2359,6 @@ async function roundsSetting(page, checkAt) {
   const drawn = () => page.evaluate(columnsDrawn);
   const store = (value) => page.evaluate(([key, held]) => localStorage.setItem(key, held), [ROUNDS_KEY, value]);
   const counts = Array.from({ length: MAX_ROUNDS }, (_, k) => String(k + 1));
-  const [, more] = OTHER_ROUNDS;
   await page.reload();
   await page.click('#settings-btn');
   const fresh = await control();
@@ -2375,33 +2376,33 @@ async function roundsSetting(page, checkAt) {
   await page.keyboard.press('ArrowUp');
   await page.keyboard.press('ArrowUp');
   const up = await control();
-  const keyboard = ring && down.value === '3' && down.stored === '3' && up.value === '1' && up.stored === '1';
+  const [above, below] = [String(ROUNDS + 1), String(ROUNDS - 1)];
+  const keyboard = ring && down.value === above && down.stored === above && up.value === below && up.stored === below;
   const keyboardName = 'from the keyboard alone, Tab reaches relevance rounds, its focus shows, and the arrow keys choose a count, stored at once';
   checkAt(keyboardName, keyboard, `focus ring ${ring}; ${down.value} stored ${down.stored}, then ${up.value} stored ${up.stored}`);
 
-  await page.selectOption('#rounds', String(more));
+  await page.selectOption('#rounds', String(MORE_ROUNDS));
   await page.keyboard.press('Escape');
   await page.reload();
   const reloaded = await control();
-  checkAt(`${more} rounds chosen are still chosen after a reload`, reloaded.value === String(more) && reloaded.stored === String(more), JSON.stringify(reloaded));
+  checkAt(`${MORE_ROUNDS} rounds chosen are still chosen after a reload`, reloaded.value === String(MORE_ROUNDS) && reloaded.stored === String(MORE_ROUNDS), JSON.stringify(reloaded));
 
   await page.click('#run-btn');
   const recorded = (await becomes(page, statusIs, SAMPLE_STATUS)) && runOfRounds(await drawn(), ROUNDS);
   await page.fill('#question', NEW_QUESTION);
   await page.click('#new-run-btn');
-  const simulated = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), more);
-  checkAt(`with ${more} rounds chosen the recorded run still replays its own ${ROUNDS}, and a simulated run draws ${more}`, recorded && simulated, `recorded ${recorded}, simulated ${simulated}`);
+  const simulated = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), MORE_ROUNDS);
+  checkAt(`with ${MORE_ROUNDS} rounds chosen the recorded run still replays its own ${ROUNDS}, and a simulated run draws ${MORE_ROUNDS}`, recorded && simulated, `recorded ${recorded}, simulated ${simulated}`);
 
-  const [fewer] = OTHER_ROUNDS;
-  await pickRounds(page, fewer);
+  await pickRounds(page, FEWER_ROUNDS);
   await page.click('#replay-btn');
   await page.click('#arrange-btn');
   const kept = await drawn();
   await page.fill('#question', NEW_QUESTION);
   await page.click('#new-run-btn');
-  const next = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), fewer);
-  const keptName = `a simulated run keeps its ${more} rounds once ${fewer} is chosen, replayed and arranged, and the next run draws ${fewer}`;
-  checkAt(keptName, runOfRounds(kept, more) && next, `${columnsShown(kept)}; next ${next}`);
+  const next = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), FEWER_ROUNDS);
+  const keptName = `a simulated run keeps its ${MORE_ROUNDS} rounds once ${FEWER_ROUNDS} is chosen, replayed and arranged, and the next run draws ${FEWER_ROUNDS}`;
+  checkAt(keptName, runOfRounds(kept, MORE_ROUNDS) && next, `${columnsShown(kept)}; next ${next}`);
 
   const refused = [];
   for (const held of REFUSED_ROUNDS) {
@@ -2409,17 +2410,17 @@ async function roundsSetting(page, checkAt) {
     await page.reload();
     refused.push((await control()).value);
   }
-  await store(String(more));
+  await store(String(MORE_ROUNDS));
   await page.addInitScript(blockStorage);
   await page.reload();
   const blocked = await control();
   const fallsBack = refused.every((value) => value === String(ROUNDS)) && blocked.value === String(ROUNDS) && blocked.stored === 'blocked';
   checkAt(`storage that throws, or holds a count r3con app would refuse, reads as ${ROUNDS}`, fallsBack, `${REFUSED_ROUNDS.map((held, i) => `${held} → ${refused[i]}`).join(', ')}; blocked → ${blocked.value}`);
-  await pickRounds(page, more);
+  await pickRounds(page, MORE_ROUNDS);
   await page.fill('#question', NEW_QUESTION);
   await page.click('#run-btn');
-  const held = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), more);
-  checkAt(`with storage blocked, ${more} rounds chosen still hold for this visit's runs`, held, columnsShown(await drawn()));
+  const held = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), MORE_ROUNDS);
+  checkAt(`with storage blocked, ${MORE_ROUNDS} rounds chosen still hold for this visit's runs`, held, columnsShown(await drawn()));
 }
 
 async function popupArea() {
@@ -4915,7 +4916,6 @@ async function liveRoundsOf(url, rounds) {
 
 // A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a new run.
 async function liveRoundsKept(url) {
-  const [fewer, more] = OTHER_ROUNDS;
   await withPage('live', { url, sample: false }, async (page) => {
     const posts = [];
     page.on('request', (request) => {
@@ -4928,23 +4928,23 @@ async function liveRoundsKept(url) {
       await held;
       await route.continue();
     });
-    await pickRounds(page, more);
+    await pickRounds(page, MORE_ROUNDS);
     await page.click('#run-btn');
-    await pickRounds(page, fewer);
+    await pickRounds(page, FEWER_ROUNDS);
     release();
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await page.click('#arrange-btn');
     const kept = await page.evaluate(columnsDrawn);
-    const keptName = `a run keeps the ${more} rounds it started with once ${fewer} is chosen while it runs: it is sent ${more} and draws ${more}, arranged too`;
-    check('live', keptName, done && posts[0]?.body.relevance_rounds === more && runOfRounds(kept, more), `sent ${posts[0]?.body.relevance_rounds}; ${columnsShown(kept)}`);
+    const keptName = `a run keeps the ${MORE_ROUNDS} rounds it started with once ${FEWER_ROUNDS} is chosen while it runs: it is sent ${MORE_ROUNDS} and draws ${MORE_ROUNDS}, arranged too`;
+    check('live', keptName, done && posts[0]?.body.relevance_rounds === MORE_ROUNDS && runOfRounds(kept, MORE_ROUNDS), `sent ${posts[0]?.body.relevance_rounds}; ${columnsShown(kept)}`);
 
     await page.fill('#question', 'Which memo is the registry?');
     await page.click('#run-btn');
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, `ready · ${DEFAULT_MODEL} · $`], LIVE_RUN_MS);
     const ask = posts.find(({ path }) => path.endsWith('/asks'))?.body;
     const afterAsk = await page.evaluate(columnsDrawn);
-    const askName = `an ask sends no round count, and its run still draws its ${more} rounds`;
-    check('live', askName, answered && ask !== undefined && !('relevance_rounds' in ask) && runOfRounds(afterAsk, more), `${JSON.stringify(ask)}; ${columnsShown(afterAsk)}`);
+    const askName = `an ask sends no round count, and its run still draws its ${MORE_ROUNDS} rounds`;
+    check('live', askName, answered && ask !== undefined && !('relevance_rounds' in ask) && runOfRounds(afterAsk, MORE_ROUNDS), `${JSON.stringify(ask)}; ${columnsShown(afterAsk)}`);
 
     await page.fill('#question', NEW_QUESTION);
     await page.click('#new-run-btn');
@@ -4953,8 +4953,8 @@ async function liveRoundsKept(url) {
     await page.locator('.run-tab').first().click();
     const first = await page.evaluate(columnsDrawn);
     const sent = posts.filter(({ path }) => path === '/api/runs').map(({ body }) => body.relevance_rounds);
-    const nextName = `a new run after the change is sent ${fewer} and draws ${fewer} in a tab of its own, and the first tab still draws ${more}`;
-    check('live', nextName, again && isDeepStrictEqual(sent, [more, fewer]) && runOfRounds(fresh, fewer) && runOfRounds(first, more), `sent ${sent.join(', ')}; ${columnsShown(fresh)}`);
+    const nextName = `a new run after the change is sent ${FEWER_ROUNDS} and draws ${FEWER_ROUNDS} in a tab of its own, and the first tab still draws ${MORE_ROUNDS}`;
+    check('live', nextName, again && isDeepStrictEqual(sent, [MORE_ROUNDS, FEWER_ROUNDS]) && runOfRounds(fresh, FEWER_ROUNDS) && runOfRounds(first, MORE_ROUNDS), `sent ${sent.join(', ')}; ${columnsShown(fresh)}`);
   });
 }
 
@@ -5386,6 +5386,7 @@ async function liveNames(url) {
     const numbered = isDeepStrictEqual(named, ['notes.txt', 'notes.txt (2)', 'plan.txt']);
     const name = "a run is sent each file's name beside its text, and r3con app names the run's documents by them, a name sent twice numbered the second time";
     check('live', name, done && paired && numbered, `${JSON.stringify(sent.names)}; ${JSON.stringify(named)}`);
+    check('live', `with no rounds chosen, a run is sent relevance_rounds ${ROUNDS}`, sent.relevance_rounds === ROUNDS, JSON.stringify(sent.relevance_rounds));
   });
 }
 

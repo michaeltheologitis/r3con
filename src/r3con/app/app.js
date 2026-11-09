@@ -1497,6 +1497,7 @@
   ].join('\n');
   const THEME_KEY = 'r3con-proto-theme';
   const MODEL_KEY = 'r3con-proto-model';
+  const ROUNDS_KEY = 'r3con-proto-rounds';
   const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
   // The side column's narrowest, where the composer and the files pane still fit, its widest as a share of the frame, and a key press's step.
   const SIDE_MIN_PX = 280;
@@ -1532,7 +1533,6 @@
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
-  const ROUNDS_KEY = 'r3con-proto-rounds';
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -1855,7 +1855,6 @@
   const roundOf = (kind) => Number(kind.slice(1));
   /** @param {RoundKind} kind */
   const roundName = (kind) => `round ${roundOf(kind)}`;
-  // The round a summary of round k is shown and cites, k - 1; none for round 1 or any other kind of node.
   /** @param {NodeKind} kind @returns {RoundKind | null} */
   const previousRound = (kind) => (isRound(kind) && roundOf(kind) > 1 ? roundKind(roundOf(kind) - 1) : null);
   /** @param {number} rounds @returns {Summary[][]} */
@@ -3517,7 +3516,7 @@
 
   /** @param {Run} run @param {StageKind} kind */
   function stepLine(run, kind) {
-    if (isRound(kind)) return `${phaseOf(kind)} · extracting relevance`;
+    if (isRound(kind)) return `${roundName(kind)} · extracting relevance`;
     return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : phaseOf(kind);
   }
 
@@ -4708,7 +4707,6 @@
     return Number.isInteger(rounds) && rounds >= 1 && rounds <= MAX_ROUNDS ? rounds : DEFAULT_ROUNDS;
   }
 
-  // A new run takes the count chosen now, and keeps it.
   const pickedRounds = () => Number(roundsPick.value);
 
   function buildSettings() {
