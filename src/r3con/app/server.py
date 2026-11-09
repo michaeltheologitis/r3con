@@ -118,6 +118,9 @@ import litellm
 import platformdirs
 import uvicorn
 from litellm.exceptions import BadRequestError
+from litellm.litellm_core_utils.get_llm_provider_logic import (
+    declared_authenticating_provider,
+)
 from pydantic import (
     AfterValidator,
     BaseModel,
@@ -395,6 +398,9 @@ def _key_status(state: ServerState) -> dict[str, Any]:
 def _provider(model: str, api_base: str | None) -> str | None:
     """``model``'s provider as litellm places it on ``api_base``, or ``None`` if it
     can't."""
+    # Looking these up, litellm would start a Copilot or ChatGPT device sign-in.
+    if declared := declared_authenticating_provider(model):
+        return declared
     try:
         with quiet_litellm():
             return litellm.get_llm_provider(model, api_base=api_base)[1]

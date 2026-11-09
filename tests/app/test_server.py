@@ -606,6 +606,8 @@ def test_a_model_on_a_server_reaches_it_as_typed_with_its_key_in_a_run_and_an_as
             "would send the server the headers in OPENAI_CUSTOM_HEADERS",
         ),
         ("lm_studio/qwen", ENDPOINT, "OPENAI_CUSTOM_HEADERS"),
+        ("github_copilot/x", ENDPOINT, "isn't a self-hosted or openai/ model"),
+        ("chatgpt/x", ENDPOINT, "isn't a self-hosted or openai/ model"),
     ],
 )
 def test_an_unknown_server_or_a_model_that_would_send_it_other_credentials_is_refused(
