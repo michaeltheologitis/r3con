@@ -2866,7 +2866,7 @@
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
     }
     for (const from of inputsOf(tab.run, id)) {
-      if (!tab.edges.has(`${from}>${id}`)) addEdge(tab, from, id, 'context', 'fade');
+      if (!tab.edges.has(`${from}>${id}`)) addEdge(tab, from, id, 'context');
     }
     tab.run.lit = id;
     lightPath(tab);
@@ -3483,7 +3483,7 @@
   function showInputs(tab, to) {
     const own = ownDocument(tab.run, to);
     if (own) addEdge(tab, own, to, 'self', 'fade');
-    for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context', 'fade');
+    for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context');
   }
 
   /** @param {RunTab} tab @param {string} to */
