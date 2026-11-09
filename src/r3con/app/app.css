@@ -178,7 +178,8 @@ p { margin: 0; }
   stroke-width: calc(1px / var(--k, 1));
   transition: opacity 0.4s, stroke 0.4s, stroke-width 0.4s;
 }
-.edge.context { opacity: calc(0.16 * var(--context-fade, 1)); }
+/* Faint lines grow as n² with the documents, so they neither fade in nor ease: thousands animating at once stall the page. */
+.edge.context { opacity: calc(0.16 * var(--context-fade, 1)); transition: none; }
 .edge.self { opacity: 0.5; stroke-dasharray: calc(2px / var(--k, 1)) calc(3px / var(--k, 1)); }
 .edge.flow { opacity: 0.5; }
 .edge.cite { opacity: 0.85; }

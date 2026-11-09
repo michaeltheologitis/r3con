@@ -279,6 +279,8 @@ const ZIPPED_ENTRIES = {
   'memos/notes.py': "print('not a document')\n",
   'memos/~$draft.docx': 'x',
 };
+const MANY_FILES = 120;
+const memoNames = (from, to) => Array.from({ length: to - from }, (_, i) => `memo_${String(from + i).padStart(3, '0')}.txt`);
 // Every document the checks add, by name: the arguments its writer in tests/documents.py takes for it, so
 // that the checks and the tests make them one way. A PDF with no text makes a scan.
 const DOCUMENT_SPECS = {
@@ -289,6 +291,7 @@ const DOCUMENT_SPECS = {
   'report.docx': { blocks: ['Incidents by site:', [['Site', 'Incidents'], ['Halloran', '7'], ['Merrow', '3']]] },
   'memos.zip': { entries: ZIPPED_ENTRIES },
   'photos.zip': { entries: { 'photo.jpg': 'x' } },
+  'many.zip': { entries: Object.fromEntries(memoNames(0, MANY_FILES).toReversed().map((name) => [`many/${name}`, `${name}\n`])) },
 };
 const MIME_TYPES = {
   '.pdf': 'application/pdf',
@@ -310,9 +313,12 @@ const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads 
 const UNREADABLE_ZIP = "Couldn't unzip it: it's corrupt, or not a zip.";
 const NO_DOCUMENTS = 'No text, PDF or Word (.docx) files in it';
 const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
-const TOO_MANY_FILES = 'A tab takes 40 files at most.';
-// The page's MAX_FILES.
-const MAX_FILES = 40;
+// The page's NAMED_AT_MOST: a refusal names this many files, then counts the rest.
+const NAMED_AT_MOST = 5;
+// The page's EXTRACTIONS_AT_ONCE: how many files' text it asks r3con app for at once.
+const EXTRACTIONS_AT_ONCE = 4;
+// Long enough for every request the page sends at once to reach a route that holds them.
+const ROUTED_MS = 300;
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
 const NEW_TAB = 'new tab';
@@ -3116,7 +3122,34 @@ async function gestures() {
   });
 }
 
+// Every animation or transition a faint line starts, from the page's load.
+function recordFaintMotion() {
+  window.faintMotion = [];
+  for (const type of ['animationstart', 'transitionrun']) {
+    const record = (e) => e.target.matches?.('.edge.context') && window.faintMotion.push(`${type} ${e.animationName ?? e.propertyName}`);
+    document.addEventListener(type, record, true);
+  }
+}
+
+// The faint lines on the panel, how many animations or transitions they started, how many still run, and how many would ease.
+async function faintMotion() {
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const lines = [...document.querySelectorAll('#world .edge.context')];
+  const running = document.getAnimations().filter((a) => a.effect?.target?.matches?.('.edge.context')).length;
+  const eased = lines.filter((el) => getComputedStyle(el).transitionDuration.split(',').some((d) => parseFloat(d) > 0)).length;
+  return { lines: lines.length, started: window.faintMotion.length, first: window.faintMotion[0] ?? null, running, eased };
+}
+
 async function scale() {
+  // With motion on: faint lines grow as n², and thousands animating at once would stall the page.
+  await withPage('scale', { sample: false, before: (page) => page.addInitScript(recordFaintMotion) }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    const lit = await becomes(page, () => document.querySelector('#world .is-lit') !== null, null, REPLAY_MS);
+    const motion = await page.evaluate(faintMotion);
+    const still = lit && motion.lines > 0 && motion.started === 0 && motion.running === 0 && motion.eased === 0;
+    check('scale', 'with motion on, faint lines neither fade in nor ease as a replay draws them and its answer lights', still, JSON.stringify(motion));
+  });
   const memos = Array.from({ length: LARGE_RUN_DOCS }, (_, i) => ({
     name: `doc_${String(i + 1).padStart(2, '0')}.txt`,
     mimeType: 'text/plain',
@@ -4202,7 +4235,6 @@ const DROPPED_FOLDER = [
 ];
 const LOOSE_FILE = ['loose.py', "print('dropped on its own')\n"];
 const filesSaid = (page) => page.textContent('#files-said');
-const memoNames = (from, to) => Array.from({ length: to - from }, (_, i) => `memo_${String(from + i).padStart(2, '0')}.txt`);
 
 async function dropArea() {
   await withPage('drop', { sample: false }, async (page) => {
@@ -4238,23 +4270,24 @@ async function dropArea() {
     const none = { error: await becomes(page, (text) => document.getElementById('files-error').textContent === text, `${NO_DOCUMENTS}; 2 skipped.`), names: (await page.evaluate(filesPane)).names };
     check('drop', 'a folder with no file r3con run reads adds nothing, and says how many it skipped', none.error && isDeepStrictEqual(none.names, expected.names), `${await filesError(page)}; ${JSON.stringify(none)}`);
 
-    await openEmptyTab(page);
-    const many = memoNames(0, MAX_FILES + 2).map((name) => [name, `${name}\n`]);
-    await page.evaluate(dropItems, { on: 'panel', items: [['many', many.reverse()]] });
-    await removeButton(page, 'memo_39.txt').waitFor();
-    const capped = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
-    const cappedName = `a folder of more files than a tab takes, walked in any order, adds the first ${MAX_FILES} by name, and says how many it left out`;
-    const cappedExpected = { names: memoNames(0, MAX_FILES), error: `Not added: 2 files. ${TOO_MANY_FILES}`, said: `${MAX_FILES} files added.` };
-    check('drop', cappedName, isDeepStrictEqual(capped, cappedExpected), JSON.stringify({ ...capped, names: `${capped.names.length}: ${capped.names[0]}…${capped.names.at(-1)}` }));
-
+    const many = memoNames(0, MANY_FILES);
+    const shortly = (pane) => JSON.stringify({ ...pane, names: `${pane.names.length}: ${pane.names[0]}…${pane.names.at(-1)}` });
     await openEmptyTab(page);
     const pdfs = ['a_0.pdf', 'a_1.pdf', 'a_2.pdf'].map((name) => [name, '%PDF-1.7']);
-    await page.evaluate(dropItems, { on: 'panel', items: [['mixed', [...pdfs, ...memoNames(0, MAX_FILES).map((name) => [name, `${name}\n`])]]] });
-    await removeButton(page, 'memo_39.txt').waitFor();
-    const filled = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
-    const filledName = `files refused among the first ${MAX_FILES} by name leave their room to the next, so the tab still fills to ${MAX_FILES}, and none is called one too many`;
-    const filledExpected = { names: memoNames(0, MAX_FILES), error: `Not added: a_0.pdf, a_1.pdf, a_2.pdf. ${NEEDS_APP}`, said: `${MAX_FILES} files added.` };
-    check('drop', filledName, isDeepStrictEqual(filled, filledExpected), JSON.stringify({ ...filled, names: filled.names.length }));
+    await page.evaluate(dropItems, { on: 'panel', items: [['many', [...pdfs, ...many.map((name) => [name, `${name}\n`])].reverse()]] });
+    await removeButton(page, many.at(-1)).waitFor();
+    const dropped = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
+    const droppedName = `a folder of ${MANY_FILES} text files and ${pdfs.length} PDFs, walked in any order, adds every text file by name, and refuses only the PDFs, which the prototype can't read`;
+    const droppedExpected = { names: many, error: `Not added: a_0.pdf, a_1.pdf, a_2.pdf. ${NEEDS_APP}`, said: `${MANY_FILES} files added.` };
+    check('drop', droppedName, isDeepStrictEqual(dropped, droppedExpected), shortly(dropped));
+
+    await openEmptyTab(page);
+    await page.click('#tab-files');
+    await page.setInputFiles('#file-input', many.toReversed().map((name) => memo(name, `${name}\n`)));
+    await removeButton(page, many.at(-1)).waitFor();
+    const picked = { names: (await page.evaluate(filesPane)).names, error: await filesError(page), said: await filesSaid(page) };
+    const pickedExpected = { names: many, error: null, said: `${MANY_FILES} files added.` };
+    check('drop', `${MANY_FILES} text files picked at once are all added, by name, with none refused`, isDeepStrictEqual(picked, pickedExpected), shortly(picked));
 
     await showRunTab(page, 1);
     await page.click('#tab-chat');
@@ -5334,32 +5367,46 @@ async function liveUnreadable(url) {
     const sent = (await started)?.postDataJSON().documents;
     check('live', 'once the unreadable file is removed, the next run sends only the readable one', isDeepStrictEqual(sent, ['A memo.\n']), JSON.stringify(sent));
   });
+  await withPage('live', { url, sample: false }, async (page) => {
+    const blanks = Array.from({ length: NAMED_AT_MOST + 2 }, (_, i) => memo(`blank_${i + 1}.txt`, '  \n'));
+    await page.setInputFiles('#file-input', [memo('01_memo.txt', 'A memo.\n'), ...blanks]);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, blanks.length + 1);
+    await page.click('#run-btn');
+    const status = await page.textContent('#run-status');
+    const named = blanks.slice(0, NAMED_AT_MOST).map((f) => f.name);
+    const expected = `no readable text in ${named.join(', ')} and 2 more; nothing was sent`;
+    check('live', `files with no readable text are named up to ${NAMED_AT_MOST}, and the rest counted`, status === expected, status);
+  });
 }
 
-// A zip dropped on the panel goes to r3con app, which unpacks it, sent the room left in the tab; its documents are
-// added and run as dropped files are.
+// A zip dropped on the panel goes to r3con app, which unpacks it; its documents are added and run as dropped files are.
 async function liveZip(url) {
+  const zipped = (name) => [name, { bytes: [...documents[name].buffer] }];
   await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {
-    const limits = [];
-    page.on('request', (request) => request.url().includes('/api/documents/zip') && limits.push(new URL(request.url()).searchParams.get('limit')));
-    const zipped = (name) => [name, { bytes: [...documents[name].buffer] }];
     await page.evaluate(dropItems, { on: 'panel', items: [zipped('memos.zip'), zipped('photos.zip'), ['broken.zip', 'not a zip']] });
     await removeButton(page, '01_zipped.txt').waitFor();
-    const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page), limits };
+    const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page) };
     const expected = {
       names: ['01_zipped.txt'],
       said: '1 file added, in place of the 5 sample memos; 1 skipped.',
       error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${NO_DOCUMENTS}; 1 skipped.`,
-      limits: ['40', '40', '39'],
     };
     const name =
-      "zips dropped on the panel are unpacked by r3con app one at a time, each sent the room left: their documents are added by their paths below the folder they share, one with no text is refused, the files pane counts what was left out by its suffix, and a zip with no documents, or one r3con app can't open, is refused saying so";
+      "zips dropped on the panel are unpacked by r3con app: their documents are added by their paths below the folder they share, one with no text is refused, the files pane counts what was left out by its suffix, and a zip with no documents, or one r3con app can't open, is refused saying so";
     check('live', name, isDeepStrictEqual(pane, expected), JSON.stringify(pane));
     await page.click('#tab-chat');
     const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
     check('live', "a run is sent the zipped memo's text", isDeepStrictEqual(sent, [ZIPPED_TEXT]), JSON.stringify(sent));
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    const many = memoNames(0, MANY_FILES);
+    await page.evaluate(dropItems, { on: 'panel', items: [zipped('many.zip')] });
+    await removeButton(page, many.at(-1)).waitFor();
+    const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page) };
+    const expected = { names: many, said: `${MANY_FILES} files added, in place of the 5 sample memos.`, error: null };
+    check('live', `a zip of ${MANY_FILES} documents adds every one, by name, with none refused`, isDeepStrictEqual(pane, expected), JSON.stringify({ ...pane, names: pane.names.length }));
   });
 }
 
@@ -5489,6 +5536,32 @@ function recordFilesLines() {
 
 const filesLines = async (page) => ({ said: await page.textContent('#files-said'), error: await filesError(page) });
 
+// Holds the PDFs' text at the server: the page asks for only a few at once, the first by name, and all are added.
+async function liveExtractionsAtOnce(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.click('#tab-files');
+    const asked = [];
+    let release;
+    const held = new Promise((resolve) => (release = resolve));
+    await page.route('**/api/documents/text?*', async (route) => {
+      asked.push(new URL(route.request().url()).searchParams.get('name'));
+      await held;
+      await route.continue();
+    });
+    const names = Array.from({ length: 3 * EXTRACTIONS_AT_ONCE }, (_, i) => `pdf_${String(i).padStart(2, '0')}.pdf`);
+    await page.setInputFiles('#file-input', names.toReversed().map((name) => ({ ...documents['01_memo.pdf'], name })));
+    const reading = await becomes(page, (n) => document.getElementById('files-said').textContent === `Reading ${n} files…`, names.length);
+    await page.waitForTimeout(ROUTED_MS);
+    const atOnce = asked.toSorted();
+    release();
+    await removeButton(page, names.at(-1)).waitFor({ timeout: LIVE_RUN_MS });
+    const pane = (await page.evaluate(filesPane)).names;
+    const name = `a batch's PDFs are sent to r3con app ${EXTRACTIONS_AT_ONCE} at a time, the first ones by name, and every one is added`;
+    const bounded = isDeepStrictEqual(atOnce, names.slice(0, EXTRACTIONS_AT_ONCE)) && isDeepStrictEqual(asked.toSorted(), names) && isDeepStrictEqual(pane, names);
+    check('live', name, reading && bounded, JSON.stringify({ reading, atOnce, asked: asked.length, added: pane.length }));
+  });
+}
+
 // Holds the PDFs' text at the server until released.
 async function holdExtraction(page) {
   let release;
@@ -5559,30 +5632,6 @@ async function liveRemoveWhileReading(url) {
     const expected = { whileReading: { offered: [false, false], hint: '2 documents' }, landed: { names: kept, docs: kept, offered: [true, true] } };
     const name = `while a batch is read ${REMOVE_ALL} is not offered, and a file removed meanwhile stays removed once the batch lands, ${REMOVE_ALL} offered again`;
     check('live', name, reading && isDeepStrictEqual({ whileReading, landed }, expected), JSON.stringify({ reading, whileReading, landed }));
-  });
-}
-
-// Holds PDFs' text at the server while undo, not offered then, is pressed anyway from the page.
-async function liveUndoWhileReading(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
-    await page.click('#tab-files');
-    const earlier = memoNames(0, MAX_FILES - 10);
-    await page.setInputFiles('#file-input', earlier.map((name) => memo(name, `${name}\n`)));
-    await removeButton(page, earlier.at(-1)).waitFor();
-    await pressRemoveAll(page);
-    const release = await holdExtraction(page);
-    const pdfs = Array.from({ length: 11 }, (_, i) => ({ ...documents['01_memo.pdf'], name: `pdf_${String(i).padStart(2, '0')}.pdf` }));
-    await page.setInputFiles('#file-input', pdfs);
-    const reading = await becomes(page, (n) => document.getElementById('files-said').textContent === `Reading ${n} files…`, pdfs.length);
-    const whileReading = (await page.evaluate(removeAllButtons)).map((b) => b.offered);
-    await page.waitForTimeout(PRESS_GUARD_MS);
-    await page.evaluate(() => document.getElementById('files-remove-all').click());
-    release();
-    const landed = await becomes(page, (n) => document.getElementById('files-count').textContent === String(n), MAX_FILES, LIVE_RUN_MS);
-    const after = { count: await page.textContent('#files-count'), error: await filesError(page), said: await filesSaid(page) };
-    const expected = { count: String(MAX_FILES), error: `Not added: 1 file. ${TOO_MANY_FILES}`, said: '10 files added.' };
-    const name = `a batch lands within the ${MAX_FILES} files a tab takes, whatever the tab took back while it was read: ${UNDO} is not offered then, and pressed anyway, it leaves the batch only the room left, the rest said to be too many`;
-    check('live', name, reading && isDeepStrictEqual(whileReading, [false, false]) && landed && isDeepStrictEqual(after, expected), JSON.stringify({ reading, whileReading, ...after }));
   });
 }
 
@@ -5957,8 +6006,8 @@ async function live() {
     await liveZip(url);
     await liveLockedWhileReading(url);
     await liveBatchesPerTab(url);
+    await liveExtractionsAtOnce(url);
     await liveRemoveWhileReading(url);
-    await liveUndoWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
