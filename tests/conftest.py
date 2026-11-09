@@ -7,6 +7,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -303,6 +304,28 @@ def router(monkeypatch: pytest.MonkeyPatch) -> Callable[..., litellm.Router]:
         return litellm.Router(model_list=model_list, num_retries=0)
 
     return build
+
+
+@pytest.fixture
+def own_trace(request: pytest.FixtureRequest) -> str:
+    """A ``trace`` for the metadata of this test's calls, its own: the test's id."""
+    return request.node.nodeid
+
+
+@pytest.fixture
+def logged(monkeypatch: pytest.MonkeyPatch, own_trace: str) -> threading.Semaphore:
+    """Released each time litellm, on its own thread, is done logging a call that
+    answered with ``own_trace`` as its metadata's ``trace``: by then it has written that
+    call's ``hidden_params`` there. litellm reads its callbacks when it logs, so an
+    earlier test's call, logged late, calls this one too, but releases nothing."""
+    done = threading.Semaphore(0)
+
+    def release_for_this_test(kwargs: dict[str, Any], *_: Any) -> None:
+        if kwargs["litellm_params"]["metadata"].get("trace") == own_trace:
+            done.release()
+
+    monkeypatch.setattr(litellm, "success_callback", [release_for_this_test])
+    return done
 
 
 @pytest.fixture

@@ -20,6 +20,8 @@ MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+GATEWAY = "https://gateway.example"
+MASKED_HEADER = {"extra_headers": {"Authorization": "REDACTED"}}
 APP_MODULES = ("starlette", "uvicorn", "platformdirs")
 # Far longer than the app takes to print its two lines, which it does before serving.
 LAUNCH_SECONDS = 30
@@ -149,6 +151,53 @@ def test_an_ask_with_a_refused_override_exits_2_in_one_line_and_makes_no_folder(
     )
     assert len(answering.requests) == sent
     assert not (run_dir / "asks").exists()
+
+
+def saving_params(run_dir: Path, params: dict) -> None:
+    """Rewrite ``run_dir``'s manifest as it would be with ``params`` saved."""
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    manifest["config"]["params"] = params
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_an_ask_that_would_send_a_masked_param_exits_2_in_one_line_and_makes_no_folder(
+    answering, capsys
+):
+    run_dir = finished_run(capsys)
+    saving_params(run_dir, MASKED_HEADER)
+    sent = len(answering.requests)
+    assert r3con("ask", str(run_dir), "Who else?") == 2
+    assert capsys.readouterr().err == (
+        "r3con: REDACTED, the mask a run's manifest saves in place of a credential, "
+        "would be sent: pass --api-key or --base-url in place of a masked `api_key` or "
+        "`api_base`, or ask with another --model, which sends none of the run's "
+        "params. Masked params: `extra_headers.Authorization`.\n"
+    )
+    assert len(answering.requests) == sent
+    assert not (run_dir / "asks").exists()
+
+
+@pytest.mark.parametrize(
+    ("saved", "option", "sent"),
+    [
+        ({"api_key": "REDACTED"}, ["--api-key", KEY], {"api_key": KEY}),
+        (
+            {"api_base": "https://REDACTED@gateway.example"},
+            ["--base-url", GATEWAY],
+            {"api_base": GATEWAY},
+        ),
+        (MASKED_HEADER, ["--model", QWEN], {"extra_headers": None}),
+    ],
+    ids=["api-key", "base-url", "another-model"],
+)
+def test_an_ask_over_a_masked_param_sends_what_the_option_its_refusal_names_gives(
+    answering, capsys, saved, option, sent
+):
+    run_dir = finished_run(capsys)
+    saving_params(run_dir, saved)
+    assert r3con("ask", str(run_dir), "Who else?", *option) == 0
+    asked = answering.requests[-1]
+    assert {name: asked.get(name) for name in sent} == sent
 
 
 def test_a_failed_ask_exits_1_and_points_at_its_partial_artifacts(answering, capsys):

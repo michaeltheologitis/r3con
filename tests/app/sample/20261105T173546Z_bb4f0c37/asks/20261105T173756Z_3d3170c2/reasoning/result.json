@@ -1,0 +1,27 @@
+{
+  "answer": "Merrow Facilities Group's site(s) logged 9 equipment incidents in Q3.",
+  "provenance": {
+    "summary_ids": [
+      "964bc2",
+      "d9add2"
+    ],
+    "parse_ids": [
+      "964bc2",
+      "d9add2"
+    ]
+  },
+  "path": "direct",
+  "fallback": null,
+  "terminated_by": "reply",
+  "n_turns": 0,
+  "turns": [],
+  "totals": {
+    "n_steps": 1,
+    "tokens": {
+      "prompt": 3181,
+      "completion": 172,
+      "total": 3353
+    },
+    "usd": 0.00012084
+  }
+}

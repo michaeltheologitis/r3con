@@ -49,7 +49,7 @@ from typing import Any
 from pydantic import ValidationError
 from pydantic_core import to_jsonable_python
 
-_MASK = "REDACTED"
+MASK = "REDACTED"
 # A shorter key is a placeholder, and masking one as short as "x" garbles "maximum".
 _MIN_MASKED_KEY_CHARS = 8
 _MIN_ENVIRONMENT_SECRET_CHARS = 16
@@ -86,7 +86,7 @@ def masked(text: str) -> str:
     with _lock:
         known |= _registered
     for key in sorted(known, key=len, reverse=True):
-        text = text.replace(key, _MASK)
+        text = text.replace(key, MASK)
     return text
 
 
