@@ -47,6 +47,7 @@ LONG_RETRY_AFTER_SECONDS = 60
 # Far below GATE_TIMEOUT_SECONDS, which ends a held call by itself.
 STILL_WAITING_SECONDS = 0.5
 FORCED_EXIT_SECONDS = 5
+WORKER_PREFIX = "r3con-app-"
 QUESTION = "Which contractor's sites logged the most equipment incidents in Q3?"
 MODEL = "openai/gpt-6-luna"
 # A bare OpenAI name that litellm's model map places from its floor, 1.103, on.
@@ -236,7 +237,7 @@ def transport(llm: FakeLLM) -> list[dict[str, str]]:
 
 def worker_of(job_id: str) -> threading.Thread:
     """The thread the server started for the job ``job_id``, while it runs."""
-    return next(t for t in threading.enumerate() if t.name == f"r3con-app-{job_id}")
+    return next(t for t in threading.enumerate() if t.name == WORKER_PREFIX + job_id)
 
 
 def wait_for_worker(job_id: str) -> None:
@@ -244,8 +245,9 @@ def wait_for_worker(job_id: str) -> None:
     so has logged its failure, if any: the job's stream ends before that. A thread no
     longer listed has ended."""
     for thread in threading.enumerate():
-        if thread.name == f"r3con-app-{job_id}":
+        if thread.name == WORKER_PREFIX + job_id:
             thread.join(GATE_TIMEOUT_SECONDS)
+            assert not thread.is_alive(), f"{thread.name} still running"
 
 
 def rate_limited(**request: Any) -> Any:
