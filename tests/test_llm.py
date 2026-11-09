@@ -17,6 +17,7 @@ from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_sou
 from litellm.types.router import RetryPolicy
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
+import r3con
 from r3con import settings
 from r3con.masking import masked
 from r3con.runs import StageRun, TaskLogger
@@ -161,6 +162,7 @@ RETRY_AFTER_SECONDS = 0.1
 SERVED = "Qwen/Qwen3-8B-2504"
 FINGERPRINT = "fp_3f1c2d"
 THOUGHT = "The user wants OK."
+CALLERS_METADATA = {"trace": "run-7"}
 
 
 class Flat(BaseModel):
@@ -203,6 +205,16 @@ def loud_litellm(monkeypatch):
 @pytest.fixture
 def run(tmp_path) -> StageRun:
     return StageRun(stage="judge", task_logger=TaskLogger("run", root=tmp_path))
+
+
+@pytest.fixture
+def logged(monkeypatch) -> threading.Semaphore:
+    """Released each time litellm, on its own thread, is done logging a call that
+    answered: by then it has written that call's ``hidden_params`` into its
+    ``metadata``."""
+    done = threading.Semaphore(0)
+    monkeypatch.setattr(litellm, "success_callback", [lambda *_: done.release()])
+    return done
 
 
 @pytest.fixture
@@ -411,6 +423,39 @@ def test_sampling_params_reach_the_request_untouched(llm):
     request = llm.requests[0]
     assert {key: request[key] for key in sampling} == sampling
     assert request["extra_body"] == extra_body
+
+
+def test_a_run_leaves_the_callers_metadata_as_it_was(answering_llm, logged):
+    metadata = dict(CALLERS_METADATA)
+    r3con.run(
+        "Who?",
+        ["Halloran memo", "Merrow memo"],
+        params={"metadata": metadata},
+        completion=answering_llm,
+        save_artifacts=False,
+    )
+    for _ in answering_llm.requests:
+        assert logged.acquire(timeout=THREAD_TIMEOUT_SECONDS)
+    assert metadata == CALLERS_METADATA
+
+
+def test_what_litellm_writes_into_a_calls_metadata_never_reaches_the_next_call(
+    llm, logged
+):
+    metadata = dict(CALLERS_METADATA)
+    for _ in range(2):
+        ask(llm.replies("ok"), metadata=metadata)
+        assert logged.acquire(timeout=THREAD_TIMEOUT_SECONDS)
+    assert [request["metadata"] for request in llm.requests] == [CALLERS_METADATA] * 2
+
+
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize("name", ["metadata", "litellm_metadata"])
+def test_litellms_timing_of_a_call_stays_out_of_the_callers_dict(httpserver, name):
+    answers_in_turn(httpserver, OK)
+    given = dict(CALLERS_METADATA)
+    ask_server(httpserver, model=OPENAI, **{name: given})
+    assert given == CALLERS_METADATA
 
 
 def test_the_callers_completion_makes_the_request_and_is_not_sent_in_it(llm):
