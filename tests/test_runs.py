@@ -31,6 +31,38 @@ USAGE = {
     "completion_tokens_details": {"reasoning_tokens": 1},
 }
 THOUGHT = "Count the memos first."
+KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
+PEM = f"-----BEGIN PRIVATE KEY-----\n{KEY}\n-----END PRIVATE KEY-----\n"
+SERVER = "https://llm.example.com/v1"
+PLAIN_PARAMS = {
+    "prompt_cache_key": "summaries-cache-2026",
+    "api_base": f"{SERVER}?api-version=2024-10-21",
+}
+# Each run's params, and its manifest's record of them.
+RECORDED_PARAMS = {
+    "nested-in-extra-body": (
+        {"extra_body": {"api_key": KEY, "top_k": 20}},
+        {"extra_body": {"api_key": "REDACTED", "top_k": 20}},
+    ),
+    "headers-whatever-their-name": (
+        {"headers": {"x-functions-key": KEY}},
+        {"headers": {"x-functions-key": "REDACTED"}},
+    ),
+    "dict-valued-credential": (
+        {"vertex_credentials": {"private_key": PEM, "client_id": "108374628401"}},
+        {"vertex_credentials": {"private_key": "REDACTED", "client_id": "REDACTED"}},
+    ),
+    "oci-key": ({"oci_key": PEM}, {"oci_key": "REDACTED"}),
+    "url-password": (
+        {"api_base": f"https://reader:{KEY}@llm.example.com/v1"},
+        {"api_base": "https://reader:REDACTED@llm.example.com/v1"},
+    ),
+    "url-key": (
+        {"api_base": f"{SERVER}?key={KEY}"},
+        {"api_base": f"{SERVER}?key=REDACTED"},
+    ),
+    "no-credential": (PLAIN_PARAMS, PLAIN_PARAMS),
+}
 
 
 class Sample(BaseModel):
@@ -383,6 +415,47 @@ def test_the_manifest_masks_a_registered_key_among_the_runs_params(logger, key):
         "extra_headers": {"x-gateway-auth": "REDACTED"},
         "temperature": 0.3,
     }
+
+
+@pytest.mark.parametrize(
+    ("params", "recorded"), RECORDED_PARAMS.values(), ids=RECORDED_PARAMS
+)
+def test_a_run_records_each_credential_among_its_params_masked(
+    llm, logger, params, recorded
+):
+    refused = litellm.AuthenticationError("refused", llm_provider="openai", model=MODEL)
+    with pytest.raises(litellm.AuthenticationError):
+        run_pipeline(
+            task="q",
+            documents=["d"],
+            config=config(params=params),
+            task_logger=logger,
+            completion=llm.answers(relevance=refused),
+        )
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    assert manifest["config"]["params"] == recorded
+
+
+def test_a_provider_error_that_echoes_the_servers_password_is_written_masked(
+    llm, logger, events_in
+):
+    server = f"https://reader:{KEY}@llm.example.com/v1"
+    down = litellm.APIConnectionError(
+        f"can't reach {server}", llm_provider="openai", model=MODEL
+    )
+    with pytest.raises(litellm.APIConnectionError):
+        run_pipeline(
+            task="q",
+            documents=["d"],
+            config=config(),
+            task_logger=logger,
+            api_base=server,
+            completion=llm.answers(relevance=down),
+        )
+    written = [path.read_text() for path in logger.dir.rglob("*") if path.is_file()]
+    assert not [text for text in written if KEY in text]
+    [failed] = [e for e in events_in(logger.dir) if e["type"] == "run_failed"]
+    assert "can't reach https://reader:REDACTED@llm.example.com/v1" in failed["error"]
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):

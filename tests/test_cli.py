@@ -13,7 +13,7 @@ import pytest
 
 from r3con import settings
 from r3con.cli import main
-from r3con.config import PROMPT_STAGES
+from r3con.config import PROMPT_STAGES, load_config
 from r3con.r3con import read_documents
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
@@ -352,6 +352,31 @@ def test_a_failed_run_shows_no_key_on_stderr(answering, capsys):
     err = capsys.readouterr().err
     assert "r3con: AuthenticationError: " in err
     assert "Incorrect API key provided: REDACTED" in err
+    assert KEY not in err
+
+
+@pytest.mark.parametrize(
+    ("params", "shown"),
+    [
+        (
+            {"extra_headers": {"Authorization": f"Bearer {KEY}"}},
+            "params={extra_headers={'Authorization': 'REDACTED'}}",
+        ),
+        (
+            {"vertex_credentials": {"private_key": f"-----BEGIN KEY-----\n{KEY}\n"}},
+            "params={vertex_credentials={'private_key': 'REDACTED'}}",
+        ),
+    ],
+    ids=["header", "escaped-in-the-label"],
+)
+def test_a_run_shows_its_label_with_the_credentials_in_its_params_masked(
+    answering, configs, capsys, params, shown
+):
+    default = load_config().model_dump(exclude={"name", "overrides"})
+    configs(keyed={**default, "params": params})
+    assert r3con("run", "Who?", str(MEMOS), "--config", "keyed") == 0
+    err = capsys.readouterr().err
+    assert shown in err
     assert KEY not in err
 
 

@@ -1129,6 +1129,18 @@ def test_every_credential_a_request_sends_is_registered_for_masking(
     )
 
 
+def test_a_requests_messages_and_schema_are_data_not_credentials():
+    document = "The memo's gateway is https://reader:memo-password-2026@gw.example.com"
+    field = {"description": "How the site signs its users in"}
+    request = {
+        "messages": [{"role": "user", "content": document}],
+        "response_format": {"json_schema": {"schema": {"auth_method": field}}},
+    }
+    register_credentials(request)
+    text = f"{document}; {field['description']}"
+    assert masked(text) == text
+
+
 def test_first_model_calls_made_at_once_in_a_new_process_all_get_replies():
     try:
         first_calls = subprocess.run(
