@@ -18,9 +18,12 @@ unedited from the ``logs/`` r3con wrote it to:
 
 Building calls no model: each document's name, text and size come from
 ``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder, and
-every other value is read from the folder as it is. A document read in parts has one
-summary per round, its parts' joined as the app joins them, and each quote names the
-snippet it is from, ``<id>`` or ``<id>.<k>``, so the app can match it to the trail.
+every other value is read from the folder as it is. Each quote names the snippet it is
+from, so the app can match it to the trail. Every document in this run was read whole,
+and this handles only that. A sample with a document read in parts would need part
+handling: joining its parts' summaries as the app does, counting its ``<id>.<k>``
+snippets as the document, and fitting its several calls into the page's one call per
+node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
 keeping its name (``r3con.trace`` finds an ask's run by it), set ``RUN_FOLDER``, and run
@@ -47,23 +50,10 @@ APP_JS = REPO / "src" / "r3con" / "app" / "app.js"
 ROUNDS_DRAWN = 2
 # What the page reads of each quote: its text, and where it is in its document, in code points.
 QUOTE_FIELDS = ("text", "start", "end")
-# How the app joins the summaries of a document's parts.
-PART_JOIN = "\n\n"
-# The page shows the schema and the answer as one call each, at their stage's first step.
-FIRST_STEP = 1
 
 
 def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def document_index(ids: dict[str, int], snippet_id: str) -> int:
-    """The index of the document ``snippet_id`` is from, ``<id>.<k>`` (part k) counted as its document."""
-    return ids[snippet_id.split(".")[0]]
-
-
-def document_indices(ids: dict[str, int], cited: list[str]) -> list[int]:
-    return list(dict.fromkeys(document_index(ids, c) for c in cited))
 
 
 def provenance(folder: Path, cited: dict[str, list[str]]) -> dict[str, Any]:
@@ -74,19 +64,14 @@ def provenance(folder: Path, cited: dict[str, list[str]]) -> dict[str, Any]:
     return dict(traced)
 
 
-def joined_summary(parts: list[dict[str, Any]], ids: dict[str, int]) -> dict[str, Any]:
-    """One document's summary in one round, from its parts' snippets, in order."""
+def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
+    """One document's summary in one round, each quote naming the snippet it is from."""
     return {
-        "summary": PART_JOIN.join(filter(None, (p["summary"] for p in parts))),
-        "provenance": list(
-            dict.fromkeys(
-                i for p in parts for i in document_indices(ids, p["provenance"])
-            )
-        ),
+        "summary": snippet["summary"],
+        "provenance": [ids[cited] for cited in snippet["provenance"]],
         "quotes": [
-            {**{f: q[f] for f in QUOTE_FIELDS}, "snippet": p["id"]}
-            for p in parts
-            for q in p["quotes"]
+            {**{f: q[f] for f in QUOTE_FIELDS}, "snippet": snippet["id"]}
+            for q in snippet["quotes"]
         ],
     }
 
@@ -95,21 +80,21 @@ def round_summaries(
     snippets: list[dict[str, Any]], ids: dict[str, int]
 ) -> list[dict[str, Any]]:
     """Each document's summary in one round, in document order."""
-    parts: dict[int, list[dict[str, Any]]] = {}
-    for snippet in snippets:
-        parts.setdefault(document_index(ids, snippet["id"]), []).append(snippet)
-    assert sorted(parts) == sorted(ids.values()), (
-        "every document has a summary each round"
+    by_document = {ids[snippet["id"]]: snippet for snippet in snippets}
+    assert len(snippets) == len(by_document) == len(ids), (
+        "one summary per document each round"
     )
-    return [joined_summary(parts[doc], ids) for doc in sorted(parts)]
+    return [summary(by_document[doc], ids) for doc in sorted(by_document)]
+
+
+def events_of(run: Path, kind: str) -> list[dict[str, Any]]:
+    lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    return [event for event in map(json.loads, lines) if event["type"] == kind]
 
 
 def document_parses(run: Path, ids: dict[str, int]) -> list[dict[str, Any]]:
     """Each document's parse, every field, empty ones included, from its parsing_finished event."""
-    lines = (run / "events.jsonl").read_text(encoding="utf-8").splitlines()
-    finished = [
-        event for event in map(json.loads, lines) if event["type"] == "parsing_finished"
-    ]
+    finished = events_of(run, "parsing_finished")
     parses = {ids[event["doc_id"]]: event["parse"] for event in finished}
     assert len(finished) == len(parses) == len(ids), (
         "one parsing_finished event per document"
@@ -117,19 +102,14 @@ def document_parses(run: Path, ids: dict[str, int]) -> list[dict[str, Any]]:
     return [parses[doc] for doc in sorted(parses)]
 
 
-def call_cost(step: int, tokens: int, usd: float) -> dict[str, Any]:
-    return {"step": step, "tokens": tokens, "usd": usd}
+def run_totals(run: Path) -> dict[str, Any]:
+    """The run's tokens and cost, from its run_finished event."""
+    finished = events_of(run, "run_finished")
+    assert len(finished) == 1, "one run_finished event"
+    return {"tokens": finished[0]["tokens"]["total"], "usd": finished[0]["usd"]}
 
 
-def stage_cost(result: dict[str, Any]) -> dict[str, Any]:
-    return call_cost(
-        FIRST_STEP, result["totals"]["tokens"]["total"], result["totals"]["usd"]
-    )
-
-
-def call_costs(
-    run: Path, schema: dict[str, Any], reasoning: dict[str, Any]
-) -> dict[str, Any]:
+def call_costs(run: Path) -> dict[str, Any]:
     """Each model call's step, tokens and cost, keyed by the page's node for it."""
     relevance = [
         (f"{c['kind'].split('-')[1]}-{c['doc']}", c)
@@ -138,11 +118,12 @@ def call_costs(
     parsing = [
         (f"parsed-{c['doc']}", c) for c in load(run / "structuring/parsing/calls.json")
     ]
+    schema = [("schema", c) for c in load(run / "structuring/schema/calls.json")]
+    answer = [("answer", c) for c in load(run / "reasoning/calls.json")]
     keyed = [
-        (key, call_cost(c["step"], c["tokens"]["total"], c["usd"]))
-        for key, c in relevance + parsing
+        (key, {"step": c["step"], "tokens": c["tokens"]["total"], "usd": c["usd"]})
+        for key, c in relevance + parsing + schema + answer
     ]
-    keyed += [("schema", stage_cost(schema)), ("answer", stage_cost(reasoning))]
     calls = dict(keyed)
     assert len(calls) == len(keyed), "one call per node"
     return calls
@@ -171,7 +152,6 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
     )
     first, second = (round_summaries(r["snippets"], ids) for r in relevance["rounds"])
     parses = document_parses(run, ids)
-    stages = [relevance, schema, parsing, reasoning]
     return {
         "question": manifest["task"],
         "model": manifest["config"]["model"],
@@ -184,18 +164,15 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         "r2": second,
         "schema": {"code": schema["schema_code"], "thought": schema["thought"]},
         "parsed": [
-            {"parse": parse, "provenance": document_indices(ids, cited)}
+            {"parse": parse, "provenance": [ids[c] for c in cited]}
             for parse, cited in zip(parses, parsing["provenance"], strict=True)
         ],
         "answer": {
             "text": reasoning["answer"],
             "provenance": provenance(run, reasoning["provenance"]),
         },
-        "calls": call_costs(run, schema, reasoning),
-        "totals": {
-            "tokens": sum(s["totals"]["tokens"]["total"] for s in stages),
-            "usd": sum(s["totals"]["usd"] for s in stages),
-        },
+        "calls": call_costs(run),
+        "totals": run_totals(run),
     }
 
 
@@ -217,8 +194,8 @@ def ask_entry(folder: Path) -> dict[str, Any]:
 
 
 def js_block(name: str, value: Any) -> str:
-    """``value`` as app.js's ``const`` named ``name``, safe inside a script tag."""
-    blob = json.dumps(value, ensure_ascii=False, indent=1).replace("</", "<\\/")
+    """``value`` as app.js's ``const`` named ``name``."""
+    blob = json.dumps(value, ensure_ascii=False, indent=1)
     return f"  const {name} = {blob};\n"
 
 
@@ -232,8 +209,11 @@ def built_blocks() -> dict[str, str]:
 
 
 def app_block(app: str, name: str) -> str:
-    """The block app.js holds for the ``const`` named ``name``, up to the ``;`` that ends a line."""
-    found = re.findall(rf"^  const {name} = .*?;\n", app, re.DOTALL | re.MULTILINE)
+    """The block app.js holds for the ``const`` named ``name``: its first line, the indented
+    lines after it, and the ``};`` or ``];`` line that closes it."""
+    found = re.findall(
+        rf"^  const {name} = [{{\[]\n(?: .*\n)*[}}\]];\n", app, re.MULTILINE
+    )
     assert len(found) == 1, f"app.js holds one {name} block"
     return found[0]
 
