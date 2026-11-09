@@ -605,7 +605,8 @@ def ask(
         params: as in :func:`run`. Defaults to the run's when the ask runs on the run's
             model (by its name without the provider prefix), and to none on another
             model, since one provider's params (``reasoning_effort``, ``extra_body``)
-            can break another's request.
+            can break another's request. A credential among the run's params is saved
+            as ``REDACTED`` (:mod:`r3con.masking`), so pass its real value here.
         api_key, api_base, completion: as in :func:`run`.
         on_event: as in :func:`run`, called with the ask's events: ``ask_started``,
             ``reasoning_started``, ``reasoning_finished``, then ``ask_finished`` or
@@ -632,8 +633,9 @@ def ask(
         ValueError: if ``source`` is an Answer without a ``run_dir`` (its run was made
             with ``save_artifacts=False``), if a file in its folder is not as this
             r3con writes it (one an older r3con wrote, say), if it leaves a prompt
-            version unpinned, if an override is not valid for its setting, or if a
-            setting in :mod:`r3con.settings` is out of range.
+            version unpinned, if an override is not valid for its setting, if a param
+            it would send holds ``REDACTED``, at any depth, naming each one's path, or
+            if a setting in :mod:`r3con.settings` is out of range.
         Each of these is raised in one line, before any request and before the ask's
         folder exists.
         Anything reasoning raises, with a note naming the ask's folder, where it left

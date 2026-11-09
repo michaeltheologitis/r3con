@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import threading
 import traceback
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -53,7 +53,7 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
-from r3con.masking import masked, one_line
+from r3con.masking import MASK, masked, one_line
 from r3con.provenance import Citations, Provenance, build_provenance, check_rule
 from r3con.runs import (
     Emit,
@@ -839,6 +839,7 @@ def ask_pipeline(
         completion=completion,
         cancel=cancel,
     )
+    _refuse_masked(llm_kwargs)
     if task_logger is None:
         task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     write_manifest(
@@ -925,6 +926,39 @@ def _llm_kwargs(
         llm_kwargs["cancel"] = cancel
     register_credentials(llm_kwargs, completion)
     return llm_kwargs
+
+
+def _refuse_masked(sent: Mapping[str, Any]) -> None:
+    """Refuse to send ``sent`` while a value in it holds :data:`~r3con.masking.MASK`,
+    as a param a run's manifest saved masked does, since the real value is saved
+    nowhere."""
+    paths = _paths_holding_mask(sent, ())
+    if paths:
+        raise ValueError(
+            f"{', '.join(f'`{path}`' for path in paths)} would be sent with {MASK}, "
+            "the mask a run's manifest saves in place of a credential: pass the real "
+            "value in `params`, which replaces all of the run's params."
+        )
+
+
+def _paths_holding_mask(data: Any, path: tuple[Any, ...]) -> list[str]:
+    """The dotted path, from ``path``, of each string in ``data``, at any depth of its
+    dicts and lists, that holds the mask, even within a longer value: masking replaces
+    a key inside one, as in ``https://REDACTED@host``."""
+    if isinstance(data, str):
+        return [".".join(map(str, path))] if MASK in data else []
+    entries: Iterable[tuple[Any, Any]]
+    if isinstance(data, Mapping):
+        entries = data.items()
+    elif isinstance(data, (list, tuple)):
+        entries = enumerate(data)
+    else:
+        return []
+    return [
+        found
+        for name, value in entries
+        for found in _paths_holding_mask(value, (*path, name))
+    ]
 
 
 def _reasoning_outcome(

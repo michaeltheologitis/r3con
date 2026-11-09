@@ -812,6 +812,27 @@ def test_an_ask_over_a_run_that_failed_before_parsing_fails_saying_why(
     assert "never finished parsing" in events[0]["error"]
 
 
+def test_an_ask_that_would_send_a_masked_param_fails_naming_it_and_sends_nothing(
+    client: TestClient, llm: FakeLLM
+):
+    run_id = finished_run(client)
+    manifest_path = Path(run_events(client, run_id)[0]["run_dir"]) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["config"]["params"] = {"extra_headers": {"Authorization": "REDACTED"}}
+    manifest_path.write_text(json.dumps(manifest))
+    sent = len(llm.requests)
+    events = ask_events(client, run_id)
+    assert [(event["type"], event["stage"]) for event in events] == [
+        ("ask_failed", None)
+    ]
+    assert events[0]["error"] == (
+        "ValueError: `extra_headers.Authorization` would be sent with REDACTED, the "
+        "mask a run's manifest saves in place of a credential: pass the real value in "
+        "`params`, which replaces all of the run's params."
+    )
+    assert llm.requests[sent:] == []
+
+
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(
     client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
