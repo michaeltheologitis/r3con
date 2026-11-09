@@ -23,7 +23,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Run r3con in your browser:
 
 ```bash
-uv tool install "r3context[app]"
+uv tool install --python 3.14 "r3context[app]"
+```
+
+```bash
 r3con app
 ```
 
