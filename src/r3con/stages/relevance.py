@@ -33,9 +33,14 @@ the document it is reading.
 
 Round k reads the *frozen* round-(k-1) set, so within a round the per-document calls
 are independent and fan out in parallel (bounded by
-:func:`r3con.settings.active_doc_workers`). Downstream stages consume the
-**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept for
-inspection and for the answer's trail back through them (:mod:`r3con.provenance`).
+:func:`r3con.settings.active_doc_workers`). For a model whose provider signs in on its
+first call, litellm's ``github_copilot`` and ``chatgpt``, named by the model's prefix
+or by ``custom_llm_provider``, round 1 reads the first document alone before the
+others: concurrent first calls would each start their own device sign-in, printing a
+code apiece and then waiting minutes on the codes nobody enters, while a call after
+one has signed in reuses its token. Downstream stages consume the **final-round**
+snippets (``RelevantContext.snippets``); earlier rounds are kept for inspection and for
+the answer's trail back through them (:mod:`r3con.provenance`).
 """
 
 from __future__ import annotations
@@ -45,6 +50,9 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from litellm.litellm_core_utils.get_llm_provider_logic import (
+    declared_authenticating_provider,
+)
 from pydantic import BaseModel
 
 from r3con import settings
@@ -415,6 +423,8 @@ def surface_relevance(
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
+    provider = llm_kwargs.get("custom_llm_provider")
+    signs_in = declared_authenticating_provider(model, provider) is not None
 
     def run_round(
         prev: list[list[SnippetRecord]], round_idx: int
@@ -467,7 +477,12 @@ def surface_relevance(
             _report_snippets(emit, round_idx, document_ids[i], records)
             return records
 
-        result = parallel_map(one, documents, max_workers=max_workers)
+        result = parallel_map(
+            one,
+            documents,
+            max_workers=max_workers,
+            first_alone=signs_in and round_idx == 1,
+        )
         n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))
         _log.info(
             "round %d/%d done · %d/%d doc(s) had a relevant snippet",

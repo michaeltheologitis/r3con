@@ -4,6 +4,8 @@ import pytest
 
 from r3con.parallel import parallel_map
 
+CALL_SECONDS = 0.01
+
 
 @pytest.mark.parametrize(
     ("items", "max_workers", "results"),
@@ -62,3 +64,31 @@ def test_the_lowest_indexed_failure_is_the_one_raised():
 
     with pytest.raises(RuntimeError, match="item 1"):
         parallel_map(fails, list(range(5)), max_workers=5)
+
+
+def test_with_first_alone_the_first_call_returns_before_any_other_starts():
+    events = []
+
+    def record(i: int, x: str) -> tuple[int, str]:
+        events.append(f"start {i}")
+        time.sleep(CALL_SECONDS)
+        events.append(f"end {i}")
+        return i, x
+
+    results = parallel_map(record, ["a", "b", "c"], max_workers=3, first_alone=True)
+    assert results == [(0, "a"), (1, "b"), (2, "c")]
+    assert events[:2] == ["start 0", "end 0"]
+
+
+def test_with_first_alone_a_failing_first_call_starts_no_other():
+    started = []
+
+    def first_fails(i: int, x: int) -> int:
+        started.append(i)
+        if i == 0:
+            raise RuntimeError("first")
+        return x
+
+    with pytest.raises(RuntimeError, match="first"):
+        parallel_map(first_fails, list(range(5)), max_workers=5, first_alone=True)
+    assert started == [0]
