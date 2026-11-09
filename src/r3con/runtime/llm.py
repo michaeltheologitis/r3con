@@ -124,8 +124,7 @@ _LOOKAROUND = re.compile(r"\(\?<?[=!]")
 _CANCELLED = "cancel was set, so no further model call is sent"
 # What a request sends of the documents: their text, no credential of the caller's.
 _DOCUMENTS = "messages"
-# Each value in these is a credential, whatever the header's name (x-functions-key, say),
-# wherever they sit (an MCP tool's headers), but a public header's.
+# Each header's value is a credential, at any depth, unless the header is public.
 _HEADER_PARAMS = frozenset({"extra_headers", "headers"})
 # The headers whose values are public, by their names in lower case.
 _PUBLIC_HEADERS = frozenset(
@@ -140,13 +139,28 @@ _PUBLIC_HEADERS = frozenset(
         "content-type",
         "accept",
         "user-agent",
+        # Google's quota project, the id of the project a request is billed to.
+        "x-goog-user-project",
+        # Azure Machine Learning's deployment name.
+        "azureml-model-deployment",
+        # OpenAI's organization and project ids, and its beta features.
+        "openai-organization",
+        "openai-project",
+        "openai-beta",
     }
 )
-# A JSON Schema's own names, its fields' and its definitions', are no parameters' names:
-# a schema anywhere (a tool's parameters, guided_json) may name a field auth_token.
-_SCHEMA_NAMES = frozenset({"properties", "$defs", "definitions"})
-# Azure's API version and watsonx's, which litellm adds, by their names in lower case:
-# any other value in a URL's query is taken for a key.
+# By key name alone, schema or not: the keys under these name fields, not params.
+_SCHEMA_NAMES = frozenset(
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        "dependentRequired",
+    }
+)
+# Azure's and watsonx's API version, which litellm adds; other query values are keys.
 _PUBLIC_QUERY_NAMES = frozenset({"api-version", "version"})
 # A "<scheme> <token>" value's words, as in "Bearer <token>".
 _SCHEMED_WORDS = 2
@@ -504,11 +518,11 @@ def register_credentials(
     path that exists (:func:`r3con.masking.is_path`); in a URL, its password, or its
     user name when it has none, and every value in its query but a public one
     (:func:`_url_secrets`); and the token alone of a ``<scheme> <token>`` one
-    (``Bearer``, ``Basic``). The names a JSON Schema gives its fields and definitions
-    (:data:`_SCHEMA_NAMES`) are not parameters' names, wherever the schema sits. When
-    ``completion`` is a ``litellm.Router``'s, the same of each of its deployments'
-    ``litellm_params``, where the Router has already read an ``os.environ/NAME`` from
-    the environment."""
+    (``Bearer``, ``Basic``). The keys of a dict under a key that JSON Schema names
+    fields or patterns with (:data:`_SCHEMA_NAMES`) are not parameters' names, by that
+    key's name alone, whether or not the dict is a schema. When ``completion`` is a
+    ``litellm.Router``'s, the same of each of its deployments' ``litellm_params``,
+    where the Router has already read an ``os.environ/NAME`` from the environment."""
     sent = {name: value for name, value in params.items() if name != _DOCUMENTS}
     for value in _credentials(plain(sent)):
         register_key(value)

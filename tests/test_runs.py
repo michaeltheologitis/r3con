@@ -21,7 +21,7 @@ from r3con.runs import (
 )
 from r3con.runtime.llm import register_credentials
 from r3con.settings import settings_snapshot
-from tests.fakes import DIGITS_KEY, GatewayKey
+from tests.fakes import DIGITS_KEY, GatewayKey, on_your_data
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -50,6 +50,10 @@ SCHEMA = {
     },
 }
 TOOLS = [{"type": "function", "function": {"name": "sign_in", "parameters": SCHEMA}}]
+# A field of a schema, which the rows below name like a credential.
+FIELD = {"type": "string", "description": "The session's sign-in token"}
+DEPENDENT_FIELDS = ["auth_token_issuer"]
+SEARCH_KEY = {"type": "api_key", "key": KEY}
 MCP_TOOL = {
     "type": "mcp",
     "server_label": "memos",
@@ -98,6 +102,20 @@ RECORDED_PARAMS = {
         {"tools": TOOLS, "extra_body": {"api_key": KEY, "guided_json": SCHEMA}},
         {"tools": TOOLS, "extra_body": {"api_key": "REDACTED", "guided_json": SCHEMA}},
     ),
+    "azure-on-your-data-search-key": (
+        on_your_data({"authentication": SEARCH_KEY}),
+        on_your_data({"authentication": {**SEARCH_KEY, "key": "REDACTED"}}),
+    ),
+    "azure-on-your-data-embedding-key": (
+        on_your_data({"embedding_dependency": {"authentication": SEARCH_KEY}}),
+        on_your_data(
+            {
+                "embedding_dependency": {
+                    "authentication": {**SEARCH_KEY, "key": "REDACTED"}
+                }
+            }
+        ),
+    ),
 }
 # Credentials litellm reads from within what a request sends, and the run's record.
 WITHIN_REQUEST_DATA = {
@@ -141,7 +159,59 @@ CREDENTIAL_FREE_PARAMS = {
             "X-Title": "Halloran memo desk",
         }
     },
-    "anthropic-beta": {"extra_headers": {"anthropic-beta": "context-1m-2025-08-07"}},
+    "definitions-schema": {
+        "extra_body": {"guided_json": {"definitions": {"auth_token": FIELD}}}
+    },
+    "pattern-properties-schema": {
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "memo",
+                "schema": {
+                    "type": "object",
+                    "patternProperties": {"^token_.*$": FIELD},
+                },
+            },
+        }
+    },
+    "dependent-schemas-schema": {
+        "extra_body": {
+            "guided_json": {
+                "dependentSchemas": {"auth_token": {"required": DEPENDENT_FIELDS}}
+            }
+        }
+    },
+    "dependent-required-schema": {
+        "extra_body": {
+            "guided_json": {"dependentRequired": {"auth_token": DEPENDENT_FIELDS}}
+        }
+    },
+    "anthropic-headers": {
+        "extra_headers": {
+            "anthropic-beta": "context-1m-2025-08-07",
+            "anthropic-version": "2023-06-01",
+        }
+    },
+    "http-headers": {
+        "extra_headers": {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "memo-desk/2026.11",
+        }
+    },
+    "google-quota-project-header": {
+        "extra_headers": {"x-goog-user-project": "memo-reader-2026"}
+    },
+    "azure-ml-deployment-header": {
+        "extra_headers": {"azureml-model-deployment": "memo-reader-blue"}
+    },
+    "openai-headers": {
+        "extra_headers": {
+            "OpenAI-Organization": "org-memo-desk-2026",
+            "OpenAI-Project": "proj_memoReader2026",
+            "OpenAI-Beta": "assistants=v2",
+        }
+    },
     "api-version-in-any-case": {"api_base": f"{SERVER}?API-Version=2024-10-21"},
     "watsonx-version": {"api_base": f"{SERVER}?version=2024-05-31"},
     "prompt-cache-key": {"prompt_cache_key": "summaries-cache-2026"},

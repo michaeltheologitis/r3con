@@ -1,3 +1,5 @@
+import pwd
+
 import pytest
 from pydantic import BaseModel, ValidationError
 
@@ -99,6 +101,17 @@ def test_a_credential_named_variable_holding_an_existing_file_is_not_masked(
     assert masked(text) == text
 
 
+def test_a_credential_starting_with_a_tilde_and_a_name_is_masked_with_no_user_lookup(
+    monkeypatch,
+):
+    def lookup(name: str) -> None:
+        pytest.fail(f"looked the user {name!r} up")
+
+    monkeypatch.setattr(pwd, "getpwnam", lookup)
+    monkeypatch.setenv("MEMO_READER_TOKEN", "~somename/memo-reader-2026")
+    assert masked("refused ~somename/memo-reader-2026") == "refused REDACTED"
+
+
 # Each name, and whether it says that what it holds is a credential.
 CREDENTIAL_NAMES = {
     "api_key": True,
@@ -111,6 +124,7 @@ CREDENTIAL_NAMES = {
     "vertex_credentials": True,
     "auth": True,
     "Authorization": True,
+    "authentication": True,
     "x-auth-token": True,
     "auth_token": True,
     "basic_auth": True,

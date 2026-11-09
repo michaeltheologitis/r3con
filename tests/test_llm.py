@@ -34,7 +34,7 @@ from r3con.runtime.llm import (
     register_credentials,
     schema_as_sent,
 )
-from tests.fakes import DIGITS_KEY, GatewayKey
+from tests.fakes import DIGITS_KEY, GatewayKey, on_your_data
 
 MODEL = "openai/gpt-6-luna"
 VLLM = "hosted_vllm/fake"
@@ -1240,6 +1240,34 @@ SENT_CREDENTIALS = {
         {"aws_secret_access_key": f"/{PLAIN_KEY}"},
         f"/{PLAIN_KEY}",
     ),
+    "azure-on-your-data-search-key": (
+        on_your_data({"authentication": {"type": "api_key", "key": PLAIN_KEY}}),
+        PLAIN_KEY,
+    ),
+    "azure-on-your-data-embedding-key": (
+        on_your_data(
+            {
+                "embedding_dependency": {
+                    "type": "endpoint",
+                    "endpoint": f"{SERVER}/embeddings",
+                    "authentication": {"type": "api_key", "key": PLAIN_KEY},
+                }
+            }
+        ),
+        PLAIN_KEY,
+    ),
+    "elasticsearch-key-and-key-id": (
+        on_your_data(
+            {
+                "authentication": {
+                    "type": "key_and_key_id",
+                    "key": PLAIN_KEY,
+                    "key_id": "memo-reader",
+                }
+            }
+        ),
+        PLAIN_KEY,
+    ),
 }
 
 
@@ -1259,6 +1287,28 @@ def test_a_vertex_credentials_path_that_exists_is_not_registered(tmp_path):
     register_credentials({"vertex_credentials": str(credentials)})
     text = f"could not read {credentials}"
     assert masked(text) == text
+
+
+def test_a_header_holding_a_path_that_exists_is_still_registered(tmp_path):
+    token = tmp_path / "gateway-token"
+    token.touch()
+    register_credentials({"extra_headers": {"X-Auth-Token": str(token)}})
+    assert masked(f"refused {token}") == "refused REDACTED"
+
+
+def test_a_document_starting_with_a_url_is_data_its_password_and_query_unregistered(
+    llm,
+):
+    password, memo_id = "memo-password-2026", "q3-memos-2026"
+    document = f"https://reader:{password}@gw.example.com/memo?id={memo_id}"
+    llm.replies("ok")
+    litellm_chat_completion(
+        system_prompt="Summarize the memo.",
+        user_prompt=document,
+        model=MODEL,
+        completion=llm,
+    )
+    assert masked(f"{password} {memo_id}") == f"{password} {memo_id}"
 
 
 def test_a_one_shot_iterator_among_the_params_reaches_the_completion_whole(llm):

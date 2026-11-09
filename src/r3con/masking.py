@@ -26,13 +26,15 @@ are:
   ``langfuse_secret_key``, unless it is a path that exists (:func:`is_path`); and in a
   URL, such as ``api_base``, as its password, or its user name when it has none, or as
   any value in its query but a public one (Azure's ``api-version``, watsonx's
-  ``version``). The names a JSON Schema gives its fields and definitions are not
-  parameters' names, wherever the schema sits (a tool's ``parameters``,
-  ``response_format``, ``guided_json``). The keys of a ``litellm.Router`` whose
-  ``.completion`` is the run's ``completion`` are registered too. Every string in a
-  dict-valued ``vertex_credentials`` is masked, the public ``token_uri`` too, since a
-  service account's field names do not say which are secret. A ``completion`` wrapper
-  that adds a key of its own must register it;
+  ``version``). The keys of a dict under a key that JSON Schema names fields or
+  patterns with (``properties``, ``patternProperties``, ``$defs``, …) are not
+  parameters' names. The rule goes by that key's name, not by whether the dict is a
+  schema, so it holds wherever the key sits: in a tool's ``parameters``, in
+  ``response_format`` or ``guided_json``, or anywhere else. The keys of a
+  ``litellm.Router`` whose ``.completion`` is the run's ``completion`` are registered
+  too. Every string in a dict-valued ``vertex_credentials`` is masked, the public
+  ``token_uri`` too, since a service account's field names do not say which are
+  secret. A ``completion`` wrapper that adds a key of its own must register it;
 - the value of every environment variable with a credential's name, where litellm finds
   a provider's key, unless it holds whitespace or is a path that exists
   (:func:`is_path`), as ``GOOGLE_APPLICATION_CREDENTIALS`` and
@@ -67,8 +69,11 @@ _CREDENTIAL_NAME = re.compile(
 # A name's words, whatever its case: snake_case, kebab-case, camelCase, SCREAMING_CASE.
 _NAME_WORDS = re.compile("[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
 # Whole words only: "auth" begins "author" and "authority", which name no credential.
-_AUTH_WORDS = frozenset({"auth", "authorization"})
-_PATH_STARTS = ("/", "~")
+_AUTH_WORDS = frozenset({"auth", "authentication", "authorization"})
+# Each auth word holds it, so a name without it needs no splitting into words.
+_AUTH = "auth"
+# Not "~name": expanding one looks the user up, through NSS or LDAP on some hosts.
+_PATH_STARTS = ("/", "~/")
 _registered: set[str] = set()
 _lock = threading.Lock()
 
@@ -86,29 +91,30 @@ def is_credential_name(name: str) -> bool:
     its name, in any case, ends in ``api_key`` or ``apikey``, is ``oci_key``, OCI's
     private key and the one credential litellm reads under a bare ``key``, says token,
     secret, password, credential or webhook (``slack_webhook_url``, whose secret is its
-    URL's path), or has auth or authorization as a word of its own (``x-auth-token``,
-    ``basicAuth``), not within another (``author``, ``authority``). Any other bare
-    ``key``, as in ``prompt_cache_key`` or litellm's ``cache_key``, does not."""
+    URL's path), or has auth, authentication or authorization as a word of its own
+    (``x-auth-token``, ``basicAuth``, Azure On Your Data's ``authentication``), not
+    within another (``author``, ``authority``). Any other bare ``key``, as in
+    ``prompt_cache_key`` or litellm's ``cache_key``, does not."""
+    if _CREDENTIAL_NAME.search(name):
+        return True
+    if _AUTH not in name.lower():
+        return False
     words = {word.lower() for word in _NAME_WORDS.findall(name)}
-    return bool(_CREDENTIAL_NAME.search(name)) or not _AUTH_WORDS.isdisjoint(words)
+    return not _AUTH_WORDS.isdisjoint(words)
 
 
 def is_path(value: str) -> bool:
     """Whether ``value``, held under a credential's name, is the path of a file or
     folder litellm reads a credential from or keeps one in (``vertex_credentials``,
     ``GOOGLE_APPLICATION_CREDENTIALS``, ``GITHUB_COPILOT_TOKEN_DIR``) rather than the
-    credential: it starts with ``/`` or ``~`` and the path exists. A base64 key may
+    credential: it starts with ``/`` or ``~/`` and the path exists. A base64 key may
     start with ``/``, as about one AWS secret key in 64 does, but names no path, so it
-    is masked, as is a path not made yet: a path masked, never a key shown. A value
-    too long or otherwise invalid as a path is not one."""
+    is masked, as is a path not made yet, and any ``~name…``, which is never looked
+    up: a path masked, never a key shown. A value too long or otherwise invalid as a
+    path is not one."""
     if not value.startswith(_PATH_STARTS):
         return False
-    try:
-        return os.path.exists(os.path.expanduser(value))
-    except ValueError:
-        # exists() answers False for any invalid path; expanduser() raises on a NUL
-        # in a ~user name.
-        return False
+    return os.path.exists(os.path.expanduser(value))
 
 
 def masked(text: str) -> str:
@@ -185,10 +191,8 @@ def _environment_secrets() -> list[str]:
 
 
 def _is_secret(name: str, value: str) -> bool:
-    if not is_credential_name(name) or is_path(value):
-        return False
-    if any(map(str.isspace, value)):
+    if not is_credential_name(name) or any(map(str.isspace, value)):
         return False
     provider_key = _PROVIDER_KEY_NAME.search(name)
     floor = _MIN_MASKED_KEY_CHARS if provider_key else _MIN_ENVIRONMENT_SECRET_CHARS
-    return len(value) >= floor
+    return len(value) >= floor and not is_path(value)
