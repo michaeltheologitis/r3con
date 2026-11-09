@@ -35,7 +35,13 @@ from r3con.app.server import (
 )
 from r3con.r3con import read_documents
 from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
-from tests.fakes import GATE_TIMEOUT_SECONDS, SCHEMA_REPLY, FakeLLM
+from tests.fakes import (
+    GATE_TIMEOUT_SECONDS,
+    SCHEMA_REPLY,
+    FakeLLM,
+    a_parse_citation_short,
+    in_json,
+)
 
 litellm.suppress_debug_info = True
 
@@ -892,6 +898,25 @@ def test_an_ask_that_would_send_a_masked_param_fails_naming_it_and_sends_nothing
         "all of the run's params. Masked params: `extra_headers.Authorization`."
     )
     assert llm.requests[sent:] == []
+
+
+def test_an_ask_over_a_run_folder_it_cannot_read_fails_saying_why_and_sends_nothing(
+    client: TestClient, llm: FakeLLM
+):
+    run_id = finished_run(client)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    in_json("structuring/parsing/result.json", a_parse_citation_short)(run_dir)
+    sent = len(llm.requests)
+    events = ask_events(client, run_id)
+    assert [(event["type"], event["stage"]) for event in events] == [
+        ("ask_failed", None)
+    ]
+    assert events[0]["error"] == (
+        f"ValueError: can't read {run_dir} as a run folder: ValueError: zip() "
+        "argument 2 is shorter than argument 1"
+    )
+    assert llm.requests[sent:] == []
+    assert not (run_dir / "asks").exists()
 
 
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(

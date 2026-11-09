@@ -33,6 +33,7 @@ from tests.fakes import (
     FINGERPRINT,
     TWO_LINE_MEMOS,
     USAGE,
+    a_parse_citation_short,
     bad_key,
     cited_documents,
     citing,
@@ -1115,6 +1116,47 @@ def test_a_document_read_in_parts_keeps_its_part_headings_in_an_ask(
     assert f"### Document ID: {registry}.2\n" in system
 
 
+def quoting_its_first_line_and_citing_all_shown(shown_ids):
+    """A relevance reply quoting the first line of the text it is sent, and, in a
+    later round, citing every summary shown."""
+
+    def reply(request):
+        first = request["messages"][1]["content"].splitlines()[0]
+        if not is_later_round(request):
+            return {"summary": f"Notes on {first}.", "quotes": [first]}
+        cites = shown_ids(request)
+        return {
+            "summary": f"Notes on {first}.",
+            "quotes": [first],
+            "provenance_ids": cites,
+        }
+
+    return reply
+
+
+@pytest.mark.parametrize("rounds", [1, 3])
+def test_a_run_with_a_document_in_parts_is_asked_through_each_of_its_rounds(
+    answering_llm, shown_ids, grown_registry, window, tmp_path, rounds
+):
+    answering_llm.answers(
+        relevance=quoting_its_first_line_and_citing_all_shown(shown_ids),
+        reasoning=citing("Halloran memo", slice(None), slice(None)),
+    )
+    model = window(5_000)
+    documents = ["Halloran memo", grown_registry(40_000), "Merrow memo"]
+    result = finished_run(
+        answering_llm, tmp_path, documents, model=model, relevance_rounds=rounds
+    )
+    asked = ask(result, "Who else?", model=model, completion=answering_llm)
+    assert asked.answer == "Halloran memo"
+    assert f"{result.document_ids[1]}.2" in asked.provenance["summary_ids"]
+    trail = asked.provenance["trail"]["nodes"]
+    reached = {node.split(":")[1] for node in trail if node.startswith("summary:")}
+    assert reached == {str(k) for k in range(1, rounds + 1)}
+    assert asked.provenance["quotes"]
+    assert trace(asked) == asked.provenance
+
+
 @pytest.mark.parametrize("folder", ["missing", ""], ids=["missing", "empty"])
 def test_a_folder_that_is_not_a_run_folder_cannot_be_asked(llm, tmp_path, folder):
     with pytest.raises(FileNotFoundError) as refused:
@@ -1326,10 +1368,6 @@ def test_trace_reads_a_run_whose_config_or_prompts_this_r3con_no_longer_runs(
     assert trace(cited_run.run_dir) == cited_run.provenance
 
 
-def a_parse_citation_short(result: dict) -> None:
-    result["provenance"] = result["provenance"][:-1]
-
-
 def a_quote_without_text(result: dict) -> None:
     del result["rounds"][0]["snippets"][0]["quotes"][0]["text"]
 
@@ -1366,6 +1404,45 @@ def test_trace_refuses_malformed_saved_records_in_one_line(
     assert str(refused.value) == (
         f"can't read {cited_run.run_dir} as a run folder: {error}"
     )
+
+
+def a_quote_placed_by_a_list(result: dict) -> None:
+    """A quote's place that breaks only the provenance of an answer whose trail
+    reaches it: the first document's last-round quote, which ``cited_run``'s answer
+    reaches."""
+    quote = result["rounds"][-1]["snippets"][0]["quotes"][0]
+    quote["start"] = [quote["start"]]
+
+
+@pytest.mark.parametrize(
+    ("name", "make_malformed", "error"),
+    [
+        (
+            "structuring/parsing/result.json",
+            a_parse_citation_short,
+            "ValueError: zip() argument 2 is shorter than argument 1",
+        ),
+        ("relevance/result.json", a_quote_without_text, "KeyError: 'text'"),
+        (
+            "relevance/result.json",
+            a_quote_placed_by_a_list,
+            "TypeError: unhashable type: 'list'",
+        ),
+    ],
+    ids=["a-parse-citation-short", "a-quote-without-text", "a-quote-placed-by-a-list"],
+)
+def test_an_ask_refuses_malformed_saved_records_in_one_line_before_any_request(
+    answering_llm, cited_run, name, make_malformed, error
+):
+    in_json(name, make_malformed)(cited_run.run_dir)
+    sent = len(answering_llm.requests)
+    with pytest.raises(ValueError) as refused:
+        ask(cited_run, "Who else?", completion=answering_llm)
+    assert str(refused.value) == (
+        f"can't read {cited_run.run_dir} as a run folder: {error}"
+    )
+    assert len(answering_llm.requests) == sent
+    assert not (cited_run.run_dir / "asks").exists()
 
 
 @pytest.mark.parametrize(

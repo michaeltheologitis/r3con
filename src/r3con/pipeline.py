@@ -72,6 +72,7 @@ from r3con.stages import reasoning
 from r3con.stages.relevance import (
     RelevantContext,
     SnippetRecord,
+    citable_ids,
     draw_document_ids,
     join_parts,
     surface_relevance,
@@ -647,7 +648,11 @@ def run_pipeline(
 
 def read_representation(run_dir: Path) -> Representation:
     """Read back what the run in ``run_dir``, or the run an ask's folder ``run_dir``
-    asked over, built; :func:`r3con.ask` lists refusals."""
+    asked over, built; :func:`r3con.ask` lists refusals.
+
+    It also builds the provenance of an answer citing all it can (:func:`_cites_all`),
+    as an ask builds its answer's after reasoning's paid call, so that a folder it
+    can't be built over is refused before that call."""
     run_dir = _run_of(run_dir)
     unbuilt = [s for s in _BUILT_STAGES if not (run_dir / s / "result.json").is_file()]
     if unbuilt:
@@ -657,8 +662,30 @@ def read_representation(run_dir: Path) -> Representation:
         )
     with _readable(run_dir):
         built = _read_built(run_dir)
+        _provenance_over(built, _cites_all(built))
     check_prompts(built.config)
     return built
+
+
+def _cites_all(built: Representation) -> Citations:
+    """Citations of every final-round snippet an answer over ``built`` can cite, and
+    of every document's parse: whatever an answer cites, its trail reaches no further
+    than theirs."""
+    document_ids = list(built.names)
+    return Citations(
+        summary_ids=citable_ids(built.relevance.snippets, document_ids),
+        parse_ids=document_ids,
+    )
+
+
+def _provenance_over(built: Representation, citations: Citations) -> Provenance:
+    """The provenance of an answer over ``built`` that cites ``citations``."""
+    return build_provenance(
+        citations,
+        relevance=built.relevance,
+        parsing_provenance=built.parsing_provenance,
+        names=built.names,
+    )
 
 
 def read_answer(folder: Path, rule: str) -> Provenance:
@@ -883,12 +910,7 @@ def ask_pipeline(
             run=record.run,
             **llm_kwargs,
         )
-        provenance = build_provenance(
-            result.citations,
-            relevance=built.relevance,
-            parsing_provenance=built.parsing_provenance,
-            names=built.names,
-        )
+        provenance = _provenance_over(built, result.citations)
         record.result = _reasoning_record(result, provenance)
     emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
