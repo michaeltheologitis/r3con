@@ -365,6 +365,11 @@ def in_json(name: str, change: Callable[[Any], None]) -> Callable[[Path], None]:
     return rewrite
 
 
+def a_parse_citation_short(result: dict) -> None:
+    """The parse's citations with the last document's left out."""
+    result["provenance"] = result["provenance"][:-1]
+
+
 def snippets_without_quotes(result: dict) -> None:
     """As r3context 0.6.4 wrote them."""
     for round_ in result["rounds"]:

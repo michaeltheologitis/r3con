@@ -15,6 +15,7 @@ from r3con import settings
 from r3con.cli import main
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.r3con import read_documents
+from tests.fakes import a_parse_citation_short, in_json
 
 MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
@@ -122,8 +123,12 @@ def test_ask_prints_a_new_answer_and_where_its_artifacts_are(answering, capsys):
             pinning_a_missing_prompt,
             "No prompt for stage 'reasoning/coding' version 'v9'",
         ),
+        (
+            in_json("structuring/parsing/result.json", a_parse_citation_short),
+            "as a run folder: ValueError: zip() argument 2 is shorter than argument 1",
+        ),
     ],
-    ids=["older-r3con", "missing-prompt"],
+    ids=["older-r3con", "missing-prompt", "a-parse-citation-short"],
 )
 def test_ask_over_a_run_folder_it_cannot_use_exits_2_in_one_line(
     answering, capsys, change, message
