@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 import litellm
 import pytest
+import pytest_socket
 
 # Its import-time IPv6 probe opens a socket: here, before sockets are blocked.
 import urllib3  # noqa: F401
@@ -448,8 +449,8 @@ def _refused(provider: str) -> Callable[[object], NoReturn]:
     return refuse
 
 
-# Never undone: a worker thread a test leaves running can still ask between tests or at
-# exit, after pytest-socket has let go.
+# Never undone: a worker thread a test leaves running can still ask between tests, while
+# pytest-socket has let go.
 for authenticator, method, provider in TOKEN_REQUESTS:
     setattr(authenticator, method, _refused(provider))
 
@@ -466,6 +467,29 @@ def _no_litellm_sign_in(
     yield
     # litellm turns the refusal into a failed lookup, which code under test may pass.
     assert not tokens_asked_for, sorted(set(tokens_asked_for))
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown() -> Iterator[None]:
+    """Keeps the test's pytest-socket guard up until its fixtures are torn down."""
+    # pytest-socket's own teardown hook lifts the guard before pytest's tears them down.
+    lift_guard = pytest_socket._remove_restrictions
+    pytest_socket._remove_restrictions = lambda: None
+    try:
+        yield
+    finally:
+        pytest_socket._remove_restrictions = lift_guard
+        lift_guard()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Puts the run's guard back for good once the tests are done: a thread one left
+    running may outlive the session."""
+    config = session.config
+    blocked = config.getoption("--disable-socket")
+    if blocked and not config.getoption("--force-enable-socket"):
+        pytest_socket.disable_socket(config.getoption("--allow-unix-socket"))
 
 
 @pytest.fixture(scope="session")
