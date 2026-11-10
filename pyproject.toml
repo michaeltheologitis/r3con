@@ -69,6 +69,9 @@ dev = [
     "ruff>=0.16",
     "toga-core>=0.5.7,<0.6",
 ]
+# Toga's Mac backend, which the Mac app bundles and nothing installs here: it is in the
+# group only so that uv.lock pins it, and its dependencies, for the app's build.
+mac-app = ["toga-cocoa>=0.5.7,<0.6; sys_platform == 'darwin'"]
 
 [project.scripts]
 r3con = "r3con.cli:main"
@@ -101,9 +104,13 @@ formal_name = "R3Con"
 # directory is exempt from.
 sources = ["src/r3con"]
 requires = [".[app]"]
+# Every package at uv.lock's version, the one CI tests: mac-app.yml writes these
+# constraints with `uv export` before it builds, and pip fails without them.
+requirement_installer_args = ["--constraint", "./build/constraints.txt"]
 
 [tool.briefcase.app.r3con.macOS]
-requires = ["toga-cocoa>=0.5.7,<0.6"]
+# At the version the mac-app group locks.
+requires = ["toga-cocoa"]
 # Apple Silicon only. A universal build fails to merge charset_normalizer: its only
 # arm64 wheel is universal2, and Briefcase reinstalls it, thinned, for x86_64.
 universal_build = false
