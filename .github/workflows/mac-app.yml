@@ -1,6 +1,7 @@
 name: Mac app
 
-# Signed ad hoc unless `sign` is set, so that only an approved run uses the signing key.
+# Signed ad hoc unless `sign` is set: only a run on main or a v* tag, through the
+# macos-signing environment, gets the signing key.
 on:
   pull_request:
     paths:
@@ -13,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       sign:
-        description: Sign and notarize (waits for approval)
+        description: Sign and notarize
         type: boolean
         default: false
   workflow_call:
@@ -21,6 +22,12 @@ on:
       sign:
         type: boolean
         default: false
+    secrets:
+      MACOS_CERTIFICATE: {required: false}
+      MACOS_CERTIFICATE_PASSWORD: {required: false}
+      APP_STORE_CONNECT_KEY: {required: false}
+      APP_STORE_CONNECT_KEY_ID: {required: false}
+      APP_STORE_CONNECT_ISSUER_ID: {required: false}
 
 permissions:
   contents: read
