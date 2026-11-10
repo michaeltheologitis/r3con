@@ -158,7 +158,7 @@ const SCHEME_PAGE_COLORS = {
 };
 const pageColorsOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
-const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
+const ADD_FILES_FIRST = 'Drop files or folders first, then ask again.';
 // The page's intro, live and in the prototype, for n documents.
 const loadedLine = (n) => (n === 1 ? 'Loaded 1 document.' : `Loaded ${n} documents.`);
 // The shown tab's chat: each tab has its own, and the others are hidden.
@@ -323,7 +323,10 @@ const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't
 const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
 const NEW_TAB = 'new tab';
 const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
-const ADD_FILES = 'no files yet · add them in the files tab';
+const DROP_FILES = 'drop files and folders here';
+const NO_FILES = 'no files yet';
+// How far off the panel's centre its empty line may sit and still count as centred.
+const CENTRED_PX = 1;
 // Remove all's label and name, and those of undo, which takes its place once it has removed n documents.
 const REMOVE_ALL = 'remove all';
 const REMOVE_ALL_NAME = 'remove all documents';
@@ -383,7 +386,7 @@ function check(area, name, pass, detail = '') {
 
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
-async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample = true, expectedErrors = [], before }, body) {
+async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample = true, memos = false, question = memos, expectedErrors = [], before }, body) {
   const messages = [];
   let context;
   try {
@@ -395,6 +398,9 @@ async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample
     await before?.(page);
     await page.goto(url);
     if (sample) await runSample(page);
+    // A live page starts empty: these give it the sample memos, as the user's files, and the sample's question.
+    if (memos) await addMemos(page);
+    if (question) await page.fill('#question', recordedSample().question);
     await body(page, messages);
   } catch (error) {
     check(area, firstLine(error), false);
@@ -421,6 +427,11 @@ const waitLit = (page, timeout = ACTION_TIMEOUT_MS) => page.waitForSelector('#wo
 async function runSample(page) {
   await page.click('#run-btn');
   await waitLit(page);
+}
+
+async function addMemos(page) {
+  await page.setInputFiles('#file-input', sampleMemos());
+  await filesCounted(page, SAMPLE_DOCS);
 }
 
 // Waits for a condition in the page; false if it never holds.
@@ -4199,8 +4210,8 @@ async function tabFiles() {
       pane: { names: [], removes: 0, adds: true, locked: null, count: '0' },
       nodes: 0,
       can: false,
-      hint: ADD_FILES,
-      status: ADD_FILES,
+      hint: DROP_FILES,
+      status: NO_FILES,
     };
     const emptyName = '+ on a tab with no files opens an empty tab, shows it with the focus on it, and shows its empty files pane';
     check('tab files', emptyName, isDeepStrictEqual(empty, emptyExpected), JSON.stringify(empty));
@@ -4625,11 +4636,71 @@ function postsOf(page) {
   return posts;
 }
 
+// The page as r3con app opens it: an empty tab, whose panel takes files and folders dropped on it until it has run.
+async function liveStart(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const start = {
+      nodes: await count(page, '#world .node'),
+      files: await page.textContent('#files-count'),
+      question: await page.inputValue('#question'),
+      chat: await count(page, `${CHAT} .line`),
+      tabs: await tabLabels(page),
+      status: await page.textContent('#run-status'),
+      hint: await page.innerText('#panel-hint'),
+    };
+    const empty = { nodes: 0, files: '0', question: '', chat: 0, tabs: [['1 new', true]], status: NO_FILES, hint: DROP_FILES };
+    const startName = 'r3con app opens on an empty tab: no files, no run, no question and nothing in the chat, the status saying so and the panel to drop files';
+    check('live', startName, isDeepStrictEqual(start, empty), JSON.stringify(start));
+    const [text, middle] = [await boxCentre(page, '#panel-hint-text'), await boxCentre(page, '#panel')];
+    const off = { x: Math.abs(text.x - middle.x), y: Math.abs(text.y - middle.y) };
+    check('live', "the empty panel's line is centred in it", off.x <= CENTRED_PX && off.y <= CENTRED_PX, JSON.stringify(off));
+
+    const over = await page.evaluate(dropItems, { on: 'panel', items: [['panel_memo.txt', 'A memo dropped on the panel.\n'], DROPPED_FOLDER] });
+    await removeButton(page, 'panel_memo.txt').waitFor();
+    const added = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), said: await filesSaid(page), error: await filesError(page) };
+    const names = ['01_summary.txt', 'panel_memo.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'];
+    const addedExpected = { names, docs: names, said: '4 files added; 1 skipped.', error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}` };
+    const addedName = 'a file and a folder dropped on the empty panel are added as a drop on the files pane adds them, the folder walked and its refusals named';
+    check('live', addedName, over.said === DROP_ADDS && isDeepStrictEqual(added, addedExpected), `${over.said}; ${JSON.stringify(added)}`);
+
+    await page.click('#tab-chat');
+    await send(page, 'Which quarter logged incidents?');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const late = await page.evaluate(dropItems, { on: 'panel', items: [['late.txt', 'A late memo.\n'], DROPPED_FOLDER] });
+    const refused = { error: await filesError(page), names: (await page.evaluate(filesPane)).names };
+    const lockedName = 'once the tab has run, a file and a folder dropped on its panel are refused unread';
+    const locked = done && late.said === DROP_LOCKED && isDeepStrictEqual(refused, { error: `Not added: late.txt, reports. ${LOCKED_DROP}`, names });
+    check('live', lockedName, locked, `${late.said}; ${JSON.stringify(refused)}`);
+  });
+}
+
+// Holds a PDF's text at the server: while an empty tab reads its first files, its panel and status say so, as its files
+// pane does, then count them once they are added.
+async function liveFirstRead(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const release = await holdExtraction(page);
+    await page.evaluate(dropItems, { on: 'panel', items: [['01_memo.pdf', { bytes: [...documents['01_memo.pdf'].buffer] }]] });
+    const lines = async () => ({ hint: await page.innerText('#panel-hint'), status: await page.textContent('#run-status'), said: await filesSaid(page) });
+    const reading = 'Reading 1 file…';
+    await becomes(page, (text) => document.getElementById('files-said').textContent === text, reading);
+    const whileRead = await lines();
+    release();
+    await removeButton(page, '01_memo.pdf').waitFor({ timeout: LIVE_RUN_MS });
+    const added = await lines();
+    const expected = {
+      whileRead: { hint: reading, status: reading, said: reading },
+      added: { hint: `1 document · ${REMOVE_ALL}`, status: `1 document ready · ${DEFAULT_MODEL}`, said: '1 file added.' },
+    };
+    const name = "while an empty tab reads its first files, its panel and status say so as its files pane does, and count them once they are added";
+    check('live', name, isDeepStrictEqual({ whileRead, added }, expected), JSON.stringify({ whileRead, added }));
+  });
+}
+
 // Saves a key on its server.
 async function liveSession(url) {
   const token = tokenOf(url);
   const before = (page) => page.addInitScript(recordEvents);
-  await withPage('live', { url, sample: false, before }, async (page, messages) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page, messages) => {
     const address = await page.evaluate(() => location.href);
     check('live', 'the launch token leaves the address bar at once', !address.includes(token) && !address.includes('#'), address);
     const ready = await page.textContent('#run-status');
@@ -4731,7 +4802,7 @@ async function liveServers(url) {
   const [first, second] = ['10.0.0.7:8000', 'localhost:11434'];
   const otherOn = (label) => `other model on ${label}…`;
   const sent = () => bodies.map(({ model, endpoint }) => [model, endpoint ?? null]);
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     await page.click('#settings-btn');
     await page.fill('#endpoint-other', TEST_ENDPOINT);
     await page.fill('#key-other', TEST_KEY);
@@ -4815,7 +4886,7 @@ async function liveServers(url) {
 
 async function liveCutStream(url) {
   const before = (page) => page.addInitScript(cutEventStreams, 1);
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const nodes = await count(page, '.node');
@@ -4827,7 +4898,7 @@ async function liveCutStream(url) {
 }
 
 async function liveParts(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     await page.setInputFiles('#file-input', [...sampleMemos(), splitMemo()]);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, SAMPLE_DOCS + 1);
     await page.click('#run-btn');
@@ -4898,7 +4969,7 @@ const FOLD_RUN_ROWS = readRows(FOLD_RUN, FOLD_RUN_FOLDS);
 const foldNode = ([first]) => nodeSel(`doc-f${first}`);
 const foldHolding = (d) => FOLD_RUN_FOLDS.find(([first, last]) => first <= d && d <= last);
 
-// The page's document node for memo d of a run's files, added in one batch in place of the sample memos.
+// The page's document node for memo d of a run's files, added in one batch: the sample memos took the first ids at load.
 const fileNode = (d) => `doc-${SAMPLE_DOCS + d}`;
 const fileNodes = (docs) => Array.from({ length: docs }, (_, d) => fileNode(d));
 
@@ -5101,7 +5172,7 @@ const roadworksMemo = () => memo('00_roadworks.txt', `🚧🚧 ${QUIET} Roadwork
 
 async function liveQuotes(url) {
   const before = (page) => page.addInitScript(recordEvents);
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, question: true, before }, async (page) => {
     const memos = [roadworksMemo(), ...sampleMemos(), splitMemo()];
     await page.setInputFiles('#file-input', memos);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
@@ -5142,7 +5213,7 @@ function twoPartMemo() {
 // Second, so the scripted answer cites the first memo's summary and the first part's, not the second part's.
 async function livePartQuotes(url) {
   const before = (page) => page.addInitScript(recordEvents);
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, question: true, before }, async (page) => {
     const [first, ...rest] = sampleMemos();
     const memos = [first, twoPartMemo(), ...rest];
     await page.setInputFiles('#file-input', memos);
@@ -5203,7 +5274,7 @@ async function liveRounds(url) {
 // A live run of `rounds` relevance rounds, chosen in the settings, is sent them, planned for them from its first frame,
 // and draws every round, wired as r3con's events say.
 async function liveRoundsOf(url, rounds) {
-  await withPage('live', { url, sample: false, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
     let posted = null;
     // Held for some frames, so what they show is the page's own plan, before r3con app has said a thing.
     await page.route('**/api/runs', async (route) => {
@@ -5312,7 +5383,7 @@ async function liveRoundsOf(url, rounds) {
 
 // A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a new run.
 async function liveRoundsKept(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = [];
     page.on('request', (request) => {
       const path = new URL(request.url()).pathname;
@@ -5360,7 +5431,7 @@ async function liveAnswers(url) {
     await page.addInitScript(recordEvents);
     await page.addInitScript(holdFrom, 'ask_finished');
   };
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     const posts = postsOf(page);
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
@@ -5406,7 +5477,7 @@ async function liveAnswers(url) {
 // Holds the run's answer back, so its log is seen going.
 async function liveLog(url) {
   const before = (page) => page.addInitScript(holdFrom, 'reasoning_finished');
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     const place = await page.evaluate(composerPlace);
     check('live', "no note under the composer: it takes the note's place, a line at most from the foot of the chat column", place.note === null && place.gap < LINE_PX, JSON.stringify(place));
     await page.click('#run-btn');
@@ -5445,7 +5516,7 @@ async function liveTabs(url) {
     await page.addInitScript(recordEvents);
     await page.addInitScript(holdFrom, 'reasoning_finished');
   };
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     const posts = postsOf(page);
     await page.evaluate(() => (window.release = true));
     await page.click('#run-btn');
@@ -5493,7 +5564,7 @@ async function liveTabs(url) {
 }
 
 async function liveAskAfterFailed(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, `Which memo is the registry? ${FAILS}`);
@@ -5511,7 +5582,7 @@ async function liveAskAfterFailed(url) {
 // Holds the run's end back, so its answer has landed while it is still going.
 async function liveWhileGoing(url) {
   const before = (page) => page.addInitScript(holdFrom, 'run_finished');
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     await page.click('#run-btn');
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS);
     const offered = await page.evaluate(composer);
@@ -5528,7 +5599,7 @@ async function liveWhileGoing(url) {
 
 // Leaves an ask hanging on its server.
 async function liveAskGoing(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
@@ -5548,7 +5619,7 @@ async function liveAskGoing(url) {
 }
 
 async function liveFailure(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     await page.fill('#question', `Which site logged the most incidents? ${FAILS}`);
     await page.click('#run-btn');
     const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
@@ -5579,7 +5650,7 @@ const runPosted = (page) =>
   page.waitForRequest((request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/runs', { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
 
 async function livePdf(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const posts = postsOf(page);
     const memoPdf = documents['01_memo.pdf'];
     const padded = documents['03_padded.pdf'];
@@ -5634,7 +5705,7 @@ async function liveBatches(url) {
     await page.setInputFiles('#file-input', documents['01_memo.pdf']);
     await page.setInputFiles('#file-input', [oldWord(), documents['03_padded.pdf']]);
     release();
-    const lines = ['Reading 1 file…', '1 file added, in place of the 5 sample memos.', 'Reading 2 files…', '1 file added.'];
+    const lines = ['Reading 1 file…', '1 file added.', 'Reading 2 files…', '1 file added.'];
     const inOrder = await becomes(page, (expected) => JSON.stringify(window.saidLines) === JSON.stringify(expected), lines);
     const refused = (await filesError(page)) === `Not added: old.doc. ${OLD_WORD}`;
     const docs = await count(page, '.node.doc');
@@ -5644,7 +5715,7 @@ async function liveBatches(url) {
 }
 
 async function liveWord(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const posts = postsOf(page);
     const report = documents['report.docx'];
     // Word's lock file for report.docx, which is not added or sent.
@@ -5677,7 +5748,7 @@ const utf16 = (name, text, bom = []) => ({ name, mimeType: 'text/plain', buffer:
 const utf32 = (name, text) => ({ name, mimeType: 'text/plain', buffer: Buffer.from([...UTF32LE_BOM, ...[...text].flatMap((c) => [c.charCodeAt(0), 0, 0, 0])]) });
 
 async function liveNotText(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const posts = postsOf(page);
     const binary = { name: 'data.bin', mimeType: 'application/octet-stream', buffer: Buffer.from('a header\0with a NUL byte') };
     const files = [
@@ -5713,7 +5784,7 @@ async function liveNotText(url) {
 }
 
 async function liveUnreadable(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const posts = postsOf(page);
     await page.setInputFiles('#file-input', [memo('01_memo.txt', 'A memo.\n'), memo('02_blank.txt', '  \n')]);
     await page.waitForFunction(() => document.querySelectorAll('.node.doc').length === 2);
@@ -5729,7 +5800,7 @@ async function liveUnreadable(url) {
     const sent = (await started)?.postDataJSON().documents;
     check('live', 'once the unreadable file is removed, the next run sends only the readable one', isDeepStrictEqual(sent, ['A memo.\n']), JSON.stringify(sent));
   });
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const blanks = Array.from({ length: NAMED_AT_MOST + 2 }, (_, i) => memo(`blank_${i + 1}.txt`, '  \n'));
     await page.setInputFiles('#file-input', [memo('01_memo.txt', 'A memo.\n'), ...blanks]);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, blanks.length + 1);
@@ -5744,13 +5815,13 @@ async function liveUnreadable(url) {
 // A zip dropped on the panel goes to r3con app, which unpacks it; its documents are added and run as dropped files are.
 async function liveZip(url) {
   const zipped = (name) => [name, { bytes: [...documents[name].buffer] }];
-  await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, question: true, expectedErrors: [REFUSED_LOG] }, async (page) => {
     await page.evaluate(dropItems, { on: 'panel', items: [zipped('memos.zip'), zipped('photos.zip'), ['broken.zip', 'not a zip']] });
     await removeButton(page, '01_zipped.txt').waitFor();
     const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page) };
     const expected = {
       names: ['01_zipped.txt'],
-      said: '1 file added, in place of the 5 sample memos; 1 skipped.',
+      said: '1 file added; 1 skipped.',
       error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${NO_DOCUMENTS}; 1 skipped.`,
     };
     const name =
@@ -5767,7 +5838,7 @@ async function liveZip(url) {
     await page.evaluate(dropItems, { on: 'panel', items: [zipped('many.zip')] });
     await removeButton(page, many.at(-1)).waitFor();
     const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), error: await filesError(page) };
-    const expected = { names: many, said: `${MANY_FILES} files added, in place of the 5 sample memos.`, error: null };
+    const expected = { names: many, said: `${MANY_FILES} files added.`, error: null };
     check('live', `a zip of ${MANY_FILES} documents adds every one, by name, with none refused`, isDeepStrictEqual(pane, expected), JSON.stringify({ ...pane, names: pane.names.length }));
   });
 }
@@ -5781,7 +5852,7 @@ async function runStarted(url, runId) {
 
 // Two files of one name, and a third: each is sent with its name, and r3con app names the run's documents by them.
 async function liveNames(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
     const memos = [memo('notes.txt', 'A memo.\n'), memo('notes.txt', 'Another memo.\n'), memo('plan.txt', 'A plan.\n')];
     await page.setInputFiles('#file-input', memos);
     await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, memos.length);
@@ -5800,9 +5871,9 @@ async function liveNames(url) {
   });
 }
 
-// A + tab's run and ask are sent its own files, and tab 1 keeps the sample memos, not run.
+// A + tab's run and ask are sent its own files, and tab 1 keeps its memos, not run.
 async function liveTabFiles(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
     const text = 'A memo for the second tab.\n';
     await openEmptyTab(page);
@@ -5832,13 +5903,13 @@ async function liveTabFiles(url) {
     const pane = await paneOf(page);
     const label = (await page.evaluate(tabRow))[0].label;
     const untouched = label === FIRST_TAB_BEFORE_RUN && pane.removes === SAMPLE_DOCS && pane.adds && pane.locked === null;
-    check('live', 'tab 1 keeps the sample memos, not run and not locked', untouched, `${label}; ${JSON.stringify(pane)}`);
+    check('live', 'tab 1 keeps its memos, not run and not locked', untouched, `${label}; ${JSON.stringify(pane)}`);
   });
 }
 
-// A sample memo dropped on the can is left out of the next run.
+// A memo dropped on the can is left out of the next run.
 async function liveTrash(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const docs = recordedSample().docs;
     const id = await docNodeId(page, docs[0].name);
     await dragOver(page, await centre(page, id), await boxCentre(page, '#trash'));
@@ -5854,7 +5925,7 @@ async function liveTrash(url) {
 // Holds the first PDF's text at the server until the tab it was added in has started its run; three more
 // batches wait behind it, the last with only a hidden file.
 async function liveLockedWhileReading(url) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     let release;
     const held = new Promise((resolve) => (release = resolve));
     let extractions = 0;
@@ -5940,7 +6011,7 @@ async function liveBatchesPerTab(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     const release = await holdExtraction(page);
     await page.evaluate(recordFilesLines);
-    await openEmptyTab(page);
+    await page.click('#new-tab-btn');
     await page.setInputFiles('#file-input', [documents['01_memo.pdf'], oldWord()]);
     await showRunTab(page, 0);
     await page.evaluate(() => (window.lineWrites = []));
@@ -5963,7 +6034,7 @@ async function liveBatchesPerTab(url) {
     await showRunTab(page, 1);
     const again = { names: (await page.evaluate(filesPane)).names, ...(await filesLines(page)) };
     const restored = await page.evaluate(() => window.lineWrites);
-    const firstOwn = { names: ['08_first_tab.txt'], said: '1 file added, in place of the 5 sample memos.', error: null };
+    const firstOwn = { names: ['08_first_tab.txt'], said: '1 file added.', error: null };
     const landsName = 'a batch that lands while another tab is shown goes to the tab it was added in, and the shown tab keeps its own files and lines';
     check('live', landsName, landed && isDeepStrictEqual(first, firstOwn) && isDeepStrictEqual(second.names, ['01_memo.pdf']), JSON.stringify({ first, second }));
     const toldName = "that tab's pane says what happened to the batch once the tab is shown, its refusal too, and still says it after a switch away and back";
@@ -6008,7 +6079,7 @@ async function liveRefusalWhileChatting(url) {
     await page.click('#tab-files');
     await showRunTab(page, 0);
     const lines = await filesLines(page);
-    const expected = { said: '1 file added, in place of the 5 sample memos.', error: `Not added: old.doc. ${OLD_WORD}` };
+    const expected = { said: '1 file added.', error: `Not added: old.doc. ${OLD_WORD}` };
     const name = 'a refusal that lands while the chat pane is shown is in the files pane once it is opened, after a switch to another tab and back';
     check('live', name, isDeepStrictEqual(lines, expected), JSON.stringify(lines));
   });
@@ -6067,7 +6138,7 @@ async function liveKeySaves(url) {
 async function liveLoadProblem(url) {
   const before = (page) => page.route('**/api/keys', (route) => route.abort());
   const failing = (route) => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'still unwell' }) });
-  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG, SERVER_ERROR_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [ABORTED_LOG, SERVER_ERROR_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
     await page.fill('#question', 'Which memo mentions the storm?');
     const typing = (await page.textContent('#run-status')) === LOST_CONNECTION;
@@ -6092,7 +6163,7 @@ async function liveLoadProblem(url) {
 // Loses the connection at load, so the status holds the error, and then removes a file.
 async function liveRemoveKeepsProblem(url) {
   const before = (page) => page.route('**/api/keys', (route) => route.abort());
-  await withPage('live', { url, sample: false, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
     check('live', 'a connection lost at load shows in the status', atLoad, await page.textContent('#run-status'));
     await page.click('#tab-files');
@@ -6104,7 +6175,7 @@ async function liveRemoveKeepsProblem(url) {
 
 async function liveStaleToken(url) {
   const wrong = url.replace(/#token=.*/, '#token=not-this-launch');
-  await withPage('live', { url: wrong, sample: false, expectedErrors: [UNAUTHORIZED_LOG] }, async (page) => {
+  await withPage('live', { url: wrong, sample: false, memos: true, expectedErrors: [UNAUTHORIZED_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, `● ${STALE_TOKEN}`);
     await page.click('#run-btn');
     const inChat = await becomes(page, lastTurnSays, [STALE_TOKEN]);
@@ -6118,7 +6189,7 @@ async function liveStaleToken(url) {
 
 // Stops the server it is given: its own.
 async function liveGoingThenLost(url, server) {
-  await withPage('live', { url, sample: false, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
     const posts = postsOf(page);
     await page.fill('#question', `Which site logged the most incidents? ${HANGS}`);
     await page.click('#run-btn');
@@ -6160,7 +6231,7 @@ const startedJob = (page, path) => page.waitForResponse((response) => response.r
 
 // Stalls both tabs' runs on its server until it releases them, after the second is stopped.
 async function liveStop(url, server) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
     const absentBefore = !(await page.evaluate(composer)).stop;
     await send(page, `Which site logged the most incidents? ${STALLS}`);
@@ -6211,7 +6282,7 @@ async function liveStopEarly(url, server) {
     await posted;
     await route.continue();
   });
-  await withPage('live', { url, sample: false, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     const posts = postsOf(page);
     await send(page, `Which site logged the most incidents? ${STALLS}`);
     await becomes(page, () => !document.getElementById('stop-btn').hidden);
@@ -6229,7 +6300,7 @@ async function liveStopEarly(url, server) {
 
 // Stalls two asks' calls until it releases them; their replies then miss their schema, so r3con would send again.
 async function liveStopAsk(url, server) {
-  await withPage('live', { url, sample: false }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
@@ -6276,7 +6347,7 @@ async function liveStopRefused(url) {
     await page.addInitScript(holdFrom, 'reasoning_finished');
     await page.route('**/cancel', (route) => route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: CANCEL_REFUSED }) }));
   };
-  await withPage('live', { url, sample: false, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
     await page.click('#run-btn');
     await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await page.evaluate(recordStatuses);
@@ -6303,7 +6374,7 @@ async function liveStopLate(url) {
       await route.fulfill({ status: 404, contentType: 'application/json', body: JSON.stringify({ error: CANCEL_REFUSED }) });
     });
   };
-  await withPage('live', { url, sample: false, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [NOT_FOUND_LOG] }, async (page) => {
     await page.click('#run-btn');
     await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await pressStop(page);
@@ -6340,7 +6411,8 @@ async function liveElsewhere() {
 // A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
-    await introCounts('live', { url, sample: false });
+    await liveStart(url);
+    await liveFirstRead(url);
     await liveCutStream(url);
     await liveAnswers(url);
     await liveLog(url);
