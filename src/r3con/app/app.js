@@ -3214,17 +3214,22 @@
   }
 
   // What a call was shown, as the panel draws it. On a folded panel, a call shown every document's output is drawn
-  // shown each row's, and one shown the others' snippets, each relevant document's, which has a row of its own.
+  // shown each row's, and one shown the others' snippets, each relevant document's, which has a row of its own. The
+  // documents of an opened fold draw no faint lines, in or out, so that opening hundreds doesn't draw a line from
+  // each to each: their fold draws theirs while closed.
   /** @param {RunTab} tab @param {string} id */
   function shownInputs(tab, id) {
     const { run, fold } = tab;
     if (!fold) return inputsOf(run, id);
     const [kind, i] = splitId(id);
+    /** @param {number} d */
+    const opened = (d) => fold.opened.has(d) && !fold.relevant.has(d);
+    if (isPerDocument(kind) && opened(i)) return [];
     const final = finalRound(run);
     /** @param {PerDocumentKind} step @param {(docs: number[]) => boolean} [keep] */
     const eachRow = (step, keep = () => true) =>
       fold.rows.flatMap((row) => {
-        if ('doc' in row) return keep([row.doc]) ? [`${step}-${row.doc}`] : [];
+        if ('doc' in row) return !opened(row.doc) && keep([row.doc]) ? [`${step}-${row.doc}`] : [];
         return !row.open && keep(foldDocs(row)) ? [foldId(step, row)] : [];
       });
     if (kind === 'parsed' || kind === 'schema') return eachRow(final);
