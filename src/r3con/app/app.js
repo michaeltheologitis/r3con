@@ -3123,8 +3123,8 @@
     sub.textContent = node.kind === 'doc' ? [status, row.open && 'fold'].filter(Boolean).join(' · ') : isRound(node.kind) ? roundName(node.kind) : '';
     sub.hidden = !sub.textContent;
     const column = isRound(node.kind) ? roundName(node.kind) : node.kind === 'parsed' ? 'parsed' : '';
-    const stopped = node.el.classList.contains('failed') && 'stopped';
-    node.el.setAttribute('aria-label', [count, column, status, stopped, row.open ? 'unfolded' : 'folded'].filter(Boolean).join(', '));
+    const stopped = node.el.classList.contains('failed') && status !== 'stopped' && 'stopped';
+    node.el.setAttribute('aria-label', [count, column, row.open ? 'unfolded' : 'folded', status, stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(row.open));
     node.el.title = `${row.open ? 'fold' : 'unfold'} ${count}`;
     node.el.classList.toggle('open', row.open);

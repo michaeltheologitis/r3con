@@ -1272,6 +1272,88 @@ async function beforeRun() {
   await introCounts('before a run', { sample: false });
 }
 
+// ---------- folds: a tab of more than ten documents folds those with nothing relevant ----------
+
+// The page's FOLD_FROM_DOCS and CONTEXT_DOCS: a tab of more documents folds, and before a run keeps this many in
+// view at each end.
+const FOLD_FROM_DOCS = 10;
+const CONTEXT_DOCS = 3;
+const FOLDED_FILES = 30;
+const memoNamed = (i) => memo(`memo_${String(i).padStart(3, '0')}.txt`, `Memo ${i}.\n`);
+const memosFrom = (from, to) => Array.from({ length: to - from }, (_, i) => memoNamed(from + i));
+const stemsFrom = (from, to) => Array.from({ length: to - from }, (_, i) => `memo_${String(from + i).padStart(3, '0')}`);
+
+// The panel's rows, top to bottom: a document's name, or a fold's labels, and "(open)" for an opened one.
+function panelRows() {
+  const firsts = [...document.querySelectorAll('#world .node.doc')].sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
+  const labels = (el) => [...el.querySelectorAll('.label')].map((label) => label.textContent).filter(Boolean).join(' · ');
+  return firsts.map((el) => (el.classList.contains('fold') ? `${labels(el)}${el.getAttribute('aria-expanded') === 'true' ? ' (open)' : ''}` : labels(el)));
+}
+
+// A fold's first node's count and dots, the fold colour as the page resolves it, and a document's name.
+function foldInk() {
+  if (!document.querySelector('.node.fold.doc')) return null;
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--fold)';
+  document.body.append(probe);
+  const fold = getComputedStyle(probe).color;
+  probe.remove();
+  /** @param {string} selector */
+  const ink = (selector) => {
+    const style = getComputedStyle(/** @type {Element} */ (document.querySelector(selector)));
+    return { color: style.color, weight: Number(style.fontWeight) };
+  };
+  return { fold, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
+}
+
+const filesCounted = (page, n) => page.waitForFunction((k) => document.getElementById('files-count').textContent === String(k), n);
+
+// Clicks `selector`, or presses Enter on it; false, having done nothing, when the panel has no such node.
+async function pressNode(page, selector, { key = false } = {}) {
+  const el = await page.$(selector);
+  if (!el) return false;
+  if (!key) await el.click();
+  else {
+    await el.focus();
+    await page.keyboard.press('Enter');
+  }
+  return true;
+}
+
+async function folds() {
+  await withPage('folds', { sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', memosFrom(0, FOLD_FROM_DOCS));
+    await filesCounted(page, FOLD_FROM_DOCS);
+    const all = await page.evaluate(panelRows);
+    await page.setInputFiles('#file-input', memoNamed(FOLD_FROM_DOCS));
+    await filesCounted(page, FOLD_FROM_DOCS + 1);
+    const folded = await page.evaluate(panelRows);
+    const rest = FOLD_FROM_DOCS + 1 - 2 * CONTEXT_DOCS;
+    const expected = [...stemsFrom(0, CONTEXT_DOCS), `${rest} more documents`, ...stemsFrom(FOLD_FROM_DOCS + 1 - CONTEXT_DOCS, FOLD_FROM_DOCS + 1)];
+    const thresholdName = `a tab of ${FOLD_FROM_DOCS} documents draws a node for each; one of ${FOLD_FROM_DOCS + 1} folds all but the first and last ${CONTEXT_DOCS}, counting the rest`;
+    check('folds', thresholdName, isDeepStrictEqual(all, stemsFrom(0, FOLD_FROM_DOCS)) && isDeepStrictEqual(folded, expected), `${all.length} rows; then ${folded.join(', ')}`);
+  });
+  await withPage('folds', { sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', memosFrom(0, FOLDED_FILES));
+    await filesCounted(page, FOLDED_FILES);
+    const rest = FOLDED_FILES - 2 * CONTEXT_DOCS;
+    const fold = nodeSel(`doc-f${CONTEXT_DOCS}`);
+    const ends = [stemsFrom(0, CONTEXT_DOCS), stemsFrom(FOLDED_FILES - CONTEXT_DOCS, FOLDED_FILES)];
+    const closed = [ends[0], `${rest} more documents`, ends[1]].flat();
+    const rows = await page.evaluate(panelRows);
+    await pressNode(page, fold);
+    const opened = await page.evaluate(panelRows);
+    await pressNode(page, fold, { key: true });
+    const shut = await page.evaluate(panelRows);
+    const open = [ends[0], `${rest} more documents · fold (open)`, stemsFrom(CONTEXT_DOCS, FOLDED_FILES - CONTEXT_DOCS), ends[1]].flat();
+    const beforeName = `before a run, ${FOLDED_FILES} documents show the first and last ${CONTEXT_DOCS} around one fold of the other ${rest}; a click opens it above their rows, and Enter on it folds them again`;
+    check('folds', beforeName, isDeepStrictEqual(rows, closed) && isDeepStrictEqual(opened, open) && isDeepStrictEqual(shut, closed), `${rows.join(', ')}; opened ${opened.length} rows; then ${shut.length}`);
+    const ink = await page.evaluate(foldInk);
+    const inkName = "a fold's first node, which opens it, counts its documents bolder than a document's name, count and dots in the fold colour";
+    check('folds', inkName, ink && ink.count.color === ink.fold && ink.dots === ink.fold && ink.count.weight > ink.name.weight, JSON.stringify(ink));
+  });
+}
+
 async function sampleReplay() {
   await withPage('sample replay', {}, async (page) => {
     const counts = {};
@@ -3158,7 +3240,7 @@ async function scale() {
   for (const layout of Object.values(LAYOUTS)) {
     await withPage('scale', { layout, sample: false }, async (page) => {
       await page.setInputFiles('#file-input', memos);
-      await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, LARGE_RUN_DOCS);
+      await filesCounted(page, LARGE_RUN_DOCS);
       await page.fill('#question', 'Which site logged the most incidents?');
       await page.click('#run-btn');
       await waitLit(page);
@@ -4733,6 +4815,167 @@ async function liveParts(url) {
   });
 }
 
+// fake_server.py's UNPARSED: a document holding it parses to nothing.
+const UNPARSED = '(nothing to parse here)';
+// A folded run's memos: those in `relevant` say something relevant; the others say nothing, and parse to nothing.
+// The memo `inParts` is read in parts, none relevant, and `relevantInParts` in parts, its second relevant.
+const FOLD_RUN = { docs: 60, relevant: [5, 30, 31], inParts: 40, relevantInParts: 50 };
+const FOLD_RUN_ROWS = [
+  '5 documents · nothing relevant',
+  'fold_05',
+  '24 documents · nothing relevant',
+  'fold_30',
+  'fold_31',
+  '18 documents · nothing relevant',
+  'fold_50',
+  '9 documents · nothing relevant',
+];
+// Two runs in the same rows, the second's folds holding twice the memos.
+const FAINT_RUNS = [
+  { docs: 60, relevant: [5, 30, 31, 50] },
+  { docs: 120, relevant: [5, 30, 31, 110] },
+];
+
+function foldMemos({ docs, relevant, inParts = -1, relevantInParts = -1 }) {
+  const quiet = (i) => `${QUIET} ${UNPARSED} A routine memo, number ${i}.\n`;
+  const paragraphs = Array.from({ length: 40 }, (_, k) => `${QUIET} ${UNPARSED} Filler paragraph ${k + 1}, which the scripted model skips.`);
+  const text = (i) => {
+    if (i === inParts) return paragraphs.join('\n\n');
+    if (i === relevantInParts) return splitMemo().buffer.toString();
+    return relevant.includes(i) ? `Site ${i}: an equipment incident was logged in Q3.\n` : quiet(i);
+  };
+  // Numbered to one width, as the files are sorted by name.
+  const width = String(docs - 1).length;
+  return Array.from({ length: docs }, (_, i) => memo(`fold_${String(i).padStart(width, '0')}.txt`, text(i)));
+}
+
+// The page's document node for memo d of a run's files, added in one batch in place of the sample memos.
+const fileNode = (d) => `doc-${SAMPLE_DOCS + d}`;
+const fileNodes = (docs) => Array.from({ length: docs }, (_, d) => fileNode(d));
+
+// Runs `memos` live, and returns the page once the run is done.
+async function runFolded(page, memos, question = 'Which sites logged an equipment incident?') {
+  await page.setInputFiles('#file-input', memos);
+  await filesCounted(page, memos.length);
+  await send(page, question);
+}
+
+async function liveFolds(url, server) {
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await runFolded(page, foldMemos(FOLD_RUN), `Which sites logged an equipment incident? ${STALLS}`);
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    const reading = await page.evaluate(panelRows);
+    const rest = FOLD_RUN.docs - 2 * CONTEXT_DOCS;
+    const waiting = ['fold_00', 'fold_01', 'fold_02', `${rest} documents · reading…`, 'fold_57', 'fold_58', 'fold_59'];
+    const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
+    check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
+
+    server.release();
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const rows = await page.evaluate(panelRows);
+    const readName = 'once read, each document with a snippet has a row of its own, and each run of three or more of the others is one fold, nothing relevant';
+    check('live', readName, done && isDeepStrictEqual(rows, FOLD_RUN_ROWS), rows.join(', '));
+
+    const [answer] = await page.evaluate(answersRead);
+    const expected = trailOnPage(answer.trail, answer.ids, fileNodes(FOLD_RUN.docs));
+    const lit = await litOnPanel(page);
+    const cited = answer.summary_ids.map((id) => fileNode(answer.ids.indexOf(id)));
+    const unfolded = cited.length > 0 && cited.every((id) => lit.nodes.includes(id));
+    const trailName = "the answer's trail is lit along r3con's, through the cited documents' own rows between the folds";
+    const between = isDeepStrictEqual(rows, FOLD_RUN_ROWS);
+    check('live', trailName, between && unfolded && isDeepStrictEqual(lit, expected), `${lit.edges.length} lines lit, ${expected.edges.length} on the trail; cited ${cited.join(' ')}; ${rows.length} rows`);
+
+    const inParts = nodeSel(fileNode(FOLD_RUN.inParts));
+    const foldOfParts = nodeSel('doc-f32');
+    const hidden = (await count(page, inParts)) === 0;
+    const pressed = await pressNode(page, foldOfParts);
+    const shown = pressed && (await count(page, inParts)) === 1 && (await page.$eval(nodeSel(`r1-${FOLD_RUN.inParts}`), (el) => el.classList.contains('void')));
+    await pressNode(page, foldOfParts, { key: true });
+    const refolded = (await count(page, inParts)) === 0 && isDeepStrictEqual(await page.evaluate(panelRows), FOLD_RUN_ROWS);
+    const partsName = 'a document read in parts leaves its fold once a part has a snippet; one whose parts have none folds, and shows in its own row, empty, while its fold is open';
+    check('live', partsName, rows.includes(`fold_${FOLD_RUN.relevantInParts}`) && hidden && shown && refolded, `hidden ${hidden}, shown ${shown}, folded again ${refolded}`);
+
+    const lastFold = nodeSel('doc-f51');
+    await pressNode(page, lastFold);
+    const opened = await page.evaluate(panelRows);
+    await pressNode(page, lastFold, { key: true });
+    const closed = await page.evaluate(panelRows);
+    const openRows = [...FOLD_RUN_ROWS.slice(0, -1), '9 documents · nothing relevant · fold (open)', ...Array.from({ length: 9 }, (_, i) => `fold_${51 + i}`)];
+    const toggleName = 'after a run a click opens a fold above its documents, saying so, and Enter on it folds them again';
+    check('live', toggleName, isDeepStrictEqual(opened, openRows) && isDeepStrictEqual(closed, FOLD_RUN_ROWS), `${opened.length} rows; then ${closed.length}`);
+
+    // The fold opened last glided up to show its rows; fit brings the whole panel back into view.
+    await page.click('#fit-btn');
+    const dragged = fileNode(FOLD_RUN.relevant[1]);
+    await dragNode(page, dragged, -NUDGE_PX * 4, 0);
+    const spots = async () => ({ answer: await positionOf(page, 'answer-0'), dragged: await positionOf(page, dragged), below: await positionOf(page, `r1-${FOLD_RUN.relevant[1]}`) });
+    const before = await spots();
+    await pressNode(page, nodeSel('doc-f6'));
+    const during = await spots();
+    await pressNode(page, nodeSel('doc-f6'), { key: true });
+    const after = await spots();
+    const steady = isDeepStrictEqual(during.answer, before.answer) && isDeepStrictEqual(during.dragged, before.dragged) && during.below.y > before.below.y;
+    const steadyName = 'opening a fold moves neither the answer nor a node the user dragged, while the rows below it move down, and back up as it folds';
+    check('live', steadyName, steady && isDeepStrictEqual(after, before), JSON.stringify({ before, during, after }));
+
+    await page.click('#tab-files');
+    await page.click('#file-list li:nth-child(21) .file');
+    await page.click('#file-view >> text=show in panel');
+    const expanded = await page.evaluate((selector) => document.querySelector(selector)?.getAttribute('aria-expanded') ?? null, nodeSel('doc-f6'));
+    const jumped = { fold: expanded, node: await count(page, nodeSel(fileNode(20))), popup: (await popup(page))?.title };
+    const jumpName = "a folded document's show in panel opens its fold, and its popup";
+    check('live', jumpName, isDeepStrictEqual(jumped, { fold: 'true', node: 1, popup: '● fold_20.txt' }), JSON.stringify(jumped));
+
+    await page.keyboard.press('Escape');
+    const kept = await page.evaluate(panelRows);
+    await page.click('#new-tab-btn');
+    await page.locator('.run-tab').first().click();
+    const back = await page.evaluate(panelRows);
+    const openFold = kept.some((row) => row.endsWith('(open)'));
+    check('live', 'a tab shown again has its folds as it left them, an opened one still open', openFold && isDeepStrictEqual(back, kept), `${kept.length} rows; back ${back.length}`);
+
+    await page.click('#tab-chat');
+    await send(page, 'Which memo is the registry?');
+    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const ask = (await page.evaluate(answersRead))[1];
+    const askLit = await litOnPanel(page);
+    const askExpected = trailOnPage(ask.trail, ask.ids, fileNodes(FOLD_RUN.docs), 'answer-1');
+    const askName = 'an ask over a folded run lands lit along its own trail, the folds as they were';
+    const folded = back.some((row) => row.includes(' documents · '));
+    const asked = landed && isDeepStrictEqual(askLit, askExpected) && isDeepStrictEqual(await page.evaluate(panelRows), back);
+    check('live', askName, folded && asked, `${askLit.edges.length} lines lit, ${askExpected.edges.length} on the trail; ${back.length} rows`);
+  });
+  const drawn = [];
+  for (const run of FAINT_RUNS) {
+    await withPage('live', { url, sample: false }, async (page) => {
+      await runFolded(page, foldMemos(run));
+      const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+      drawn.push({ done, rows: (await page.evaluate(panelRows)).length, faint: await count(page, '.edge.context') });
+    });
+  }
+  const [fewer, more] = FAINT_RUNS.map((run) => run.docs);
+  const faintName = `a run's faint lines follow its rows, not its documents: ${more} documents in the same rows as ${fewer} draw as many`;
+  const same = drawn.every(({ done }) => done) && drawn[0].rows === drawn[1].rows && drawn[0].faint > 0 && drawn[0].faint === drawn[1].faint;
+  check('live', faintName, same, JSON.stringify(drawn));
+}
+
+// Every node a stopped run marked so says so; a fold's ends its name.
+async function liveFoldsStopped(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await runFolded(page, foldMemos({ docs: FOLDED_FILES, relevant: [] }), `Which memo is the registry? ${STALLS}`);
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    await pressStop(page);
+    server.release();
+    const ended = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+    const rows = await page.evaluate(panelRows);
+    const stopped = await page.evaluate(nodesStopped);
+    const working = await count(page, '.node.working');
+    const name = 'a run stopped while reading leaves its unread documents in a fold saying stopped, each node it stopped marked so, none still working';
+    check('live', name, ended && rows.some((row) => row.endsWith(' · stopped')) && stopped && working === 0, `${rows.join(', ')}; ${working} working`);
+  });
+}
+
 // Its one relevant line comes after emoji, a code point each to r3con and two UTF-16 code units each here.
 const ROADWORKS_LINE = 'The 🚧 Westgate site logged 4 equipment incidents in Q3.';
 const roadworksMemo = () => memo('00_roadworks.txt', `🚧🚧 ${QUIET} Roadworks notice.\n${ROADWORKS_LINE}\nSite manager: Ana Ruiz.\n`);
@@ -6011,7 +6254,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk];
+  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
@@ -6021,7 +6264,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, folds, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
