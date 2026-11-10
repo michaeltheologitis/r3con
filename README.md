@@ -18,6 +18,12 @@ organizes the relevant information, then reasons over it to produce an answer.
 
 [Download R3Con](https://github.com/michaeltheologitis/r3con/releases/latest/download/R3Con.dmg), open it, and drag R3Con to Applications.
 
+Or install it with [Homebrew](https://brew.sh):
+
+```bash
+brew install michaeltheologitis/r3con/r3con
+```
+
 ### Any computer
 
 First install uv:
