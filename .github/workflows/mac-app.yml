@@ -44,7 +44,8 @@ env:
 jobs:
   app:
     runs-on: macos-15
-    timeout-minutes: ${{ inputs.sign && 60 || 30 }}
+    # A signed run can wait up to two hours for Apple's notarization.
+    timeout-minutes: ${{ inputs.sign && 150 || 30 }}
     # Only a run with `sign` takes the environment, with its approval and its secrets:
     # an empty name takes none.
     environment: ${{ inputs.sign && 'macos-signing' || '' }}
@@ -132,18 +133,31 @@ jobs:
           printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$key"
           credentials=(--key "$key" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID")
           dmg=$(echo dist/*.dmg)
-          result="$RUNNER_TEMP/notarization.json"
-          xcrun notarytool submit "$dmg" "${credentials[@]}" --wait --timeout 40m --output-format json > "$result" || true
+          result="$RUNNER_TEMP/notarization.txt"
+          # notarytool's JSON can come on either stream: after a timeout, on stderr.
+          xcrun notarytool submit "$dmg" "${credentials[@]}" --wait --timeout 2h --output-format json > "$result" 2>&1 || true
           cat "$result"
-          id=$(jq -r .id "$result")
-          status=$(jq -r .status "$result")
+          field() { jq -rR "fromjson? | objects | .$1 // empty" "$result" | tail -n 1; }
+          id=$(field id)
+          status=$(field status)
           echo "id=$id" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          if [ "$status" != Accepted ]; then
-            echo "::error::Notarization $id: $status"
-            xcrun notarytool log "$id" "${credentials[@]}"
-            exit 1
-          fi
+          case "$status" in
+            Accepted) ;;
+            Invalid | Rejected)
+              echo "::error::Apple marked submission $id $status."
+              xcrun notarytool log "$id" "${credentials[@]}"
+              exit 1
+              ;;
+            *)
+              if [ -n "$id" ]; then
+                echo "::error::Submission $id is still processing at Apple: $(field message)"
+              else
+                echo "::error::notarytool returned no submission."
+              fi
+              exit 1
+              ;;
+          esac
           # A ticket can take a moment to be served after its acceptance.
           for attempt in 1 2 3; do
             xcrun stapler staple "$dmg" && break
