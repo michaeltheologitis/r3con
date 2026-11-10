@@ -94,10 +94,11 @@ bundle = "io.github.michaeltheologitis"
 
 [tool.briefcase.app.r3con]
 formal_name = "r3con"
-# No sources: the app's code is this project, installed as a requirement, so that its
-# metadata, r3con.__version__'s, comes too. Briefcase installs with --only-binary, which
-# a local directory is exempt from.
-sources = []
+# Briefcase needs the app's package among its sources. The project is installed as a
+# requirement too, for its app extra's packages and for its metadata, which
+# r3con.__version__ reads. Briefcase installs with --only-binary, which a local
+# directory is exempt from.
+sources = ["src/r3con"]
 requires = [".[app]"]
 
 [tool.briefcase.app.r3con.macOS]
