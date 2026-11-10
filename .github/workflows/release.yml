@@ -29,6 +29,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -60,11 +61,20 @@ jobs:
               echo "::error::publishing needs main; this run is on $GITHUB_REF"
               exit 1
             fi
+            if [ "$(git log -1 --format=%H -S"version = \"$version\"" -- pyproject.toml)" != "$GITHUB_SHA" ]; then
+              echo "::error::main's head is not the commit that set $version; dispatch right after the release commit merges."
+              exit 1
+            fi
             if git show-ref --verify --quiet "refs/tags/v$version"; then
               echo "::error::tag v$version already exists; bump the version first."
               exit 1
             fi
           fi
+          release=false
+          if [ "$GITHUB_EVENT_NAME" = push ] || [ "$PUBLISH" = true ]; then
+            release=true
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
@@ -73,7 +83,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' || (inputs.publish && github.ref == 'refs/heads/main')
+    if: needs.build.outputs.release == 'true'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
