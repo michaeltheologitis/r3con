@@ -2236,7 +2236,7 @@ wheels = [
 
 [[package]]
 name = "r3context"
-version = "0.6.99"
+version = "0.6.10"
 source = { editable = "." }
 dependencies = [
     { name = "jinja2" },
