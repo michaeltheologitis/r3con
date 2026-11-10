@@ -1,7 +1,9 @@
 """The Mac app's window (r3con.app.window), with Toga faked at the screen."""
 
+import runpy
 import threading
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx2
@@ -98,6 +100,21 @@ def test_quitting_hides_the_window_then_stops_the_server(opened: list[FakeApp]):
     assert app.quits
     assert all(shown.hidden for shown in app.windows)
     assert refuses(app.url)
+
+
+def test_python_m_r3con_opens_the_window_in_the_mac_app(
+    opened: list[FakeApp], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # The distribution Briefcase writes into the Mac app, beside r3con's code.
+    dist_info = tmp_path / "app" / "r3con-0.6.10.dist-info"
+    dist_info.mkdir(parents=True)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: r3con\nVersion: 0.6.10\n"
+    )
+    monkeypatch.syspath_prepend(tmp_path / "app")
+    runpy.run_module("r3con", run_name="__main__")
+    (app,) = opened
+    assert app.page.status_code == 200
 
 
 def test_the_server_stops_when_toga_cannot_start(monkeypatch: pytest.MonkeyPatch):

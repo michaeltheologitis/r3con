@@ -85,15 +85,16 @@ module-name = "r3con"
 module-root = "src"
 
 # The Mac app, which .github/workflows/mac-app.yml builds: Briefcase bundles Python, this
-# project with its app extra, and Toga, and starts the app as `python -m r3con`. Its
-# version, description, license and author are [project]'s. Its bundle identifier,
-# `bundle` and the app's name joined, must never change; formal_name, the name it
-# shows, can.
+# project with its app extra, and Toga, and starts the app as `python -m r3con`, which
+# opens the window there. Its version, description, license and author are [project]'s.
+# Its bundle identifier, `bundle` and the app's name joined
+# (io.github.michaeltheologitis.r3con), must never change; formal_name, the name it
+# shows in Finder, the Dock, its menu and its window's title, can.
 [tool.briefcase]
 bundle = "io.github.michaeltheologitis"
 
 [tool.briefcase.app.r3con]
-formal_name = "r3con"
+formal_name = "R3Con"
 # Briefcase needs the app's package among its sources. The project is installed as a
 # requirement too, for its app extra's packages and for its metadata, which
 # r3con.__version__ reads. Briefcase installs with --only-binary, which a local

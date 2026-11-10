@@ -12,7 +12,7 @@ import platformdirs
 import pytest
 
 from r3con import settings
-from r3con.cli import main
+from r3con.cli import build_parser, main
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.r3con import read_documents
 from tests.fakes import a_parse_citation_short, in_json
@@ -500,6 +500,18 @@ def test_the_app_on_a_busy_port_says_so_in_one_line_and_exits_2(capsys):
     assert err.startswith(f"r3con: can't listen on port {port}: ")
     assert "Address already in use" in err
     assert err.count("\n") == 1
+
+
+def test_python_m_r3con_is_the_command_line(monkeypatch):
+    # The same width for both, which argparse wraps the help to.
+    monkeypatch.setenv("COLUMNS", "100")
+    shown = subprocess.run(
+        [sys.executable, "-m", "r3con", "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert shown.stdout == build_parser().format_help()
 
 
 @pytest.mark.parametrize(
