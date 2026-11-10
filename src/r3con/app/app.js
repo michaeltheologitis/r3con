@@ -4994,7 +4994,7 @@
   // ---------- theme ----------
 
   function currentTheme() {
-    return root.dataset.theme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    return root.dataset.theme;
   }
 
   function updateThemeLabel() {
@@ -5719,7 +5719,6 @@
     for (const button of removeAllButtons) button.addEventListener('click', removeAllOrUndo);
     $('chat-pane').addEventListener('click', onChatClick);
     $('theme-btn').addEventListener('click', toggleTheme);
-    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', updateThemeLabel);
 
     $('tab-chat').addEventListener('click', () => showTab('chat'));
     $('tab-files').addEventListener('click', () => {
