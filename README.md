@@ -1,5 +1,5 @@
 
-# r3con
+# R3Con
 
 [![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
 ![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
@@ -7,10 +7,10 @@
 
 **Context representation for large-scale reasoning with smaller, cheaper models.**
 
-Ask a question whose evidence is spread across many documents. `r3con` finds and
+Ask a question whose evidence is spread across many documents. R3Con finds and
 organizes the relevant information, then reasons over it to produce an answer.
 
-![r3con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; the sentences it quotes unfold under the answer, a file's name there opens its memo with the same sentences marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
+![R3Con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; the sentences it quotes unfold under the answer, a file's name there opens its memo with the same sentences marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
 ## App
 
@@ -20,7 +20,7 @@ First install uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Run r3con in your browser:
+Run R3Con in your browser:
 
 ```bash
 uv tool install --python 3.14 "r3context[app]"
@@ -91,7 +91,7 @@ r3con run "Who approved the Q3 overspend?" q1.md q2.md q3.md
 ```
 
 Keep glob patterns in quotes, as shown above. When reading a folder or using
-a glob pattern, r3con skips links to files outside the selected folder.
+a glob pattern, R3Con skips links to files outside the selected folder.
 Individual files can be specified directly.
 
 ### Python
@@ -175,7 +175,7 @@ shows the rest of the provenance.
 The examples use five short memos, with the information spread across them
 so no single document contains the complete answer:
 
-- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — a complete example of using r3con.
+- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — a complete example of using R3Con.
 - [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb) — checking the original sentences, snippets, and records behind an answer.
 - [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — configuring models, relevance rounds, reasoning, generation settings, custom connections, and saved files.
 - [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — using an AI model hosted on your own vLLM server.

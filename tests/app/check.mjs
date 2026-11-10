@@ -119,7 +119,7 @@ const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 // The page's GRID.rowGap: answer nodes stack this far apart.
 const ROW_GAP = 112;
-const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
+const SIMULATED_LABEL = 'simulated — not connected to R3Con yet';
 // A simulated run's note, from the page's SUMMARY_CHARS.
 const SIMULATED_NOTE = "simulated · each relevance snippet is the file's first 140 characters, and the citations are made up";
 // A relevance round's line for a document with a snippet.
@@ -307,8 +307,8 @@ const WRITE_DOCUMENTS =
   'for name, spec in json.loads(sys.argv[2]).items(): WRITERS[Path(name).suffix](Path(sys.argv[1], name), **spec)';
 // An old Office file is an OLE2 compound file, whose header holds NUL bytes.
 const OLE2_START = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00];
-const NOT_TEXT = 'r3con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
-const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
+const NOT_TEXT = 'R3Con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
 const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
 const UNREADABLE_ZIP = "Couldn't unzip it: it's corrupt, or not a zip.";
 const NO_DOCUMENTS = 'No text, PDF or Word (.docx) files in it';
@@ -320,7 +320,7 @@ const EXTRACTIONS_AT_ONCE = 4;
 // Long enough for every request the page sends at once to reach a route that holds them.
 const ROUTED_MS = 300;
 const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
-const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
+const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
 const NEW_TAB = 'new tab';
 const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
 const ADD_FILES = 'no files yet · add them in the files tab';
@@ -1249,7 +1249,7 @@ async function load() {
 async function beforeRun() {
   await withPage('before a run', { sample: false }, async (page) => {
     const names = { title: await page.title(), brand: await page.textContent('.brand') };
-    check('before a run', "the browser tab is titled with the page's brand, ❀ r3con", names.title === '❀ r3con' && names.title === names.brand, JSON.stringify(names));
+    check('before a run', "the browser tab is titled with the page's brand, ❀ R3Con", names.title === '❀ R3Con' && names.title === names.brand, JSON.stringify(names));
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
@@ -5425,7 +5425,7 @@ async function liveLog(url) {
     await page.keyboard.press('Enter');
     const opened = await page.evaluate(logOf);
     const [sent, ...steps] = stepsOf(opened);
-    const sentFirst = sent?.[0].startsWith(`sent ${SAMPLE_DOCS} documents to r3con · `) && sent[1] === 0;
+    const sentFirst = sent?.[0].startsWith(`sent ${SAMPLE_DOCS} documents to R3Con · `) && sent[1] === 0;
     const listed = opened.open && sentFirst && isDeepStrictEqual(steps, RUN_STEPS);
     check('live', "Enter on its chevron opens the log: what was sent, then each step in turn with its documents' lines under it", listed, JSON.stringify(stepsOf(opened)));
     const docs = recordedSample().docs;
@@ -5607,7 +5607,7 @@ async function livePdf(url) {
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
     const bytes = Buffer.byteLength(PDF_TEXT + PADDED_TEXT);
-    const counted = await becomes(page, lastTurnSays, [`sent 2 documents to r3con · ${bytes} B`]);
+    const counted = await becomes(page, lastTurnSays, [`sent 2 documents to R3Con · ${bytes} B`]);
     const runName = "a run is sent the PDFs' extracted texts, and says it sent their size, not the PDFs'";
     const said = (await page.evaluate(lastTurnLines)).find((text) => text.startsWith('sent '));
     check('live', runName, isDeepStrictEqual(sent, [PDF_TEXT, PADDED_TEXT]) && counted, `${JSON.stringify(sent)}; ${said}`);

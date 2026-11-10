@@ -1514,9 +1514,9 @@
   const SIMULATED_PARSE_STRIDE = 3;
   // A made-up answer's trail goes one hop, under none of r3con's rules.
   const ONE_HOP = 'one hop';
-  const SIMULATED_LABEL = 'simulated — not connected to r3con yet';
+  const SIMULATED_LABEL = 'simulated — not connected to R3Con yet';
   const SIMULATED_SCHEMA = [
-    '# simulated — not connected to r3con yet',
+    '# simulated — not connected to R3Con yet',
     'from pydantic import BaseModel',
     '',
     'class Excerpt(BaseModel):',
@@ -1568,8 +1568,8 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
-  const NOT_TEXT = 'r3con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
-  const OLD_WORD = "r3con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
+  const NOT_TEXT = 'R3Con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+  const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
@@ -1588,7 +1588,7 @@
   // A refusal names this many files, then counts the rest.
   const NAMED_AT_MOST = 5;
   const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
-  const NO_TEXT = "No text: it's empty or only images, or r3con can't read it.";
+  const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
   const ADD_FILES = `${NO_FILES} · add them in the files tab`;
@@ -2208,7 +2208,7 @@
     ];
     const trail = { rule: ONE_HOP, nodes: [TRAIL_ANSWER, ...cited, ...summary_ids.map(documentNode)], edges };
     return {
-      text: `r3con's answer to “${question}” would appear here. The documents it cites are made up.`,
+      text: `R3Con's answer to “${question}” would appear here. The documents it cites are made up.`,
       provenance: provenanceOf(run, { summary_ids, parse_ids, trail }),
     };
   }
@@ -4294,7 +4294,7 @@
       case 'run_started':
         Object.assign(run, withIds(event.document_ids));
         if (event.rounds !== run.rounds.length) makeRoomForRounds(tab, event.rounds);
-        narr.log('main', `sent ${plural(run.docs.length, 'document')} to r3con · ${fmtBytes(textBytes(run.docs))}`);
+        narr.log('main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         if (!hasNodes(tab, roundKind(event.round))) beginStage(tab, narr, roundKind(event.round));
