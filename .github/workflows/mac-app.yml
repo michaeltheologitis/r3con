@@ -1,8 +1,10 @@
 name: Mac app
 
-# The Mac app (pyproject.toml's [tool.briefcase]), unsigned for now: build it and its
-# .dmg, check both the bundle's own Python and the app's window on the runner, and keep
-# the .dmg as an artifact.
+# The Mac app (pyproject.toml's [tool.briefcase]): build it and its .dmg, install the app
+# from the .dmg, check its signature, the bundle's own Python and the app's window on the
+# runner, and keep the .dmg as an artifact. The app is signed ad hoc, except in a run
+# with `sign`: that one waits for approval in the macos-signing environment, signs with
+# its Developer ID, has Apple notarize the .dmg, and checks that Gatekeeper accepts both.
 on:
   pull_request:
     paths:
@@ -10,20 +12,31 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "tests/app/bundle_check.py"
+      - ".github/briefcase/**"
       - ".github/workflows/mac-app.yml"
   workflow_dispatch:
+    inputs:
+      sign:
+        description: Sign and notarize (waits for approval)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      sign:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Not github.workflow, which in a workflow_call is the caller's, and so its group.
+  group: mac-app-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Otherwise importing litellm fetches its price map from GitHub.
   LITELLM_LOCAL_MODEL_COST_MAP: "True"
-  APP: build/r3con/macos/app/R3Con.app
   # Where pyproject.toml's requirement_installer_args has pip read its constraints.
   CONSTRAINTS: build/constraints.txt
   BUILD_CONSTRAINTS: build/build-constraints.txt
@@ -31,10 +44,23 @@ env:
 jobs:
   app:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: ${{ inputs.sign && 60 || 30 }}
+    # Only a run with `sign` takes the environment, with its approval and its secrets:
+    # an empty name takes none.
+    environment: ${{ inputs.sign && 'macos-signing' || '' }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          version: "0.13.7"
+          # The release's uv-aarch64-apple-darwin.tar.gz.sha256.
+          checksum: 81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731
+          enable-cache: false
       # The bundle's packages at uv.lock's versions, the ones the Linux CI tests, and
       # the backend that builds this project at its locked version and hashes.
       # --locked fails here if uv.lock is out of date with pyproject.toml.
@@ -42,19 +68,130 @@ jobs:
         run: |
           uv export --locked --no-hashes --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
           uv export --locked --only-group build-backend --no-emit-project --output-file "$BUILD_CONSTRAINTS"
-      # Briefcase bundles the Python it runs on: 3.14, the newest with wheels for all
-      # of litellm's compiled dependencies.
-      - name: Build the app and its .dmg, signed ad hoc
-        run: uvx --python 3.14 --from briefcase==0.4.7 briefcase package macOS app --adhoc-sign --no-input
+      - name: Install Briefcase from its own uv.lock, by hash
+        run: |
+          uv export --project .github/briefcase --locked --no-emit-project --output-file "$RUNNER_TEMP/briefcase.txt"
+          uv venv --python 3.14 "$RUNNER_TEMP/briefcase"
+          uv pip install --python "$RUNNER_TEMP/briefcase" --require-hashes --only-binary :all: -r "$RUNNER_TEMP/briefcase.txt"
+      - name: Build the app
+        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
+      # After the build, so that the key is not there while pip and the build backend
+      # run. codesign finds an identity only in a keychain on the search list, and uses
+      # its key without a prompt only for the tools that the key's partition list names.
+      - name: Import the Developer ID certificate into a keychain of its own
+        if: inputs.sign
+        id: identity
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          password=$(openssl rand -base64 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode -o "$certificate"
+          security import "$certificate" -k "$keychain" -f pkcs12 -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046 # One argument for each keychain already on the list.
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | grep -F '"Developer ID Application: ' | grep -F "($TEAM_ID)\"" || true)
+          if [ -z "$TEAM_ID" ] || [ "$(printf '%s' "$identity" | grep -c .)" -ne 1 ]; then
+            echo "::error::No single valid Developer ID Application identity for team '$TEAM_ID' in the certificate."
+            security find-identity -p codesigning "$keychain"
+            exit 1
+          fi
+          echo "sha1=$(echo "$identity" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "name=$(echo "$identity" | sed -E 's/^[^"]*"(.*)"$/\1/')" >> "$GITHUB_OUTPUT"
+      # With an identity, Briefcase signs every Mach-O file inside out, then the app and
+      # the .dmg, with the hardened runtime and its default entitlements.
+      - name: Package the app and its .dmg
+        env:
+          IDENTITY: ${{ steps.identity.outputs.sha1 }}
+        run: |
+          if [ -n "$IDENTITY" ]; then
+            "$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --identity "$IDENTITY" --no-notarize --no-input
+          else
+            "$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input
+          fi
+      # Briefcase notarizes only with a notarytool keychain profile; this step gives
+      # notarytool the API key instead. Notarizing the .dmg notarizes the app inside it,
+      # and macOS takes the ticket stapled to the .dmg when the .dmg is opened.
+      - name: Notarize the .dmg and staple its ticket
+        if: inputs.sign
+        id: notarize
+        env:
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$key"
+          credentials=(--key "$key" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID")
+          dmg=$(echo dist/*.dmg)
+          result="$RUNNER_TEMP/notarization.json"
+          xcrun notarytool submit "$dmg" "${credentials[@]}" --wait --timeout 40m --output-format json > "$result" || true
+          cat "$result"
+          id=$(jq -r .id "$result")
+          status=$(jq -r .status "$result")
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          if [ "$status" != Accepted ]; then
+            echo "::error::Notarization $id: $status"
+            xcrun notarytool log "$id" "${credentials[@]}"
+            exit 1
+          fi
+          # A ticket can take a moment to be served after its acceptance.
+          for attempt in 1 2 3; do
+            xcrun stapler staple "$dmg" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 30
+          done
+      # Before the checks run the app's own code.
+      - name: Remove the signing keychain and the API key
+        if: always() && inputs.sign
+        run: |
+          rm -f "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/notary-key.p8"
+          if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
+          fi
+      # As a user would: out of the .dmg, into a folder they can write to.
+      - name: Install the app from its .dmg
+        run: |
+          mkdir -p "$RUNNER_TEMP/dmg" "$HOME/Applications"
+          hdiutil attach dist/*.dmg -readonly -nobrowse -mountpoint "$RUNNER_TEMP/dmg"
+          ditto "$RUNNER_TEMP/dmg/R3Con.app" "$HOME/Applications/R3Con.app"
+          hdiutil detach "$RUNNER_TEMP/dmg"
+          echo "APP=$HOME/Applications/R3Con.app" >> "$GITHUB_ENV"
+      - name: Check the app's signature
+        run: |
+          codesign --display --verbose=2 "$APP" 2>&1 | grep -E '^(Authority|Signature|Timestamp|TeamIdentifier)=|flags=' | tee "$RUNNER_TEMP/codesign.txt"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a "$RUNNER_TEMP/codesign.txt"
+      - name: Check that Gatekeeper accepts the app and the .dmg as notarized
+        if: inputs.sign
+        run: |
+          dmg=$(echo dist/*.dmg)
+          checks="$RUNNER_TEMP/spctl-and-stapler.txt"
+          spctl --assess --type execute --verbose=4 "$APP" 2>&1 | tee "$checks"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" 2>&1 | tee -a "$checks"
+          xcrun stapler validate "$dmg" 2>&1 | tee -a "$checks"
+          if [ "$(grep -cx 'source=Notarized Developer ID' "$checks")" -ne 2 ]; then
+            echo "::error::Gatekeeper did not accept both the app and the .dmg as notarized."
+            exit 1
+          fi
+      # -B: bytecode written into the bundle would break its signature.
       - name: Check the bundle with its own Python
-        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
+        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
       - name: Open the app's window
         run: |
           "$APP/Contents/MacOS/R3Con" &
           pid=$!
           port=
           for _ in $(seq 60); do
-            port=$(lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -Fn | sed -n 's/^n.*://p')
+            port=$(lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -Fn | sed -n 's/^n.*://p' || true)
             [ -n "$port" ] && break
             sleep 1
           done
@@ -78,10 +215,18 @@ jobs:
           echo "$keys"
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           kill "$pid"
+      # An app that changes its own files breaks its signature for every user who runs
+      # it from a folder they can write to.
+      - name: Check that running the app left its signature intact
+        run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
       - name: The app's log
         if: failure()
         run: log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
-      - name: The app's identity and sizes
+      - name: The app's identity, signature and sizes
+        env:
+          SIGNED_BY: ${{ steps.identity.outputs.name }}
+          SUBMISSION: ${{ steps.notarize.outputs.id }}
+          NOTARIZATION: ${{ steps.notarize.outputs.status }}
         run: |
           plist="$APP/Contents/Info.plist"
           dmg=$(echo dist/*.dmg)
@@ -94,14 +239,25 @@ jobs:
             echo "| Architectures (pydantic_core) | $(lipo -archs "$compiled") |"
             echo "| \`$(basename "$APP")\` | $(du -sh "$APP" | cut -f1) |"
             echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"
+            if [ -n "$SIGNED_BY" ]; then
+              echo "| Signed by | $SIGNED_BY |"
+              echo "| Notarization | \`$SUBMISSION\`: $NOTARIZATION |"
+            fi
+            for check in codesign spctl-and-stapler codesign-after-a-run; do
+              if [ -f "$RUNNER_TEMP/$check.txt" ]; then
+                printf '\n%s:\n\n```\n' "$check"
+                cat "$RUNNER_TEMP/$check.txt"
+                echo '```'
+              fi
+            done
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: r3con-mac-app
+          name: ${{ inputs.sign && 'r3con-mac-app-signed' || 'r3con-mac-app' }}
           path: dist/*.dmg
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: window-screenshot
