@@ -33,9 +33,11 @@ concurrency:
 env:
   # Otherwise importing litellm fetches its price map from GitHub.
   LITELLM_LOCAL_MODEL_COST_MAP: "True"
-  # Where pyproject.toml's requirement_installer_args has pip read its constraints.
+  # uv.lock's pins and hashes, for the bundle and for the backend that builds it.
   CONSTRAINTS: build/constraints.txt
   BUILD_CONSTRAINTS: build/build-constraints.txt
+  # Where pyproject.toml's requirement_installer_args has pip find every wheel.
+  WHEELS: build/wheels
 
 jobs:
   app:
@@ -57,18 +59,22 @@ jobs:
           # The release's uv-aarch64-apple-darwin.tar.gz.sha256.
           checksum: 81b811b57e4624df7ed3aac148e0359100d9962f3d9dce00aec533dc2e086731
           enable-cache: false
-      # The bundle's packages at uv.lock's versions, the ones the Linux CI tests, and
-      # the backend that builds this project at its locked version and hashes.
+      # The bundle's packages and the backend that builds this project, at uv.lock's
+      # versions (the ones the Linux CI tests) and hashes.
       # --locked fails here if uv.lock is out of date with pyproject.toml.
       - name: Pin the bundle and its build to uv.lock
         run: |
-          uv export --locked --no-hashes --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
+          uv export --locked --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
           uv export --locked --only-group build-backend --no-emit-project --output-file "$BUILD_CONSTRAINTS"
       - name: Install Briefcase from its own uv.lock, by hash
         run: |
           uv export --project .github/briefcase --locked --no-emit-project --output-file "$RUNNER_TEMP/briefcase.txt"
           uv venv --python 3.14 "$RUNNER_TEMP/briefcase"
           uv pip install --python "$RUNNER_TEMP/briefcase" --require-hashes --only-binary :all: -r "$RUNNER_TEMP/briefcase.txt"
+      # With the Python and platform tag of Briefcase's pip (arm64, and its support
+      # package's minimum macOS, 11.0), so that pip picks the wheels Briefcase's would.
+      - name: Download the bundle's wheels, by uv.lock's hashes
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -m pip download --require-hashes --only-binary :all: --no-deps --platform macosx_11_0_arm64 --dest "$WHEELS" -r "$CONSTRAINTS" -r "$BUILD_CONSTRAINTS"'
       - name: Build the app
         run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
       # After the build, so that the key is absent while pip and the build backend run.
