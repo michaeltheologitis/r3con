@@ -58,10 +58,11 @@ def load(path: Path) -> Any:
 
 
 def provenance(folder: Path, saved: dict[str, Any]) -> dict[str, Any]:
-    """The provenance of the answer saved in ``folder``, as r3con.trace gives it. An
-    older r3con saved only its citations; today's saves its quotes and trail too."""
+    """The provenance of the answer saved in ``folder``, as r3con.trace gives it. Before
+    0.6.5, r3con saved only its citations; it saves its quotes since, and its trail
+    since 0.6.9."""
     traced = dict(r3con.trace(folder))
-    assert {key: traced[key] for key in saved} == saved, (
+    assert saved.items() <= traced.items(), (
         f"{folder.name}: trace gives the saved provenance"
     )
     return traced

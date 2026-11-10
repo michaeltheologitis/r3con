@@ -44,6 +44,7 @@ from tests.fakes import (
     in_json,
     is_later_round,
     quoting_a_line_a_round,
+    quoting_its_first_line_and_citing_all_shown,
     snippets_without_quotes,
     without_trail,
 )
@@ -1156,24 +1157,6 @@ def test_a_document_read_in_parts_keeps_its_part_headings_in_an_ask(
     system = asked["messages"][0]["content"]
     assert f"### Document ID: {registry}.1\n" in system
     assert f"### Document ID: {registry}.2\n" in system
-
-
-def quoting_its_first_line_and_citing_all_shown(shown_ids):
-    """A relevance reply quoting the first line of the text it is sent, and, in a
-    later round, citing every summary shown."""
-
-    def reply(request):
-        first = request["messages"][1]["content"].splitlines()[0]
-        if not is_later_round(request):
-            return {"summary": f"Notes on {first}.", "quotes": [first]}
-        cites = shown_ids(request)
-        return {
-            "summary": f"Notes on {first}.",
-            "quotes": [first],
-            "provenance_ids": cites,
-        }
-
-    return reply
 
 
 @pytest.mark.parametrize("rounds", [1, 3])

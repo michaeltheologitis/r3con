@@ -11,23 +11,13 @@ from tests.app.build_sample import (
     build_sample,
     built_blocks,
 )
-from tests.fakes import Content, FakeLLM, Request, citing, in_json, is_later_round
-
-
-def quoting_the_first_line(
-    shown_ids: Callable[[Request], list[str]],
-) -> Callable[[Request], Content]:
-    """A relevance reply quoting the document's first line, and in a later round citing
-    the first id shown."""
-
-    def reply(request: Request) -> Content:
-        first = request["messages"][1]["content"].splitlines()[0]
-        content = {"summary": f"Notes on {first}.", "quotes": [first]}
-        if is_later_round(request):
-            content["provenance_ids"] = shown_ids(request)[:1]
-        return content
-
-    return reply
+from tests.fakes import (
+    FakeLLM,
+    Request,
+    citing,
+    in_json,
+    quoting_its_first_line_and_citing_all_shown,
+)
 
 
 @pytest.fixture
@@ -37,7 +27,7 @@ def todays_run(
     """A run over the memos as this r3con saves it, its answer citing the first summary
     and the last parse; ``answering_llm`` answering so from then on."""
     answering_llm.answers(
-        relevance=quoting_the_first_line(shown_ids),
+        relevance=quoting_its_first_line_and_citing_all_shown(shown_ids),
         reasoning=citing("Halloran memo", slice(1), slice(-1, None)),
     )
     documents = read_documents(MEMOS)
@@ -61,12 +51,11 @@ def test_a_run_and_ask_this_r3con_saves_build_with_their_saved_provenance(
     assert ask_entry(asked.run_dir)["provenance"] == asked.provenance
 
 
-def test_a_saved_provenance_trace_does_not_give_fails_the_build(
-    todays_run: Answer,
-) -> None:
+def test_a_saved_trail_trace_does_not_give_fails_the_build(todays_run: Answer) -> None:
     assert todays_run.run_dir is not None
     in_json(
-        "reasoning/result.json", lambda result: result["provenance"]["quotes"].pop()
+        "reasoning/result.json",
+        lambda result: result["provenance"]["trail"].update(rule="another rule"),
     )(todays_run.run_dir)
     with pytest.raises(AssertionError, match="trace gives the saved provenance"):
         build_sample(todays_run.run_dir, MEMOS)
