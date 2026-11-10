@@ -101,6 +101,8 @@ bundle = "io.github.michaeltheologitis"
 
 [tool.briefcase.app.r3con]
 formal_name = "R3Con"
+# Briefcase adds the platform's extension: icons/r3con.icns on macOS.
+icon = "icons/r3con"
 # Briefcase needs the app's package among its sources. The project is installed as a
 # requirement too, for its app extra's packages and for its metadata, which
 # r3con.__version__ reads. Briefcase installs with --only-binary, which a local
