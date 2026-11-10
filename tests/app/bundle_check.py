@@ -1,22 +1,30 @@
 """Check a built Mac app with its own Python, for .github/workflows/mac-app.yml:
 
     APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3 -I \\
-        tests/app/bundle_check.py APP
+        tests/app/bundle_check.py APP CONSTRAINTS BUILD_CONSTRAINTS
 
-It puts the app's code and packages on the path as the app's launcher does, then
-imports, each from inside APP, r3con and the packages a bundle most likely lacks, and
-every compiled module under its packages, so that one built for another platform fails
-here. Then it serves the app as the window does: the page, and the API with this
-launch's token, must answer, and once the server has stopped, nothing must.
+It puts the app's code and packages on the path as the app's launcher does, and checks
+that the packages there but the project are exactly the ones CONSTRAINTS, the build's
+`uv export` of uv.lock, pins for this Python, at its versions, and that the project was
+built by the backend BUILD_CONSTRAINTS pins. Then it imports, each from inside APP,
+r3con and the packages a bundle most likely lacks, and every compiled module under its
+packages, so that one built for another platform fails here. Then it serves the app as
+the window does: the page, and the API with this launch's token, must answer, and once
+the server has stopped, nothing must.
 """
 
-import importlib
+import importlib.metadata
 import site
 import sys
 import tempfile
+from email.parser import HeaderParser
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+if TYPE_CHECKING:
+    from packaging.specifiers import SpecifierSet
 
 BUNDLED = (
     "r3con",
@@ -30,6 +38,9 @@ BUNDLED = (
     "toga_cocoa.widgets.webview",
 )
 TIMEOUT_SECONDS = 10
+# Built from the checkout, so not among uv.lock's exported pins: its backend is.
+PROJECT = "r3context"
+BACKEND = "uv-build"
 
 
 def imported(name: str, resources: Path) -> Path:
@@ -48,6 +59,64 @@ def compiled(packages: Path) -> list[str]:
     )
 
 
+def locked(constraints: Path) -> "dict[str, SpecifierSet]":
+    """The version ``constraints``, a ``uv export``, pins for each package this Python
+    takes, by normalized name."""
+    # The bundle's own packaging, on the path once main has added app_packages.
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    text = constraints.read_text(encoding="utf-8").replace("\\\n", "")
+    lines = [line.split(" --hash=")[0] for line in text.splitlines()]
+    requirements = [Requirement(line) for line in lines if line and line[0] not in " #"]
+    return {
+        canonicalize_name(requirement.name): requirement.specifier
+        for requirement in requirements
+        if requirement.marker is None or requirement.marker.evaluate()
+    }
+
+
+def pinned(packages: Path, constraints: Path) -> int:
+    """How many packages ``packages`` holds besides the project, which must be the ones
+    ``constraints`` pins for this Python, each at its pinned version."""
+    from packaging.utils import canonicalize_name
+
+    pins = locked(constraints)
+    found = {
+        canonicalize_name(distribution.name): distribution.version
+        for distribution in importlib.metadata.distributions(path=[str(packages)])
+    }
+    found.pop(canonicalize_name(PROJECT), None)
+    problems = [
+        f"{name}: uv.lock pins {pins[name]}, but it is missing"
+        for name in sorted(pins.keys() - found.keys())
+    ]
+    for name, version in sorted(found.items()):
+        pin = pins.get(name)
+        if pin is None or version not in pin:
+            problems.append(f"{name} {version}: uv.lock pins {pin or 'no version'}")
+    if problems:
+        sys.exit("\n".join(["Not as uv.lock pins it:", *problems]))
+    return len(found)
+
+
+def built_by(packages: Path, build_constraints: Path) -> str:
+    """The backend that built the project's wheel in ``packages``, which must be at the
+    version ``build_constraints`` pins."""
+    found = importlib.metadata.distributions(name=PROJECT, path=[str(packages)])
+    distribution = next(iter(found), None)
+    if distribution is None:
+        sys.exit(f"{PROJECT} is missing")
+    wheel = distribution.read_text("WHEEL") or ""
+    generator = HeaderParser().parsestr(wheel)["Generator"]
+    pin = locked(build_constraints)[BACKEND]
+    if generator.split()[-1] not in pin:
+        sys.exit(
+            f"{PROJECT} was built by {generator}, but uv.lock pins {BACKEND} {pin}"
+        )
+    return generator
+
+
 def answers(url: str) -> bool:
     try:
         urlopen(url, timeout=TIMEOUT_SECONDS).close()
@@ -56,11 +125,15 @@ def answers(url: str) -> bool:
     return True
 
 
-def main(app: Path) -> None:
+def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     resources = app / "Contents" / "Resources"
     packages = resources / "app_packages"
     sys.path.append(str(resources / "app"))
     site.addsitedir(str(packages))
+    count = pinned(packages, constraints)
+    print(f"{count} packages under app_packages but {PROJECT}: each as uv.lock pins it")
+    generator = built_by(packages, build_constraints)
+    print(f"{PROJECT}: built by {generator}, as uv.lock pins {BACKEND}")
     for name in BUNDLED:
         print(f"{name}: {imported(name, resources).relative_to(app)}")
     modules = compiled(packages)
@@ -92,4 +165,4 @@ def main(app: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]).resolve())
+    main(Path(sys.argv[1]).resolve(), Path(sys.argv[2]), Path(sys.argv[3]))
