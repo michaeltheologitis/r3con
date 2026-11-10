@@ -42,7 +42,7 @@ dependencies = [
 [project.optional-dependencies]
 # The app's page and its local server, `r3con app` (r3con.app).
 app = [
-    "platformdirs>=4.0",
+    "platformdirs>=4.1",
     "starlette>=1.10",
     "uvicorn>=0.54",
 ]
@@ -72,6 +72,9 @@ dev = [
 # Toga's Mac backend, which the Mac app bundles and nothing installs here: it is in the
 # group only so that uv.lock pins it, and its dependencies, for the app's build.
 mac-app = ["toga-cocoa>=0.5.7,<0.6; sys_platform == 'darwin'"]
+# [build-system]'s backend, locked so that the Mac app's build of this project uses
+# uv.lock's version and files. If the two ranges part, that build fails in pip.
+build-backend = ["uv_build>=0.9.17,<0.10.0"]
 
 [project.scripts]
 r3con = "r3con.cli:main"
@@ -104,9 +107,15 @@ formal_name = "R3Con"
 # directory is exempt from.
 sources = ["src/r3con"]
 requires = [".[app]"]
-# Every package at uv.lock's version, the one CI tests: mac-app.yml writes these
-# constraints with `uv export` before it builds, and pip fails without them.
-requirement_installer_args = ["--constraint", "./build/constraints.txt"]
+# Every package at uv.lock's version, the one CI tests, and the build backend at its
+# locked version and hashes: mac-app.yml writes these constraints with `uv export`
+# before it builds, and pip fails without them.
+requirement_installer_args = [
+    "--constraint",
+    "./build/constraints.txt",
+    "--build-constraint",
+    "./build/build-constraints.txt",
+]
 
 [tool.briefcase.app.r3con.macOS]
 # At the version the mac-app group locks.

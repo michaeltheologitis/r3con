@@ -26,6 +26,7 @@ env:
   APP: build/r3con/macos/app/R3Con.app
   # Where pyproject.toml's requirement_installer_args has pip read its constraints.
   CONSTRAINTS: build/constraints.txt
+  BUILD_CONSTRAINTS: build/build-constraints.txt
 
 jobs:
   app:
@@ -34,16 +35,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
-      # The bundle's packages at uv.lock's versions, the ones the Linux CI tests.
+      # The bundle's packages at uv.lock's versions, the ones the Linux CI tests, and
+      # the backend that builds this project at its locked version and hashes.
       # --locked fails here if uv.lock is out of date with pyproject.toml.
-      - name: Pin the bundle to uv.lock
-        run: uv export --locked --no-hashes --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
+      - name: Pin the bundle and its build to uv.lock
+        run: |
+          uv export --locked --no-hashes --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
+          uv export --locked --only-group build-backend --no-emit-project --output-file "$BUILD_CONSTRAINTS"
       # Briefcase bundles the Python it runs on: 3.14, the newest with wheels for all
       # of litellm's compiled dependencies.
       - name: Build the app and its .dmg, signed ad hoc
         run: uvx --python 3.14 --from briefcase==0.4.7 briefcase package macOS app --adhoc-sign --no-input
       - name: Check the bundle with its own Python
-        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I tests/app/bundle_check.py "$APP" "$CONSTRAINTS"'
+        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
       - name: Open the app's window
         run: |
           "$APP/Contents/MacOS/R3Con" &
