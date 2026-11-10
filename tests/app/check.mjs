@@ -1618,6 +1618,17 @@ async function arrange() {
     const detail = `${home.x},${home.y} → ${dx},${dy}, back in ${frames} frames`;
     check('arrange', 'arrange slides a dragged node back to where it was', moved && back && frames > 0, detail);
   });
+  await withPage('arrange', {}, async (page) => {
+    const paths = () => page.$$eval('#world .edge', (els) => Object.fromEntries(els.map((el) => [el.dataset.key, el.getAttribute('d')])));
+    const before = await paths();
+    await dragNode(page, 'r1-0', 0, ROW_GAP / 2);
+    const dragged = await paths();
+    await page.click('#arrange-btn');
+    const after = await paths();
+    const changed = Object.keys(before).filter((key) => after[key] !== before[key]);
+    const name = 'after a node is dragged off its row and the panel arranged, every line runs as it did before: a bridge hops the nodes between its ends again';
+    check('arrange', name, !isDeepStrictEqual(dragged, before) && changed.length === 0, `${changed.length} lines changed: ${changed.join(' ')}`);
+  });
 }
 
 // Records the view while `start` starts the run of tab `tab`. It passes if that run started, the view moved, and
@@ -4921,6 +4932,12 @@ async function liveFolds(url, server) {
     const rows = await page.evaluate(panelRows);
     const readName = 'once read, each document with a snippet has a row of its own, and each run of three or more of the others is one fold, nothing relevant';
     check('live', readName, done && isDeepStrictEqual(rows, FOLD_RUN_ROWS), rows.join(', '));
+    // The answers centre on the rows rather than sit in one, and the structure heads its column.
+    const order = await page.$$eval('#world .node:not(.answer, .schema)', (els) => els.map((el) => [el.dataset.id, parseFloat(el.style.top), parseFloat(el.style.left)]));
+    const inRows = [...order].sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(([id]) => id);
+    const misplaced = order.map(([id]) => id).filter((id, i) => id !== inRows[i]);
+    const orderName = "a folded run's nodes come in the page row by row, as the panel draws them, so that the keyboard follows the rows";
+    check('live', orderName, order.length > 0 && misplaced.length === 0, `${misplaced.length} out of place: ${misplaced.slice(0, 6).join(' ')}`);
 
     const [answer] = await page.evaluate(answersRead);
     const expected = trailOnPage(answer.trail, answer.ids, fileNodes(FOLD_RUN.docs));

@@ -2587,7 +2587,9 @@
       const fold = showFolded(tab, id);
       if (fold) return fold;
     }
-    return createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: isPerDocument(kind) ? tab.run.docs[d] : null });
+    const node = createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: isPerDocument(kind) ? tab.run.docs[d] : null });
+    if (tab.fold) placeInRows(tab, node);
+    return node;
   }
 
   /** @param {Tab} tab @param {LoadedFile} file @param {Point} [pos] */
@@ -2705,13 +2707,14 @@
       Object.assign(node, to);
       if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
     }
-    // Only the lines of nodes that move need drawing again.
+    // Each frame draws again only the lines of nodes that move; the last draws every line, as a line hops the nodes
+    // between its ends, and they may have moved.
     const moved = new Set(moves.map(({ node }) => node.id));
     const lines = [...tab.edges.values()].filter((e) => moved.has(e.from) || moved.has(e.to));
     const finish = () => {
       tab.arrangeFrame = 0;
       for (const { node } of moves) placeNode(node);
-      redrawEdges(tab, undefined, lines);
+      redrawEdges(tab);
       positionInspector();
       settled();
     };
@@ -3217,9 +3220,31 @@
     if (!row) return null;
     const [kind] = splitId(id);
     const at = foldId(kind, row);
-    const node = tab.nodes.get(at) ?? createFoldNode(tab, at, kind, row, /** @type {Point} */ (tab.layout.get(at)), true);
+    let node = tab.nodes.get(at);
+    if (!node) {
+      node = createFoldNode(tab, at, kind, row, /** @type {Point} */ (tab.layout.get(at)), true);
+      placeInRows(tab, node);
+    }
     paintNode(tab, node);
     return node;
+  }
+
+  // A folded panel's page holds its nodes row by row, as the panel lays them out, so that the keyboard follows the
+  // rows: a node drawn during a run goes after the last node before it in the layout.
+  /** @param {Tab} tab @param {PanelNode} node */
+  function placeInRows(tab, node) {
+    /** @param {PanelNode} n */
+    const spot = (n) => tab.layout.get(n.id) ?? n;
+    const at = spot(node);
+    /** @param {Point} a @param {Point} b */
+    const precedes = (a, b) => a.y < b.y || (a.y === b.y && a.x < b.x);
+    /** @type {PanelNode | null} */
+    let before = null;
+    for (const n of tab.nodes.values()) {
+      if (n !== node && precedes(spot(n), at) && (!before || precedes(spot(before), spot(n)))) before = n;
+    }
+    if (before) before.el.after(node.el);
+    else tab.nodesEl.prepend(node.el);
   }
 
   // Settles a call of a folded panel; true once that is drawn on its fold. A document with a snippet comes out of its
