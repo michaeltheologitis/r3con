@@ -74,7 +74,10 @@ jobs:
       # With the Python and platform tag of Briefcase's pip (arm64, and its support
       # package's minimum macOS, 11.0), so that pip picks the wheels Briefcase's would.
       - name: Download the bundle's wheels, by uv.lock's hashes
-        run: '"$RUNNER_TEMP/briefcase/bin/python" -m pip download --require-hashes --only-binary :all: --no-deps --platform macosx_11_0_arm64 --dest "$WHEELS" -r "$CONSTRAINTS" -r "$BUILD_CONSTRAINTS"'
+        run: |
+          "$RUNNER_TEMP/briefcase/bin/python" -m pip download --require-hashes --only-binary :all: --no-deps --platform macosx_11_0_arm64 --dest "$WHEELS" -r "$CONSTRAINTS" -r "$BUILD_CONSTRAINTS"
+          rm -v "$WHEELS"/jinja2-*.whl
+          ls "$WHEELS" | wc -l
       - name: Build the app
         run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
       # After the build, so that the key is absent while pip and the build backend run.
