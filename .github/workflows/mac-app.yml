@@ -42,6 +42,8 @@ jobs:
       # of litellm's compiled dependencies.
       - name: Build the app and its .dmg, signed ad hoc
         run: uvx --python 3.14 --from briefcase==0.4.7 briefcase package macOS app --adhoc-sign --no-input
+      - name: "Test only: a pin the bundle doesn't match, and a package with no pin"
+        run: sed -i '' -e 's/^toga-cocoa==0.5.7/toga-cocoa==0.5.6/' -e '/^rubicon-objc==/d' "$CONSTRAINTS"
       - name: Check the bundle with its own Python
         run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I tests/app/bundle_check.py "$APP" "$CONSTRAINTS"'
       - name: Open the app's window
