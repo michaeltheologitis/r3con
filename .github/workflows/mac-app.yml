@@ -170,6 +170,52 @@ jobs:
         run: |
           codesign --display --verbose=2 "$APP" 2>&1 | grep -E '^(Authority|Signature|Timestamp|TeamIdentifier)=|flags=' | tee "$RUNNER_TEMP/codesign.txt"
           codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a "$RUNNER_TEMP/codesign.txt"
+      - name: Test only, Gatekeeper on the runner
+        if: ${{ !inputs.sign }}
+        run: |
+          spctl --status || true
+          spctl --assess --type execute --verbose=4 "$APP" || true
+          spctl --assess --type execute --verbose=4 "/Applications/Google Chrome.app" || true
+          xcrun stapler validate "/Applications/Google Chrome.app" || true
+          security list-keychains -d user
+          security find-certificate -a -c "Developer ID Certification Authority" -Z /Library/Keychains/System.keychain | grep -E "SHA-1|labl" || true
+      - name: Test only, the keychain commands with a self-signed certificate
+        if: ${{ !inputs.sign }}
+        run: |
+          cd "$RUNNER_TEMP"
+          printf '%s\n' "[req]" "distinguished_name = dn" "x509_extensions = ext" "prompt = no" \
+            "[dn]" "CN = Developer ID Application: Test (AB12CD34EF)" "OU = AB12CD34EF" \
+            "[ext]" "basicConstraints = critical,CA:false" "keyUsage = critical,digitalSignature" "extendedKeyUsage = critical,codeSigning" > test.cnf
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout test-key.pem -out test-cert.pem -days 1 -config test.cnf
+          openssl pkcs12 -export -inkey test-key.pem -in test-cert.pem -out test.p12 -passout pass:test-password
+          MACOS_CERTIFICATE="$(base64 < test.p12)
+          "
+          MACOS_CERTIFICATE_PASSWORD=test-password
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          password=$(openssl rand -base64 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode -o "$certificate"
+          cmp "$certificate" test.p12
+          security import "$certificate" -k "$keychain" -f pkcs12 -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$certificate"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security list-keychains -d user
+          security find-identity -p codesigning "$keychain"
+          security find-identity -v -p codesigning
+          sha1=$(security find-identity -p codesigning "$keychain" | awk '/Developer ID Application: Test/ {print $2; exit}')
+          cp /bin/ls test-ls
+          codesign --sign "$sha1" --force --options runtime --timestamp=none test-ls &
+          pid=$!
+          for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$pid" 2>/dev/null; then echo "codesign still runs after 60 s"; kill "$pid"; else wait "$pid" && echo "codesign: ok" || echo "codesign exit=$?"; fi
+          codesign --display --verbose=2 test-ls 2>&1 | grep -E "Authority|Signature" || true
+          security delete-keychain "$keychain"
+          security list-keychains -d user
       - name: Check that Gatekeeper accepts the app and the .dmg as notarized
         if: inputs.sign
         run: |
