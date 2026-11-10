@@ -1,10 +1,10 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version >= '3.11.5' and python_full_version < '3.12') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
+    "(python_full_version >= '3.11.5' and python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'emscripten')",
     "python_full_version < '3.11.5'",
 ]
 
@@ -2247,6 +2247,7 @@ dev = [
     { name = "pytest-socket" },
     { name = "r3context", extra = ["app"] },
     { name = "ruff" },
+    { name = "toga-core" },
 ]
 
 [package.metadata]
@@ -2279,6 +2280,7 @@ dev = [
     { name = "pytest-socket", specifier = ">=0.8" },
     { name = "r3context", extras = ["app"] },
     { name = "ruff", specifier = ">=0.16" },
+    { name = "toga-core", specifier = ">=0.5.7,<0.6" },
 ]
 
 [[package]]
@@ -2721,7 +2723,7 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "(python_full_version >= '3.11.5' and python_full_version < '3.12') or (python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten')",
+    "(python_full_version >= '3.11.5' and python_full_version < '3.14' and sys_platform != 'emscripten') or (python_full_version >= '3.11.5' and python_full_version < '3.12' and sys_platform == 'emscripten')",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/19/63/0b6bae54546aed98d72f12d09df57b19a287f01c84d22047fa2e23772ab9/soupsieve-3.0.4.tar.gz", hash = "sha256:924fab84ae21604c19e175e1f39815eb6fa83ba23836e09e9de180925e5bc4c0", size = 119017, upload-time = "2026-10-22T00:45:26.362Z" }
 wheels = [
@@ -2823,6 +2825,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/4e/f6/80760e98a08e6649d2d68afb6035af713121dfb615acce8c4f73810ec438/tiktoken-0.14.0-cp315-cp315t-musllinux_1_2_aarch64.whl", hash = "sha256:86f66c85e796f5d05d5c4a60ec1d40cbfebc47a32464053528c797163fa9ab89", size = 1251479, upload-time = "2026-08-17T19:49:36.419Z" },
     { url = "https://files.pythonhosted.org/packages/c5/84/50966fb6918a0fb9b32721277e5342bf729a2d74350074d662fbedf9772e/tiktoken-0.14.0-cp315-cp315t-musllinux_1_2_x86_64.whl", hash = "sha256:149d97453c4c98c04b081d64a85e635921269b532710d6faf81e9e82b790e7d3", size = 1316673, upload-time = "2026-08-17T19:49:37.756Z" },
     { url = "https://files.pythonhosted.org/packages/35/5e/9b01afd037bfa22a0033963fa091e0f75b6fb15cd85bffb42ff86e697323/tiktoken-0.14.0-cp315-cp315t-win_amd64.whl", hash = "sha256:561e7580f84a79859af1ef6f676968e9030fcc3fe195700b15235bca64f009c9", size = 987929, upload-time = "2026-08-17T19:49:38.947Z" },
+]
+
+[[package]]
+name = "toga-core"
+version = "0.5.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "travertino" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/76/10/02bde90457becf905952673ffc6df1f573435b5099ae50194ea3d8223916/toga_core-0.5.7.tar.gz", hash = "sha256:e920c81a7cb4bb5660008a16e05b8e0972a348fd3f84f44f3556f9ecac29ff8e", size = 1065875, upload-time = "2026-10-01T06:42:18.079Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/67/fb/e9f7d4aa837411a02e67f51538529f7a54f79f2ba1d9b338ce988212e44d/toga_core-0.5.7-py3-none-any.whl", hash = "sha256:7b95e0c18e62fe2de32b5d88178e532fae90b72d29cca38da83ddcacb8dc8302", size = 170589, upload-time = "2026-10-01T06:42:16.451Z" },
 ]
 
 [[package]]
@@ -2942,6 +2956,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/2c/2e/a7fbfe268c8a3b32546930c0297c101d65a4a14c304ad5790a9f478f0e4e/traitlets-5.16.1.tar.gz", hash = "sha256:ed900c2b631aa3a112811139fa97b8d2c3bad5e989656bba4b7e52c7852c18c1", size = 166137, upload-time = "2026-08-03T08:32:36.848Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ad/66/0d785f0bc5e4315a96c989bb476d0fc07ea4f85132550c7b156ca2035d52/traitlets-5.16.1-py3-none-any.whl", hash = "sha256:f775618166caa0396c8e337099240f2bd3e5e917d203b2e6fbe21a58d3cb1f6b", size = 86211, upload-time = "2026-08-03T08:32:34.48Z" },
+]
+
+[[package]]
+name = "travertino"
+version = "0.5.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/69/b7d1a2a46188d5b24f1500fd4c37cf75f35d4aca0f55fa1b2b2b60649188/travertino-0.5.7.tar.gz", hash = "sha256:a84ad0ece33132a7170a7fe355d684c9b8d39da7f06d4bb9e4194cb97119f241", size = 50145, upload-time = "2026-10-01T06:42:16.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/61/eb/daf19ae19480c908facff6c828b3f2d4086747bf7db8da0d7a8315a0e793/travertino-0.5.7-py3-none-any.whl", hash = "sha256:0bcaed5fc2d2059fb3207e20a85ca1637bfcd81c0faa392eaa818e2bfd708a61", size = 26642, upload-time = "2026-10-01T06:42:14.935Z" },
 ]
 
 [[package]]

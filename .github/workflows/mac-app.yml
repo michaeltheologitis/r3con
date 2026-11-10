@@ -1,0 +1,98 @@
+name: Mac app
+
+# The Mac app (pyproject.toml's [tool.briefcase]), unsigned for now: build it and its
+# .dmg, check both the bundle's own Python and the app's window on the runner, and keep
+# the .dmg as an artifact.
+on:
+  pull_request:
+    paths:
+      - "src/r3con/**"
+      - "pyproject.toml"
+      - "tests/app/bundle_check.py"
+      - ".github/workflows/mac-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Otherwise importing litellm fetches its price map from GitHub.
+  LITELLM_LOCAL_MODEL_COST_MAP: "True"
+  APP: build/r3con/macos/app/R3Con.app
+
+jobs:
+  app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+      # Briefcase bundles the Python it runs on: 3.14, the newest with wheels for all
+      # of litellm's compiled dependencies.
+      - name: Build the app and its .dmg, signed ad hoc
+        run: uvx --python 3.14 --from briefcase==0.4.7 briefcase package macOS app --adhoc-sign --no-input
+      - name: Check the bundle with its own Python
+        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I tests/app/bundle_check.py "$APP"'
+      - name: Open the app's window
+        run: |
+          "$APP/Contents/MacOS/R3Con" &
+          pid=$!
+          port=
+          for _ in $(seq 60); do
+            port=$(lsof -nP -a -p "$pid" -iTCP -sTCP:LISTEN -Fn | sed -n 's/^n.*://p')
+            [ -n "$port" ] && break
+            sleep 1
+          done
+          if [ -z "$port" ]; then
+            echo "::error::The app served nothing within 60 s."
+            exit 1
+          fi
+          curl -fsS "http://127.0.0.1:$port/" | grep "<title>"
+          # Only the window's page asks for /api/keys with the token. The app's stdout,
+          # where uvicorn logs each request, goes to the system log.
+          keys=
+          for _ in $(seq 30); do
+            keys=$(log show --last 2m --style compact --predicate 'process == "R3Con"' | grep -F '"GET /api/keys HTTP/1.1" 200' || true)
+            [ -n "$keys" ] && break
+            sleep 2
+          done
+          if [ -z "$keys" ]; then
+            echo "::error::The window's page never asked the server for /api/keys with the token."
+            exit 1
+          fi
+          echo "$keys"
+          screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
+          kill "$pid"
+      - name: The app's log
+        if: failure()
+        run: log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
+      - name: The app's identity and sizes
+        run: |
+          plist="$APP/Contents/Info.plist"
+          dmg=$(echo dist/*.dmg)
+          compiled=$(find "$APP/Contents/Resources/app_packages/pydantic_core" -name "*.so" | head -n 1)
+          {
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Bundle identifier | \`$(plutil -extract CFBundleIdentifier raw "$plist")\` |"
+            echo "| Version | $(plutil -extract CFBundleShortVersionString raw "$plist") |"
+            echo "| Architectures (pydantic_core) | $(lipo -archs "$compiled") |"
+            echo "| \`$(basename "$APP")\` | $(du -sh "$APP" | cut -f1) |"
+            echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: r3con-mac-app
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: window-screenshot
+          path: ${{ runner.temp }}/window.png
+          if-no-files-found: ignore
