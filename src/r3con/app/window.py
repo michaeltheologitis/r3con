@@ -2,10 +2,10 @@
 ``python -m r3con``.
 
 It serves the app as ``r3con app`` does, on a free port with a new token, and shows the
-page in a Toga window. Closing the window, or Quit in the app's menu, hides it, then
-stops the server as ``serve``'s stop does, before the app exits; the server stops too
-if the window fails. Toga is the Mac app's own: neither r3con nor its ``app`` extra
-installs it.
+page in a Toga window of ``WINDOW_SIZE``. Closing the window, or Quit in the app's
+menu, hides it, then stops the server as ``serve``'s stop does, before the app exits;
+if Toga can't start the app, the server stops before the error goes on. Toga is the
+Mac app's own: neither r3con nor its ``app`` extra installs it.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import toga
 from r3con.app.server import serve
 from r3con.logging_setup import configure_logging
 
+WINDOW_SIZE = (1280, 820)
+
 
 def main() -> None:
     """Serve the app and show its page in a window until the app quits."""
@@ -24,6 +26,8 @@ def main() -> None:
     url, stop = serve()
 
     def page(app: toga.App, **kwargs: Any) -> toga.Widget:
+        for window in app.windows:
+            window.size = WINDOW_SIZE
         return toga.WebView(url=url)
 
     def hide(app: toga.App, **kwargs: Any) -> bool:
