@@ -14,7 +14,9 @@ organizes the relevant information, then reasons over it to produce an answer.
 
 ## App
 
-First install uv:
+**Mac:** download `R3Con-<version>.dmg` from the [latest release](https://github.com/michaeltheologitis/r3con/releases/latest) and drag R3Con to Applications.
+
+**Any computer:** first install uv:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
