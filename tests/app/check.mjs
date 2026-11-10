@@ -18,8 +18,10 @@ const SCRIPT_FILE = fileURLToPath(new URL('app.js', APP_DIR));
 const PAGE_FILES = { '/': 'index.html', '/app.css': 'app.css', '/app.js': 'app.js' };
 const LAYOUTS = {
   desktop: { name: '1440 light', options: { viewport: { width: 1440, height: 900 }, colorScheme: 'light' } },
+  // Its user chose the dark theme, which the system's dark scheme alone no longer gives.
   phone: {
     name: '400 dark',
+    theme: 'dark',
     options: {
       viewport: { width: 400, height: 800 },
       colorScheme: 'dark',
@@ -82,6 +84,7 @@ const POPUP_ROWS = {
   'answer-0': ['question'],
 };
 const MODEL_KEY = 'r3con-proto-model';
+const THEME_KEY = 'r3con-proto-theme';
 const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
 const SAVED_MODEL = 'ollama_chat/llama3.3';
 const PROVIDER_MODEL = 'anthropic/claude-opus-5-5';
@@ -383,6 +386,15 @@ function check(area, name, pass, detail = '') {
 
 const firstLine = (error) => String(error?.message ?? error).split('\n')[0];
 
+// In-page, before the page's own script: storage reads `theme` as saved under `key` while nothing is, so the page opens
+// in it and the checks that read storage still find only their own entries.
+function savedTheme([key, theme]) {
+  const getItem = Storage.prototype.getItem;
+  Storage.prototype.getItem = function (name) {
+    return getItem.call(this, name) ?? (name === key ? theme : null);
+  };
+}
+
 async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample = true, expectedErrors = [], before }, body) {
   const messages = [];
   let context;
@@ -392,6 +404,7 @@ async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample
     const page = await context.newPage();
     page.on('console', (m) => messages.push({ type: m.type(), text: m.text() }));
     page.on('pageerror', (e) => messages.push({ type: 'error', text: e.message }));
+    if (layout.theme) await page.addInitScript(savedTheme, [THEME_KEY, layout.theme]);
     await before?.(page);
     await page.goto(url);
     if (sample) await runSample(page);
@@ -1212,31 +1225,45 @@ async function pickRounds(page, rounds) {
   await page.keyboard.press('Escape');
 }
 
+// The theme a page shows: its root's data-theme, the theme button's label, and the theme values as drawn.
+async function themeShown(page, tokens) {
+  const theme = await page.evaluate(() => document.documentElement.dataset.theme);
+  return { theme, label: await page.textContent('#theme-btn'), values: await page.evaluate(themeValues, tokens) };
+}
+
 // ---------- areas ----------
 
 async function load() {
-  const seen = { system: {}, button: {} };
+  const seen = [];
   let tokens = [];
-  for (const layout of Object.values(LAYOUTS)) {
+  for (const { options } of Object.values(LAYOUTS)) {
+    const layout = { name: `${options.viewport.width}, system ${options.colorScheme}, no theme saved`, options };
     await withPage('load', { layout, sample: false }, async (page) => {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
-      const scheme = layout.options.colorScheme;
-      const other = scheme === 'dark' ? 'light' : 'dark';
       tokens = await page.evaluate(lightDarkTokens);
-      seen.system[scheme] = await page.evaluate(themeValues, tokens);
+      const opened = await themeShown(page, tokens);
       await page.click('#theme-btn');
-      seen.button[other] = await page.evaluate(themeValues, tokens);
-      const pageColors = { [scheme]: pageColorsOf(seen.system[scheme]), [other]: pageColorsOf(seen.button[other]) };
-      const pageColorsName = `${layout.name}: the page's background and accent are its color scheme's, and the other's after the theme button`;
-      check('load', pageColorsName, isDeepStrictEqual(pageColors, SCHEME_PAGE_COLORS), JSON.stringify(pageColors));
+      const clicked = await themeShown(page, tokens);
+      await page.reload();
+      const reloaded = await themeShown(page, tokens);
+      seen.push({ opened: opened.values, clicked: clicked.values });
+      const shown = [opened, clicked, reloaded].map(({ theme, label, values }) => ({ theme, label, colors: pageColorsOf(values) }));
+      const wanted = ['light', 'dark', 'dark'].map((theme) => ({ theme, label: `theme · ${theme}`, colors: SCHEME_PAGE_COLORS[theme] }));
+      const themesName = `${layout.name}: the page opens light, the theme button makes it dark, and a reload keeps the dark it saved`;
+      check('load', themesName, isDeepStrictEqual(shown, wanted), JSON.stringify(shown));
     });
   }
-  const drifted = (scheme) => Object.keys(seen.system[scheme] ?? {}).filter((name) => seen.system[scheme][name] !== seen.button[scheme]?.[name]);
-  const differing = ['light', 'dark'].flatMap((scheme) => drifted(scheme).map((name) => `${scheme} ${name}`));
-  const both = Object.keys(seen.system).length === Object.keys(LAYOUTS).length;
-  const valueCount = Object.keys(seen.system.light ?? {}).length;
-  const themeName = `the theme button gives all ${valueCount} theme values, ${tokens.length} of them light-dark() colors, just as the system's color scheme does, in light and in dark`;
-  check('load', themeName, both && tokens.length > 0 && !differing.length, differing.join(', '));
+  const drifted = (when) => Object.keys(seen[0]?.[when] ?? {}).filter((name) => seen[0][when][name] !== seen[1]?.[when][name]);
+  const differing = ['opened', 'clicked'].flatMap((when) => drifted(when).map((name) => `${when} ${name}`));
+  const valueCount = Object.keys(seen[0]?.opened ?? {}).length;
+  const systemName = `the system's color scheme changes none of the ${valueCount} theme values, ${tokens.length} of them light-dark() colors, on opening or after the theme button`;
+  check('load', systemName, seen.length === Object.keys(LAYOUTS).length && tokens.length > 0 && !differing.length, differing.join(', '));
+  const unscripted = { name: `${LAYOUTS.phone.options.viewport.width}, system dark, no script`, options: { ...LAYOUTS.phone.options, javaScriptEnabled: false } };
+  await withPage('load', { layout: unscripted, sample: false }, async (page) => {
+    const painted = await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, background: getComputedStyle(document.body).backgroundColor }));
+    const light = { theme: 'light', background: SCHEME_PAGE_COLORS.light['--bg'] };
+    check('load', `${unscripted.name}: the page is light before its script runs, so it never flashes dark`, isDeepStrictEqual(painted, light), JSON.stringify(painted));
+  });
   // Each tab row's bottom is its line.
   await withPage('load', { sample: false }, async (page) => {
     const chat = await rect(page, '#side .tabs');

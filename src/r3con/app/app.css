@@ -36,11 +36,8 @@
   --trash-size: 32px;
   --trash-icon-size: 24px;
 }
-/* Dark, by the system's scheme or the theme button: color-scheme makes each light-dark() above take its
-   second colour, and --shadow, which is not a colour, takes its dark value. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { color-scheme: dark; --shadow: var(--shadow-dark); }
-}
+/* Dark, by the theme button: color-scheme makes each light-dark() above take its second colour, and --shadow,
+   which is not a colour, takes its dark value. */
 :root[data-theme="dark"] { color-scheme: dark; --shadow: var(--shadow-dark); }
 
 *, *::before, *::after { box-sizing: border-box; }
