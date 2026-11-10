@@ -82,9 +82,18 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Before PyPI, so that a failed notarization publishes nothing. A dry run builds it unsigned.
+  mac-app:
+    needs: build
+    uses: ./.github/workflows/mac-app.yml
+    with:
+      sign: ${{ needs.build.outputs.release == 'true' }}
+    # The signing secrets live in mac-app.yml's environment, but a caller must still pass them.
+    secrets: inherit
+
   publish:
     if: needs.build.outputs.release == 'true'
-    needs: build
+    needs: [build, mac-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -110,6 +119,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: dist
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: r3con-mac-app-signed
           path: dist/
       # The release commit's body is the notes; its trailers are attribution, not notes.
       - name: Build the notes
