@@ -8,6 +8,10 @@
   --panel: light-dark(#f4f2ef, #141312);
   --fg: light-dark(#1f1e1c, #e8e5e1);
   --dim: light-dark(#736b62, #968e84);
+  /* Folds of documents with nothing relevant: a muted slate blue, apart from the warm text and the orange trail,
+     its dimmer shade for what a fold says of them; both 4.5:1 or more on the panel. */
+  --fold: light-dark(#465d7e, #8ea4c4);
+  --fold-dim: light-dark(#58708f, #7689a3);
   --line: light-dark(#e5e0d9, #2e2b28);
   --code: light-dark(#f0ece7, #232120);
   --accent: light-dark(#c15f3c, #d77757);
@@ -228,6 +232,16 @@ p { margin: 0; }
   border-radius: 1em;
 }
 .node.void { opacity: 0.45; }
+/* A fold: a run of documents with nothing relevant as one row, counted in the fold colour in every column and
+   readable where its icons dim. Its first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
+.node.fold .label { color: var(--fold-dim); }
+.node.fold .name { color: var(--fold); }
+.node.fold.doc .icon { color: var(--fold); }
+.node.fold.doc .name { font-weight: 700; }
+.node.fold.doc.open .icon { rotate: 90deg; }
+.node.fold.void { opacity: 1; }
+.node.fold.void .icon { opacity: 0.45; }
+.node.fold.doc:hover .icon { color: var(--fg); }
 .node.failed .icon, .node.failed .label { color: var(--err); }
 .node.failed .icon { opacity: 0.6; }
 .node:hover .label, .node.selected .label { color: var(--fg); }
@@ -243,6 +257,9 @@ p { margin: 0; }
 .drawing.is-lit .node.on-path { opacity: 1; }
 .drawing.is-lit .node.on-path .icon { color: var(--accent); }
 .drawing.is-lit .node.on-path .label { color: var(--fg); }
+/* Off the trail a fold's icons dim with the other nodes, while its text keeps 4.5:1: it marks where its documents are. */
+.drawing.is-lit .node.fold { opacity: 1; }
+.drawing.is-lit .node.fold .icon { opacity: 0.3; }
 .fill-orange { fill: var(--fill-orange); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
