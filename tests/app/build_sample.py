@@ -57,12 +57,15 @@ def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def provenance(folder: Path, cited: dict[str, list[str]]) -> dict[str, Any]:
-    """The provenance of the answer saved in ``folder``, as r3con.trace gives it."""
-    traced = r3con.trace(folder)
-    citations = {"summary_ids": traced["summary_ids"], "parse_ids": traced["parse_ids"]}
-    assert citations == cited, f"{folder.name}: trace reads the saved citations"
-    return dict(traced)
+def provenance(folder: Path, saved: dict[str, Any]) -> dict[str, Any]:
+    """The provenance of the answer saved in ``folder``, as r3con.trace gives it. Before
+    0.6.5, r3con saved only its citations; it saves its quotes since, and its trail
+    since 0.6.9."""
+    traced = dict(r3con.trace(folder))
+    assert saved.items() <= traced.items(), (
+        f"{folder.name}: trace gives the saved provenance"
+    )
+    return traced
 
 
 def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:

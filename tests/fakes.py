@@ -331,6 +331,22 @@ def quoting_a_line_a_round(
     return reply
 
 
+def quoting_its_first_line_and_citing_all_shown(
+    shown_ids: Callable[[Request], list[str]],
+) -> Callable[[Request], Content]:
+    """A relevance reply quoting the first line of the text it is sent, and, in a
+    later round, citing every summary shown."""
+
+    def reply(request: Request) -> Content:
+        first = request["messages"][1]["content"].splitlines()[0]
+        quoting = {"summary": f"Notes on {first}.", "quotes": [first]}
+        if not is_later_round(request):
+            return quoting
+        return {**quoting, "provenance_ids": shown_ids(request)}
+
+    return reply
+
+
 def citing(
     answer: str, summaries: slice = slice(0), parses: slice = slice(0)
 ) -> Callable[[Request], Content]:

@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - "src/r3con/**"
+      - "icons/**"
       - "pyproject.toml"
       - "uv.lock"
       - "tests/app/bundle_check.py"
@@ -187,6 +188,9 @@ jobs:
       # -B: bytecode written into the bundle would break its signature.
       - name: Check the bundle with its own Python
         run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
+      # Without its icon, Briefcase falls back to its placeholder and only says so.
+      - name: Check that the app's icon is icons/r3con.icns
+        run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
       - name: Open the app's window
         run: |
           "$APP/Contents/MacOS/R3Con" &
