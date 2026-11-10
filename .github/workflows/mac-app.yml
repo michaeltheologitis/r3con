@@ -6,8 +6,7 @@ name: Mac app
 on:
   pull_request:
     paths:
-      - "src/r3con/__main__.py"
-      - "src/r3con/app/**"
+      - "src/r3con/**"
       - "pyproject.toml"
       - "tests/app/bundle_check.py"
       - ".github/workflows/mac-app.yml"
@@ -53,8 +52,19 @@ jobs:
             exit 1
           fi
           curl -fsS "http://127.0.0.1:$port/" | grep "<title>"
-          # Time for the window to draw the page.
-          sleep 5
+          # Only the window's page asks for /api/keys with the token. The app's stdout,
+          # where uvicorn logs each request, goes to the system log.
+          keys=
+          for _ in $(seq 30); do
+            keys=$(log show --last 2m --style compact --predicate 'process == "r3con"' | grep -F '"GET /api/keys HTTP/1.1" 200' || true)
+            [ -n "$keys" ] && break
+            sleep 2
+          done
+          if [ -z "$keys" ]; then
+            echo "::error::The window's page never asked the server for /api/keys with the token."
+            exit 1
+          fi
+          echo "$keys"
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           kill "$pid"
       - name: The app's log
@@ -79,6 +89,7 @@ jobs:
           name: r3con-mac-app
           path: dist/*.dmg
           if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v7
         if: always()
         with:
