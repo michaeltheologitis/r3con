@@ -1279,9 +1279,10 @@ async function beforeRun() {
 const FOLD_FROM_DOCS = 10;
 const CONTEXT_DOCS = 3;
 const FOLDED_FILES = 30;
-const memoNamed = (i) => memo(`memo_${String(i).padStart(3, '0')}.txt`, `Memo ${i}.\n`);
+const memoStem = (i) => `memo_${String(i).padStart(3, '0')}`;
+const memoNamed = (i) => memo(`${memoStem(i)}.txt`, `Memo ${i}.\n`);
 const memosFrom = (from, to) => Array.from({ length: to - from }, (_, i) => memoNamed(from + i));
-const stemsFrom = (from, to) => Array.from({ length: to - from }, (_, i) => `memo_${String(from + i).padStart(3, '0')}`);
+const stemsFrom = (from, to) => Array.from({ length: to - from }, (_, i) => memoStem(from + i));
 
 // The panel's rows, top to bottom: a document's name, or a fold's labels, and "(open)" for an opened one.
 function panelRows() {
@@ -1351,6 +1352,27 @@ async function folds() {
     const ink = await page.evaluate(foldInk);
     const inkName = "a fold's first node, which opens it, counts its documents bolder than a document's name, count and dots in the fold colour";
     check('folds', inkName, ink && ink.count.color === ink.fold && ink.dots === ink.fold && ink.count.weight > ink.name.weight, JSON.stringify(ink));
+  });
+  await withPage('folds', { sample: false }, async (page) => {
+    const folding = FOLD_FROM_DOCS + 1;
+    // One of the documents kept in view at the end.
+    const gone = folding - 2;
+    await page.setInputFiles('#file-input', memosFrom(0, folding));
+    await filesCounted(page, folding);
+    await page.click('#tab-files');
+    await removeButton(page, `${memoStem(gone)}.txt`).click();
+    await filesCounted(page, FOLD_FROM_DOCS);
+    const left = await page.evaluate(panelRows);
+    await pressRemoveAll(page, '#files-remove-all');
+    const emptied = await count(page, '#world .node');
+    await page.setInputFiles('#file-input', memosFrom(0, FOLDED_FILES));
+    await filesCounted(page, FOLDED_FILES);
+    await pressNode(page, nodeSel(`doc-f${CONTEXT_DOCS}`));
+    await pressRemoveAll(page, '#files-remove-all');
+    const openedThenEmptied = await count(page, '#world .node');
+    const name = `removing files from a folded tab leaves a node per file: ${folding} less one show all ${FOLD_FROM_DOCS}, and remove all leaves none, a fold open or not`;
+    const all = stemsFrom(0, folding).filter((stem) => stem !== memoStem(gone));
+    check('folds', name, isDeepStrictEqual(left, all) && emptied === 0 && openedThenEmptied === 0, `${left.length} rows; then ${emptied} and ${openedThenEmptied} nodes`);
   });
 }
 
@@ -4817,47 +4839,69 @@ async function liveParts(url) {
 
 // fake_server.py's UNPARSED: a document holding it parses to nothing.
 const UNPARSED = '(nothing to parse here)';
-// A folded run's memos: those in `relevant` say something relevant; the others say nothing, and parse to nothing.
-// The memo `inParts` is read in parts, none relevant, and `relevantInParts` in parts, its second relevant.
-const FOLD_RUN = { docs: 60, relevant: [5, 30, 31], inParts: 40, relevantInParts: 50 };
-const FOLD_RUN_ROWS = [
-  '5 documents · nothing relevant',
-  'fold_05',
-  '24 documents · nothing relevant',
-  'fold_30',
-  'fold_31',
-  '18 documents · nothing relevant',
-  'fold_50',
-  '9 documents · nothing relevant',
+// Enough quiet paragraphs that fake_server.py refuses the memo whole, past PART_CHARS, so r3con reads it in parts.
+const QUIET_PARAGRAPHS = 40;
+// A folded run's memos: those in `relevant` say something relevant; the others say nothing, and parse to nothing
+// unless `parsed`. The memo `inParts` is read in parts, none relevant, and `relevantInParts` in parts, its second
+// relevant.
+const FOLD_RUN = { docs: 60, relevant: [5, 30, 31, 50], inParts: 40, relevantInParts: 50 };
+// Its folds once read, first memo to last: the runs of memos between the relevant ones.
+const FOLD_RUN_FOLDS = [
+  [0, 4],
+  [6, 29],
+  [32, 49],
+  [51, 59],
 ];
-// Two runs in the same rows, the second's folds holding twice the memos.
+// A memo a fold holds, which "show in panel" brings out.
+const SHOWN_MEMO = 20;
+// Two runs in the same rows, the second's folds holding twice the memos, and one of as many memos as their rows.
 const FAINT_RUNS = [
   { docs: 60, relevant: [5, 30, 31, 50] },
   { docs: 120, relevant: [5, 30, 31, 110] },
 ];
+const UNFOLDED_RUN = { docs: 8, relevant: [1, 3, 4, 6] };
+// Its quiet memos parse to records, as a real model's may: only a snippet, or the answer's trail, brings one out.
+const PARSED_RUN = { docs: 150, relevant: [25, 75, 76, 125], parsed: true };
+const LONG_TASK_MS = 200;
 
-function foldMemos({ docs, relevant, inParts = -1, relevantInParts = -1 }) {
-  const quiet = (i) => `${QUIET} ${UNPARSED} A routine memo, number ${i}.\n`;
-  const paragraphs = Array.from({ length: 40 }, (_, k) => `${QUIET} ${UNPARSED} Filler paragraph ${k + 1}, which the scripted model skips.`);
+function foldMemos({ docs, relevant, inParts = -1, relevantInParts = -1, parsed = false }) {
+  const quiet = (i) => `${QUIET} ${parsed ? '' : UNPARSED} A routine memo, number ${i}.\n`;
+  const paragraphs = Array.from({ length: QUIET_PARAGRAPHS }, (_, k) => `${QUIET} ${UNPARSED} Filler paragraph ${k + 1}, which the scripted model skips.`);
   const text = (i) => {
     if (i === inParts) return paragraphs.join('\n\n');
     if (i === relevantInParts) return splitMemo().buffer.toString();
     return relevant.includes(i) ? `Site ${i}: an equipment incident was logged in Q3.\n` : quiet(i);
   };
-  // Numbered to one width, as the files are sorted by name.
-  const width = String(docs - 1).length;
-  return Array.from({ length: docs }, (_, i) => memo(`fold_${String(i).padStart(width, '0')}.txt`, text(i)));
+  return Array.from({ length: docs }, (_, i) => memo(`${foldStem({ docs }, i)}.txt`, text(i)));
 }
+
+// Numbered to one width, as the files are sorted by name.
+const foldStem = ({ docs }, i) => `fold_${String(i).padStart(String(docs - 1).length, '0')}`;
+const foldStems = (run, [first, last]) => Array.from({ length: last - first + 1 }, (_, k) => foldStem(run, first + k));
+// A run's rows once read, as panelRows gives them: each fold, and each relevant memo's own row.
+function readRows(run, folds) {
+  const rows = [...folds.map(([first, last]) => [first, `${last - first + 1} documents · nothing relevant`]), ...run.relevant.map((d) => [d, foldStem(run, d)])];
+  return rows.sort((a, b) => a[0] - b[0]).map(([, row]) => row);
+}
+const FOLD_RUN_ROWS = readRows(FOLD_RUN, FOLD_RUN_FOLDS);
+const foldNode = ([first]) => nodeSel(`doc-f${first}`);
+const foldHolding = (d) => FOLD_RUN_FOLDS.find(([first, last]) => first <= d && d <= last);
 
 // The page's document node for memo d of a run's files, added in one batch in place of the sample memos.
 const fileNode = (d) => `doc-${SAMPLE_DOCS + d}`;
 const fileNodes = (docs) => Array.from({ length: docs }, (_, d) => fileNode(d));
 
-// Runs `memos` live, and returns the page once the run is done.
 async function runFolded(page, memos, question = 'Which sites logged an equipment incident?') {
   await page.setInputFiles('#file-input', memos);
   await filesCounted(page, memos.length);
   await send(page, question);
+}
+
+// The faint lines' count and how visible each is, once the shown tab's run is done.
+async function faintLines(page) {
+  const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+  const lines = await page.$$eval('.edge.context', (els) => ({ count: els.length, opacity: els.length ? Number(getComputedStyle(els[0]).opacity) : 0 }));
+  return { done, rows: (await page.evaluate(panelRows)).length, ...lines };
 }
 
 async function liveFolds(url, server) {
@@ -4867,7 +4911,8 @@ async function liveFolds(url, server) {
     await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
     const reading = await page.evaluate(panelRows);
     const rest = FOLD_RUN.docs - 2 * CONTEXT_DOCS;
-    const waiting = ['fold_00', 'fold_01', 'fold_02', `${rest} documents · reading…`, 'fold_57', 'fold_58', 'fold_59'];
+    const ends = [foldStems(FOLD_RUN, [0, CONTEXT_DOCS - 1]), foldStems(FOLD_RUN, [FOLD_RUN.docs - CONTEXT_DOCS, FOLD_RUN.docs - 1])];
+    const waiting = [ends[0], `${rest} documents · reading…`, ends[1]].flat();
     const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
     check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
 
@@ -4887,45 +4932,46 @@ async function liveFolds(url, server) {
     check('live', trailName, between && unfolded && isDeepStrictEqual(lit, expected), `${lit.edges.length} lines lit, ${expected.edges.length} on the trail; cited ${cited.join(' ')}; ${rows.length} rows`);
 
     const inParts = nodeSel(fileNode(FOLD_RUN.inParts));
-    const foldOfParts = nodeSel('doc-f32');
+    const foldOfParts = foldNode(foldHolding(FOLD_RUN.inParts));
     const hidden = (await count(page, inParts)) === 0;
     const pressed = await pressNode(page, foldOfParts);
     const shown = pressed && (await count(page, inParts)) === 1 && (await page.$eval(nodeSel(`r1-${FOLD_RUN.inParts}`), (el) => el.classList.contains('void')));
     await pressNode(page, foldOfParts, { key: true });
     const refolded = (await count(page, inParts)) === 0 && isDeepStrictEqual(await page.evaluate(panelRows), FOLD_RUN_ROWS);
     const partsName = 'a document read in parts leaves its fold once a part has a snippet; one whose parts have none folds, and shows in its own row, empty, while its fold is open';
-    check('live', partsName, rows.includes(`fold_${FOLD_RUN.relevantInParts}`) && hidden && shown && refolded, `hidden ${hidden}, shown ${shown}, folded again ${refolded}`);
+    check('live', partsName, rows.includes(foldStem(FOLD_RUN, FOLD_RUN.relevantInParts)) && hidden && shown && refolded, `hidden ${hidden}, shown ${shown}, folded again ${refolded}`);
 
-    const lastFold = nodeSel('doc-f51');
-    await pressNode(page, lastFold);
+    const lastFold = FOLD_RUN_FOLDS.at(-1);
+    await pressNode(page, foldNode(lastFold));
     const opened = await page.evaluate(panelRows);
-    await pressNode(page, lastFold, { key: true });
+    await pressNode(page, foldNode(lastFold), { key: true });
     const closed = await page.evaluate(panelRows);
-    const openRows = [...FOLD_RUN_ROWS.slice(0, -1), '9 documents · nothing relevant · fold (open)', ...Array.from({ length: 9 }, (_, i) => `fold_${51 + i}`)];
+    const openRows = [...FOLD_RUN_ROWS.slice(0, -1), `${FOLD_RUN_ROWS.at(-1)} · fold (open)`, ...foldStems(FOLD_RUN, lastFold)];
     const toggleName = 'after a run a click opens a fold above its documents, saying so, and Enter on it folds them again';
     check('live', toggleName, isDeepStrictEqual(opened, openRows) && isDeepStrictEqual(closed, FOLD_RUN_ROWS), `${opened.length} rows; then ${closed.length}`);
 
     // The fold opened last glided up to show its rows; fit brings the whole panel back into view.
     await page.click('#fit-btn');
-    const dragged = fileNode(FOLD_RUN.relevant[1]);
-    await dragNode(page, dragged, -NUDGE_PX * 4, 0);
-    const spots = async () => ({ answer: await positionOf(page, 'answer-0'), dragged: await positionOf(page, dragged), below: await positionOf(page, `r1-${FOLD_RUN.relevant[1]}`) });
+    const dragged = FOLD_RUN.relevant[1];
+    const above = foldNode(foldHolding(dragged - 1));
+    await dragNode(page, fileNode(dragged), -NUDGE_PX * 4, 0);
+    const spots = async () => ({ answer: await positionOf(page, 'answer-0'), dragged: await positionOf(page, fileNode(dragged)), below: await positionOf(page, `r1-${dragged}`) });
     const before = await spots();
-    await pressNode(page, nodeSel('doc-f6'));
+    await pressNode(page, above);
     const during = await spots();
-    await pressNode(page, nodeSel('doc-f6'), { key: true });
+    await pressNode(page, above, { key: true });
     const after = await spots();
     const steady = isDeepStrictEqual(during.answer, before.answer) && isDeepStrictEqual(during.dragged, before.dragged) && during.below.y > before.below.y;
     const steadyName = 'opening a fold moves neither the answer nor a node the user dragged, while the rows below it move down, and back up as it folds';
     check('live', steadyName, steady && isDeepStrictEqual(after, before), JSON.stringify({ before, during, after }));
 
     await page.click('#tab-files');
-    await page.click('#file-list li:nth-child(21) .file');
+    await page.click(`#file-list li:nth-child(${SHOWN_MEMO + 1}) .file`);
     await page.click('#file-view >> text=show in panel');
-    const expanded = await page.evaluate((selector) => document.querySelector(selector)?.getAttribute('aria-expanded') ?? null, nodeSel('doc-f6'));
-    const jumped = { fold: expanded, node: await count(page, nodeSel(fileNode(20))), popup: (await popup(page))?.title };
+    const expanded = await page.evaluate((selector) => document.querySelector(selector)?.getAttribute('aria-expanded') ?? null, foldNode(foldHolding(SHOWN_MEMO)));
+    const jumped = { fold: expanded, node: await count(page, nodeSel(fileNode(SHOWN_MEMO))), popup: (await popup(page))?.title };
     const jumpName = "a folded document's show in panel opens its fold, and its popup";
-    check('live', jumpName, isDeepStrictEqual(jumped, { fold: 'true', node: 1, popup: '● fold_20.txt' }), JSON.stringify(jumped));
+    check('live', jumpName, isDeepStrictEqual(jumped, { fold: 'true', node: 1, popup: `● ${foldStem(FOLD_RUN, SHOWN_MEMO)}.txt` }), JSON.stringify(jumped));
 
     await page.keyboard.press('Escape');
     const kept = await page.evaluate(panelRows);
@@ -4946,18 +4992,50 @@ async function liveFolds(url, server) {
     const asked = landed && isDeepStrictEqual(askLit, askExpected) && isDeepStrictEqual(await page.evaluate(panelRows), back);
     check('live', askName, folded && asked, `${askLit.edges.length} lines lit, ${askExpected.edges.length} on the trail; ${back.length} rows`);
   });
+
   const drawn = [];
-  for (const run of FAINT_RUNS) {
+  for (const run of [...FAINT_RUNS, UNFOLDED_RUN]) {
     await withPage('live', { url, sample: false }, async (page) => {
       await runFolded(page, foldMemos(run));
-      const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-      drawn.push({ done, rows: (await page.evaluate(panelRows)).length, faint: await count(page, '.edge.context') });
+      drawn.push(await faintLines(page));
     });
   }
-  const [fewer, more] = FAINT_RUNS.map((run) => run.docs);
-  const faintName = `a run's faint lines follow its rows, not its documents: ${more} documents in the same rows as ${fewer} draw as many`;
-  const same = drawn.every(({ done }) => done) && drawn[0].rows === drawn[1].rows && drawn[0].faint > 0 && drawn[0].faint === drawn[1].faint;
+  const [fewer, more, unfolded] = drawn;
+  const [fewerDocs, moreDocs] = FAINT_RUNS.map((run) => run.docs);
+  const faintName = `a run's faint lines follow its rows, not its documents: ${moreDocs} documents in the same rows as ${fewerDocs} draw as many`;
+  const same = drawn.every(({ done }) => done) && fewer.rows === more.rows && fewer.count > 0 && fewer.count === more.count;
   check('live', faintName, same, JSON.stringify(drawn));
+  const fadeName = `a folded run's faint lines are as visible as those of an unfolded run of as many rows: ${fewerDocs} documents in ${fewer.rows} rows, and ${UNFOLDED_RUN.docs}`;
+  check('live', fadeName, fewer.rows === unfolded.rows && fewer.opacity > 0 && fewer.opacity === unfolded.opacity, JSON.stringify(drawn));
+}
+
+// Long tasks, as the page records them.
+function recordLongTasks() {
+  window.longTasks = [];
+  new PerformanceObserver((list) => list.getEntries().forEach((entry) => window.longTasks.push(entry.duration))).observe({ type: 'longtask', buffered: true });
+}
+
+async function liveFoldsParsed(url) {
+  const before = (page) => page.addInitScript(recordLongTasks);
+  await withPage('live', { url, sample: false, before }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const memos = foldMemos(PARSED_RUN);
+    await page.setInputFiles('#file-input', memos);
+    await filesCounted(page, memos.length);
+    await page.evaluate(() => (window.longTasks = []));
+    await send(page, 'Which sites logged an equipment incident?');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    await page.waitForTimeout(ARRANGE_MS);
+    const longest = Math.max(0, ...(await page.evaluate(() => window.longTasks)));
+    // Every memo with a row of its own has a snippet, or a node on the answer's trail.
+    const lit = await litNodes(page);
+    const rowNodes = (d) => [fileNode(d), ...Array.from({ length: ROUNDS }, (_, k) => `r${k + 1}-${d}`), `parsed-${d}`];
+    const own = (await docIdsOf(page)).filter((id) => !id.startsWith('doc-f')).map((id) => Number(id.slice('doc-'.length)) - SAMPLE_DOCS);
+    const outside = own.filter((d) => !PARSED_RUN.relevant.includes(d) && !rowNodes(d).some((id) => lit.includes(id))).map((d) => foldStem(PARSED_RUN, d));
+    const folds = await count(page, '.node.fold.doc');
+    const name = `a run of ${PARSED_RUN.docs} memos whose quiet ones parse to records keeps those folded, but for the trail's, with no task over ${LONG_TASK_MS} ms`;
+    check('live', name, done && longest <= LONG_TASK_MS && folds > 0 && outside.length === 0, `longest task ${Math.round(longest)} ms; ${folds} folds; ${own.length} own rows; ${outside.length} out without a snippet: ${outside.slice(0, 5).join(' ')}`);
+  });
 }
 
 // Every node a stopped run marked so says so; a fold's ends its name.
@@ -4973,6 +5051,30 @@ async function liveFoldsStopped(url, server) {
     const working = await count(page, '.node.working');
     const name = 'a run stopped while reading leaves its unread documents in a fold saying stopped, each node it stopped marked so, none still working';
     check('live', name, ended && rows.some((row) => row.endsWith(' · stopped')) && stopped && working === 0, `${rows.join(', ')}; ${working} working`);
+  });
+}
+
+// A fold opened while a run reads: the documents kept in view at each end join it as they are read.
+async function liveFoldsJoined(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await runFolded(page, foldMemos(FOLD_RUN), `Which sites logged an equipment incident? ${STALLS}`);
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    const opened = CONTEXT_DOCS;
+    await page.click('#tab-files');
+    await page.click(`#file-list li:nth-child(${opened + 1}) .file`);
+    await page.click('#file-view >> text=show in panel');
+    server.release();
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const rows = await page.evaluate(panelRows);
+    const folds = rows.filter((row) => row.includes(' documents · '));
+    const title = (await popup(page))?.title;
+    const shown = await count(page, nodeSel(fileNode(opened)));
+    // The documents kept in view, which joined a fold once read, draw no faint lines, as an opened fold's don't.
+    const kept = [...Array.from({ length: CONTEXT_DOCS }, (_, k) => k), ...Array.from({ length: CONTEXT_DOCS }, (_, k) => FOLD_RUN.docs - 1 - k)];
+    const touching = await page.$$eval('.edge.context', (els, ids) => els.filter((el) => ids.some((id) => el.dataset.key.startsWith(`${id}>`) || el.dataset.key.endsWith(`>${id}`))).length, kept.flatMap((d) => [`r1-${d}`, `r2-${d}`, `parsed-${d}`]));
+    const name = 'a fold opened while a run reads stays open, its popup too, as documents join it, and they draw no faint lines';
+    const open = folds.length > 0 && folds.every((row) => row.endsWith('(open)'));
+    check('live', name, done && open && shown === 1 && title === `● ${foldStem(FOLD_RUN, opened)}.txt` && touching === 0, `${folds.join(' | ')}; popup ${title}; ${touching} faint lines`);
   });
 }
 
@@ -6229,6 +6331,7 @@ async function live() {
     await liveTabs(url);
     await liveWhileGoing(url);
     await liveParts(url);
+    await liveFoldsParsed(url);
     await liveQuotes(url);
     await livePartQuotes(url);
     await liveRounds(url);
@@ -6254,7 +6357,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped];
+  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
