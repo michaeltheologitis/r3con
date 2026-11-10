@@ -1,0 +1,6 @@
+# Locked apart from r3con's uv.lock, so that neither constrains the other's versions.
+[project]
+name = "r3con-briefcase"
+version = "0"
+requires-python = ">=3.14,<3.15"
+dependencies = ["briefcase==0.4.7"]

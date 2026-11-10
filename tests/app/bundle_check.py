@@ -1,6 +1,6 @@
 """Check a built Mac app with its own Python, for .github/workflows/mac-app.yml:
 
-    APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3 -I \\
+    APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3 -I -B \\
         tests/app/bundle_check.py APP CONSTRAINTS BUILD_CONSTRAINTS
 
 It puts the app's code and packages on the path as the app's launcher does, and checks
