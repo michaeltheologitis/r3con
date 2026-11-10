@@ -116,8 +116,25 @@
    * @typedef {{ question: string, model: string, folder: string, created: string, text: string,
    *   provenance: R3conProvenance, totals: Totals }} RecordedAsk
    */
-  /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement }} PanelNode */
+  /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement, fold?: FoldRow }} PanelNode A fold's node has its fold. */
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
+  /** @typedef {'working' | 'done' | 'failed'} CallState */
+  /** @typedef {{ start: number, end: number, open: boolean }} FoldRow Documents start to end, inclusive, as one row, or opened above their own rows. */
+  /** @typedef {FoldRow | { doc: number }} PanelRow */
+  /**
+   * How a tab of more than FOLD_FROM_DOCS documents folds them.
+   * @typedef {object} Folding
+   * @property {LoadedFile[]} files the tab's files, or its run's documents
+   * @property {Map<string, number>} index each document node's document
+   * @property {Map<string, CallState>} calls each call by its node's id; a document node's is reading the file
+   * @property {Map<NodeKind, number>} settled how many calls of each kind are back
+   * @property {Set<number>} relevant documents with a snippet or a parse, which always have a row of their own
+   * @property {Set<number>} kept documents kept in view from before the run until their first round is back
+   * @property {Set<number>} opened documents in an opened fold
+   * @property {boolean} stopped whether the run stopped before reading them all
+   * @property {PanelRow[]} rows top to bottom
+   * @property {(FoldRow | null)[]} foldOf each document's fold, while it is closed
+   */
   /**
    * @typedef {object} Tab
    * @property {number} id
@@ -148,6 +165,8 @@
    * @property {Narrator | null} narr
    * @property {number} arrangeFrame
    * @property {Trail | null} trail the lit answer's, while the panel has one lit
+   * @property {Folding | null} fold while it has more than FOLD_FROM_DOCS documents
+   * @property {Set<string>} placed the nodes the user dragged since the panel was last laid out
    */
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
@@ -1444,6 +1463,15 @@
   const LABEL_MAX = 24;
   const NODE_PAD_PX = 12;
   const ZOOM = { min: 0.05, max: 2.5, fitMax: 1.15 };
+  // About this many rows fit a laptop's panel readably, so a tab of more documents folds those with nothing relevant.
+  const FOLD_FROM_DOCS = 10;
+  const MIN_FOLD = 3;
+  // Before a run, a fold keeps this many documents in view at each end, as a diff keeps lines of context.
+  const CONTEXT_DOCS = 3;
+  // An opened fold lower in the panel than this share of its height glides up, so that the rows it opened show.
+  const UNFOLD_TOP = 0.4;
+  // A fold's line keeps the strongest kind of the lines it stands for.
+  const EDGE_RANK = { context: 0, self: 1, flow: 2, cite: 3 };
   const FIT_MARGIN = 28;
   const WHEEL_ZOOM_RATE = 0.004;
   const WHEEL_LINE_PX = 16;
@@ -1576,6 +1604,9 @@
   const ICONS = {
     chevron: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M6 3.5 10.5 8 6 12.5"/>
+    </svg>`,
+    fold: `<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
+      <circle cx="16" cy="7.5" r="3"/><circle cx="16" cy="16" r="3"/><circle cx="16" cy="24.5" r="3"/>
     </svg>`,
     document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M19.25 3H8.5a2 2 0 0 0-2 2v22a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V9.25z"/>
@@ -1712,6 +1743,8 @@
       narr: null,
       arrangeFrame: 0,
       trail: null,
+      fold: null,
+      placed: new Set(),
     };
     return tab;
   }
@@ -2438,6 +2471,7 @@
 
   /** @param {Tab} tab @param {Origin} origin */
   function plan(tab, origin) {
+    if (tab.fold) return foldPlan(tab);
     const layout = gridLayout(tab.files, origin, roundsOf(tab));
     const first = layout.get(RUN_ANSWER);
     if (!tab.run || !first) return layout;
@@ -2545,6 +2579,11 @@
   /** @param {RunTab} tab @param {string} id */
   function addNode(tab, id) {
     const [kind, d] = splitId(id);
+    if (tab.fold && isPerDocument(kind)) {
+      setCall(tab.fold, id, 'working');
+      const fold = showFolded(tab, id);
+      if (fold) return fold;
+    }
     return createNode(tab, id, kind, /** @type {Point} */ (tab.layout.get(id)), { working: true, file: isPerDocument(kind) ? tab.run.docs[d] : null });
   }
 
@@ -2564,6 +2603,7 @@
     if (tab.nodes.get(id) === gesture.node) endGesture();
     tab.nodes.get(id)?.el.remove();
     tab.nodes.delete(id);
+    tab.placed.delete(id);
   }
 
   /** @param {number} t */
@@ -2578,6 +2618,7 @@
     tab.edges.clear();
     tab.nodesEl.replaceChildren();
     tab.nodes.clear();
+    tab.placed.clear();
     tab.drawing.classList.remove('is-lit');
     tab.trail = null;
     if (hoveredIn(tab)) state.hovered = null;
@@ -2594,10 +2635,11 @@
     redrawEdges(tab);
   }
 
-  // Document nodes are created only here: one per file of the tab, at its position in `at` if it had one,
-  // else below the last document node. A run's grid is planned once, when it starts.
+  // Document nodes are created only here, or by a folded tab's rows: one per file of the tab, at its position in
+  // `at` if it had one, else below the last document node. A run's grid is planned once, when it starts.
   /** @param {Tab} tab @param {{ at?: Map<string, Point>, animate?: boolean, replan?: boolean }} [options] */
   function syncDocNodes(tab, { at = new Map(), animate = false, replan = !tab.run } = {}) {
+    if (tab.fold || (!tab.run && tab.files.length > FOLD_FROM_DOCS)) return syncFolded(tab, at, animate);
     const { files } = tab;
     const keep = new Set(files.map(docId));
     for (const n of [...tab.nodes.values()]) {
@@ -2627,17 +2669,24 @@
     return { x: parseFloat(node.el.style.left), y: parseFloat(node.el.style.top) };
   }
 
-  // The model takes the final positions at once; only the drawing slides there.
   function arrange() {
     const tab = state.shown;
-    cancelAnimationFrame(tab.arrangeFrame);
     tab.layout = plan(tab, tidyOrigin);
     tab.userMoved = false;
+    tab.placed.clear();
+    slideToLayout(tab);
+  }
+
+  // Each node but those the user placed slides from where it is drawn to its place in the tab's layout, then
+  // `settled` runs. The model takes the final positions at once; only the drawing slides there.
+  /** @param {Tab} tab @param {() => void} [settled] */
+  function slideToLayout(tab, settled = () => fitShown(true)) {
+    cancelAnimationFrame(tab.arrangeFrame);
     /** @type {{ node: PanelNode, from: Point }[]} */
     const moves = [];
     for (const node of tab.nodes.values()) {
       const to = tab.layout.get(node.id);
-      if (!to) continue;
+      if (!to || tab.placed.has(node.id)) continue;
       const from = drawnAt(node);
       Object.assign(node, to);
       if (from.x !== to.x || from.y !== to.y) moves.push({ node, from });
@@ -2647,9 +2696,9 @@
       for (const { node } of moves) placeNode(node);
       redrawEdges(tab);
       positionInspector();
-      fitShown(true);
+      settled();
     };
-    if (!moves.length || reduceMotion()) return finish();
+    if (!moves.length || !animates(tab)) return finish();
     const start = performance.now();
     const grabbed = new Set();
     /** @param {number} now */
@@ -2673,13 +2722,22 @@
 
   /** @param {Tab} tab @param {string} id */
   function markWorking(tab, id) {
+    if (tab.fold) {
+      setCall(tab.fold, id, 'working');
+      if (showFolded(tab, id)) return;
+    }
     drawnNode(tab, id).el.classList.add('working');
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
   /** @param {Tab} tab @param {string} id */
   function settleNode(tab, id, { empty = false, failed = false } = {}) {
-    const node = drawnNode(tab, id);
+    if (tab.fold && settleFolded(tab, id, { empty, failed })) return;
+    drawSettled(tab, drawnNode(tab, id), { empty, failed });
+  }
+
+  /** @param {Tab} tab @param {PanelNode} node @param {{ empty: boolean, failed: boolean }} how */
+  function drawSettled(tab, node, { empty, failed }) {
     node.el.classList.remove('working');
     node.el.classList.toggle('void', empty);
     node.el.classList.toggle('failed', failed);
@@ -2687,8 +2745,8 @@
       g.textContent = MARK;
     });
     if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = iconFor('parsed', true);
-    node.el.setAttribute('aria-label', ariaName(tab, node));
-    rerenderIfOpen(tab, id);
+    if (!node.fold) node.el.setAttribute('aria-label', ariaName(tab, node));
+    rerenderIfOpen(tab, node.id);
   }
 
   // Ids repeat across tabs; the popup and the hover are only ever on the shown tab's nodes.
@@ -2777,8 +2835,16 @@
 
   /** @param {Tab} tab @param {string} from @param {string} to @param {EdgeKind} kind @param {'draw' | 'fade'} [how] */
   function addEdge(tab, from, to, kind, how) {
+    // On a folded panel a line runs between the nodes that show its ends, once for all the lines a fold stands for.
+    if (tab.fold) {
+      [from, to] = [shownAs(tab, from), shownAs(tab, to)];
+      if (from === to || !tab.nodes.has(from) || !tab.nodes.has(to)) return null;
+    }
     const key = `${from}>${to}`;
     let edge = tab.edges.get(key);
+    const drawnNow = !redrawn || redrawn.has(key);
+    if (edge && tab.fold && drawnNow && EDGE_RANK[edge.kind] >= EDGE_RANK[kind]) return edge;
+    redrawn?.add(key);
     if (!edge) {
       edge = { key, from, to, kind, el: document.createElementNS(SVG_NS, 'path') };
       edge.el.classList.add('edge');
@@ -2790,7 +2856,7 @@
     edge.el.classList.add(kind);
     layerFor(tab, kind).append(edge.el);
     edge.el.setAttribute('d', edgePath(tab, drawnNode(tab, from), drawnNode(tab, to)));
-    if (how) animateEdge(tab, edge.el, how);
+    if (how && !redrawn) animateEdge(tab, edge.el, how);
     edge.el.classList.toggle('hl', lightsWith(tab, edge));
     return edge;
   }
@@ -2823,7 +2889,10 @@
       n.el.classList.toggle('on-path', Boolean(trail?.nodes.has(id)));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    run.docs.forEach((file, d) => countSentences(tab, drawnNode(tab, docId(file)), trail?.quoted[d].sentences.length ?? 0));
+    run.docs.forEach((file, d) => {
+      const node = tab.nodes.get(docId(file));
+      if (node) countSentences(tab, node, trail?.quoted[d].sentences.length ?? 0);
+    });
     for (const e of tab.edges.values()) {
       const on = Boolean(trail?.edges.has(e.key));
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
@@ -2869,7 +2938,7 @@
     for (const e of [...tab.edges.values()]) {
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
     }
-    for (const from of inputsOf(tab.run, id)) {
+    for (const from of shownInputs(tab, id)) {
       if (!tab.edges.has(`${from}>${id}`)) addEdge(tab, from, id, 'context');
     }
     tab.run.lit = id;
@@ -2887,6 +2956,376 @@
   // A run lights its own answer, or again the one lit before a replay.
   /** @param {RunTab} tab */
   const lightRun = (tab) => lightAnswer(tab, tab.run.lit ?? RUN_ANSWER);
+
+  // ---------- panel: folding ----------
+  // A tab of more than FOLD_FROM_DOCS documents folds each run of those with nothing relevant into one row, as a diff
+  // folds unchanged lines: in each column a fold's node stands for its documents' nodes, and one line for all of
+  // theirs. A document with a snippet or a parse has a row of its own. Before a run, the first and last CONTEXT_DOCS
+  // documents stay in view between the rest's fold, and they stay until the run has read them.
+
+  /** @type {Set<string> | null} the lines drawn so far while a folded panel's lines are drawn again */
+  let redrawn = null;
+
+  /** @param {NodeKind} kind @param {FoldRow} row */
+  const foldId = (kind, row) => `${kind}-f${row.start}`;
+  /** @param {FoldRow} row */
+  const foldDocs = (row) => range(row.end - row.start + 1).map((k) => row.start + k);
+  // Document d's node of `kind`, whose id its call is kept under.
+  /** @param {Folding} fold @param {NodeKind} kind @param {number} d */
+  const callId = (fold, kind, d) => (kind === 'doc' ? docId(fold.files[d]) : `${kind}-${d}`);
+  /** @param {Tab} tab */
+  const foldingOf = (tab) => /** @type {Folding} */ (tab.fold);
+
+  // A tab's files, or its run's documents, fold once there are more than FOLD_FROM_DOCS of them.
+  /** @param {Tab} tab */
+  function startFolding(tab) {
+    const files = tab.run?.docs ?? tab.files;
+    const n = files.length;
+    if (n <= FOLD_FROM_DOCS) {
+      tab.fold = null;
+      return;
+    }
+    const kept = new Set(range(CONTEXT_DOCS).flatMap((k) => [k, n - 1 - k]));
+    const index = new Map(files.map((f, d) => [docId(f), d]));
+    tab.fold = { files, index, calls: new Map(), settled: new Map(), relevant: new Set(), kept, opened: new Set(), stopped: false, rows: [], foldOf: [] };
+    foldRows(tab.fold);
+  }
+
+  // The document a node of one document is about, or null for any other node.
+  /** @param {Tab} tab @param {string} id */
+  function docOf(tab, id) {
+    const [kind, d] = splitId(id);
+    if (kind === 'doc') return tab.fold?.index.get(id) ?? null;
+    return isPerDocument(kind) && Number.isInteger(d) ? d : null;
+  }
+
+  // The node that shows `id`: its own, or that of the fold its document is in.
+  /** @param {Tab} tab @param {string} id */
+  function shownAs(tab, id) {
+    const d = docOf(tab, id);
+    const row = d === null ? null : tab.fold?.foldOf[d];
+    return row ? foldId(splitId(id)[0], row) : id;
+  }
+
+  // The rows, top to bottom: a document with something relevant, or kept in view, has one of its own; each run of the
+  // others is a fold, or rows of their own when too few to fold.
+  /** @param {Folding} fold */
+  function foldRows(fold) {
+    const n = fold.files.length;
+    /** @param {number} d */
+    const own = (d) => fold.relevant.has(d) || fold.kept.has(d);
+    fold.rows = [];
+    fold.foldOf = Array(n).fill(null);
+    for (let d = 0; d < n; ) {
+      let end = d;
+      while (!own(d) && end + 1 < n && !own(end + 1)) end += 1;
+      if (own(d) || end - d + 1 < MIN_FOLD) {
+        for (let k = d; k <= end; k += 1) fold.rows.push({ doc: k });
+      } else {
+        const row = { start: d, end, open: fold.opened.has(d) };
+        fold.rows.push(row);
+        for (let k = d; k <= end; k += 1) {
+          if (row.open) fold.rows.push({ doc: k });
+          else fold.foldOf[k] = row;
+        }
+      }
+      d = end + 1;
+    }
+  }
+
+  // Each row a gap below the last. The answers centre on the rows as they'd be with every fold closed, so that
+  // opening one doesn't move them.
+  /** @param {Tab} tab */
+  function foldPlan(tab) {
+    const fold = foldingOf(tab);
+    const rounds = roundsOf(tab);
+    /** @param {NodeKind} kind */
+    const x = (kind) => column(kind, rounds) * GRID.colGap;
+    /** @type {PerDocumentKind[]} */
+    const perDocument = [...roundKinds(rounds), 'parsed'];
+    /** @type {Map<string, Point>} */
+    const layout = new Map();
+    let opened = 0;
+    fold.rows.forEach((row, i) => {
+      const y = i * GRID.rowGap;
+      if ('doc' in row) {
+        layout.set(docId(fold.files[row.doc]), { x: 0, y });
+        for (const kind of perDocument) layout.set(`${kind}-${row.doc}`, { x: x(kind), y });
+        return;
+      }
+      layout.set(foldId('doc', row), { x: 0, y });
+      if (row.open) opened += row.end - row.start + 1;
+      else for (const kind of perDocument) layout.set(foldId(kind, row), { x: x(kind), y });
+    });
+    layout.set('schema', { x: x('schema'), y: 0 });
+    const first = { x: x('answer'), y: ((fold.rows.length - opened - 1) * GRID.rowGap) / 2 };
+    range(tab.run?.answers.length ?? 1).forEach((k) => layout.set(answerId(k), answerSpot(first, k)));
+    return layout;
+  }
+
+  // The nodes of documents and of folds that the panel draws: each row's first, and in each other column once a
+  // call there has started.
+  /** @param {Tab} tab */
+  function foldedNodes(tab) {
+    const fold = foldingOf(tab);
+    /** @type {PerDocumentKind[]} */
+    const kinds = [...roundKinds(roundsOf(tab)), 'parsed'];
+    /** @type {Map<string, { kind: NodeKind, doc: number, row?: undefined } | { kind: NodeKind, row: FoldRow }>} */
+    const want = new Map();
+    for (const row of fold.rows) {
+      if ('doc' in row) {
+        want.set(docId(fold.files[row.doc]), { kind: 'doc', doc: row.doc });
+        for (const kind of kinds) if (fold.calls.has(`${kind}-${row.doc}`)) want.set(`${kind}-${row.doc}`, { kind, doc: row.doc });
+        continue;
+      }
+      want.set(foldId('doc', row), { kind: 'doc', row });
+      if (row.open) continue;
+      for (const kind of kinds) if (foldDocs(row).some((d) => fold.calls.has(`${kind}-${d}`))) want.set(foldId(kind, row), { kind, row });
+    }
+    return want;
+  }
+
+  /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {FoldRow} row @param {Point} pos @param {boolean} enter */
+  function createFoldNode(tab, id, kind, row, pos, enter) {
+    const el = h(
+      'div',
+      { class: ['node', 'fold', kind, enter && animates(tab) && 'enter'].filter(Boolean).join(' '), tabindex: '0', role: 'button', 'data-id': id },
+      h('span', { class: 'icon', html: kind === 'doc' ? ICONS.fold : iconFor(kind, false) }),
+      h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
+      h('span', { class: 'label name' }),
+      h('span', { class: 'label' }),
+    );
+    /** @type {PanelNode} */
+    const node = { id, kind, file: null, x: pos.x, y: pos.y, el, fold: row };
+    tab.nodes.set(id, node);
+    placeNode(node);
+    tab.nodesEl.append(el);
+    return node;
+  }
+
+  // Whether a fold's documents are read: all back from round 1 with nothing, or the run stopped first, or not yet.
+  /** @param {Tab} tab @param {FoldRow} row */
+  function foldStatus(tab, row) {
+    if (!tab.run) return '';
+    const fold = foldingOf(tab);
+    if (foldDocs(row).every((d) => fold.calls.get(`${roundKind(1)}-${d}`) === 'done')) return 'nothing relevant';
+    return fold.stopped ? 'stopped' : 'reading…';
+  }
+
+  // Before a run a fold counts its files; in a run, its first node says whether they are read.
+  /** @param {Tab} tab @param {PanelNode} node */
+  function labelFold(tab, node) {
+    const row = /** @type {FoldRow} */ (node.fold);
+    const count = plural(row.end - row.start + 1, tab.run ? 'document' : 'more document');
+    const status = foldStatus(tab, row);
+    const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
+    name.textContent = count;
+    sub.textContent = node.kind === 'doc' ? [status, row.open && 'fold'].filter(Boolean).join(' · ') : isRound(node.kind) ? roundName(node.kind) : '';
+    sub.hidden = !sub.textContent;
+    const column = isRound(node.kind) ? roundName(node.kind) : node.kind === 'parsed' ? 'parsed' : '';
+    const stopped = node.el.classList.contains('failed') && 'stopped';
+    node.el.setAttribute('aria-label', [count, column, status, stopped, row.open ? 'unfolded' : 'folded'].filter(Boolean).join(', '));
+    node.el.setAttribute('aria-expanded', String(row.open));
+    node.el.title = `${row.open ? 'fold' : 'unfold'} ${count}`;
+    node.el.classList.toggle('open', row.open);
+  }
+
+  // Draws a node of a folded panel as its calls stand: working while any is, stopped if any stopped, else back.
+  /** @param {Tab} tab @param {PanelNode} node */
+  function paintNode(tab, node) {
+    const fold = foldingOf(tab);
+    const docs = node.fold ? foldDocs(node.fold) : [/** @type {number} */ (docOf(tab, node.id))];
+    const calls = docs.map((d) => fold.calls.get(callId(fold, node.kind, d)));
+    if (calls.includes('working')) {
+      node.el.classList.remove('void', 'failed');
+      node.el.classList.add('working');
+    } else if (calls.some(Boolean)) {
+      const failed = calls.includes('failed');
+      const empty = !failed && node.kind !== 'doc' && (Boolean(node.fold) || isVoid(runTab(tab).run, node.id));
+      drawSettled(tab, node, { empty, failed });
+    }
+    if (!node.fold) return;
+    labelFold(tab, node);
+    const head = tab.nodes.get(foldId('doc', node.fold));
+    if (head && head !== node) labelFold(tab, head);
+  }
+
+  /** @param {Folding} fold @param {string} id @param {CallState} call */
+  function setCall(fold, id, call) {
+    const was = fold.calls.get(id);
+    fold.calls.set(id, call);
+    const back = (/** @type {CallState | undefined} */ state) => state === 'done' || state === 'failed';
+    if (back(was) === back(call)) return;
+    const [kind] = splitId(id);
+    fold.settled.set(kind, (fold.settled.get(kind) ?? 0) + (back(call) ? 1 : -1));
+  }
+
+  // Draws a call of a folded document on its fold; returns the fold's node, or null when the document has its own.
+  /** @param {Tab} tab @param {string} id */
+  function showFolded(tab, id) {
+    const row = tab.fold?.foldOf[docOf(tab, id) ?? -1];
+    if (!row) return null;
+    const [kind] = splitId(id);
+    const at = foldId(kind, row);
+    const node = tab.nodes.get(at) ?? createFoldNode(tab, at, kind, row, /** @type {Point} */ (tab.layout.get(at)), true);
+    paintNode(tab, node);
+    return node;
+  }
+
+  // Settles a call of a folded panel; true once that is drawn: on its fold, or by drawing the rows again because its
+  // document comes out of its fold with something relevant, or one kept in view goes into one with nothing.
+  /** @param {Tab} tab @param {string} id @param {{ empty: boolean, failed: boolean }} how */
+  function settleFolded(tab, id, { empty, failed }) {
+    const fold = foldingOf(tab);
+    const node = tab.nodes.get(id);
+    if (node?.fold) {
+      stopFold(tab, node, failed);
+      return true;
+    }
+    const d = docOf(tab, id);
+    if (d === null) return false;
+    setCall(fold, id, failed ? 'failed' : 'done');
+    const [kind] = splitId(id);
+    const comesOut = kind !== 'doc' && !empty && !failed && !fold.relevant.has(d);
+    const goesIn = kind === roundKind(1) && empty && !failed && fold.kept.has(d);
+    if (comesOut) fold.relevant.add(d);
+    if (!comesOut && !goesIn) return Boolean(showFolded(tab, id));
+    fold.kept.delete(d);
+    refold(tab);
+    return true;
+  }
+
+  // The run stopped while a fold's calls were going: each of them stops too, or, reading a file, is done.
+  /** @param {Tab} tab @param {PanelNode} node @param {boolean} failed */
+  function stopFold(tab, node, failed) {
+    const fold = foldingOf(tab);
+    for (const d of foldDocs(/** @type {FoldRow} */ (node.fold))) {
+      const id = callId(fold, node.kind, d);
+      if (fold.calls.get(id) === 'working') setCall(fold, id, failed ? 'failed' : 'done');
+    }
+    paintNode(tab, node);
+  }
+
+  // A stopped run's folds say so, where their documents weren't all read.
+  /** @param {Tab} tab */
+  function foldsStopped(tab) {
+    foldingOf(tab).stopped = true;
+    for (const node of tab.nodes.values()) if (node.fold) labelFold(tab, node);
+  }
+
+  // What a call was shown, as the panel draws it. On a folded panel, a call shown every document's output is drawn
+  // shown each row's, and one shown the others' snippets, each relevant document's, which has a row of its own.
+  /** @param {RunTab} tab @param {string} id */
+  function shownInputs(tab, id) {
+    const { run, fold } = tab;
+    if (!fold) return inputsOf(run, id);
+    const [kind, i] = splitId(id);
+    const final = finalRound(run);
+    /** @param {PerDocumentKind} step @param {(docs: number[]) => boolean} [keep] */
+    const eachRow = (step, keep = () => true) =>
+      fold.rows.flatMap((row) => {
+        if ('doc' in row) return keep([row.doc]) ? [`${step}-${row.doc}`] : [];
+        return !row.open && keep(foldDocs(row)) ? [foldId(step, row)] : [];
+      });
+    if (kind === 'parsed' || kind === 'schema') return eachRow(final);
+    if (kind === 'answer') return [...eachRow(final), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
+    const previous = previousRound(kind);
+    if (!previous) return [];
+    const shown = [...fold.relevant].filter((j) => j !== i && summariesIn(run, previous)[j].summary);
+    return shown.sort((a, b) => a - b).map((j) => `${previous}-${j}`);
+  }
+
+  // Every line of a folded panel, drawn again once its rows change: what each node's call was shown, and once back,
+  // what it cites. A line still wanted stays as it is drawn; the rest go.
+  /** @param {Tab} tab */
+  function redrawFoldedLines(tab) {
+    if (!tab.run) {
+      for (const e of [...tab.edges.values()]) dropEdge(tab, e);
+      return;
+    }
+    const runtab = runTab(tab);
+    const fold = foldingOf(tab);
+    redrawn = new Set();
+    for (const node of tab.nodes.values()) {
+      if (!isPerDocument(node.kind)) continue;
+      linesInto(runtab, `${node.kind}-${node.fold ? node.fold.start : docOf(tab, node.id)}`);
+    }
+    if (tab.nodes.has('schema')) linesInto(runtab, 'schema');
+    const lit = tab.run.lit ?? RUN_ANSWER;
+    if (tab.nodes.has(lit)) for (const from of shownInputs(runtab, lit)) addEdge(tab, from, lit, 'context');
+    for (const [id, call] of fold.calls) if (call === 'done' && splitId(id)[0] !== 'doc') showCites(runtab, id);
+    for (const node of tab.nodes.values()) if (node.kind === 'answer' && landed(tab, node.id)) showCites(runtab, node.id);
+    for (const e of [...tab.edges.values()]) if (!redrawn.has(e.key)) dropEdge(tab, e);
+    redrawn = null;
+  }
+
+  // Draws a folded panel's rows again once they change: a node leaving a fold slides out of where the fold was drawn,
+  // the rows below move, and the lines are drawn again. A node not drawn now starts where `was` has it, if anywhere.
+  // With `keepView` the view stays where it is; else the panel fits again unless the user moved it.
+  /** @param {Tab} tab @param {{ keepView?: boolean, was?: Map<string, Point>, animate?: boolean }} [options] */
+  function refold(tab, { keepView = false, was = new Map(), animate = true } = {}) {
+    const fold = foldingOf(tab);
+    const drawn = new Map([...was, ...[...tab.nodes.values()].map((n) => /** @type {[string, Point]} */ ([n.id, drawnAt(n)]))]);
+    const folded = fold.foldOf;
+    foldRows(fold);
+    tab.layout = foldPlan(tab);
+    const want = foldedNodes(tab);
+    for (const n of [...tab.nodes.values()]) if ((n.kind === 'doc' || isPerDocument(n.kind)) && !want.has(n.id)) removeNode(tab, n.id);
+    for (const [id, w] of want) {
+      let node = tab.nodes.get(id);
+      if (node && w.row) node.fold = w.row;
+      if (!node) {
+        const d = w.row ? w.row.start : w.doc;
+        const at = drawn.get(folded[d] ? foldId(w.kind, folded[d]) : callId(fold, w.kind, d));
+        const pos = at ?? /** @type {Point} */ (tab.layout.get(id));
+        node = w.row ? createFoldNode(tab, id, w.kind, w.row, pos, !at) : createNode(tab, id, w.kind, pos, { file: fold.files[w.doc], enter: !at });
+      }
+      paintNode(tab, node);
+    }
+    redrawFoldedLines(tab);
+    if (tab.run?.lit && landed(tab, tab.run.lit)) lightPath(runTab(tab));
+    // The panel fits as the nodes start to slide: rows change faster than a slide ends.
+    slideToLayout(tab, () => {});
+    if (!keepView && tab === state.shown) fitShown(animate);
+  }
+
+  // A fold opens, or folds again, in place. The view stays, but isn't marked as moved, so the panel fits again when it
+  // next would; an opened fold low in the panel glides up, so that the rows it opened show.
+  /** @param {Tab} tab @param {FoldRow} row */
+  function toggleFold(tab, row) {
+    const fold = foldingOf(tab);
+    for (const d of foldDocs(row)) {
+      if (row.open) fold.opened.delete(d);
+      else fold.opened.add(d);
+    }
+    refold(tab, { keepView: true });
+    const head = tab.nodes.get(foldId('doc', row));
+    if (!head) return;
+    head.el.focus({ preventScroll: true });
+    const { view } = tab;
+    const top = panel.clientHeight * UNFOLD_TOP;
+    if (row.open || view.y + head.y * view.k <= top) return;
+    view.y = top - head.y * view.k;
+    glide();
+    applyView();
+  }
+
+  // A folded tab's rows. Before a run they are drawn again as its files change, and give way to a node per file once
+  // too few are left to fold.
+  /** @param {Tab} tab @param {Map<string, Point>} at @param {boolean} animate */
+  function syncFolded(tab, at, animate) {
+    if (!tab.run && tab.fold?.files !== tab.files) startFolding(tab);
+    if (tab.fold && !tab.run) refold(tab, { was: at, animate });
+    if (!tab.fold) {
+      for (const n of [...tab.nodes.values()]) if (n.fold) removeNode(tab, n.id);
+      for (const f of tab.files) if (!tab.nodes.has(docId(f))) addDocNode(tab, f, at.get(docId(f)));
+      tab.layout = plan(tab, tidyOrigin);
+      slideToLayout(tab, () => tab === state.shown && fitShown(animate));
+    }
+    if (tab !== state.shown) return;
+    updateHint();
+    fitShown(animate);
+  }
 
   // ---------- inspector ----------
 
@@ -3126,6 +3565,8 @@
   // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
   /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null }} [options] */
   function openInspector(id, { focus = false, at = null } = {}) {
+    const fold = state.shown.nodes.get(id)?.fold;
+    if (fold) return toggleFold(state.shown, fold);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
@@ -3171,6 +3612,9 @@
   /** @param {string} id @param {TextRange | null} [at] */
   function jumpTo(id, at = null) {
     const { view } = state.shown;
+    // A node in a fold is shown by opening the fold first.
+    const fold = state.shown.nodes.has(id) ? null : state.shown.nodes.get(shownAs(state.shown, id))?.fold;
+    if (fold) toggleFold(state.shown, fold);
     const node = state.shown.nodes.get(id);
     if (!node) return;
     const pw = panel.clientWidth;
@@ -3488,7 +3932,7 @@
   function showInputs(tab, to) {
     const own = ownDocument(tab.run, to);
     if (own) addEdge(tab, own, to, 'self', 'fade');
-    for (const from of inputsOf(tab.run, to)) addEdge(tab, from, to, 'context');
+    for (const from of shownInputs(tab, to)) addEdge(tab, from, to, 'context');
   }
 
   /** @param {RunTab} tab @param {string} to */
@@ -3502,7 +3946,8 @@
   /** @param {Tab} tab @param {NodeKind} kind */
   const hasNodes = (tab, kind) => [...tab.nodes.values()].some((n) => n.kind === kind);
   /** @param {Tab} tab @param {NodeKind} kind */
-  const settledCount = (tab, kind) => [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
+  const settledCount = (tab, kind) =>
+    tab.fold ? (tab.fold.settled.get(kind) ?? 0) : [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
 
   /** @param {StageKind} kind */
   const phaseOf = (kind) => (isRound(kind) ? roundName(kind) : STAGE_PHASE[kind]);
@@ -3528,8 +3973,14 @@
 
   /** @param {RunTab} tab @param {string} id */
   function appear(tab, id) {
-    const [kind, i] = splitId(id);
     addNode(tab, id);
+    linesInto(tab, id);
+  }
+
+  // The lines into a node as its call starts: from its document or, for a parse, the structure, and what it was shown.
+  /** @param {RunTab} tab @param {string} id */
+  function linesInto(tab, id) {
+    const [kind, i] = splitId(id);
     if (kind === roundKind(1)) return addEdge(tab, docId(tab.run.docs[i]), id, 'flow', 'draw');
     if (kind === 'parsed') addEdge(tab, 'schema', id, 'flow', 'draw');
     showInputs(tab, id);
@@ -3613,6 +4064,7 @@
     for (const node of tab.nodes.values()) {
       if (node.el.classList.contains('working')) settleNode(tab, node.id, { failed: node.kind !== 'doc' });
     }
+    if (tab.fold) foldsStopped(tab);
     sayEnding(narr, ending);
     tabStatus(tab, ...errorLine(status));
   }
@@ -3858,6 +4310,9 @@
     tab.userMoved = false;
     const narr = (tab.narr = narrator(tab, tab.turn, 'starting'));
     tabStatus(tab, 'running · starting');
+    // A folded tab's rows carry over into its run, each drawn where it was, so that starting doesn't jump.
+    startFolding(tab);
+    if (tab.fold) refold(tab, { was: at });
     syncDocNodes(tab, { at, animate: true, replan: true });
     mode.play(tab, narr);
     updateComposer();
@@ -4124,13 +4579,14 @@
   /** @param {LoadedFile} file */
   function openFile(file) {
     showTab('files');
-    const node = state.shown.nodes.get(docId(file));
+    // A folded document is shown by its fold until it is shown in the panel.
+    const shown = state.shown.nodes.has(shownAs(state.shown, docId(file)));
     fill(
       $('file-view'),
       h('button', { class: 'btn back', type: 'button', id: 'file-back', onclick: closeFile }, '‹ all files'),
       h('div', { class: 'insp-title' }, h('span', { class: 'g' }, '● '), file.name),
       markedFile(state.shown, file),
-      node ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(node.id) }, 'show in panel ›') : null,
+      shown ? h('button', { class: 'btn back', type: 'button', onclick: () => jumpTo(docId(file)) }, 'show in panel ›') : null,
     );
     $('file-list-view').hidden = true;
     $('file-view').hidden = false;
@@ -4822,7 +5278,7 @@
   /** @param {PointerEvent} e */
   function overTrash(e) {
     const { node } = gesture;
-    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node?.kind === 'doc';
+    const droppable = gesture.mode === 'drag' && gesture.moved && !trash.hidden && node?.kind === 'doc' && !node.fold;
     if (!droppable) return false;
     const r = trash.getBoundingClientRect();
     return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
@@ -4862,6 +5318,7 @@
     gesture.moved = true;
     if (gesture.mode === 'drag') {
       const node = /** @type {PanelNode} */ (gesture.node);
+      state.shown.placed.add(node.id);
       node.x = gesture.from.x + dx / view.k;
       node.y = gesture.from.y + dy / view.k;
       placeNode(node);

@@ -5,10 +5,10 @@ its token, then serves until killed.
 The model answers every stage as one would, citing real ids, so a run draws its whole
 panel: each summary is its document's first line that is not ``QUIET`` (none if all
 are), quoting that line, and each parse its first line as a memo's title, its other
-lines nested under it; each round after the first cites the first summary it is shown,
-each parse its own document's note, and the answer the first two documents' summaries
-and parses. It refuses a document over ``PART_CHARS`` as too long, so that r3con reads
-it in parts.
+lines nested under it, or nothing for a document holding ``UNPARSED``; each round
+after the first cites the first summary it is shown, each parse its own document's
+note, and the answer the first two documents' summaries and parses. It refuses a
+document over ``PART_CHARS`` as too long, so that r3con reads it in parts.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding
@@ -50,6 +50,7 @@ RELEASE_POLL_SECONDS = 0.05
 OFF_SCHEMA = "(the model answers off schema)"
 EMPTY_REPLY = "{}"
 QUIET = "(nothing relevant here)"
+UNPARSED = "(nothing to parse here)"
 PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
@@ -102,6 +103,8 @@ def content(request: dict[str, Any]) -> str:
         heading = PARSE_HEADING.match(user)
         own = [heading[1]] if heading else []
         text = PARSE_HEADING.sub("", user)
+        if UNPARSED in text:
+            return json.dumps({"parse": {"memos": []}, "provenance_ids": []})
         lines = [{"text": line} for line in text.splitlines() if line.strip()][1:]
         parse = {"memos": [{"title": first_line(text), "lines": lines}]}
         return json.dumps({"parse": parse, "provenance_ids": own})
