@@ -3934,10 +3934,14 @@
   /** @param {boolean} stopped @param {{ stage: string | null, error: string }} event @returns {Ending} */
   const endingOf = (stopped, { stage, error }) => ({ outcome: inStage(stopped ? 'stopped' : 'failed', stage), error: stopped ? '' : error });
 
+  // While a tab with no files reads its first ones, its panel and status say what its files pane says.
+  /** @param {Tab} tab @param {string} otherwise */
+  const readingOr = (tab, otherwise) => (tab.reading > 0 && tab.filesSaid ? tab.filesSaid : otherwise);
+
   function readyStatus() {
     if (state.shown.run) return;
     if (connectionProblem) return errorStatus(connectionProblem);
-    if (!state.shown.files.length) return setStatus(DROP_FILES);
+    if (!state.shown.files.length) return setStatus(readingOr(state.shown, NO_FILES));
     setStatus(`${fileCount()} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
@@ -3973,7 +3977,7 @@
     // Not while a batch is read: its landing would end undo, and what remove all took couldn't be put back.
     const offered = !trash.hidden && !reading;
     $('panel-hint').hidden = Boolean(run);
-    $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : DROP_FILES;
+    $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : readingOr(state.shown, DROP_FILES);
     for (const button of removeAllButtons) {
       button.hidden = !offered;
       button.textContent = removed ? UNDO : REMOVE_ALL;
@@ -4000,7 +4004,7 @@
     if (asks) {
       mode.ask(runTab(state.shown), question);
     } else if (!state.shown.files.length) {
-      addTurn(state.shown, question).append(line('main', 'Add files in the files tab first, then ask again.', { dim: true }));
+      addTurn(state.shown, question).append(line('main', 'Drop files or folders first, then ask again.', { dim: true }));
     } else {
       startRun(question);
     }
@@ -4786,6 +4790,7 @@
       .finally(() => {
         tab.reading -= 1;
         updateHint();
+        readyStatus();
       });
   }
 
@@ -4849,7 +4854,11 @@
       else if (tab.run) refuse(RAN_FIRST, r.name);
       else read.push(loaded({ name: r.name, size: r.size, text: r.text, sample: false }));
     };
-    if (picked.length) tellFiles(tab, { filesSaid: `Reading ${plural(picked.length, 'file')}…` });
+    if (picked.length) {
+      tellFiles(tab, { filesSaid: `Reading ${plural(picked.length, 'file')}…` });
+      updateHint();
+      readyStatus();
+    }
     const unpacked = await Promise.all(picked.map(readDocuments));
     if (!state.tabs.includes(tab)) return;
     unpacked.flatMap((u) => u.docs).forEach(take);

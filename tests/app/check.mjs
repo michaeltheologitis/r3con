@@ -158,7 +158,7 @@ const SCHEME_PAGE_COLORS = {
 };
 const pageColorsOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
-const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
+const ADD_FILES_FIRST = 'Drop files or folders first, then ask again.';
 // The page's intro, live and in the prototype, for n documents.
 const loadedLine = (n) => (n === 1 ? 'Loaded 1 document.' : `Loaded ${n} documents.`);
 // The shown tab's chat: each tab has its own, and the others are hidden.
@@ -324,6 +324,9 @@ const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
 const NEW_TAB = 'new tab';
 const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
 const DROP_FILES = 'drop files and folders here';
+const NO_FILES = 'no files yet';
+// How far off the panel's centre its empty line may sit and still count as centred.
+const CENTRED_PX = 1;
 // Remove all's label and name, and those of undo, which takes its place once it has removed n documents.
 const REMOVE_ALL = 'remove all';
 const REMOVE_ALL_NAME = 'remove all documents';
@@ -4208,7 +4211,7 @@ async function tabFiles() {
       nodes: 0,
       can: false,
       hint: DROP_FILES,
-      status: DROP_FILES,
+      status: NO_FILES,
     };
     const emptyName = '+ on a tab with no files opens an empty tab, shows it with the focus on it, and shows its empty files pane';
     check('tab files', emptyName, isDeepStrictEqual(empty, emptyExpected), JSON.stringify(empty));
@@ -4633,16 +4636,6 @@ function postsOf(page) {
   return posts;
 }
 
-// How far the empty panel's line is from the panel's centre, across and down.
-function hintOffCentre() {
-  const mid = (id) => {
-    const r = document.getElementById(id).getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  };
-  const [text, panel] = [mid('panel-hint-text'), mid('panel')];
-  return { x: Math.abs(text.x - panel.x), y: Math.abs(text.y - panel.y) };
-}
-
 // The page as r3con app opens it: an empty tab, whose panel takes files and folders dropped on it until it has run.
 async function liveStart(url) {
   await withPage('live', { url, sample: false }, async (page) => {
@@ -4655,11 +4648,12 @@ async function liveStart(url) {
       status: await page.textContent('#run-status'),
       hint: await page.innerText('#panel-hint'),
     };
-    const empty = { nodes: 0, files: '0', question: '', chat: 0, tabs: [['1 new', true]], status: DROP_FILES, hint: DROP_FILES };
-    const startName = 'r3con app opens on an empty tab: no files, no run, no question and nothing in the chat, the status and the panel saying to drop files';
+    const empty = { nodes: 0, files: '0', question: '', chat: 0, tabs: [['1 new', true]], status: NO_FILES, hint: DROP_FILES };
+    const startName = 'r3con app opens on an empty tab: no files, no run, no question and nothing in the chat, the status saying so and the panel to drop files';
     check('live', startName, isDeepStrictEqual(start, empty), JSON.stringify(start));
-    const off = await page.evaluate(hintOffCentre);
-    check('live', "the empty panel's line is centred in it", off.x <= 1 && off.y <= 1, JSON.stringify(off));
+    const [text, middle] = [await boxCentre(page, '#panel-hint-text'), await boxCentre(page, '#panel')];
+    const off = { x: Math.abs(text.x - middle.x), y: Math.abs(text.y - middle.y) };
+    check('live', "the empty panel's line is centred in it", off.x <= CENTRED_PX && off.y <= CENTRED_PX, JSON.stringify(off));
 
     const over = await page.evaluate(dropItems, { on: 'panel', items: [['panel_memo.txt', 'A memo dropped on the panel.\n'], DROPPED_FOLDER] });
     await removeButton(page, 'panel_memo.txt').waitFor();
@@ -4677,6 +4671,28 @@ async function liveStart(url) {
     const lockedName = 'once the tab has run, a file and a folder dropped on its panel are refused unread';
     const locked = done && late.said === DROP_LOCKED && isDeepStrictEqual(refused, { error: `Not added: late.txt, reports. ${LOCKED_DROP}`, names });
     check('live', lockedName, locked, `${late.said}; ${JSON.stringify(refused)}`);
+  });
+}
+
+// Holds a PDF's text at the server: while an empty tab reads its first files, its panel and status say so, as its files
+// pane does, then count them once they are added.
+async function liveFirstRead(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const release = await holdExtraction(page);
+    await page.evaluate(dropItems, { on: 'panel', items: [['01_memo.pdf', { bytes: [...documents['01_memo.pdf'].buffer] }]] });
+    const lines = async () => ({ hint: await page.innerText('#panel-hint'), status: await page.textContent('#run-status'), said: await filesSaid(page) });
+    const reading = 'Reading 1 file…';
+    await becomes(page, (text) => document.getElementById('files-said').textContent === text, reading);
+    const whileRead = await lines();
+    release();
+    await removeButton(page, '01_memo.pdf').waitFor({ timeout: LIVE_RUN_MS });
+    const added = await lines();
+    const expected = {
+      whileRead: { hint: reading, status: reading, said: reading },
+      added: { hint: `1 document · ${REMOVE_ALL}`, status: `1 document ready · ${DEFAULT_MODEL}`, said: '1 file added.' },
+    };
+    const name = "while an empty tab reads its first files, its panel and status say so as its files pane does, and count them once they are added";
+    check('live', name, isDeepStrictEqual({ whileRead, added }, expected), JSON.stringify({ whileRead, added }));
   });
 }
 
@@ -5855,7 +5871,7 @@ async function liveNames(url) {
   });
 }
 
-// A + tab's run and ask are sent its own files, and tab 1 keeps the sample memos, not run.
+// A + tab's run and ask are sent its own files, and tab 1 keeps its memos, not run.
 async function liveTabFiles(url) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
@@ -5887,11 +5903,11 @@ async function liveTabFiles(url) {
     const pane = await paneOf(page);
     const label = (await page.evaluate(tabRow))[0].label;
     const untouched = label === FIRST_TAB_BEFORE_RUN && pane.removes === SAMPLE_DOCS && pane.adds && pane.locked === null;
-    check('live', 'tab 1 keeps the sample memos, not run and not locked', untouched, `${label}; ${JSON.stringify(pane)}`);
+    check('live', 'tab 1 keeps its memos, not run and not locked', untouched, `${label}; ${JSON.stringify(pane)}`);
   });
 }
 
-// A sample memo dropped on the can is left out of the next run.
+// A memo dropped on the can is left out of the next run.
 async function liveTrash(url) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const docs = recordedSample().docs;
@@ -6396,6 +6412,7 @@ async function liveElsewhere() {
 async function live() {
   await withFakeServer(async (url) => {
     await liveStart(url);
+    await liveFirstRead(url);
     await liveCutStream(url);
     await liveAnswers(url);
     await liveLog(url);
