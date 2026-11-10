@@ -285,7 +285,8 @@ p { margin: 0; }
   color: var(--dim);
   pointer-events: none;
 }
-.trash[hidden] + .panel-hint { left: 1.5ch; }
+/* Shown without the can only for a tab with no files: then it is the panel's one line, a drop's invitation. */
+.trash[hidden] + .panel-hint { left: 0; right: 0; top: 50%; translate: 0 -50%; text-align: center; }
 .panel-hint .remove-all { pointer-events: auto; }
 .trash:has(+ .panel-hint .remove-all:is(:hover, :focus-visible)) { color: var(--fg); }
 .panel-tools {
