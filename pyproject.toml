@@ -52,7 +52,9 @@ app = [
 # gives you an environment that can run examples/quickstart.ipynb as a notebook: pick
 # .venv as the kernel and go. `pip` is here because editors shell out to it when they
 # offer to fix a kernel themselves, and a uv-made venv has none. The rest are the
-# checks and the test runner, the same ones CI runs, and the app extra, for its tests.
+# checks and the test runner, the same ones CI runs, the app extra, for its tests, and
+# Toga's core, for the Mac app's window (r3con.app.window), whose Mac backend only the
+# Mac app bundles.
 [dependency-groups]
 dev = [
     "r3context[app]",
@@ -65,6 +67,7 @@ dev = [
     "pytest-httpserver>=1.1",
     "pytest-socket>=0.8",
     "ruff>=0.16",
+    "toga-core>=0.5.7,<0.6",
 ]
 
 [project.scripts]
@@ -80,6 +83,24 @@ Repository = "https://github.com/michaeltheologitis/r3con"
 [tool.uv.build-backend]
 module-name = "r3con"
 module-root = "src"
+
+# The Mac app, which .github/workflows/mac-app.yml builds: Briefcase bundles Python, this
+# project with its app extra, and Toga, and starts the app as `python -m r3con`. Its
+# version, description, license and author are [project]'s. Its bundle identifier,
+# `bundle` and the app's name joined, must never change; formal_name, the name it
+# shows, can.
+[tool.briefcase]
+bundle = "io.github.michaeltheologitis"
+
+[tool.briefcase.app.r3con]
+formal_name = "r3con"
+# Briefcase installs with --only-binary, which a local directory is exempt from.
+requires = [".[app]"]
+
+[tool.briefcase.app.r3con.macOS]
+requires = ["toga-cocoa>=0.5.7,<0.6"]
+# The window loads its page from the app's own server, over http on 127.0.0.1.
+info.NSAppTransportSecurity.NSAllowsLocalNetworking = true
 
 [tool.ruff]
 extend-exclude = ["src/r3con/runtime/python_executor.py"]
