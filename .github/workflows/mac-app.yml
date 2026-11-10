@@ -66,8 +66,6 @@ jobs:
         run: |
           uv export --locked --no-dev --extra app --group mac-app --no-emit-project --output-file "$CONSTRAINTS"
           uv export --locked --only-group build-backend --no-emit-project --output-file "$BUILD_CONSTRAINTS"
-          sed -i '' 's/sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67/sha256:0000000000000000000000000000000000000000000000000000000000000000/' "$CONSTRAINTS"
-          grep -A3 '^jinja2==' "$CONSTRAINTS"
       - name: Install Briefcase from its own uv.lock, by hash
         run: |
           uv export --project .github/briefcase --locked --no-emit-project --output-file "$RUNNER_TEMP/briefcase.txt"
