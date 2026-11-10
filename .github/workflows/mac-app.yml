@@ -1,10 +1,6 @@
 name: Mac app
 
-# The Mac app (pyproject.toml's [tool.briefcase]): build it and its .dmg, install the app
-# from the .dmg, check its signature, the bundle's own Python and the app's window on the
-# runner, and keep the .dmg as an artifact. The app is signed ad hoc, except in a run
-# with `sign`: that one waits for approval in the macos-signing environment, signs with
-# its Developer ID, has Apple notarize the .dmg, and checks that Gatekeeper accepts both.
+# Signed ad hoc unless `sign` is set, so that only an approved run uses the signing key.
 on:
   pull_request:
     paths:
@@ -46,8 +42,7 @@ jobs:
     runs-on: macos-15
     # A signed run can wait up to two hours for Apple's notarization.
     timeout-minutes: ${{ inputs.sign && 150 || 30 }}
-    # Only a run with `sign` takes the environment, with its approval and its secrets:
-    # an empty name takes none.
+    # An empty name is no environment: no approval and no secrets.
     environment: ${{ inputs.sign && 'macos-signing' || '' }}
     defaults:
       run:
@@ -76,9 +71,7 @@ jobs:
           uv pip install --python "$RUNNER_TEMP/briefcase" --require-hashes --only-binary :all: -r "$RUNNER_TEMP/briefcase.txt"
       - name: Build the app
         run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
-      # After the build, so that the key is not there while pip and the build backend
-      # run. codesign finds an identity only in a keychain on the search list, and uses
-      # its key without a prompt only for the tools that the key's partition list names.
+      # After the build, so that the key is absent while pip and the build backend run.
       - name: Import the Developer ID certificate into a keychain of its own
         if: inputs.sign
         id: identity
@@ -107,8 +100,6 @@ jobs:
           fi
           echo "sha1=$(echo "$identity" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
           echo "name=$(echo "$identity" | sed -E 's/^[^"]*"(.*)"$/\1/')" >> "$GITHUB_OUTPUT"
-      # With an identity, Briefcase signs every Mach-O file inside out, then the app and
-      # the .dmg, with the hardened runtime and its default entitlements.
       - name: Package the app and its .dmg
         env:
           IDENTITY: ${{ steps.identity.outputs.sha1 }}
@@ -118,9 +109,7 @@ jobs:
           else
             "$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input
           fi
-      # Briefcase notarizes only with a notarytool keychain profile; this step gives
-      # notarytool the API key instead. Notarizing the .dmg notarizes the app inside it,
-      # and macOS takes the ticket stapled to the .dmg when the .dmg is opened.
+      # Briefcase notarizes only with a keychain profile; notarytool takes the API key.
       - name: Notarize the .dmg and staple its ticket
         if: inputs.sign
         id: notarize
@@ -229,8 +218,8 @@ jobs:
           echo "$keys"
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           kill "$pid"
-      # An app that changes its own files breaks its signature for every user who runs
-      # it from a folder they can write to.
+          wait "$pid" || true
+      # An app that writes into its own bundle breaks its signature.
       - name: Check that running the app left its signature intact
         run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
       - name: The app's log

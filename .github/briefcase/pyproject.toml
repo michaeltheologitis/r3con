@@ -1,7 +1,4 @@
-# Briefcase, which builds the Mac app (.github/workflows/mac-app.yml), locked apart from
-# r3con's own uv.lock so that neither constrains the other's versions: the workflow
-# installs it from this directory's uv.lock, by hash, into an environment of its own.
-# Briefcase bundles the Python it runs on, 3.14.
+# Locked apart from r3con's uv.lock, so that neither constrains the other's versions.
 [project]
 name = "r3con-briefcase"
 version = "0"
