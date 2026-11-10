@@ -1591,7 +1591,7 @@
   const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
-  const ADD_FILES = `${NO_FILES} · add them in the files tab`;
+  const DROP_FILES = 'drop files and folders here';
   const REMOVE_ALL = 'remove all';
   const REMOVE_ALL_NAME = 'remove all documents';
   const UNDO = 'undo';
@@ -1757,9 +1757,10 @@
    *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
    */
   const state = {
-    // Every tab, in order; init lists the first, the shown tab, with the sample memos.
+    // Every tab, in order; init lists the first, the shown tab: empty, or in the prototype the sample memos, which its
+    // recorded run needs.
     tabs: [],
-    shown: newTab(SAMPLE_FILES),
+    shown: newTab(live ? [] : SAMPLE_FILES),
     // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
     streams: new Set(),
@@ -3936,7 +3937,7 @@
   function readyStatus() {
     if (state.shown.run) return;
     if (connectionProblem) return errorStatus(connectionProblem);
-    if (!state.shown.files.length) return setStatus(ADD_FILES);
+    if (!state.shown.files.length) return setStatus(DROP_FILES);
     setStatus(`${fileCount()} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
@@ -3972,7 +3973,7 @@
     // Not while a batch is read: its landing would end undo, and what remove all took couldn't be put back.
     const offered = !trash.hidden && !reading;
     $('panel-hint').hidden = Boolean(run);
-    $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : ADD_FILES;
+    $('panel-hint-text').textContent = listed.length ? `${count}${removed ? ' removed' : ''}${offered ? ' · ' : ''}` : DROP_FILES;
     for (const button of removeAllButtons) {
       button.hidden = !offered;
       button.textContent = removed ? UNDO : REMOVE_ALL;
@@ -5926,7 +5927,7 @@
     fitSideToFrame();
     removeStored(RETIRED_SETTINGS_KEY);
     buildSettings();
-    questionEl.value = SAMPLE.question;
+    if (!live) questionEl.value = SAMPLE.question;
     openTab(state.shown);
     showTabContents(state.shown);
     syncDocNodes(state.shown);
