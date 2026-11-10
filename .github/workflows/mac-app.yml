@@ -116,8 +116,7 @@ jobs:
       - name: Package the app and its .dmg
         if: ${{ !inputs.sign }}
         run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input'
-      # Signed, the app is notarized and stapled before it is packed, so that it keeps
-      # a ticket of its own once out of the .dmg. The zip is what notarytool takes.
+      # Signed, the app is stapled before it is packed, so that it keeps a ticket out of the .dmg.
       - name: Sign the app and zip it
         if: inputs.sign
         env:
@@ -130,7 +129,7 @@ jobs:
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-        run: .github/notarize.sh dist/*.app.zip build/r3con/macos/app/R3Con.app
+        run: .github/notarize.sh dist/*.app.zip build/r3con/macos/app/*.app
       # Briefcase signs the app again before packing it, which would invalidate its ticket.
       - name: Pack the app into a signed .dmg
         if: inputs.sign

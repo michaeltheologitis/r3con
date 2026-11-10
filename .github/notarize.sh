@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Usage: notarize.sh FILE [TARGET]
-# Notarizes FILE with the App Store Connect API key in the environment, then staples
-# its ticket onto TARGET: FILE itself by default, or the app that a zip FILE holds.
+# Usage: notarize.sh FILE [TARGET]: notarizes FILE, then staples its ticket onto TARGET (FILE by default).
 # Briefcase notarizes only with a keychain profile; notarytool takes the API key.
-set -eo pipefail
+set -euo pipefail
 
 file=$1
 target=${2:-$1}
