@@ -1249,7 +1249,7 @@ async function load() {
 async function beforeRun() {
   await withPage('before a run', { sample: false }, async (page) => {
     const names = { title: await page.title(), brand: await page.textContent('.brand') };
-    check('before a run', "the browser tab is titled with the page's brand, ❀ R3Con", names.title === '❀ R3Con' && names.title === names.brand, JSON.stringify(names));
+    check('before a run', 'the browser tab is titled ❀ R3Con and the header brand is ❀ r3con', isDeepStrictEqual(names, { title: '❀ R3Con', brand: '❀ r3con' }), JSON.stringify(names));
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
