@@ -36,8 +36,8 @@ def main(app: Path) -> None:
     sys.path.append(str(resources / "app"))
     site.addsitedir(str(resources / "app_packages"))
     for name in BUNDLED:
-        where = Path(importlib.import_module(name).__file__ or "")
-        if resources not in where.parents:
+        where = Path(importlib.import_module(name).__file__ or "").resolve()
+        if not where.is_relative_to(resources):
             sys.exit(f"{name} is imported from {where}, not from {app}")
         print(f"{name}: {where.relative_to(app)}")
 
@@ -69,4 +69,4 @@ def main(app: Path) -> None:
 
 
 if __name__ == "__main__":
-    main(Path(sys.argv[1]))
+    main(Path(sys.argv[1]).resolve())
