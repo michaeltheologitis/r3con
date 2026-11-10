@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to PyPI and tag the release (only on main)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -31,6 +37,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Check the version
         id: version
+        env:
+          PUBLISH: ${{ inputs.publish }}
         run: |
           version="$(uv version --short)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -48,6 +56,25 @@ jobs:
               exit 1
             fi
           fi
+          if [ "$PUBLISH" = true ]; then
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              echo "::error::publishing needs main; this run is on $GITHUB_REF"
+              exit 1
+            fi
+            if [ "$(git log -1 --format=%H -S"version = \"$version\"" -- pyproject.toml)" != "$GITHUB_SHA" ]; then
+              echo "::error::main's head is not the commit that set $version; dispatch right after the release commit merges."
+              exit 1
+            fi
+            if git show-ref --verify --quiet "refs/tags/v$version"; then
+              echo "::error::tag v$version already exists; bump the version first."
+              exit 1
+            fi
+          fi
+          release=false
+          if [ "$GITHUB_EVENT_NAME" = push ] || [ "$PUBLISH" = true ]; then
+            release=true
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
@@ -56,7 +83,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.ref_type == 'tag'
+    if: needs.build.outputs.release == 'true'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -73,7 +100,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    if: github.ref_type == 'tag'
     needs: [build, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -95,4 +121,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file notes.md --verify-tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file notes.md --verify-tag
+          else
+            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes-file notes.md --target "$GITHUB_SHA"
+          fi
