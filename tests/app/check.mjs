@@ -997,7 +997,6 @@ function composer() {
   return {
     primary: document.getElementById('run-btn').textContent,
     stop: !document.getElementById('stop-btn').hidden,
-    newRun: !document.getElementById('new-run-btn').hidden,
   };
 }
 
@@ -1308,9 +1307,9 @@ async function beforeRun() {
     const status = await page.textContent('#run-status');
     const named = status === ready('recorded run', RECORDED_MODEL);
     check('before a run', "the status names a recorded run and the recording's model", named, status);
-    const offered = await page.evaluate(composer);
-    const onlyRun = isDeepStrictEqual(offered, { primary: 'run ⏎', stop: false, newRun: false });
-    check('before a run', 'only run is offered: no stop and no new run', onlyRun, JSON.stringify(offered));
+    const offered = { ...(await page.evaluate(composer)), newRun: await count(page, '#new-run-btn') };
+    const onlyAsk = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: 0 });
+    check('before a run', 'only ask ⏎ is offered: no stop, and no new run button', onlyAsk, JSON.stringify(offered));
     await page.evaluate(countStatusWrites);
     await page.focus('#question');
     await page.keyboard.type(' today');
@@ -1709,8 +1708,9 @@ async function runView() {
     const frame = await page.evaluate(panelBox);
     await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, 200);
     await becomes(page, viewChanged, fitted);
-    const second = await viewOnStart(page, 2, () => send(page, NEW_QUESTION, 'Control+Enter'));
-    const secondName = "a new run, started once the first has finished and been zoomed out, glides likewise from that zoom to its own tab's fit";
+    await page.click('#new-tab-btn');
+    const second = await viewOnStart(page, 2, () => send(page, NEW_QUESTION));
+    const secondName = "the first ask in a + tab, opened once the first run has finished and been zoomed out, glides likewise from where its view was to its run's fit";
     check('run view', secondName, second.pass, second.detail);
   });
 }
@@ -2560,8 +2560,7 @@ async function roundsSetting(page, checkAt) {
 
   await page.click('#run-btn');
   const recorded = (await becomes(page, statusIs, SAMPLE_STATUS)) && runOfRounds(await drawn(), ROUNDS);
-  await page.fill('#question', NEW_QUESTION);
-  await page.click('#new-run-btn');
+  await askInNewTab(page, NEW_QUESTION);
   const simulated = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), MORE_ROUNDS);
   checkAt(`with ${MORE_ROUNDS} rounds chosen the recorded run still replays its own ${ROUNDS}, and a simulated run draws ${MORE_ROUNDS}`, recorded && simulated, `recorded ${recorded}, simulated ${simulated}`);
 
@@ -2569,8 +2568,7 @@ async function roundsSetting(page, checkAt) {
   await page.click('#replay-btn');
   await page.click('#arrange-btn');
   const kept = await drawn();
-  await page.fill('#question', NEW_QUESTION);
-  await page.click('#new-run-btn');
+  await askInNewTab(page, NEW_QUESTION);
   const next = (await becomes(page, statusMatches, SIMULATED_DONE.source)) && runOfRounds(await drawn(), FEWER_ROUNDS);
   const keptName = `a simulated run keeps its ${MORE_ROUNDS} rounds once ${FEWER_ROUNDS} is chosen, replayed and arranged, and the next run draws ${FEWER_ROUNDS}`;
   checkAt(keptName, runOfRounds(kept, MORE_ROUNDS) && next, `${columnsShown(kept)}; next ${next}`);
@@ -3093,8 +3091,7 @@ async function quotesArea() {
 
   await withPage('quotes', {}, async (page) => {
     const recorded = Object.keys(await page.evaluate(pillsOn)).length;
-    await page.fill('#question', NEW_QUESTION);
-    await page.click('#new-run-btn');
+    await askInNewTab(page, NEW_QUESTION);
     await waitLit(page);
     const direct = await directCitations(page, 'answer-0');
     const madeUp = await litOnPanel(page);
@@ -3204,7 +3201,7 @@ async function gestures() {
     check('gestures', stuckName, isDeepStrictEqual(await page.evaluate(panelSnapshot), before));
   });
   await withPage('gestures', {}, async (page) => {
-    await send(page, NEW_QUESTION, 'Control+Enter');
+    await askInNewTab(page, NEW_QUESTION);
     const second = await page.evaluate(panelSnapshot);
     await showRunTab(page, 0);
     const panel = await rect(page, '#panel');
@@ -3489,10 +3486,16 @@ const overlap = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bott
 const inside = (box, frame) => box.left >= frame.left && box.right <= frame.right && box.top >= frame.top && box.bottom <= frame.bottom;
 const tally = (ids) => ids.reduce((counts, id) => ({ ...counts, [id]: (counts[id] ?? 0) + 1 }), {});
 
-// Types `question` into the composer and sends it with `keys`: Enter asks, Control+Enter starts a new run.
+// Types `question` into the composer and sends it with `keys`.
 async function send(page, question, keys = 'Enter') {
   await page.fill('#question', question);
   await page.press('#question', keys);
+}
+
+// Opens a + tab with a copy of the shown tab's files and asks `question` there, which runs over them.
+async function askInNewTab(page, question) {
+  await page.click('#new-tab-btn');
+  await send(page, question);
 }
 
 async function pickModel(page, model) {
@@ -3526,8 +3529,8 @@ async function answersOnTheRun(sample, asks) {
     const runPath = trailOnPage(sample.answer.provenance.trail, sample.ids, docIds).edges;
     const askPath = (k) => trailOnPage(asks[k].provenance.trail, sample.ids, docIds, `answer-${k + 1}`).edges;
     const offered = await page.evaluate(composer);
-    const offersBoth = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false, newRun: true });
-    check('answers', 'after a run the composer offers ask ⏎ and new run, and no stop', offersBoth, JSON.stringify(offered));
+    const offersAsk = isDeepStrictEqual(offered, { primary: 'ask ⏎', stop: false });
+    check('answers', 'after a run the composer offers ask ⏎, and no stop', offersAsk, JSON.stringify(offered));
 
     const first = await positionOf(page, 'answer-0');
     const nodes = await count(page, '.node');
@@ -3649,13 +3652,12 @@ async function answersOnTheRun(sample, asks) {
     const stillLit = isDeepStrictEqual([await litAnswers(page), await litEdges(page)], litBefore);
     check('answers', "replay draws the run's asks again, and keeps the answer that was lit", redrawn && stillLit, `${idsBefore.length} answers; lit ${litBefore[0]}`);
 
-    await page.fill('#question', sample.question);
-    await page.click('#new-run-btn');
+    await askInNewTab(page, sample.question);
     const newTabLit = await becomes(page, () => document.querySelector('#world .is-lit') !== null);
     const after = { nodes: await count(page, '.node'), answers: (await answerIds(page)).length };
     const fresh = newTabLit && isDeepStrictEqual(after, ANSWERED_RUN_COUNTS) && isDeepStrictEqual(await litEdges(page), runPath);
     const opened = (await shownTab(page)) === 1;
-    const openedName = 'new run opens a second tab and shows it, with only its own answer, lit';
+    const openedName = "the first ask in a + tab runs there, in a second tab with only its own answer, lit";
     check('answers', openedName, fresh && opened && (await page.textContent('#run-status')) === SAMPLE_STATUS, JSON.stringify(after));
 
     const offerOf = page.getByRole('button', { name: offerLabel(asks[0]), exact: true });
@@ -3727,10 +3729,8 @@ async function answersWhileReplaying() {
     const offered = await page.evaluate(composer);
     await page.click('#run-btn');
     const clickWaits = (await count(page, '.turn')) === 1 && (await page.inputValue('#question')) === NEW_QUESTION;
-    await page.$eval('#new-run-btn', (button) => button.click());
-    const opened = (await page.evaluate(tabRow)).map((tab) => tab.selected);
-    const offerName = "while the prototype's run replays, the composer offers ask ⏎, which waits as Enter does, and new run, which opens a tab of its own";
-    check('answers', offerName, offered.primary === 'ask ⏎' && offered.newRun && clickWaits && isDeepStrictEqual(opened, [false, true]), JSON.stringify(offered));
+    const offerName = "while the prototype's run replays, the composer offers ask ⏎, which waits as Enter does";
+    check('answers', offerName, offered.primary === 'ask ⏎' && clickWaits, JSON.stringify(offered));
   });
 }
 
@@ -3796,11 +3796,12 @@ async function tabs() {
     const frame = await page.evaluate(panelBox);
     await zoomAt(page, { x: frame.left + frame.width / 2, y: frame.top + frame.height / 2 }, -200);
     const left = await page.evaluate(panelSnapshot);
+    await page.click('#new-tab-btn');
     await page.evaluate(countDocNodes);
-    await send(page, NEW_QUESTION, 'Control+Enter');
+    await send(page, NEW_QUESTION);
     const other = await page.evaluate(panelSnapshot);
     const added = await page.evaluate(() => window.docNodesAdded);
-    check('tabs', 'a new run draws each of its document nodes once', added === SAMPLE_DOCS, `${added} drawn`);
+    check('tabs', "a + tab's run draws each of its document nodes once", added === SAMPLE_DOCS, `${added} drawn`);
     await page.locator('.run-tab').first().click();
     const back = await page.evaluate(panelSnapshot);
     const restoreName = 'switching back to the first tab restores its nodes and lines after a drag, its zoom, its lit answer and its status';
@@ -3837,7 +3838,7 @@ async function tabs() {
     const closesName = 'closing a tab removes its chat with it, and leaves the other tabs as they were, their chats too; the last tab has no ×';
     check('tabs', closesName, closesOne, `${chats.count} chats`);
 
-    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question, 'Control+Enter');
+    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await askInNewTab(page, question);
     const fourth = await page.evaluate(panelSnapshot);
     await page.locator('.run-tab').nth(1).click();
     await page.locator('.tab-close').nth(1).click();
@@ -3890,9 +3891,9 @@ async function tabs() {
     check('tabs', "every tab's chat is a polite live region, shown or hidden", isDeepStrictEqual(live, ['polite', 'polite']), JSON.stringify(live));
 
     const question = 'Which memo is longest?';
-    await send(page, question, 'Control+Enter');
+    await askInNewTab(page, question);
     const opened = { shown: await shownTab(page), parts: await page.$$eval(`${CHAT} > *`, (els) => els.map((el) => el.className)), first: (await chatLines(page, 2)).slice(0, 2) };
-    const openedName = `a new run's tab starts its chat with "${loadedLine(SAMPLE_DOCS)}" for the files it copied, then its own run, and nothing else`;
+    const openedName = `a + tab that runs starts its chat with "${loadedLine(SAMPLE_DOCS)}" for the files it copied, then its own run, and nothing else`;
     check('tabs', openedName, isDeepStrictEqual(opened, { shown: 2, parts: ['line main dim', 'turn'], first: [loadedLine(SAMPLE_DOCS), question] }), JSON.stringify(opened));
     await page.locator('.tab-close').nth(2).click();
     const closed = await page.$$eval('.transcript', (els, asked) => [els.length, els.some((el) => el.textContent.includes(asked))], question);
@@ -3925,7 +3926,7 @@ async function tabs() {
   await withPage('tabs', {}, async (page) => {
     const first = await page.evaluate(panelSnapshot);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await send(page, NEW_QUESTION, 'Control+Enter');
+    await askInNewTab(page, NEW_QUESTION);
     const starting = await page.textContent('#run-status');
     check('tabs', "a new tab's status line is its own from the start, not the last tab's", starting === STARTING, starting);
     const going = await page.evaluate(tabRow);
@@ -3978,7 +3979,7 @@ async function tabs() {
     const replayed = await page.evaluate(linesReplayed, 'answer-1');
     check('tabs', 'lighting a new answer moves lines between layers without playing how they were drawn again', replayed === 0, `${replayed} replayed`);
 
-    await send(page, NEW_QUESTION, 'Control+Enter');
+    await askInNewTab(page, NEW_QUESTION);
     await page.waitForSelector('#world .edge.draw', { state: 'attached' });
     await page.locator('.run-tab').first().click();
     await becomes(page, tabEnded, 1, REPLAY_MS);
@@ -4000,18 +4001,18 @@ async function tabs() {
 
     await dragNode(page, 'r2-1', 60, 40);
     await page.click('#arrange-btn');
-    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    await askInNewTab(page, 'Which memo is the registry?');
     await page.locator('.run-tab').first().click();
     const snapped = await page.evaluate(panelSnapshot);
     await page.emulateMedia({ reducedMotion: 'reduce' });
     await page.click('#arrange-btn');
     const final = await page.evaluate(panelSnapshot);
     const atFinal = isDeepStrictEqual([snapped.nodes, snapped.edges], [final.nodes, final.edges]);
-    check('tabs', "an arrange still sliding when a new run starts leaves the old tab's nodes and lines at their final spots", atFinal);
+    check('tabs', "an arrange still sliding when + opens a tab leaves the old tab's nodes and lines at their final spots", atFinal);
   });
 
   await withPage('tabs', { layout: LAYOUTS.phone }, async (page) => {
-    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await send(page, question, 'Control+Enter');
+    for (const question of [NEW_QUESTION, 'Which memo is the registry?']) await askInNewTab(page, question);
     const inView = inside(await rect(page, '.run-tab[aria-selected="true"]'), await rect(page, '#run-tabs'));
     check('tabs', "400 dark: the shown tab's button is scrolled into view in the tab row", inView);
     const rowScrolls = await page.evaluate(() => {
@@ -4189,14 +4190,14 @@ async function tabFiles() {
     const asked = { tabs: (await page.evaluate(tabRow)).length, answers: await answerIds(page), status: await page.textContent('#run-status') };
     check('tab files', 'Enter in a tab that has run asks over its run', isDeepStrictEqual(asked, { tabs: 2, answers: ['answer-0', 'answer-1'], status: ran.status }), JSON.stringify(asked));
 
-    await send(page, 'Which memo is longest?', 'Control+Enter');
+    await askInNewTab(page, 'Which memo is longest?');
     const third = { shown: await shownTab(page), label: (await page.evaluate(tabRow))[2].label, answers: await answerIds(page), docs: await docNames(page), pane: await paneOf(page) };
     await showRunTab(page, 1);
     const kept = { answers: await answerIds(page), pane: await page.evaluate(filesPane) };
     const copied =
       third.shown === 2 && third.label.startsWith('3 Which memo is longest') && isDeepStrictEqual(third.answers, ['answer-0']) && isDeepStrictEqual(third.docs, second) &&
       isDeepStrictEqual(third.pane, locked) && isDeepStrictEqual(kept, { answers: ['answer-0', 'answer-1'], pane: locked });
-    const copiedName = "new run opens a third tab with a copy of tab 2's files and runs there, its files locked too; tab 2 keeps its files and its asks";
+    const copiedName = "+ on tab 2 opens a third tab with a copy of its files, whose first ask runs there, its files locked too; tab 2 keeps its files and its asks";
     check('tab files', copiedName, copied, JSON.stringify({ third, kept }));
 
     const owned = (await page.locator('#run-tabs').ariaSnapshot()).split('\n').slice(1);
@@ -4279,14 +4280,6 @@ async function tabFiles() {
     const typed = [inNewTab, await page.inputValue('#question')];
     const ownName = 'a question typed in a tab stays with it: a + tab opens with an empty box, and back on the first tab the question is there';
     check('tab files', ownName, isDeepStrictEqual(typed, ['', NEW_QUESTION]), JSON.stringify(typed));
-
-    await page.click('#tab-chat');
-    await page.press('#question', 'Enter');
-    await waitLit(page);
-    await send(page, 'Which memo is longest?', 'Control+Enter');
-    await showRunTab(page, 0);
-    const left = await page.inputValue('#question');
-    check('tab files', 'back on a tab that new run left, the box is empty: no question from before its run', left === '', left);
   });
 
   // The + tabs copy the run's files; the third is emptied, so that adding a file lengthens its name.
@@ -4559,15 +4552,17 @@ async function stopArea() {
     // What was animating in as it stopped plays out first, and its class comes off.
     await becomes(page, panelStill);
     const frozen = await page.evaluate(panelSnapshot);
-    const offersRun = isDeepStrictEqual(after, { composer: { primary: 'run ⏎', stop: false, newRun: false }, focus: 'question', working: 0 });
-    const stopName = "stop, pressed from the keyboard during a replay, ends it where it is: its working nodes read as stopped, the status says where, and the composer offers run, its focus in the question box";
-    check('stop', stopName, offered && stopped && frozen.status === STOPPED_IN_RELEVANCE && offersRun, `${frozen.status}; ${JSON.stringify(after)}`);
+    const offersAsk = isDeepStrictEqual(after, { composer: { primary: 'ask ⏎', stop: false }, focus: 'question', working: 0 });
+    const stopName = "stop, pressed from the keyboard during a replay, ends it where it is: its working nodes read as stopped, the status says where, and the composer offers ask ⏎, its focus in the question box";
+    check('stop', stopName, offered && stopped && frozen.status === STOPPED_IN_RELEVANCE && offersAsk, `${frozen.status}; ${JSON.stringify(after)}`);
 
     await send(page, question);
     const ended = await becomes(page, statusIs, SAMPLE_STATUS, REPLAY_MS);
     await page.locator('.run-tab').first().click();
     const still = isDeepStrictEqual(drawnAs(await page.evaluate(panelSnapshot)), drawnAs(frozen));
     check('stop', 'a stopped replay draws nothing more: once the same replay has ended in another tab, the stopped one is as it was', ended && still, `ended ${ended}`);
+    const left = await page.inputValue('#question');
+    check('stop', 'back on the stopped tab, which the next ask left for a tab of its own, the box is empty: no question from before that run', left === '', left);
   });
 
   await withPage('stop', { sample: false }, async (page) => {
@@ -4892,7 +4887,7 @@ async function liveServers(url) {
     const removed = isDeepStrictEqual(left, [`${TEST_ENDPOINT} · ${TEST_HINT}`]) && isDeepStrictEqual(serversOn(await keysOnServer(url)), [TEST_ENDPOINT]);
     await page.keyboard.press('Escape');
     const after = { groups: await page.evaluate(menuGroups), picker: await page.evaluate(pickerState) };
-    await send(page, NEW_QUESTION, 'Control+Enter');
+    await askInNewTab(page, NEW_QUESTION);
     const fellBack = await becomes(page, statusMatches, `^● done · ${onSecond} · `, LIVE_RUN_MS);
     const noDeadServer = isDeepStrictEqual(Object.keys(after.groups), [first]) && after.picker.value === onSecond && isDeepStrictEqual(sent().at(-1), [onSecond, null]);
     const removedName = "removing a server forgets it and drops its group from the menu, and the model picked on it runs on no server, never its URL";
@@ -5419,7 +5414,7 @@ async function liveRoundsOf(url, rounds) {
   });
 }
 
-// A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a new run.
+// A live run keeps the rounds it started with, through a change of the setting while it runs, an ask and a + tab's run.
 async function liveRoundsKept(url) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = [];
@@ -5451,14 +5446,13 @@ async function liveRoundsKept(url) {
     const askName = `an ask sends no round count, and its run still draws its ${MORE_ROUNDS} rounds`;
     check('live', askName, answered && ask !== undefined && !('relevance_rounds' in ask) && runOfRounds(afterAsk, MORE_ROUNDS), `${JSON.stringify(ask)}; ${columnsShown(afterAsk)}`);
 
-    await page.fill('#question', NEW_QUESTION);
-    await page.click('#new-run-btn');
+    await askInNewTab(page, NEW_QUESTION);
     const again = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     const fresh = await page.evaluate(columnsDrawn);
     await page.locator('.run-tab').first().click();
     const first = await page.evaluate(columnsDrawn);
     const sent = posts.filter(({ path }) => path === '/api/runs').map(({ body }) => body.relevance_rounds);
-    const nextName = `a new run after the change is sent ${FEWER_ROUNDS} and draws ${FEWER_ROUNDS} in a tab of its own, and the first tab still draws ${MORE_ROUNDS}`;
+    const nextName = `a + tab's run after the change is sent ${FEWER_ROUNDS} and draws ${FEWER_ROUNDS}, and the first tab still draws ${MORE_ROUNDS}`;
     check('live', nextName, again && isDeepStrictEqual(sent, [MORE_ROUNDS, FEWER_ROUNDS]) && runOfRounds(fresh, FEWER_ROUNDS) && runOfRounds(first, MORE_ROUNDS), `sent ${sent.join(', ')}; ${columnsShown(fresh)}`);
   });
 }
@@ -5470,7 +5464,6 @@ async function liveAnswers(url) {
     await page.addInitScript(holdFrom, 'ask_finished');
   };
   await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
-    const posts = postsOf(page);
     await page.click('#run-btn');
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     await send(page, 'Which memo is the registry?');
@@ -5487,28 +5480,31 @@ async function liveAnswers(url) {
     const costed = await becomes(page, (start) => document.getElementById('inspector').textContent.includes(start), `${LIVE_ASK} · ${DEFAULT_MODEL} · `, LIVE_RUN_MS);
     const costName = "a live ask's open popup shows its tokens and cost once the ask finishes";
     check('live', costName, !beforeEnd.includes(' tokens') && costed, await page.textContent('#inspector .k:last-child'));
+  });
+}
 
-    await page.keyboard.press('Escape');
-    const offered = (await page.evaluate(composer)).newRun;
-    await page.fill('#question', 'Which memo is the registry, once more?');
-    await page.focus('#new-run-btn');
-    await page.keyboard.press('Enter');
-    const opened = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
-    const runs = posts.filter((path) => path === '/api/runs').length;
-    const nodes = await count(page, '.node');
-    const inTab = (await shownTab(page)) === 1;
-    const newRunName = "after an ask, new run is offered and opens its run's own tab";
-    check('live', newRunName, offered && opened && inTab && runs === 2 && nodes === SAMPLE_COUNTS.nodes, `${runs} runs, ${nodes} nodes`);
-    const focused = await focusedId(page);
-    check('live', 'new run from the keyboard keeps the focus on new run, still offered while that run goes', focused === 'new-run-btn', `focus on #${focused}`);
-    await page.fill('#question', `Which memo is the registry? ${FAILS}`);
-    await page.focus('#new-run-btn');
-    await page.keyboard.press('Enter');
-    const failed = await becomes(page, statusIs, LIVE_FAILED, LIVE_RUN_MS);
-    const refocused = await focusedId(page);
-    const hidden = !(await page.evaluate(composer)).newRun;
-    const failName = 'a new run from the keyboard that fails hides new run, and the focus moves to the question box';
-    check('live', failName, failed && hidden && refocused === 'question', `${await page.textContent('#run-status')}; focus on #${refocused}`);
+// One button: the first ask in a tab runs r3con on its files, and every later one, whatever keys send it, asks over that run.
+async function liveOneAsk(url) {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const posts = postsOf(page);
+    const before = await page.textContent('#run-btn');
+    await send(page, 'Which site logged the most incidents?');
+    const ran = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const firstName = 'before a run the composer offers ask ⏎, and the first ask in a tab runs r3con on its files';
+    check('live', firstName, before === 'ask ⏎' && ran && isDeepStrictEqual(posts, ['/api/runs']), `${before}; ${posts.join(' ')}`);
+
+    const after = await page.textContent('#run-btn');
+    const sends = [['Which memo is the registry?', 'Enter'], ['Which memo mentions the storm?', 'Control+Enter'], ['Which site is quietest?', 'Meta+Enter']];
+    const landed = [];
+    for (const [i, [question, keys]] of sends.entries()) {
+      await send(page, question, keys);
+      landed.push(await becomes(page, landedNode, `answer-${i + 1}`, LIVE_RUN_MS));
+    }
+    const asked = posts.slice(1);
+    const tabs = (await page.evaluate(tabRow)).length;
+    const asks = landed.every(Boolean) && asked.length === sends.length && asked.every((path) => /^\/api\/runs\/\w+\/asks$/.test(path)) && tabs === 1;
+    const laterName = 'after a run the button still reads ask ⏎, and each later ask, sent with Enter, Control+Enter or Meta+Enter, lands over that run: no run starts and no tab opens';
+    check('live', laterName, after === 'ask ⏎' && asks, `${after}; landed ${landed}; ${asked.join(' ')}; ${tabs} tabs`);
   });
 }
 
@@ -5564,7 +5560,7 @@ async function liveTabs(url) {
     const firstChat = await chatLines(page, 0);
     await page.evaluate(() => (window.release = false));
     const question = 'Which memo is the registry?';
-    await send(page, question, 'Control+Enter');
+    await askInNewTab(page, question);
     const held = await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
     await page.evaluate(() => (window.release = true));
@@ -5587,7 +5583,7 @@ async function liveTabs(url) {
     check('live', backName, drawn && LIVE_DONE.test(status), `${nodes} nodes, ${working} working; ${status}`);
 
     await page.evaluate(() => (window.release = false));
-    await send(page, 'Which memo is the registry, a third time?', 'Control+Enter');
+    await askInNewTab(page, 'Which memo is the registry, a third time?');
     await becomes(page, answerWorking, null, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
     const asked = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/asks'), { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
@@ -5627,11 +5623,8 @@ async function liveWhileGoing(url) {
     await page.fill('#question', 'Which memo is the registry?');
     await page.click('#run-btn');
     const refused = await page.textContent('#run-status');
-    const started = page.waitForRequest((request) => request.method() === 'POST' && request.url().endsWith('/api/runs'), { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
-    await page.$eval('#new-run-btn', (button) => button.click());
-    const second = (await started) !== null && (await shownTab(page)) === 1;
-    const goingName = "while a run is going, even with its answer landed, the composer offers ask ⏎, which waits for its end as Enter does, and new run, which starts a second run";
-    check('live', goingName, answered && offered.primary === 'ask ⏎' && offered.newRun && refused === ASK_WHEN_DONE && second, `${JSON.stringify(offered)}; ${refused}`);
+    const goingName = "while a run is going, even with its answer landed, the composer offers ask ⏎, which waits for its end as Enter does";
+    check('live', goingName, answered && offered.primary === 'ask ⏎' && refused === ASK_WHEN_DONE, `${JSON.stringify(offered)}; ${refused}`);
   });
 }
 
@@ -5644,14 +5637,13 @@ async function liveAskGoing(url) {
     await page.fill('#question', `Which site is quietest? ${HANGS}`);
     await page.click('#run-btn');
     const asking = await becomes(page, lastTurnSays, [`asking · ${DEFAULT_MODEL}`]);
-    await page.fill('#question', 'Which memo is the registry, once more?');
-    await page.click('#new-run-btn');
+    await askInNewTab(page, 'Which memo is the registry, once more?');
     const ended = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     const runs = posts.filter((path) => path === '/api/runs').length;
     const row = (await page.evaluate(tabRow)).map((tab) => [tab.selected, tab.closable]);
     const askTurn = await page.locator('.transcript').first().locator('.turn').last().locator('.line .t').allTextContents();
     const stillAsking = askTurn.includes(`asking · ${DEFAULT_MODEL}`);
-    const askName = "while an ask is going, a new run goes ahead in a tab of its own, and the asking tab can't be closed";
+    const askName = "while an ask is going, a + tab's run goes ahead, and the asking tab can't be closed";
     check('live', askName, asking && ended && runs === 2 && isDeepStrictEqual(row, [[false, false], [true, true]]) && stillAsking, `${runs} runs; ${JSON.stringify(row)}`);
   });
 }
@@ -5672,7 +5664,10 @@ async function liveFailure(url) {
     const inView = !failedLog.open && failedLog.mark === 'err' && failedLog.folded === 'failed in relevance' && isDeepStrictEqual(failedLog.after, [LIVE_ERROR]);
     check('live', "a failed run's log ends on where it failed, its spinner gone, and its error is in view below it", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
     const label = await page.textContent('#run-btn');
-    check('live', 'after a failed run the next question starts a new run', label === 'run ⏎', label);
+    const started = runPosted(page);
+    await send(page, 'Which site logged the most incidents?');
+    const ran = (await started) !== null && (await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS));
+    check('live', 'after a failed run the button still reads ask ⏎, and the next ask runs r3con again', label === 'ask ⏎' && ran, `${label}; ran ${ran}`);
   });
 }
 
@@ -5929,13 +5924,13 @@ async function liveTabFiles(url) {
     await send(page, 'Which memo mentions the storm?');
     const asked = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
     const second = runPosted(page);
-    await send(page, 'Which memo is the registry, once more?', 'Control+Enter');
+    await askInNewTab(page, 'Which memo is the registry, once more?');
     const copied = (await second)?.postDataJSON().documents;
     const ended = await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     const runs = posts.filter((path) => path === '/api/runs').length;
     const asks = posts.filter((path) => path.endsWith('/asks')).length;
     const newRun = asked && ended && isDeepStrictEqual(copied, [text]) && runs === 2 && asks === 1 && (await shownTab(page)) === 2;
-    check('live', "Enter then asks over the + tab's run, and new run opens a third tab, sent a copy of its files", newRun, `${runs} runs, ${asks} asks; ${JSON.stringify(copied)}`);
+    check('live', "Enter then asks over the + tab's run, and a + tab from it runs in a third tab, sent a copy of its files", newRun, `${runs} runs, ${asks} asks; ${JSON.stringify(copied)}`);
 
     await showRunTab(page, 0);
     const pane = await paneOf(page);
@@ -6238,14 +6233,14 @@ async function liveGoingThenLost(url, server) {
     const asked = [await page.textContent('#run-status'), await page.inputValue('#question')];
     const askName = 'while a run is going, a question stays in the box, unsent, and the status says to ask once it has finished';
     check('live', askName, held && isDeepStrictEqual(asked, [ASK_WHEN_DONE, question]) && posts.length === 1, asked[0]);
-    await page.press('#question', 'Control+Enter');
+    await askInNewTab(page, question);
     const ended = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const second = [await shownTab(page), await count(page, '.node'), await count(page, '.node.working')];
     await page.locator('.run-tab').first().click();
     const status = await page.textContent('#run-status');
     const first = [await count(page, '.node.r1.working'), await count(page, '.node.answer')];
     const apart = ended && isDeepStrictEqual(second, [1, SAMPLE_COUNTS.nodes, 0]) && status.startsWith('running · ') && first[0] > 0 && first[1] === 0;
-    const runName = "while a run is going, a new run opens a tab of its own, and each run's events land in its own tab";
+    const runName = "while a run is going, a + tab's first ask runs there, and each run's events land in its own tab";
     check('live', runName, apart && isDeepStrictEqual(posts, ['/api/runs', '/api/runs']), `${posts.join(' ')}; second ${second}; first ${status}, ${first}`);
 
     await page.locator('.run-tab').nth(1).click();
@@ -6275,7 +6270,7 @@ async function liveStop(url, server) {
     await send(page, `Which site logged the most incidents? ${STALLS}`);
     await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
     const started = startedJob(page, '/api/runs');
-    await send(page, `Which memo is the registry? ${STALLS}`, 'Control+Enter');
+    await askInNewTab(page, `Which memo is the registry? ${STALLS}`);
     const runId = (await (await started).json()).run_id;
     await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
     check('live', 'stop is absent before a run, and offered while one goes', absentBefore && (await page.evaluate(composer)).stop);
@@ -6300,8 +6295,8 @@ async function liveStop(url, server) {
     const closable = (await page.evaluate(tabRow))[1].closable;
     const after = await page.evaluate(composer);
     const cancels = cancelsIn(posts);
-    const runName = "stop sends one cancel, for the shown tab's run, even when pressed twice; the run ends stopped where it was, its × enabled, and stop gives way to run";
-    check('live', runName, isDeepStrictEqual(cancels, [`/api/runs/${runId}/cancel`]) && ended && stopped && closable && !after.stop && after.primary === 'run ⏎', `${cancels.join(' ')}; ${JSON.stringify(after)}`);
+    const runName = "stop sends one cancel, for the shown tab's run, even when pressed twice; the run ends stopped where it was, its × enabled, and stop goes, leaving ask ⏎";
+    check('live', runName, isDeepStrictEqual(cancels, [`/api/runs/${runId}/cancel`]) && ended && stopped && closable && !after.stop && after.primary === 'ask ⏎', `${cancels.join(' ')}; ${JSON.stringify(after)}`);
 
     const firstEnded = await becomes(page, tabEnded, 0, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
@@ -6371,7 +6366,7 @@ async function liveStopAsk(url, server) {
     const askName = "stop during an ask over a finished tab cancels that ask; its answer node, its log's folded line and the status say it stopped";
     check('live', askName, stoppedAsks, `${names.length} stopped; ${status}`);
 
-    await send(page, 'Which memo is the registry?', 'Control+Enter');
+    await askInNewTab(page, 'Which memo is the registry?');
     await becomes(page, newRunDone, LIVE_DONE.source, LIVE_RUN_MS);
     await page.locator('.run-tab').first().click();
     const back = await page.textContent('#run-status');
@@ -6453,6 +6448,7 @@ async function live() {
     await liveFirstRead(url);
     await liveCutStream(url);
     await liveAnswers(url);
+    await liveOneAsk(url);
     await liveLog(url);
     await liveAskAfterFailed(url);
     await liveTabs(url);

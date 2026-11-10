@@ -1560,7 +1560,7 @@
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const ARIA_KIND = { doc: 'document', parsed: 'parsed structure', schema: 'proposed schema' };
   const STAGE_PHASE = { schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
-  // The relevance rounds r3con's default config runs, and a new run's until another count is chosen in the settings.
+  // The relevance rounds r3con's default config runs, and a run's until another count is chosen in the settings.
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
@@ -3945,12 +3945,6 @@
     setStatus(`${fileCount()} ready · ${mode.nextRun(questionEl.value.trim())}`);
   }
 
-  // A question can ask over the shown tab's run once its answer has landed and the run has ended.
-  const canAsk = () => landed(state.shown, RUN_ANSWER) && !mode.runGoing(state.shown);
-  // Enter and the run button ask once there is a run to ask over, or one going; before any run, or after a
-  // failed one, they run. The composer's labels follow this, so they say what a press does.
-  const primaryAction = () => (canAsk() || mode.runGoing(state.shown) ? 'ask' : 'run');
-
   // Hiding or disabling the focused button would drop the focus to the page.
   /** @param {HTMLButtonElement} button @param {boolean} shown */
   function offer(button, shown, enabled = true) {
@@ -3960,12 +3954,9 @@
   }
 
   function updateComposer() {
-    const asks = primaryAction() === 'ask';
     updateTabs();
-    $('run-btn').textContent = asks ? 'ask ⏎' : 'run ⏎';
     // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
     offer($('stop-btn', HTMLButtonElement), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
-    offer($('new-run-btn', HTMLButtonElement), asks);
     $('replay-btn').hidden = live || !state.shown.run;
   }
 
@@ -3985,15 +3976,15 @@
     }
   }
 
-  // `action` is ask, over the run on the panel, or run, a new one over the files.
-  /** @param {'ask' | 'run'} action */
-  function submitQuestion(action) {
+  // A question asks over the shown tab's run once its answer has landed, or waits while it is going; before any run,
+  // or after a failed one, it runs r3con on the tab's files.
+  function submitQuestion() {
     const question = questionEl.value.trim();
     if (!question) {
       questionEl.focus();
       return;
     }
-    const asks = action === 'ask';
+    const asks = landed(state.shown, RUN_ANSWER) || mode.runGoing(state.shown);
     // An ask needs only the run's representation; a run needs files.
     const refused = asks || state.shown.files.length ? refusal(question, asks) : null;
     if (refused) {
@@ -4616,7 +4607,8 @@
   /** @param {Tab} tab @param {Map<string, Point>} [at] where to draw document nodes the tab hasn't drawn yet */
   function switchTab(tab, at) {
     if (tab === state.shown) return;
-    // Each tab keeps its question. Once shown its draft is emptied: new run leaves a tab without saving the box.
+    // Each tab keeps its question. Once shown its draft is emptied: a run after a failed one opens its own tab without
+    // saving the box.
     state.shown.draft = questionEl.value;
     questionEl.value = tab.draft;
     tab.draft = '';
@@ -5728,9 +5720,8 @@
 
     $('ask-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      submitQuestion(primaryAction());
+      submitQuestion();
     });
-    $('new-run-btn').addEventListener('click', () => submitQuestion('run'));
     $('stop-btn').addEventListener('click', () => {
       mode.stop(state.shown);
       updateComposer();
@@ -5738,8 +5729,7 @@
     questionEl.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
-      if (e.ctrlKey || e.metaKey) submitQuestion('run');
-      else $('ask-form', HTMLFormElement).requestSubmit();
+      $('ask-form', HTMLFormElement).requestSubmit();
     });
     modelPick.addEventListener('change', onPick);
     modelOther.addEventListener('change', onPick);
