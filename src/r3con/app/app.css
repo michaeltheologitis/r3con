@@ -257,8 +257,9 @@ p { margin: 0; }
 .drawing.is-lit .node.on-path { opacity: 1; }
 .drawing.is-lit .node.on-path .icon { color: var(--accent); }
 .drawing.is-lit .node.on-path .label { color: var(--fg); }
-/* Off the trail, a fold still marks where its documents are. */
-.drawing.is-lit .node.fold { opacity: 0.8; }
+/* Off the trail a fold's icons dim with the other nodes, while its text keeps 4.5:1: it marks where its documents are. */
+.drawing.is-lit .node.fold { opacity: 1; }
+.drawing.is-lit .node.fold .icon { opacity: 0.3; }
 .fill-orange { fill: var(--fill-orange); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
