@@ -82,9 +82,23 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # Before PyPI, so that a failed notarization publishes nothing.
+  mac-app:
+    needs: build
+    uses: ./.github/workflows/mac-app.yml
+    with:
+      sign: ${{ needs.build.outputs.release == 'true' }}
+    # macos-signing's environment secrets: the caller must name them, and the called job resolves them.
+    secrets:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+
   publish:
     if: needs.build.outputs.release == 'true'
-    needs: build
+    needs: [build, mac-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -100,7 +114,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    needs: [build, publish]
+    needs: [build, mac-app, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -110,6 +124,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: dist
+          path: dist/
+      - uses: actions/download-artifact@v8
+        with:
+          name: r3con-mac-app-signed
           path: dist/
       # The release commit's body is the notes; its trailers are attribution, not notes.
       - name: Build the notes
