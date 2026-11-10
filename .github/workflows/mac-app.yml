@@ -170,19 +170,6 @@ jobs:
         run: |
           codesign --display --verbose=2 "$APP" 2>&1 | grep -E '^(Authority|Signature|Timestamp|TeamIdentifier)=|flags=' | tee "$RUNNER_TEMP/codesign.txt"
           codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a "$RUNNER_TEMP/codesign.txt"
-      - name: Test only, Mach-O files without a signature
-        if: ${{ !inputs.sign }}
-        run: |
-          find "$APP" -type f > "$RUNNER_TEMP/files.txt"
-          echo "$(wc -l < "$RUNNER_TEMP/files.txt") files"
-          while read -r f; do
-            if file -b "$f" | grep -q "Mach-O"; then
-              echo "$(file -b "$f" | cut -c1-40) | $(codesign -dv "$f" 2>&1 | grep -E '^Signature=|not signed' | head -n 1) | ${f#"$APP"/}"
-            fi
-          done < "$RUNNER_TEMP/files.txt" > "$RUNNER_TEMP/macho.txt"
-          echo "$(wc -l < "$RUNNER_TEMP/macho.txt") Mach-O files"
-          grep -v "Signature=adhoc" "$RUNNER_TEMP/macho.txt" || echo "every Mach-O file is signed"
-          cut -d'|' -f1 "$RUNNER_TEMP/macho.txt" | sort | uniq -c
       - name: Check that Gatekeeper accepts the app and the .dmg as notarized
         if: inputs.sign
         run: |
