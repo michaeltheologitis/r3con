@@ -159,7 +159,8 @@ const SCHEME_PAGE_COLORS = {
   light: { '--bg': 'rgb(252, 251, 250)', '--accent': 'rgb(193, 95, 60)' },
   dark: { '--bg': 'rgb(26, 25, 24)', '--accent': 'rgb(215, 119, 87)' },
 };
-const pageColorsOf = (values) => ({ '--bg': values['--bg'], '--accent': values['--accent'] });
+// The page in `theme`, as themeShown reads it.
+const themeOf = (theme) => ({ theme, label: `theme · ${theme}`, colors: SCHEME_PAGE_COLORS[theme] });
 const LONG_NAME = 'quarterly_maintenance_incident_report_for_the_northgate_and_riverside_sites.txt';
 const ADD_FILES_FIRST = 'Add files in the files tab first, then ask again.';
 // The page's intro, live and in the prototype, for n documents.
@@ -407,6 +408,8 @@ async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample
     if (layout.theme) await page.addInitScript(savedTheme, [THEME_KEY, layout.theme]);
     await before?.(page);
     await page.goto(url);
+    const theme = await page.evaluate(() => document.documentElement.dataset.theme);
+    if (layout.theme && theme !== layout.theme) throw new Error(`${layout.name} opened in the ${theme} theme, not its saved ${layout.theme}`);
     if (sample) await runSample(page);
     await body(page, messages);
   } catch (error) {
@@ -1101,6 +1104,15 @@ function themeValues(colors) {
   return values;
 }
 
+// The theme the page shows: its root's data-theme, the theme button's label, and its background and accent as drawn.
+function themeShown() {
+  const probe = document.body.appendChild(document.createElement('i'));
+  probe.style.color = 'var(--accent)';
+  const colors = { '--bg': getComputedStyle(document.body).backgroundColor, '--accent': getComputedStyle(probe).color };
+  probe.remove();
+  return { theme: document.documentElement.dataset.theme, label: document.getElementById('theme-btn').textContent, colors };
+}
+
 // Only the animations a node or line plays as it appears count, not transitions such as the view's glide.
 function panelStill() {
   const world = document.getElementById('world');
@@ -1225,44 +1237,43 @@ async function pickRounds(page, rounds) {
   await page.keyboard.press('Escape');
 }
 
-// The theme a page shows: its root's data-theme, the theme button's label, and the theme values as drawn.
-async function themeShown(page, tokens) {
-  const theme = await page.evaluate(() => document.documentElement.dataset.theme);
-  return { theme, label: await page.textContent('#theme-btn'), values: await page.evaluate(themeValues, tokens) };
-}
-
 // ---------- areas ----------
 
 async function load() {
-  const seen = [];
-  let tokens = [];
   for (const { options } of Object.values(LAYOUTS)) {
     const layout = { name: `${options.viewport.width}, system ${options.colorScheme}, no theme saved`, options };
     await withPage('load', { layout, sample: false }, async (page) => {
       check('load', `${layout.name}: the page has no horizontal scroll`, await page.evaluate(noHorizontalScroll));
-      tokens = await page.evaluate(lightDarkTokens);
-      const opened = await themeShown(page, tokens);
+      const opened = await page.evaluate(themeShown);
       await page.click('#theme-btn');
-      const clicked = await themeShown(page, tokens);
+      const clicked = await page.evaluate(themeShown);
       await page.reload();
-      const reloaded = await themeShown(page, tokens);
-      seen.push({ opened: opened.values, clicked: clicked.values });
-      const shown = [opened, clicked, reloaded].map(({ theme, label, values }) => ({ theme, label, colors: pageColorsOf(values) }));
-      const wanted = ['light', 'dark', 'dark'].map((theme) => ({ theme, label: `theme · ${theme}`, colors: SCHEME_PAGE_COLORS[theme] }));
+      const shown = [opened, clicked, await page.evaluate(themeShown)];
       const themesName = `${layout.name}: the page opens light, the theme button makes it dark, and a reload keeps the dark it saved`;
-      check('load', themesName, isDeepStrictEqual(shown, wanted), JSON.stringify(shown));
+      check('load', themesName, isDeepStrictEqual(shown, ['light', 'dark', 'dark'].map(themeOf)), JSON.stringify(shown));
     });
   }
-  const drifted = (when) => Object.keys(seen[0]?.[when] ?? {}).filter((name) => seen[0][when][name] !== seen[1]?.[when][name]);
-  const differing = ['opened', 'clicked'].flatMap((when) => drifted(when).map((name) => `${when} ${name}`));
-  const valueCount = Object.keys(seen[0]?.opened ?? {}).length;
-  const systemName = `the system's color scheme changes none of the ${valueCount} theme values, ${tokens.length} of them light-dark() colors, on opening or after the theme button`;
-  check('load', systemName, seen.length === Object.keys(LAYOUTS).length && tokens.length > 0 && !differing.length, differing.join(', '));
+  await withPage('load', { sample: false }, async (page) => {
+    const tokens = await page.evaluate(lightDarkTokens);
+    const valueCount = Object.keys(await page.evaluate(themeValues, tokens)).length;
+    // The theme values that differ as the system switches to dark and back while the page is open.
+    const drifted = async (when) => {
+      await page.emulateMedia({ colorScheme: 'dark' });
+      const dark = await page.evaluate(themeValues, tokens);
+      await page.emulateMedia({ colorScheme: 'light' });
+      const light = await page.evaluate(themeValues, tokens);
+      return Object.keys(dark).filter((name) => dark[name] !== light[name]).map((name) => `${when} ${name}`);
+    };
+    const differing = await drifted('before');
+    await page.click('#theme-btn');
+    differing.push(...(await drifted('after')));
+    const systemName = `${LAYOUTS.desktop.name}: the system switching color scheme while the page is open changes none of the ${valueCount} theme values, ${tokens.length} of them light-dark() colors, before or after the theme button`;
+    check('load', systemName, tokens.length > 0 && !differing.length, differing.join(', '));
+  });
   const unscripted = { name: `${LAYOUTS.phone.options.viewport.width}, system dark, no script`, options: { ...LAYOUTS.phone.options, javaScriptEnabled: false } };
   await withPage('load', { layout: unscripted, sample: false }, async (page) => {
-    const painted = await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, background: getComputedStyle(document.body).backgroundColor }));
-    const light = { theme: 'light', background: SCHEME_PAGE_COLORS.light['--bg'] };
-    check('load', `${unscripted.name}: the page is light before its script runs, so it never flashes dark`, isDeepStrictEqual(painted, light), JSON.stringify(painted));
+    const painted = await page.evaluate(themeShown);
+    check('load', `${unscripted.name}: the page is light before its script runs, so it never flashes dark`, isDeepStrictEqual(painted, themeOf('light')), JSON.stringify(painted));
   });
   // Each tab row's bottom is its line.
   await withPage('load', { sample: false }, async (page) => {

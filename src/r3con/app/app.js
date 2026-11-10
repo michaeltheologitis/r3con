@@ -4984,7 +4984,7 @@
   // ---------- theme ----------
 
   function currentTheme() {
-    return root.dataset.theme === 'dark' ? 'dark' : 'light';
+    return root.dataset.theme;
   }
 
   function updateThemeLabel() {
