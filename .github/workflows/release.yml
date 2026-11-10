@@ -129,6 +129,9 @@ jobs:
         with:
           name: r3con-mac-app-signed
           path: dist/
+      # The same name every release, for the README's releases/latest/download/R3Con.dmg; mv fails unless exactly one matches.
+      - name: Name the .dmg R3Con.dmg
+        run: mv dist/R3Con-*.dmg dist/R3Con.dmg
       # The release commit's body is the notes; its trailers are attribution, not notes.
       - name: Build the notes
         run: |
