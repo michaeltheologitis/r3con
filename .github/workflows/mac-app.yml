@@ -73,7 +73,7 @@ jobs:
             echo "| Architectures (pydantic_core) | $(lipo -archs "$compiled") |"
             echo "| \`r3con.app\` | $(du -sh "$APP" | cut -f1) |"
             echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         with:
           name: r3con-mac-app

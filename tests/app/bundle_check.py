@@ -25,8 +25,8 @@ BUNDLED = (
     "tiktoken",
     "fastuuid",
     "toga",
-    # Toga's Mac backend, which loads AppKit and WebKit.
-    "toga_cocoa.factory",
+    # Toga's Mac web view, which loads AppKit and WebKit.
+    "toga_cocoa.widgets.webview",
 )
 TIMEOUT_SECONDS = 10
 
