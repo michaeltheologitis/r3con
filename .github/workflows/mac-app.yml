@@ -49,8 +49,8 @@ env:
 jobs:
   app:
     runs-on: macos-15
-    # A signed run can wait up to two hours for Apple's notarization.
-    timeout-minutes: ${{ inputs.sign && 150 || 30 }}
+    # A signed run can wait up to two hours for each of Apple's two notarizations.
+    timeout-minutes: ${{ inputs.sign && 270 || 30 }}
     # An empty name is no environment: no approval and no secrets.
     environment: ${{ inputs.sign && 'macos-signing' || '' }}
     defaults:
@@ -114,15 +114,36 @@ jobs:
           echo "sha1=$(echo "$identity" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
           echo "name=$(echo "$identity" | sed -E 's/^[^"]*"(.*)"$/\1/')" >> "$GITHUB_OUTPUT"
       - name: Package the app and its .dmg
+        if: ${{ !inputs.sign }}
+        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input'
+      # Signed, the app is notarized and stapled before it is packed, so that it keeps
+      # a ticket of its own once out of the .dmg. The zip is what notarytool takes.
+      - name: Sign the app and zip it
+        if: inputs.sign
+        env:
+          IDENTITY: ${{ steps.identity.outputs.sha1 }}
+        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --packaging-format zip --identity "$IDENTITY" --no-notarize --no-input'
+      - name: Notarize the app and staple its ticket
+        if: inputs.sign
+        id: notarize-app
+        env:
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: .github/notarize.sh dist/*.app.zip build/r3con/macos/app/R3Con.app
+      # Briefcase signs the app again before packing it, which would invalidate its ticket.
+      - name: Pack the app into a signed .dmg
+        if: inputs.sign
         env:
           IDENTITY: ${{ steps.identity.outputs.sha1 }}
         run: |
-          if [ -n "$IDENTITY" ]; then
-            "$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --identity "$IDENTITY" --no-notarize --no-input
-          else
-            "$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input
-          fi
-      # Briefcase notarizes only with a keychain profile; notarytool takes the API key.
+          "$RUNNER_TEMP/briefcase/bin/python" -I -c '
+          import sys
+          from briefcase.__main__ import main
+          from briefcase.platforms.macOS.app import macOSAppPackageCommand
+          macOSAppPackageCommand.sign_app = lambda *args, **kwargs: None
+          sys.exit(main())
+          ' package macOS app --identity "$IDENTITY" --no-notarize --no-input
       - name: Notarize the .dmg and staple its ticket
         if: inputs.sign
         id: notarize
@@ -130,42 +151,7 @@ jobs:
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-        run: |
-          key="$RUNNER_TEMP/notary-key.p8"
-          printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$key"
-          credentials=(--key "$key" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID")
-          dmg=$(echo dist/*.dmg)
-          result="$RUNNER_TEMP/notarization.txt"
-          # notarytool's JSON can come on either stream: after a timeout, on stderr.
-          xcrun notarytool submit "$dmg" "${credentials[@]}" --wait --timeout 2h --output-format json > "$result" 2>&1 || true
-          cat "$result"
-          field() { jq -rR "fromjson? | objects | .$1 // empty" "$result" | tail -n 1; }
-          id=$(field id)
-          status=$(field status)
-          echo "id=$id" >> "$GITHUB_OUTPUT"
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          case "$status" in
-            Accepted) ;;
-            Invalid | Rejected)
-              echo "::error::Apple marked submission $id $status."
-              xcrun notarytool log "$id" "${credentials[@]}"
-              exit 1
-              ;;
-            *)
-              if [ -n "$id" ]; then
-                echo "::error::Submission $id is still processing at Apple: $(field message)"
-              else
-                echo "::error::notarytool returned no submission."
-              fi
-              exit 1
-              ;;
-          esac
-          # A ticket can take a moment to be served after its acceptance.
-          for attempt in 1 2 3; do
-            xcrun stapler staple "$dmg" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 30
-          done
+        run: .github/notarize.sh dist/*.dmg
       # Before the checks run the app's own code.
       - name: Remove the signing keychain and the API key
         if: always() && inputs.sign
@@ -193,6 +179,7 @@ jobs:
           checks="$RUNNER_TEMP/spctl-and-stapler.txt"
           spctl --assess --type execute --verbose=4 "$APP" 2>&1 | tee "$checks"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg" 2>&1 | tee -a "$checks"
+          xcrun stapler validate "$APP" 2>&1 | tee -a "$checks"
           xcrun stapler validate "$dmg" 2>&1 | tee -a "$checks"
           if [ "$(grep -cx 'source=Notarized Developer ID' "$checks")" -ne 2 ]; then
             echo "::error::Gatekeeper did not accept both the app and the .dmg as notarized."
@@ -241,6 +228,8 @@ jobs:
       - name: The app's identity, signature and sizes
         env:
           SIGNED_BY: ${{ steps.identity.outputs.name }}
+          APP_SUBMISSION: ${{ steps.notarize-app.outputs.id }}
+          APP_NOTARIZATION: ${{ steps.notarize-app.outputs.status }}
           SUBMISSION: ${{ steps.notarize.outputs.id }}
           NOTARIZATION: ${{ steps.notarize.outputs.status }}
         run: |
@@ -257,7 +246,8 @@ jobs:
             echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"
             if [ -n "$SIGNED_BY" ]; then
               echo "| Signed by | $SIGNED_BY |"
-              echo "| Notarization | \`$SUBMISSION\`: $NOTARIZATION |"
+              echo "| Notarization of the app | \`$APP_SUBMISSION\`: $APP_NOTARIZATION |"
+              echo "| Notarization of the .dmg | \`$SUBMISSION\`: $NOTARIZATION |"
             fi
             for check in codesign spctl-and-stapler codesign-after-a-run; do
               if [ -f "$RUNNER_TEMP/$check.txt" ]; then
