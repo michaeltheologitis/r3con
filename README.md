@@ -10,7 +10,7 @@
 Ask a question whose evidence is spread across many documents. R3Con finds and
 organizes the relevant information, then reasons over it to produce an answer.
 
-![R3Con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; the sentences it quotes unfold under the answer, a file's name there opens its memo with the same sentences marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
+![R3Con app: a run on six memos builds its representation, then lights the answer's provenance back to the four memos it used; clicking one of those memos in the panel opens it with the sentences the answer quotes marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
 ## App
 
