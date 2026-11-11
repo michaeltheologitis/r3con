@@ -42,6 +42,7 @@ dependencies = [
 [project.optional-dependencies]
 # The app's page and its local server, `r3con app` (r3con.app).
 app = [
+    "keyring>=25",
     "platformdirs>=4.1",
     "starlette>=1.10",
     "uvicorn>=0.54",
@@ -94,8 +95,10 @@ module-root = "src"
 # project with its app extra, and Toga, and starts the app as `python -m r3con`, which
 # opens the window there. Its version, description, license and author are [project]'s.
 # Its bundle identifier, `bundle` and the app's name joined
-# (io.github.michaeltheologitis.r3con), must never change; formal_name, the name it
-# shows in Finder, the Dock, its menu and its window's title, can.
+# (io.github.michaeltheologitis.r3con), must never change: it is also the service its
+# keys are saved under in the Keychain (r3con.app.server's MAC_APP_KEY_SERVICE).
+# formal_name, the name it shows in Finder, the Dock, its menu and its window's title,
+# can.
 [tool.briefcase]
 bundle = "io.github.michaeltheologitis"
 

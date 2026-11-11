@@ -185,8 +185,10 @@ jobs:
             echo "::error::Gatekeeper did not accept both the app and the .dmg as notarized."
             exit 1
           fi
-      # -B: bytecode written into the bundle would break its signature.
+      # -B: bytecode written into the bundle would break its signature. Bounded, as a
+      # Keychain dialog would wait for a click no one makes.
       - name: Check the bundle with its own Python
+        timeout-minutes: 10
         run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns

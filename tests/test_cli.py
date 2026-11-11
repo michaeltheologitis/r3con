@@ -7,23 +7,26 @@ import threading
 import time
 from pathlib import Path
 
+import httpx2
 import litellm
 import platformdirs
 import pytest
 
 from r3con import settings
+from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE
 from r3con.cli import build_parser, main
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.r3con import read_documents
-from tests.fakes import a_parse_citation_short, in_json
+from tests.fakes import KEYRING_FILE, a_parse_citation_short, in_json
 
-MEMOS = Path(__file__).resolve().parents[1] / "examples" / "memos"
+REPO = Path(__file__).resolve().parents[1]
+MEMOS = REPO / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 GATEWAY = "https://gateway.example"
 MASKED_HEADER = {"extra_headers": {"Authorization": "REDACTED"}}
-APP_MODULES = ("starlette", "uvicorn", "platformdirs")
+APP_MODULES = ("starlette", "uvicorn", "platformdirs", "keyring")
 # Far longer than the app takes to print its two lines, which it does before serving.
 LAUNCH_SECONDS = 30
 NO_APP_EXTRA = (
@@ -544,3 +547,37 @@ def test_the_app_says_where_its_runs_go(monkeypatch, variable, flag, runs):
         app.wait()
     assert url.startswith("r3con app: http://127.0.0.1:")
     assert where == f"r3con app: runs go to {runs}\n"
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_r3con_app_keeps_its_keys_under_r3con_never_the_mac_apps(tmp_path, monkeypatch):
+    store = tmp_path / "keyring.json"
+    stored = {APP_KEY_SERVICE: {"openai": KEY}, MAC_APP_KEY_SERVICE: {"gemini": KEY}}
+    store.write_text(json.dumps(stored))
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "tests.fakes.FileKeyring")
+    monkeypatch.setenv(KEYRING_FILE, str(store))
+    monkeypatch.setenv("PYTHONPATH", str(REPO))
+    app = subprocess.Popen(
+        [sys.executable, "-m", "r3con.cli", "app", "--no-browser"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    watchdog = threading.Timer(LAUNCH_SECONDS, app.kill)
+    watchdog.start()
+    try:
+        base_url, token = app.stdout.readline().split(": ", 1)[1].split("/#token=")
+        headers = {"Authorization": f"Bearer {token.strip()}"}
+        with httpx2.Client(
+            base_url=base_url, headers=headers, timeout=LAUNCH_SECONDS, trust_env=False
+        ) as http:
+            loaded = http.get("/api/keys").json()
+            http.post("/api/keys", json={"provider": "anthropic", "key": KEY})
+    finally:
+        watchdog.cancel()
+        app.kill()
+        app.wait()
+    assert (loaded["openai"]["hint"], loaded["gemini"]) == (KEY[-4:], None)
+    saved = json.loads(store.read_text())
+    assert saved == {**stored, APP_KEY_SERVICE: {"openai": KEY, "anthropic": KEY}}

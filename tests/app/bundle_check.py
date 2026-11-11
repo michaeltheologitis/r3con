@@ -8,15 +8,20 @@ that the packages there but the project are exactly the ones CONSTRAINTS, the bu
 `uv export` of uv.lock, pins for this Python, at its versions, and that the project was
 built by the backend BUILD_CONSTRAINTS pins. Then it imports, each from inside APP,
 r3con and the packages a bundle most likely lacks, and every compiled module under its
-packages, so that one built for another platform fails here. Then it serves the app as
-the window does: the page, and the API with this launch's token, must answer, and once
-the server has stopped, nothing must.
+packages, so that one built for another platform fails here. It checks that keyring,
+where the app keeps its keys, finds the macOS Keychain, and saves, reads back and
+deletes a throwaway item there, giving up after ``KEYCHAIN_SECONDS``, since a Keychain
+dialog would wait for a click no one makes. Then it serves the app as the window does:
+the page, and the API with this launch's token, must answer, and once the server has
+stopped, nothing must.
 """
 
 import importlib.metadata
+import secrets
 import site
 import sys
 import tempfile
+import threading
 from email.parser import HeaderParser
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +29,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 if TYPE_CHECKING:
+    from keyring.backend import KeyringBackend
     from packaging.specifiers import SpecifierSet
 
 BUNDLED = (
@@ -36,8 +42,13 @@ BUNDLED = (
     "toga",
     # Toga's Mac web view, which loads AppKit and WebKit.
     "toga_cocoa.widgets.webview",
+    # keyring's Keychain calls, which load the Security framework.
+    "keyring.backends.macOS.api",
 )
 TIMEOUT_SECONDS = 10
+KEYCHAIN_SECONDS = 30
+# Not the app's service, so that the check never touches a key the app saved.
+THROWAWAY_SERVICE = "r3con-bundle-check"
 # Built from the checkout, so not among uv.lock's exported pins: its backend is.
 PROJECT = "r3context"
 BACKEND = "uv-build"
@@ -117,6 +128,40 @@ def built_by(packages: Path, build_constraints: Path) -> str:
     return generator
 
 
+def keychain() -> "KeyringBackend":
+    """The store keyring finds, which must be its macOS Keychain's."""
+    import keyring
+    from keyring.backends import macOS
+
+    store = keyring.get_keyring()
+    if not isinstance(store, macOS.Keyring):
+        sys.exit(f"keyring finds {type(store).__qualname__}, not the macOS Keychain")
+    return store
+
+
+def round_trip(store: "KeyringBackend") -> None:
+    """Save a throwaway item in ``store``, read it back and delete it, on a thread of
+    its own, waited for at most ``KEYCHAIN_SECONDS``."""
+    account, password = secrets.token_hex(8), secrets.token_urlsafe(16)
+    read: list[str | None] = []
+
+    def save_read_delete() -> None:
+        store.set_password(THROWAWAY_SERVICE, account, password)
+        try:
+            read.append(store.get_password(THROWAWAY_SERVICE, account))
+        finally:
+            store.delete_password(THROWAWAY_SERVICE, account)
+        read.append(store.get_password(THROWAWAY_SERVICE, account))
+
+    worker = threading.Thread(target=save_read_delete, daemon=True)
+    worker.start()
+    worker.join(KEYCHAIN_SECONDS)
+    if worker.is_alive():
+        sys.exit(f"the Keychain did not answer within {KEYCHAIN_SECONDS} s")
+    if read != [password, None]:
+        sys.exit("a throwaway item was not saved, read back as saved, and deleted")
+
+
 def answers(url: str) -> bool:
     try:
         urlopen(url, timeout=TIMEOUT_SECONDS).close()
@@ -140,12 +185,19 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     for name in modules:
         imported(name, resources)
     print(f"{len(modules)} compiled modules under app_packages: each imports")
+    store = keychain()
+    print(f"keyring finds {type(store).__module__}.{type(store).__qualname__}")
+    round_trip(store)
+    print(f"{THROWAWAY_SERVICE}: saved, read back and deleted in the Keychain")
 
     from r3con import __version__
     from r3con.app import serve
+    from r3con.app.server import MAC_APP_KEY_SERVICE
 
     print(f"r3con {__version__}")
-    url, stop = serve(logs_dir=Path(tempfile.mkdtemp()))
+    url, stop = serve(
+        logs_dir=Path(tempfile.mkdtemp()), key_service=MAC_APP_KEY_SERVICE
+    )
     base_url, token = url.split("/#token=")
     keys = Request(f"{base_url}/api/keys", headers={"Authorization": f"Bearer {token}"})
     try:

@@ -11,10 +11,14 @@ import pytest
 import toga
 
 from r3con.app import window
+from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE
+from tests.fakes import FakeKeyring
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
 TIMEOUT_SECONDS = 10
 TOGA_WINDOW_SIZE = (640, 480)
+MAC_APP_KEY = "sk-saved-by-the-mac-app-1234"
+R3CON_APP_KEY = "sk-saved-by-r3con-app-5678"
 
 
 class FakeWebView:
@@ -33,8 +37,11 @@ class FakeWindow:
 
 class FakeApp:
     """Toga's app. Its main loop opens a window on ``startup``'s web view, reads the
-    page there as a user would, then quits as the app menu's Quit does, which
-    ``on_exit`` allows or not."""
+    page there as a user would, and saves the key in ``saving``, if any, as its
+    settings would, then quits as the app menu's Quit does, which ``on_exit`` allows
+    or not."""
+
+    saving: dict[str, str] | None = None
 
     def __init__(
         self, *, startup: Callable[..., FakeWebView], on_exit: Callable[..., bool]
@@ -46,13 +53,14 @@ class FakeApp:
     def main_loop(self) -> None:
         self.url = self.startup(self).url
         base_url, token = self.url.split("/#token=")
+        auth = {"Authorization": f"Bearer {token}"}
         with httpx2.Client(
             base_url=base_url, timeout=TIMEOUT_SECONDS, trust_env=False
         ) as http:
             self.page = http.get("/")
-            self.keys = http.get(
-                "/api/keys", headers={"Authorization": f"Bearer {token}"}
-            )
+            self.keys = http.get("/api/keys", headers=auth)
+            if self.saving is not None:
+                http.post("/api/keys", json=self.saving, headers=auth)
         self.quits = self.on_exit(self)
 
 
@@ -86,6 +94,27 @@ def test_the_window_opens_the_page_this_launch_serves_with_its_token(
     assert app.page.status_code == 200
     assert "<title>" in app.page.text
     assert app.keys.status_code == 200
+
+
+def test_the_mac_app_keeps_its_keys_under_its_bundle_id_never_r3con_apps(
+    opened: list[FakeApp],
+    credential_store: FakeKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    assert MAC_APP_KEY_SERVICE == "io.github.michaeltheologitis.r3con"
+    credential_store.passwords[MAC_APP_KEY_SERVICE, "openai"] = MAC_APP_KEY
+    credential_store.passwords[APP_KEY_SERVICE, "gemini"] = R3CON_APP_KEY
+    saving = {"provider": "anthropic", "key": MAC_APP_KEY}
+    monkeypatch.setattr(FakeApp, "saving", saving)
+    window.main()
+    (app,) = opened
+    loaded = app.keys.json()
+    assert (loaded["openai"]["hint"], loaded["gemini"]) == (MAC_APP_KEY[-4:], None)
+    assert credential_store.passwords == {
+        (MAC_APP_KEY_SERVICE, "openai"): MAC_APP_KEY,
+        (MAC_APP_KEY_SERVICE, "anthropic"): MAC_APP_KEY,
+        (APP_KEY_SERVICE, "gemini"): R3CON_APP_KEY,
+    }
 
 
 def test_the_window_opens_at_its_size(opened: list[FakeApp]):

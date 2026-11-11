@@ -9,17 +9,23 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx2
+import keyring
 import litellm
 import pytest
+from keyring.backend import KeyringBackend
+from keyring.backends import fail
+from keyring.errors import KeyringLocked, PasswordDeleteError, PasswordSetError
 from litellm.exceptions import RateLimitError
 from starlette.testclient import TestClient
 from starlette.types import ASGIApp
 
 from r3con import r3con
 from r3con.app.server import (
+    APP_KEY_SERVICE,
     DEFAULT_RELEVANCE_ROUNDS,
     ENCRYPTED_ZIP,
     KEYLESS_SERVER_KEY,
+    MAC_APP_KEY_SERVICE,
     MAX_RELEVANCE_ROUNDS,
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
@@ -38,6 +44,7 @@ from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
 from tests.fakes import (
     GATE_TIMEOUT_SECONDS,
     SCHEMA_REPLY,
+    FakeKeyring,
     FakeLLM,
     a_parse_citation_short,
     in_json,
@@ -122,6 +129,91 @@ ANSWER = {
     "answer": "Northgate",
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
+REMEMBERED_OPENAI = {"source": "here", "hint": OPENAI_KEY[-4:], "remembered": True}
+UNTIL_CLOSED_OPENAI = {**REMEMBERED_OPENAI, "remembered": False}
+
+
+class BrokenKeyring(KeyringBackend):
+    """A credential store that fails every call, its error quoting what it was given,
+    as a store's own might."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        raise KeyringLocked(f"Can't read {service}/{username}")
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        raise PasswordSetError(f"Can't store {password} as {service}/{username}")
+
+    def delete_password(self, service: str, username: str) -> None:
+        raise PasswordDeleteError(f"Can't delete {service}/{username}")
+
+
+KEPT_UNTIL_CLOSED = "The openai key is kept only until the app closes"
+MAY_LOAD_AGAIN = "The openai key may load again next launch"
+
+
+def store_failed(what: str, error: str) -> str:
+    """What the log says of a failed call to the credential store."""
+    return f"{what}: the credential store failed ({error})."
+
+
+# A store that fails, and keyring's own for a system where it finds none, each with
+# what the log says as a launch reads it, and as a key is saved, then removed.
+LAUNCH_FAILURES = [
+    pytest.param(
+        BrokenKeyring,
+        [
+            store_failed(
+                f"The {provider} key saved earlier isn't loaded", "KeyringLocked"
+            )
+            for provider in ("openai", "anthropic", "gemini")
+        ],
+        id="failing",
+    ),
+    pytest.param(
+        fail.Keyring,
+        [store_failed("No key saved earlier is loaded", "NoKeyringError")],
+        id="none",
+    ),
+]
+SAVE_FAILURES = [
+    pytest.param(
+        BrokenKeyring,
+        [
+            store_failed(KEPT_UNTIL_CLOSED, "PasswordSetError"),
+            store_failed(MAY_LOAD_AGAIN, "KeyringLocked"),
+        ],
+        id="failing",
+    ),
+    pytest.param(
+        fail.Keyring,
+        [store_failed(KEPT_UNTIL_CLOSED, "NoKeyringError")],
+        id="none",
+    ),
+]
+
+
+class UnwritableKeyring(FakeKeyring):
+    """A store that reads and deletes, but fails to save."""
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        raise PasswordSetError("Can't store it")
+
+
+class UndeletableKeyring(FakeKeyring):
+    """A store that saves and reads, but fails to delete, quoting what it holds."""
+
+    def delete_password(self, service: str, username: str) -> None:
+        held = self.passwords[service, username]
+        raise PasswordDeleteError(f"Can't delete {held}")
+
+
+class LockedItemKeyring(FakeKeyring):
+    """A store that fails to read its OpenAI key, as one whose dialog was denied."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        if username == "openai":
+            raise KeyringLocked("Can't get password from keychain")
+        return super().get_password(service, username)
 
 
 @pytest.fixture
@@ -285,6 +377,22 @@ def http_client(url: str) -> httpx2.Client:
     )
 
 
+@contextlib.contextmanager
+def launched(
+    logs_dir: Path,
+    model: FakeLLM | None = None,
+    key_service: str = APP_KEY_SERVICE,
+) -> Iterator[httpx2.Client]:
+    """A client for a server started as ``r3con app`` starts one, or with
+    ``key_service``, as the Mac app does, stopped after."""
+    url, stop = serve(logs_dir=logs_dir, completion=model, key_service=key_service)
+    try:
+        with http_client(url) as http:
+            yield http
+    finally:
+        stop()
+
+
 def shut_down_with_a_stream_open(
     url: str, model: FakeLLM, shut_down: Callable[[], None]
 ) -> tuple[str, dict[str, Any]]:
@@ -430,7 +538,7 @@ def test_keys_say_where_each_comes_from_and_only_a_stored_ones_last_four(
         client.get("/api/keys"),
     ]
     assert responses[-1].json() == {
-        "openai": {"source": "here", "hint": OPENAI_KEY[-4:]},
+        "openai": REMEMBERED_OPENAI,
         "anthropic": None,
         "gemini": {"source": "environment", "variable": "GEMINI_API_KEY"},
         "other": [{"endpoint": ENDPOINT, "key": OTHER_KEY[-4:]}],
@@ -457,7 +565,7 @@ def test_a_key_too_short_to_spare_its_last_four_has_no_hint(
 ):
     client.post("/api/keys", json={"provider": "anthropic", "key": key})
     status = client.post("/api/keys", json={**OTHER, "key": key}).json()
-    assert status["anthropic"] == {"source": "here", "hint": ""}
+    assert status["anthropic"] == {"source": "here", "hint": "", "remembered": True}
     assert status["other"] == [{"endpoint": ENDPOINT, "key": ""}]
     assert key[-4:] not in json.dumps(status)
 
@@ -749,6 +857,169 @@ def test_a_key_a_provider_quotes_in_its_error_is_masked_in_the_event_and_the_log
     assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
     logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
     assert logged == [f"run_failed: {last['error']}"]
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_saved_key_is_remembered_by_the_next_launch(
+    logs_dir: Path, credential_store: FakeKeyring
+):
+    with launched(logs_dir) as http:
+        pasted = {**STORED_OPENAI, "key": f" {OPENAI_KEY}\n"}
+        saved = http.post("/api/keys", json=pasted).json()["openai"]
+    assert credential_store.passwords == {(APP_KEY_SERVICE, "openai"): OPENAI_KEY}
+    with launched(logs_dir) as http:
+        loaded = http.get("/api/keys").json()["openai"]
+    assert saved == loaded == REMEMBERED_OPENAI
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize(
+    ("saved_by", "loaded_by"),
+    [(APP_KEY_SERVICE, MAC_APP_KEY_SERVICE), (MAC_APP_KEY_SERVICE, APP_KEY_SERVICE)],
+    ids=["r3con app's, by the Mac app", "the Mac app's, by r3con app"],
+)
+def test_a_key_saved_by_one_program_is_not_loaded_by_the_other(
+    logs_dir: Path, credential_store: FakeKeyring, saved_by: str, loaded_by: str
+):
+    with launched(logs_dir, key_service=saved_by) as http:
+        http.post("/api/keys", json=STORED_OPENAI)
+    assert credential_store.passwords == {(saved_by, "openai"): OPENAI_KEY}
+    with launched(logs_dir, key_service=loaded_by) as http:
+        assert http.get("/api/keys").json()["openai"] is None
+    with launched(logs_dir, key_service=saved_by) as http:
+        assert http.get("/api/keys").json()["openai"] == REMEMBERED_OPENAI
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_launch_reads_a_key_from_the_store_as_a_post_would_store_it(
+    logs_dir: Path, credential_store: FakeKeyring
+):
+    credential_store.passwords[APP_KEY_SERVICE, "openai"] = f" {OPENAI_KEY}\n"
+    credential_store.passwords[APP_KEY_SERVICE, "gemini"] = " \n"
+    with launched(logs_dir) as http:
+        status = http.get("/api/keys").json()
+    assert (status["openai"], status["gemini"]) == (REMEMBERED_OPENAI, None)
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_key_from_the_store_is_sent_and_masked_like_any_other(
+    logs_dir: Path,
+    credential_store: FakeKeyring,
+    llm: FakeLLM,
+    caplog: pytest.LogCaptureFixture,
+):
+    credential_store.passwords[APP_KEY_SERVICE, "openai"] = OPENAI_KEY
+    llm.answers(relevance=RuntimeError(f"Incorrect API key provided: {OPENAI_KEY}."))
+    with caplog.at_level(logging.INFO, logger="r3con"), launched(logs_dir, llm) as http:
+        run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
+        events = http.get(f"/api/runs/{run_id}/events")
+        wait_for_worker(run_id)
+    assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
+    last = events_in(events.text)[-1]
+    assert last["error"] == "RuntimeError: Incorrect API key provided: REDACTED."
+    assert OPENAI_KEY not in events.text
+    assert OPENAI_KEY not in caplog.text
+    files = [path for path in logs_dir.rglob("*") if path.is_file()]
+    assert files
+    assert all(OPENAI_KEY not in path.read_text() for path in files)
+
+
+def test_forgetting_a_key_removes_it_from_the_store(
+    client: TestClient, credential_store: FakeKeyring
+):
+    client.post("/api/keys", json=STORED_OPENAI)
+    client.post("/api/keys", json={"provider": "gemini", "key": SECOND_KEY})
+    status = client.request("DELETE", "/api/keys", json={"provider": "openai"}).json()
+    assert status["openai"] is None
+    assert credential_store.passwords == {(APP_KEY_SERVICE, "gemini"): SECOND_KEY}
+
+
+def test_a_key_the_store_fails_to_delete_is_still_forgotten_here_and_the_log_says_so(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+):
+    keyring.set_keyring(UndeletableKeyring())
+    client.post("/api/keys", json=STORED_OPENAI)
+    with caplog.at_level(logging.INFO, logger="r3con"):
+        forget = {"provider": "openai"}
+        response = client.request("DELETE", "/api/keys", json=forget)
+    assert (response.status_code, response.json()["openai"]) == (200, None)
+    said = store_failed(MAY_LOAD_AGAIN, "PasswordDeleteError")
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.app"] == [said]
+    assert OPENAI_KEY not in caplog.text
+
+
+def test_removing_a_key_a_failed_save_left_in_the_store_removes_it_there(
+    client: TestClient,
+):
+    store = UnwritableKeyring()
+    store.passwords[APP_KEY_SERVICE, "openai"] = SECOND_KEY
+    keyring.set_keyring(store)
+    saved = client.post("/api/keys", json=STORED_OPENAI).json()["openai"]
+    assert saved == UNTIL_CLOSED_OPENAI
+    client.request("DELETE", "/api/keys", json={"provider": "openai"})
+    assert store.passwords == {}
+
+
+@pytest.mark.parametrize(("store", "said"), SAVE_FAILURES)
+def test_without_a_working_store_a_key_lasts_until_the_app_closes_and_is_never_logged(
+    client: TestClient,
+    llm: FakeLLM,
+    caplog: pytest.LogCaptureFixture,
+    store: Callable[[], KeyringBackend],
+    said: list[str],
+):
+    keyring.set_keyring(store())
+    with caplog.at_level(logging.INFO, logger="r3con"):
+        responses = [client.post("/api/keys", json=STORED_OPENAI)]
+        finished_run(client)
+        responses.append(client.get("/api/keys"))
+        responses.append(
+            client.request("DELETE", "/api/keys", json={"provider": "openai"})
+        )
+    assert [response.status_code for response in responses] == [200] * 3
+    kept = [response.json()["openai"] for response in responses]
+    assert kept == [UNTIL_CLOSED_OPENAI, UNTIL_CLOSED_OPENAI, None]
+    assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.app"] == said
+    assert OPENAI_KEY not in caplog.text
+    assert all(OPENAI_KEY not in response.text for response in responses)
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize(("store", "said"), LAUNCH_FAILURES)
+def test_a_launch_without_a_working_store_starts_with_no_saved_key_and_says_why(
+    logs_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+    store: Callable[[], KeyringBackend],
+    said: list[str],
+):
+    keyring.set_keyring(store())
+    with caplog.at_level(logging.INFO, logger="r3con"), launched(logs_dir) as http:
+        status = http.get("/api/keys").json()
+    assert status == {"openai": None, "anthropic": None, "gemini": None, "other": []}
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.app"] == said
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_a_key_the_store_cannot_read_leaves_the_others_loaded(logs_dir: Path):
+    store = LockedItemKeyring()
+    store.passwords[APP_KEY_SERVICE, "openai"] = OPENAI_KEY
+    store.passwords[APP_KEY_SERVICE, "gemini"] = SECOND_KEY
+    keyring.set_keyring(store)
+    with launched(logs_dir) as http:
+        status = http.get("/api/keys").json()
+    assert status["openai"] is None
+    assert status["gemini"] == {
+        "source": "here",
+        "hint": SECOND_KEY[-4:],
+        "remembered": True,
+    }
 
 
 def test_a_run_streams_its_events_in_order_and_replays_them_to_a_late_reader(

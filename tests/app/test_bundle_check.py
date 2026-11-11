@@ -1,9 +1,12 @@
 import re
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from tests.app.bundle_check import built_by, pinned
+from tests.app.bundle_check import built_by, keychain, pinned, round_trip
+from tests.fakes import FakeKeyring
 
 # As `uv export` writes uv.lock's pins, with markers this Python always or never meets.
 CONSTRAINTS = """\
@@ -110,3 +113,53 @@ def test_built_by_exits_on_another_backend_version(
     problem = "r3context was built by uv 0.9.31, but uv.lock pins uv-build ==0.9.30"
     with pytest.raises(SystemExit, match=re.escape(problem)):
         built_by(packages, build_constraints)
+
+
+class StalledKeyring(FakeKeyring):
+    """A store whose saves wait until ``answer`` is set, as one showing a dialog does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.answer = threading.Event()
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.answer.wait()
+        super().set_password(service, username, password)
+
+
+class ForgetfulKeyring(FakeKeyring):
+    """A store that keeps what it is given but never reads it back."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return None
+
+
+@pytest.fixture
+def stalled() -> Iterator[StalledKeyring]:
+    store = StalledKeyring()
+    yield store
+    store.answer.set()
+
+
+def test_keychain_exits_on_a_store_that_is_not_the_macos_keychain():
+    with pytest.raises(SystemExit, match="finds FakeKeyring, not the macOS Keychain"):
+        keychain()
+
+
+def test_round_trip_saves_reads_back_and_deletes_a_throwaway_item():
+    store = FakeKeyring()
+    round_trip(store)
+    assert store.passwords == {}
+
+
+def test_round_trip_exits_on_an_item_that_does_not_read_back():
+    with pytest.raises(SystemExit, match="was not saved, read back as saved"):
+        round_trip(ForgetfulKeyring())
+
+
+def test_round_trip_gives_up_on_a_store_that_does_not_answer(
+    stalled: StalledKeyring, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr("tests.app.bundle_check.KEYCHAIN_SECONDS", 0.1)
+    with pytest.raises(SystemExit, match="did not answer within 0.1 s"):
+        round_trip(stalled)

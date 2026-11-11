@@ -192,9 +192,10 @@
    * } ServerEvent
    */
   /**
-   * A provider's key as r3con app answers it: stored there, with its last characters as a hint, or found in an
-   * environment variable. `other` lists the servers stored there, each its endpoint and its key's hint or null.
-   * @typedef {{ source: 'here', hint: string } | { source: 'environment', variable: string }} KeyState
+   * A provider's key as r3con app answers it: stored there, with its last characters as a hint and whether it is
+   * remembered, in the system's credential store, for its next launch; or found in an environment variable. `other`
+   * lists the servers stored there, each its endpoint and its key's hint or null.
+   * @typedef {{ source: 'here', hint: string, remembered: boolean } | { source: 'environment', variable: string }} KeyState
    * @typedef {{ endpoint: string, key: string | null }} Server
    * @typedef {Record<string, KeyState | Server[] | null>} KeyStatus
    */
@@ -1580,6 +1581,10 @@
   const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
   const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
+  // Where r3con app keeps a key: in the system's credential store, or, where it can't, in its memory alone.
+  const KEYS_NOTE = "A remembered key is kept in this computer's keychain; servers, until the app closes.";
+  const REMEMBERED = 'remembered';
+  const UNTIL_CLOSED = 'until the app closes';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
@@ -5029,7 +5034,8 @@
   function keyState(provider, status) {
     const state = /** @type {KeyState} */ (status[provider]);
     if (!state) return { text: '', removable: false };
-    return state.source === 'here' ? { text: keyText(state.hint), removable: true } : { text: `from ${state.variable}`, removable: false };
+    if (state.source === 'environment') return { text: `from ${state.variable}`, removable: false };
+    return { text: `${keyText(state.hint)} · ${state.remembered ? REMEMBERED : UNTIL_CLOSED}`, removable: true };
   }
 
   /** @param {Server[]} servers */
@@ -5830,8 +5836,9 @@
       failRun(tab, narr, { outcome: inStage('stopped', narr.stage), error: '' });
     },
     ask: (tab, question) => prototypeAsk(tab, question, pickedModel()),
+    // It keeps a key no longer than the page.
     async saveKey(provider, key) {
-      keyed.set(provider, { source: 'here', hint: hintOf(key) });
+      keyed.set(provider, { source: 'here', hint: hintOf(key), remembered: false });
       return prototypeStatus();
     },
     async saveServer(endpoint, key) {
@@ -5874,7 +5881,7 @@
   /** @type {Mode} */
   const liveMode = {
     note: '',
-    keysNote: '',
+    keysNote: KEYS_NOTE,
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,

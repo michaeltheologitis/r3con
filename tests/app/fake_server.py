@@ -13,6 +13,8 @@ A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` m
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding
 ``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
+The server keeps the keys it is given in a credential store of its own, in memory,
+never the system's.
 """
 
 import os
@@ -28,6 +30,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import keyring
 import litellm
 from litellm.exceptions import ContextWindowExceededError
 
@@ -35,6 +38,7 @@ from r3con.app import serve
 from tests.fakes import (
     PARSE_HEADING,
     SCHEMA_REPLY,
+    FakeKeyring,
     mock_completion,
     stage_of,
     unscripted,
@@ -136,6 +140,7 @@ def scripted_model(**request: Any) -> Any:
 
 
 def main() -> None:
+    keyring.set_keyring(FakeKeyring())
     url, _ = serve(logs_dir=Path(sys.argv[1]), completion=scripted_model)
     print(url, flush=True)
     with contextlib.suppress(KeyboardInterrupt):

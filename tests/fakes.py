@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import re
 import threading
 from collections import deque
@@ -8,6 +9,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import litellm
+from keyring.backend import KeyringBackend
+from keyring.compat import properties
+from keyring.errors import PasswordDeleteError
 from litellm.exceptions import AuthenticationError, ContextWindowExceededError
 from pydantic import BaseModel
 
@@ -55,6 +59,10 @@ TWO_LINE_MEMOS = {
 SEARCH = "https://memos.search.windows.net"
 # A key of unquoted digits, which YAML reads as an integer.
 DIGITS_KEY = 123456789012345678
+# Where a process a test starts finds FileKeyring's file.
+KEYRING_FILE = "R3CON_TEST_KEYRING_FILE"
+# Below keyring's null store's, -1, and its failing one's, 0.
+BELOW_ANY_PICKED = -2
 
 
 class GatewayKey(BaseModel):
@@ -397,3 +405,47 @@ def bad_key() -> AuthenticationError:
     return AuthenticationError(
         message="bad key", llm_provider="openai", model="gpt-6-luna"
     )
+
+
+class FakeKeyring(KeyringBackend):
+    """A credential store in memory, for keyring's ``set_keyring``: it answers as
+    keyring's backends do, and holds each password by its service and account in
+    ``passwords``. With no ``priority``, keyring never picks it by itself."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.passwords: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.passwords.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.passwords[service, username] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        if self.passwords.pop((service, username), None) is None:
+            raise PasswordDeleteError(f"No {username} in {service}")
+
+
+class FileKeyring(KeyringBackend):
+    """A credential store in the JSON file the ``KEYRING_FILE`` variable names, as
+    ``{service: {account: password}}``, for a process a test starts through keyring's
+    own ``PYTHON_KEYRING_BACKEND``, so the test can read what it saved. It reads and
+    saves; keyring never picks it by itself."""
+
+    # The way keyring's own backends give theirs.
+    @properties.classproperty
+    def priority(cls) -> float:
+        return BELOW_ANY_PICKED
+
+    def _stored(self) -> dict[str, dict[str, str]]:
+        path = Path(os.environ[KEYRING_FILE])
+        return json.loads(path.read_text()) if path.exists() else {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self._stored().get(service, {}).get(username)
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        stored = self._stored()
+        stored.setdefault(service, {})[username] = password
+        Path(os.environ[KEYRING_FILE]).write_text(json.dumps(stored))
