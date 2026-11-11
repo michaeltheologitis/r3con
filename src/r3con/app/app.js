@@ -5137,12 +5137,9 @@
       return;
     }
     // Taken now, as files can be removed while a batch is read; files added over the sample memos take their place.
-    const left = tab.files.filter((f) => !f.sample);
-    const replaced = tab.files.length - left.length;
-    tab.files = byFolder([...left, ...read]);
+    tab.files = byFolder([...tab.files.filter((f) => !f.sample), ...read]);
     const added = `${plural(read.length, 'file')} added`;
-    const said = replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added;
-    filesChanged(tab, skipped ? `${said}; ${skipped} skipped` : said);
+    filesChanged(tab, skipped ? `${added}; ${skipped} skipped` : added);
   }
 
   // The re-render drops the clicked button, and the focus with it.
@@ -5165,8 +5162,8 @@
     if (tooSoon) return;
     const tab = state.shown;
     const { files, removed } = tab;
-    if (removed) changeFiles(removed.files, `Restored ${fileCount(removed.files)}`, { at: removed.at });
-    else changeFiles([], `Removed ${fileCount()}`, { removed: { files, at: docPositions(tab) } });
+    if (removed) changeFiles(removed.files, `Restored ${plural(removed.files.length, 'file')}`, { at: removed.at });
+    else changeFiles([], `Removed ${plural(files.length, 'file')}`, { removed: { files, at: docPositions(tab) } });
   }
 
   /** @param {LoadedFile[]} files @param {string} what @param {FilesChange} [change] */
@@ -5190,7 +5187,7 @@
     syncDocNodes(tab, { at });
     readyStatus();
     tellFiles(tab, { filesSaid: `${what}.` });
-    tellChat(tab, `${what}: the next question runs over ${fileCount(tab.files)}.`);
+    tellChat(tab, `${what} · ${plural(tab.files.length, 'file')} total`);
   }
 
   // How a file in a dropped or picked folder is taken, by its path below that folder, mirroring r3con's folder walk:
