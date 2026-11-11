@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 import litellm
+from keyring.backend import KeyringBackend
+from keyring.errors import PasswordDeleteError
 from litellm.exceptions import AuthenticationError, ContextWindowExceededError
 from pydantic import BaseModel
 
@@ -397,3 +399,23 @@ def bad_key() -> AuthenticationError:
     return AuthenticationError(
         message="bad key", llm_provider="openai", model="gpt-6-luna"
     )
+
+
+class FakeKeyring(KeyringBackend):
+    """A credential store in memory, for keyring's ``set_keyring``: it answers as
+    keyring's backends do, and holds each password by its service and account in
+    ``passwords``. With no ``priority``, keyring never picks it by itself."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.passwords: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.passwords.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.passwords[service, username] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        if self.passwords.pop((service, username), None) is None:
+            raise PasswordDeleteError(f"No {username} in {service}")

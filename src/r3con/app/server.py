@@ -8,11 +8,12 @@ request but those for the page and its two files must carry the launch's token a
 opened URL's fragment, ``#token=...``.
 
 - ``GET /api/keys``: each provider's key, as ``null`` when it has none, ``{source:
-  "here", hint}`` when it is stored here, or ``{source: "environment", variable}`` when
-  litellm finds it in that variable; and ``other``, the servers stored here, in the
-  order they were added, each ``{endpoint, key}``, its key a hint or ``null``. A hint
-  is a key's last ``KEY_HINT_CHARS`` characters, ``""`` for a key shorter than
-  ``MIN_HINTED_KEY_CHARS``.
+  "here", hint, remembered}`` when it is stored here, or ``{source: "environment",
+  variable}`` when litellm finds it in that variable; and ``other``, the servers stored
+  here, in the order they were added, each ``{endpoint, key}``, its key a hint or
+  ``null``. A hint is a key's last ``KEY_HINT_CHARS`` characters, ``""`` for a key
+  shorter than ``MIN_HINTED_KEY_CHARS``. ``remembered`` says whether the key is also
+  in the system's credential store, as below, so that the next launch has it.
   ``POST`` stores a provider's key (``{provider, key}``), or a server, by its URL
   (``{provider: "other", endpoint, key?}``), replacing the key of one stored at that
   URL; ``DELETE`` forgets one (``{provider}``, or ``{provider: "other", endpoint}``);
@@ -36,8 +37,15 @@ opened URL's fragment, ``#token=...``.
   provider's key, stored here or in the environment, ever reaches a server. A model
   is placed by its name and the server's URL, as litellm places it to send it, so a
   name on a server at a known provider's URL, such as Groq's, is that provider's.
-- Keys stay in this process's memory, and the server never logs or writes one, and
-  answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
+- A provider's key is kept in this process's memory and, where it can be, in the
+  system's credential store (keyring's: the macOS Keychain, Windows' Credential
+  Manager or the Secret Service), under the service ``KEY_STORE_SERVICE`` with the
+  provider's name as its account, so the server starts with the keys an earlier one
+  saved; ``DELETE`` removes a remembered key from the store too. Where the store
+  fails, or there is none, a key is kept in memory only, until the server stops, and
+  the log says so, naming the error's class but never quoting it. Servers and their
+  keys are kept in memory only. The server never logs or writes a key anywhere else,
+  and answers no part of one but its hint. Each goes to r3con as a run's ``api_key``,
   which r3con registers before sending it and masks in every event's ``error``, in
   what it writes to the logs dir and in what it logs (:mod:`r3con.masking`), the
   environment's keys too; the server's own log line of a failure goes through the same
@@ -116,6 +124,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypeVar
 from urllib.parse import urlsplit
 
+import keyring
 import litellm
 import platformdirs
 import uvicorn
@@ -198,6 +207,10 @@ KEY_VARIABLES: dict[Provider, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
 }
+# The service the keys saved here are stored under in the system's credential store,
+# each with its provider as the account: every later launch and release reads them by
+# it, so it must never change.
+KEY_STORE_SERVICE = "r3con"
 # A key shows its last few characters only when they are a small part of it.
 KEY_HINT_CHARS = 4
 MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS
@@ -324,6 +337,8 @@ KEY_BODY: TypeAdapter[ProviderKey | ServerKey] = TypeAdapter(
 FORGET_BODY: TypeAdapter[ForgetKey | ForgetServer] = TypeAdapter(
     Annotated[ForgetKey | ForgetServer, Field(discriminator="provider")]
 )
+# The credential store is outside input: a key read there is kept as a POST's would be.
+STORED_KEY: TypeAdapter[SecretStr] = TypeAdapter(Secret)
 
 
 @dataclass
@@ -341,6 +356,9 @@ class ServerState:
     logs_dir: Path
     completion: Callable[..., Any] | None
     keys: dict[Provider, SecretStr] = field(default_factory=dict)
+    # The providers whose key in ``keys`` is the one in the credential store.
+    remembered: set[Provider] = field(default_factory=set)
+    store_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     servers: dict[str, SecretStr | None] = field(default_factory=dict)
     jobs: dict[Kind, dict[str, Job]] = field(
         default_factory=lambda: {"run": {}, "ask": {}}
@@ -377,10 +395,13 @@ def _hint(key: SecretStr) -> str:
     return secret[-KEY_HINT_CHARS:] if len(secret) >= MIN_HINTED_KEY_CHARS else ""
 
 
-def _provider_status(state: ServerState, provider: Provider) -> dict[str, str] | None:
+def _provider_status(
+    state: ServerState, provider: Provider
+) -> dict[str, str | bool] | None:
     stored, variable = state.keys.get(provider), KEY_VARIABLES[provider]
     if stored is not None:
-        return {"source": "here", "hint": _hint(stored)}
+        remembered = provider in state.remembered
+        return {"source": "here", "hint": _hint(stored), "remembered": remembered}
     if os.environ.get(variable):
         return {"source": "environment", "variable": variable}
     return None
@@ -395,6 +416,45 @@ def _key_status(state: ServerState) -> dict[str, Any]:
         for endpoint, key in state.servers.items()
     ]
     return status
+
+
+def _store_failed(what: str, error: Exception) -> None:
+    # The error's class alone: a store's message might quote a key.
+    logger.warning("%s: the credential store failed (%s).", what, type(error).__name__)
+
+
+def _stored_keys() -> dict[Provider, SecretStr]:
+    """Each provider's key in the system's credential store. The first read that fails
+    ends the reading, so that a missing store, or a Keychain dialog denied, costs one
+    line in the log and no more dialogs."""
+    keys: dict[Provider, SecretStr] = {}
+    for provider in KEY_VARIABLES:
+        try:
+            stored = keyring.get_password(KEY_STORE_SERVICE, provider)
+        except Exception as error:  # noqa: BLE001 — logged, by its class alone
+            _store_failed("Keys saved earlier are not all loaded", error)
+            break
+        # None when there is none; a blank one, which no POST stores, counts as none.
+        with contextlib.suppress(ValidationError):
+            keys[provider] = STORED_KEY.validate_python(stored)
+    return keys
+
+
+def _save_stored(provider: Provider, key: SecretStr) -> bool:
+    """Whether ``key`` is now ``provider``'s in the system's credential store."""
+    try:
+        keyring.set_password(KEY_STORE_SERVICE, provider, key.get_secret_value())
+    except Exception as error:  # noqa: BLE001 — logged, by its class alone
+        _store_failed(f"The {provider} key is kept only until the app closes", error)
+        return False
+    return True
+
+
+def _delete_stored(provider: Provider) -> None:
+    try:
+        keyring.delete_password(KEY_STORE_SERVICE, provider)
+    except Exception as error:  # noqa: BLE001 — logged, by its class alone
+        _store_failed(f"The {provider} key may load again next launch", error)
 
 
 def _provider(model: str, api_base: str | None) -> str | None:
@@ -529,8 +589,16 @@ async def save_key(request: Request) -> Response:
     body = await _read(request, KEY_BODY.validate_json)
     if isinstance(body, ServerKey):
         state.servers[body.endpoint] = body.key
-    else:
+        return JSONResponse(_key_status(state))
+    # One change at a time, so that memory and the store end with the same key; off
+    # the event loop, which a Keychain dialog would hold up.
+    async with state.store_lock:
+        remembered = await run_in_threadpool(_save_stored, body.provider, body.key)
         state.keys[body.provider] = body.key
+        if remembered:
+            state.remembered.add(body.provider)
+        else:
+            state.remembered.discard(body.provider)
     return JSONResponse(_key_status(state))
 
 
@@ -539,8 +607,12 @@ async def forget_key(request: Request) -> Response:
     body = await _read(request, FORGET_BODY.validate_json)
     if isinstance(body, ForgetServer):
         state.servers.pop(body.endpoint, None)
-    else:
+        return JSONResponse(_key_status(state))
+    async with state.store_lock:
         state.keys.pop(body.provider, None)
+        if body.provider in state.remembered:
+            state.remembered.discard(body.provider)
+            await run_in_threadpool(_delete_stored, body.provider)
     return JSONResponse(_key_status(state))
 
 
@@ -820,10 +892,14 @@ def listen(port: int) -> socket.socket:
 def _server(
     listener: socket.socket, logs_dir: Path, completion: Callable[..., Any] | None
 ) -> tuple[_Server, str]:
-    """A server for ``listener``, and the URL that opens its page."""
+    """A server for ``listener``, with the keys in the credential store, and the URL
+    that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
-    state = ServerState(logs_dir=logs_dir, completion=completion)
+    keys = _stored_keys()
+    state = ServerState(
+        logs_dir=logs_dir, completion=completion, keys=keys, remembered=set(keys)
+    )
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
     return _Server(config, state), f"http://{HOST}:{port}/#token={token}"

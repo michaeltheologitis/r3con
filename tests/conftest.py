@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn
 
+import keyring
 import litellm
 import pytest
 import pytest_socket
@@ -29,6 +30,7 @@ from tests.fakes import (
     ANSWERING_SCHEMA,
     PARSE_HEADING,
     Content,
+    FakeKeyring,
     FakeLLM,
     Request,
     too_long,
@@ -420,6 +422,16 @@ def isolated_r3con(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[
     logger.setLevel(level)
     logger.propagate = propagate
     logger.handlers[:] = handlers
+
+
+@pytest.fixture(autouse=True)
+def credential_store() -> FakeKeyring:
+    """An empty credential store in memory, in keyring's place for the whole test, so
+    that no test reads or writes the system's. keyring finds the system's only when
+    first asked for a store, which this answers first."""
+    store = FakeKeyring()
+    keyring.set_keyring(store)
+    return store
 
 
 @pytest.fixture(autouse=True)

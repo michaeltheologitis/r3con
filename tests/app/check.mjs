@@ -94,6 +94,10 @@ const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 // The page's MASK before TEST_KEY's last four, the only part of it r3con app answers.
 const TEST_HINT = '••••7f3a';
+// A key the page saved, as its row shows it: r3con app's, which fake_server.py's store remembers, and the prototype's.
+const REMEMBERED_HINT = `${TEST_HINT} · remembered`;
+const UNTIL_CLOSED_HINT = `${TEST_HINT} · until the app closes`;
+const KEYS_NOTE = "A remembered key is kept in this computer's keychain; servers, until the app closes.";
 const ENVIRONMENT_KEY = 'env-check-not-a-real-key-9c1d';
 const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
 const SECOND_ENDPOINT = 'http://localhost:11434';
@@ -2258,9 +2262,9 @@ async function keys(page, checkAt) {
   const rows = await page.evaluate(keyRows);
   const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini']) && isDeepStrictEqual(rows.servers, [`${TEST_ENDPOINT} · no key`]);
   checkAt('a save marks OpenAI and Google as set, and lists the server with no key', marked, `${set.join(', ')}; ${rows.servers.join(', ')}`);
-  const shownStates = { 'state-openai': TEST_HINT, 'state-gemini': TEST_HINT };
-  const shownName = "each row shows its key's last four masked, and each key field is described by its row's state";
-  const describedBy = rows.described['key-openai'] === TEST_HINT && rows.described['key-anthropic'] === '';
+  const shownStates = { 'state-openai': UNTIL_CLOSED_HINT, 'state-gemini': UNTIL_CLOSED_HINT };
+  const shownName = "each row shows its key's last four masked and how long it is kept, and each key field is described by its row's state";
+  const describedBy = rows.described['key-openai'] === UNTIL_CLOSED_HINT && rows.described['key-anthropic'] === '';
   checkAt(shownName, isDeepStrictEqual(rows.states, shownStates) && describedBy, JSON.stringify(rows));
   const removesNamed = isDeepStrictEqual(rows.removes, ['remove OpenAI key', 'remove Google key', `remove server ${TEST_ENDPOINT}`]);
   const noShowKeys = (await page.getByRole('button', { name: /show keys/ }).count()) === 0;
@@ -4742,7 +4746,7 @@ async function liveSession(url) {
 
     await page.click('#settings-btn');
     const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
-    check('live', 'the settings show no note under the keys', note === null, note);
+    check('live', 'the note under the keys says where r3con app keeps them', note === KEYS_NOTE, note);
     const hintWithout = (await page.evaluate(pickerState)).hint;
     await page.fill('#key-openai', TEST_KEY);
     const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
@@ -4751,9 +4755,9 @@ async function liveSession(url) {
     await page.keyboard.press('Escape');
     const fresh = await page.context().newPage();
     await fresh.goto(url);
-    const kept = await becomes(fresh, (hint) => document.getElementById('state-openai').textContent === hint, TEST_HINT);
+    const kept = await becomes(fresh, (hint) => document.getElementById('state-openai').textContent === hint, REMEMBERED_HINT);
     await fresh.close();
-    const keyName = "a saved key shows OpenAI's last four masked, and a fresh page of the launch reads it from the server";
+    const keyName = "a saved key shows OpenAI's last four masked and remembered, and a fresh page of the launch reads it from the server";
     check('live', keyName, marked && kept, `marked ${marked}, fresh page ${kept}`);
 
     await page.click('#run-btn');
@@ -4803,7 +4807,7 @@ async function liveKeyStates(url) {
     await page.fill('#key-openai', TEST_KEY);
     const saved = await saveKeys(page);
     const rows = await page.evaluate(keyRows);
-    const both = { 'state-openai': TEST_HINT, 'state-gemini': 'from GEMINI_API_KEY' };
+    const both = { 'state-openai': REMEMBERED_HINT, 'state-gemini': 'from GEMINI_API_KEY' };
     const fromEnvironment = saved && isDeepStrictEqual(rows.states, both) && isDeepStrictEqual(rows.removes, ['remove OpenAI key']);
     const environmentName = 'a key from the environment names its variable and has no remove button, beside one saved here';
     check('live', environmentName, fromEnvironment && rows.described['key-gemini'] === both['state-gemini'], JSON.stringify(rows));
