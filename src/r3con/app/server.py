@@ -39,9 +39,12 @@ opened URL's fragment, ``#token=...``.
   name on a server at a known provider's URL, such as Groq's, is that provider's.
 - A provider's key is kept in this process's memory and, where it can be, in the
   system's credential store (keyring's: the macOS Keychain, Windows' Credential
-  Manager or the Secret Service), under the service ``KEY_STORE_SERVICE`` with the
-  provider's name as its account, so the server starts with the keys an earlier one
-  saved; ``DELETE`` removes a provider's key from the store too. Where the store
+  Manager or the Secret Service), with the provider's name as its account, so the
+  server starts with the keys an earlier one saved; ``DELETE`` removes a provider's
+  key from the store too. ``r3con app`` keeps them under the service
+  ``APP_KEY_SERVICE``, and the Mac app under ``MAC_APP_KEY_SERVICE``, its bundle id:
+  neither reads an item the other saved, which on macOS would ask for the login
+  keychain password, so a key saved in one is not in the other. Where the store
   fails, or there is none, a key is kept in memory only, until the server stops, and
   the log says so, naming the error's class but never quoting it. Servers and their
   keys are kept in memory only. The server never logs or writes a key anywhere else,
@@ -208,10 +211,12 @@ KEY_VARIABLES: dict[Provider, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
 }
-# The service the keys saved here are stored under in the system's credential store,
-# each with its provider as the account: every later launch and release reads them by
-# it, so it must never change.
-KEY_STORE_SERVICE = "r3con"
+# The services the keys saved here are stored under in the system's credential store,
+# each with its provider as the account: r3con app's, and the Mac app's, its bundle
+# id. Every later launch and release of each reads them by these, so they must never
+# change.
+APP_KEY_SERVICE = "r3con"
+MAC_APP_KEY_SERVICE = "io.github.michaeltheologitis.r3con"
 # A key shows its last few characters only when they are a small part of it.
 KEY_HINT_CHARS = 4
 MIN_HINTED_KEY_CHARS = 3 * KEY_HINT_CHARS
@@ -356,6 +361,8 @@ class Job:
 class ServerState:
     logs_dir: Path
     completion: Callable[..., Any] | None
+    # The credential store's service its keys are saved under.
+    key_service: str = APP_KEY_SERVICE
     keys: dict[Provider, SecretStr] = field(default_factory=dict)
     # The providers whose key in ``keys`` is the one in the credential store.
     remembered: set[Provider] = field(default_factory=set)
@@ -424,13 +431,13 @@ def _store_failed(what: str, error: Exception) -> None:
     logger.warning("%s: the credential store failed (%s).", what, type(error).__name__)
 
 
-def _stored_keys() -> dict[Provider, SecretStr]:
-    """The keys in the system's credential store, each by its provider, less any that
-    can't be read, as the log then says."""
+def _stored_keys(service: str) -> dict[Provider, SecretStr]:
+    """The keys in the system's credential store under ``service``, each by its
+    provider, less any that can't be read, as the log then says."""
     keys: dict[Provider, SecretStr] = {}
     for provider in KEY_VARIABLES:
         try:
-            stored = keyring.get_password(KEY_STORE_SERVICE, provider)
+            stored = keyring.get_password(service, provider)
         except NoKeyringError as error:
             _store_failed("No key saved earlier is loaded", error)
             break
@@ -443,23 +450,25 @@ def _stored_keys() -> dict[Provider, SecretStr]:
     return keys
 
 
-def _save_stored(provider: Provider, key: SecretStr) -> bool:
-    """Whether ``key`` is now ``provider``'s in the system's credential store."""
+def _save_stored(service: str, provider: Provider, key: SecretStr) -> bool:
+    """Whether ``key`` is now ``provider``'s under ``service`` in the system's
+    credential store."""
     try:
-        keyring.set_password(KEY_STORE_SERVICE, provider, key.get_secret_value())
+        keyring.set_password(service, provider, key.get_secret_value())
     except Exception as error:  # noqa: BLE001 — logged, by its class alone
         _store_failed(f"The {provider} key is kept only until the app closes", error)
         return False
     return True
 
 
-def _delete_stored(provider: Provider) -> None:
-    """Delete ``provider``'s key from the system's credential store, if it holds one,
-    whether or not it is the one in memory: one a save failed to replace is there."""
+def _delete_stored(service: str, provider: Provider) -> None:
+    """Delete ``provider``'s key under ``service`` from the system's credential store,
+    if it holds one, whether or not it is the one in memory: one a save failed to
+    replace is there."""
     try:
         # A store answers a delete of nothing with the error of a failed one.
-        if keyring.get_password(KEY_STORE_SERVICE, provider) is not None:
-            keyring.delete_password(KEY_STORE_SERVICE, provider)
+        if keyring.get_password(service, provider) is not None:
+            keyring.delete_password(service, provider)
     except NoKeyringError:
         pass  # No store, so no key in one.
     except Exception as error:  # noqa: BLE001 — logged, by its class alone
@@ -602,7 +611,9 @@ async def save_key(request: Request) -> Response:
     # One change at a time, so that memory and the store end with the same key; off
     # the event loop, which a Keychain dialog would hold up.
     async with state.store_lock:
-        remembered = await run_in_threadpool(_save_stored, body.provider, body.key)
+        remembered = await run_in_threadpool(
+            _save_stored, state.key_service, body.provider, body.key
+        )
         state.keys[body.provider] = body.key
         if remembered:
             state.remembered.add(body.provider)
@@ -620,7 +631,7 @@ async def forget_key(request: Request) -> Response:
     async with state.store_lock:
         state.keys.pop(body.provider, None)
         state.remembered.discard(body.provider)
-        await run_in_threadpool(_delete_stored, body.provider)
+        await run_in_threadpool(_delete_stored, state.key_service, body.provider)
     return JSONResponse(_key_status(state))
 
 
@@ -898,15 +909,22 @@ def listen(port: int) -> socket.socket:
 
 
 def _server(
-    listener: socket.socket, logs_dir: Path, completion: Callable[..., Any] | None
+    listener: socket.socket,
+    logs_dir: Path,
+    completion: Callable[..., Any] | None,
+    key_service: str = APP_KEY_SERVICE,
 ) -> tuple[_Server, str]:
-    """A server for ``listener``, with the keys in the credential store, and the URL
-    that opens its page."""
+    """A server for ``listener``, with the keys under ``key_service`` in the
+    credential store, and the URL that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
-    keys = _stored_keys()
+    keys = _stored_keys(key_service)
     state = ServerState(
-        logs_dir=logs_dir, completion=completion, keys=keys, remembered=set(keys)
+        logs_dir=logs_dir,
+        completion=completion,
+        key_service=key_service,
+        keys=keys,
+        remembered=set(keys),
     )
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
@@ -918,13 +936,14 @@ def serve(
     port: int = 0,
     logs_dir: Path = LOGS_DIR,
     completion: Callable[..., Any] | None = None,
+    key_service: str = APP_KEY_SERVICE,
 ) -> tuple[str, Callable[[], None]]:
-    """Start the server on a thread of its own. Returns the URL that opens the page,
-    with this launch's token, and a function that stops the server, returning once its
-    runs and asks have ended, at most ``WORKERS_EXIT_SECONDS`` after its connections
-    have closed."""
+    """Start the server on a thread of its own, its keys saved under ``key_service``.
+    Returns the URL that opens the page, with this launch's token, and a function that
+    stops the server, returning once its runs and asks have ended, at most
+    ``WORKERS_EXIT_SECONDS`` after its connections have closed."""
     listener = listen(port)
-    server, url = _server(listener, logs_dir, completion)
+    server, url = _server(listener, logs_dir, completion, key_service)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
@@ -938,11 +957,11 @@ def serve(
 
 
 def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
-    """Serve the app on ``listener`` until stopped, as ``r3con app`` does: print the
-    URL that opens the page, with this launch's token, and where its run folders go,
-    and with ``browser``, open the page."""
+    """Serve the app on ``listener`` until stopped, as ``r3con app`` does, its keys
+    under ``APP_KEY_SERVICE``: print the URL that opens the page, with this launch's
+    token, and where its run folders go, and with ``browser``, open the page."""
     configure_logging()
-    server, url = _server(listener, logs_dir, None)
+    server, url = _server(listener, logs_dir, None, APP_KEY_SERVICE)
     print(f"r3con app: {url}", flush=True)
     print(f"r3con app: runs go to {logs_dir}", flush=True)
     if browser:

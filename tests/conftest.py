@@ -54,6 +54,9 @@ ROUTER_CALLBACKS = (
     "_async_failure_callback",
 )
 TOKEN_DIR_VARIABLES = ("GITHUB_COPILOT_TOKEN_DIR", "CHATGPT_TOKEN_DIR")
+# keyring's own choice of store, read in each process it starts in.
+KEYRING_BACKEND_VARIABLE = "PYTHON_KEYRING_BACKEND"
+NULL_KEYRING = "keyring.backends.null.Keyring"
 TOKEN_REQUESTS = (
     (CopilotAuthenticator, "get_api_key", "Copilot"),
     (CopilotAuthenticator, "get_access_token", "Copilot"),
@@ -425,10 +428,12 @@ def isolated_r3con(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[
 
 
 @pytest.fixture(autouse=True)
-def credential_store() -> FakeKeyring:
+def credential_store(monkeypatch: pytest.MonkeyPatch) -> FakeKeyring:
     """An empty credential store in memory, in keyring's place for the whole test, so
     that no test reads or writes the system's. keyring finds the system's only when
-    first asked for a store, which this answers first."""
+    first asked for a store, which this answers first; a process the test starts,
+    such as ``r3con app``, gets keyring's null store, which holds nothing."""
+    monkeypatch.setenv(KEYRING_BACKEND_VARIABLE, NULL_KEYRING)
     store = FakeKeyring()
     keyring.set_keyring(store)
     return store

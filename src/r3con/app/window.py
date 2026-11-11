@@ -1,7 +1,8 @@
 """The app's page in a window of its own: the Mac app, which Briefcase starts as
 ``python -m r3con``.
 
-It serves the app as ``r3con app`` does, on a free port with a new token, and shows the
+It serves the app as ``r3con app`` does, on a free port with a new token, but with its
+keys under its own service in the Keychain, ``MAC_APP_KEY_SERVICE``, and shows the
 page in a Toga window of ``WINDOW_SIZE``. Closing the window, or Quit in the app's
 menu, hides it, then stops the server as ``serve``'s stop does, before the app exits;
 if Toga can't start the app, the server stops before the error goes on. Toga is the
@@ -14,7 +15,7 @@ from typing import Any
 
 import toga
 
-from r3con.app.server import serve
+from r3con.app.server import MAC_APP_KEY_SERVICE, serve
 from r3con.logging_setup import configure_logging
 
 WINDOW_SIZE = (1280, 820)
@@ -23,7 +24,7 @@ WINDOW_SIZE = (1280, 820)
 def main() -> None:
     """Serve the app and show its page in a window until the app quits."""
     configure_logging()
-    url, stop = serve()
+    url, stop = serve(key_service=MAC_APP_KEY_SERVICE)
 
     def page(app: toga.App, **kwargs: Any) -> toga.Widget:
         for window in app.windows:

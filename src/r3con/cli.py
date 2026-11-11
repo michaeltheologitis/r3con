@@ -40,7 +40,7 @@ from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
 _log = get_logger("cli")
 # The packages of the app extra, and what to install when one is missing.
-APP_PACKAGES = frozenset({"platformdirs", "starlette", "uvicorn"})
+APP_PACKAGES = frozenset({"keyring", "platformdirs", "starlette", "uvicorn"})
 APP_EXTRA_HINT = (
     'the app needs its extra: uv tool install "r3context[app]" '
     '(or pip install "r3context[app]")'

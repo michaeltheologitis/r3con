@@ -192,9 +192,12 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
 
     from r3con import __version__
     from r3con.app import serve
+    from r3con.app.server import MAC_APP_KEY_SERVICE
 
     print(f"r3con {__version__}")
-    url, stop = serve(logs_dir=Path(tempfile.mkdtemp()))
+    url, stop = serve(
+        logs_dir=Path(tempfile.mkdtemp()), key_service=MAC_APP_KEY_SERVICE
+    )
     base_url, token = url.split("/#token=")
     keys = Request(f"{base_url}/api/keys", headers={"Authorization": f"Bearer {token}"})
     try:
