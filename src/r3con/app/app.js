@@ -12,8 +12,8 @@
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {{ dist: number, mid: Point, view: View }} Pinch */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
-  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent; its popup stops at cut.
-  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number, words: number, cut: number }} LoadedFile */
+  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
+  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
   /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
   /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
@@ -1490,6 +1490,8 @@
   // Until opened in full, a file's popup stops after WORDS_SHOWN words, a megabyte of prose; a parse's, LINES_SHOWN.
   const WORDS_SHOWN = 150000;
   const LINES_SHOWN = 30000;
+  // Far past WORDS_SHOWN words of prose: a file stops here first only if its text has few spaces.
+  const CHARS_SHOWN = 2000000;
   const JSON_INDENT = 2;
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
@@ -1720,9 +1722,9 @@
   let nextUid = 0;
   let nextTab = 1;
 
-  /** @param {Omit<LoadedFile, 'bytes' | 'uid' | 'words' | 'cut'>} file @returns {LoadedFile} */
+  /** @param {Omit<LoadedFile, 'bytes' | 'uid'>} file @returns {LoadedFile} */
   function loaded(file) {
-    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++, ...wordsIn(file.text) };
+    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++ };
   }
 
   const SAMPLE_FILES = SAMPLE.docs.map((d) => loaded({ ...d, sample: true }));
@@ -3515,16 +3517,15 @@
     return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
   }
 
-  // Where the text in `pre` stops short, and a button that shows it all, leaving the focus on the text it opened.
-  /** @param {HTMLElement} pre @param {number} shown @param {number} total @param {string} unit @param {() => void} openInFull */
-  function cutLine(pre, shown, total, unit, openInFull) {
+  // Where the text in `pre` stops short, a button that shows it all, leaving the focus on the text it opened.
+  /** @param {HTMLElement} pre @param {() => void} openInFull */
+  function cutLine(pre, openInFull) {
     const onclick = () => {
       openInFull();
       pre.tabIndex = -1;
       pre.focus({ preventScroll: true });
     };
-    const button = h('button', { class: 'ref', type: 'button', onclick }, 'open in full');
-    return h('span', { class: 'cut k' }, `${fmtInt(shown)} of ${fmtInt(total)} ${unit} · `, button);
+    return h('span', { class: 'cut' }, h('button', { class: 'ref', type: 'button', onclick }, 'open in full'));
   }
 
   // A block per line of the JSON, its newline kept so it copies as is, wrapping under its own indent.
@@ -3539,7 +3540,7 @@
       // One at a time: a long parse's lines, spread as arguments, overflow the stack.
       const block = new DocumentFragment();
       for (const line of lines.slice(0, shown)) block.append(hanging(line));
-      fill(pre, block, shown < lines.length && cutLine(pre, shown, lines.length, 'lines', () => draw(lines.length)));
+      fill(pre, block, shown < lines.length && cutLine(pre, () => draw(lines.length)));
     };
     draw(LINES_SHOWN);
     return pre;
@@ -3551,17 +3552,20 @@
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
   }
 
-  // How many words `text` has, by whitespace, and where it stops short: after its WORDS_SHOWN-th word, if it has more.
+  // Where `text` stops short: after WORDS_SHOWN words, by whitespace, or CHARS_SHOWN characters if sooner; else its end.
   /** @param {string} text */
-  function wordsIn(text) {
+  function cutOf(text) {
     const word = /\S+/g;
     let words = 0;
-    let cut = text.length;
-    while (word.exec(text)) {
-      words += 1;
-      if (words === WORDS_SHOWN) cut = word.lastIndex;
+    while (words < WORDS_SHOWN && word.exec(text) && word.lastIndex <= CHARS_SHOWN) words += 1;
+    if (words === WORDS_SHOWN) {
+      const cut = word.lastIndex;
+      return word.exec(text) ? cut : text.length;
     }
-    return { words, cut: words > WORDS_SHOWN ? cut : text.length };
+    if (text.length <= CHARS_SHOWN) return text.length;
+    // Never between a surrogate pair's halves.
+    const last = String.fromCodePoint(/** @type {number} */ (text.codePointAt(CHARS_SHOWN - 1)));
+    return last.length > 1 ? CHARS_SHOWN - 1 : CHARS_SHOWN;
   }
 
   // `text` up to `upTo`, each span in `spans` marked, titled by `title`, and `at` flashed.
@@ -3580,7 +3584,8 @@
   // A sentence to show past where the file stops short opens it in full.
   /** @param {Tab} tab @param {LoadedFile} file @param {TextRange | null} [at] a sentence to show */
   function markedFile(tab, file, at = null) {
-    let end = at && at.end > file.cut ? file.text.length : file.cut;
+    const cut = cutOf(file.text);
+    let end = at && at.end > cut ? file.text.length : cut;
     /** @param {Trail | null} trail */
     const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
     /** @param {Trail | null} trail */
@@ -3600,7 +3605,7 @@
     /** @param {Trail | null} trail */
     const text = (trail) => [
       markedText(file.text, end, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at),
-      end < file.text.length && cutLine(pre, WORDS_SHOWN, file.words, 'words', openInFull),
+      end < file.text.length && cutLine(pre, openInFull),
     ];
     return [meta, trailPart(tab, pre, text)];
   }

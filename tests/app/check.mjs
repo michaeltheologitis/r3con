@@ -265,12 +265,13 @@ const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a stat
 const LIVE_ASK = 'live ask over this run';
 const PDF_TEXT = 'Incidents this quarter: 7.';
 const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
-// The page's WORDS_SHOWN and LINES_SHOWN: a file's popup stops after this many words, and a parse's after this many
-// lines of its JSON, until opened in full.
+// The page's WORDS_SHOWN, CHARS_SHOWN and LINES_SHOWN: a file's popup stops after this many words, or characters if
+// sooner, and a parse's after this many lines of its JSON, until opened in full.
 const WORDS_SHOWN = 150000;
+const CHARS_SHOWN = 2000000;
 const LINES_SHOWN = 30000;
-// The line where a popup's text stops short.
-const cutSays = (shown, total, unit) => `${shown.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} ${unit} · open in full`;
+// The line where a popup's text stops short: its button alone.
+const CUT_LINE = 'open in full';
 // The page's JSON_INDENT: a parse's JSON is indented this many spaces a level.
 const JSON_INDENT = 2;
 // A stream this long, which no page uses, makes a PDF far bigger than its text.
@@ -2766,21 +2767,21 @@ async function popupArea() {
     const cut = await page.evaluate(shownIn, '#inspector');
     await page.click('#inspector .cut button');
     const full = await page.evaluate(shownIn, '#inspector');
-    const capName = `a parse of more than ${LINES_SHOWN} lines of JSON shows its first ${LINES_SHOWN}, then says how many it has, and open in full shows them all`;
-    const cutThere = cut.lines === LINES_SHOWN && cut.cut === cutSays(LINES_SHOWN, total, 'lines');
+    const capName = `a parse of more than ${LINES_SHOWN} lines of JSON shows its first ${LINES_SHOWN}, then open in full, which shows them all`;
+    const cutThere = cut.lines === LINES_SHOWN && cut.cut === CUT_LINE;
     check('popup', capName, cutThere && full.lines === total && full.cut === null, `${cut.lines} lines, ${cut.cut}; then ${full.lines}, ${full.cut}`);
   });
 }
 
-// In-page: what the popup or pane `selector` shows of a text: its meta line, its lines of JSON, where its text ends, its
-// line where the text stops short, its scroll, and whether it has the focus.
+// In-page: what the popup or pane `selector` shows of a text: its meta line, its lines of JSON, its length and where it
+// ends, its line where the text stops short, its scroll, and whether it has the focus.
 function shownIn(selector) {
   const pre = document.querySelector(`${selector} pre`);
   const cut = pre.querySelector('.cut');
   const text = [...pre.childNodes].filter((node) => node !== cut).map((node) => node.textContent).join('');
   const lines = pre.querySelectorAll(':scope > span:not(.cut)').length;
   const focused = document.activeElement === pre;
-  return { meta: pre.previousElementSibling.textContent, lines, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
+  return { meta: pre.previousElementSibling.textContent, lines, length: text.length, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
 }
 
 // Words numbered from 1, so each says where it is.
@@ -2789,14 +2790,17 @@ const docNode = (name) => `.node.doc[aria-label^="${name},"]`;
 
 // Enough words past where a popup stops short that its text, opened in full, runs on past the line that said so.
 const WORDS_PAST = 1000;
+// A 3 MB file with no spaces, as minified JSON or base64 is: one word.
+const DENSE_CHARS = 3000000;
 
-// A file of more words than its popup shows, and one of exactly as many.
+// A file of more words than its popup shows, one of exactly as many, and one of more characters with no spaces.
 async function popupWords() {
   await withPage('popup', { sample: false }, async (page) => {
     const long = memo('long.txt', numberedWords(WORDS_SHOWN + WORDS_PAST));
     const within = memo('within.txt', numberedWords(WORDS_SHOWN));
-    await page.setInputFiles('#file-input', [long, within]);
-    await filesCounted(page, 2);
+    const dense = memo('dense.txt', 'x'.repeat(DENSE_CHARS));
+    await page.setInputFiles('#file-input', [long, within, dense]);
+    await filesCounted(page, 3);
     await page.click(docNode('long.txt'));
     const cut = await page.evaluate(shownIn, '#inspector');
     const stopsName = `a file of more than ${WORDS_SHOWN} words shows its ${WORDS_SHOWN}th word and not the next`;
@@ -2806,15 +2810,25 @@ async function popupWords() {
     const scrolled = (await page.evaluate(shownIn, '#inspector')).scrollTop;
     await page.click('#inspector .cut button');
     const full = await page.evaluate(shownIn, '#inspector');
-    const fullName = 'where its text stops, a line says how many words it shows of how many, and open in full shows the rest, to its last word, at the same scroll, the focus on the text';
+    const fullName = 'where its text stops, a line says only open in full, which shows the rest, to its last word, at the same scroll, the focus on the text';
     const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
-    check('popup', fullName, cut.cut === cutSays(WORDS_SHOWN, WORDS_SHOWN + WORDS_PAST, 'words') && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
+    check('popup', fullName, cut.cut === CUT_LINE && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
 
     await page.keyboard.press('Escape');
     await page.click(docNode('within.txt'));
     const whole = await page.evaluate(shownIn, '#inspector');
     const withinName = `a file of ${WORDS_SHOWN} words shows whole, with no open in full`;
     check('popup', withinName, whole.end.endsWith(` w${WORDS_SHOWN}\n`) && whole.cut === null, JSON.stringify(whole));
+
+    await page.keyboard.press('Escape');
+    await page.click(docNode('dense.txt'));
+    const denseCut = await page.evaluate(shownIn, '#inspector');
+    await page.click('#inspector .cut button');
+    const denseFull = await page.evaluate(shownIn, '#inspector');
+    const denseName = `a file of ${DENSE_CHARS} characters and no spaces stops at ${CHARS_SHOWN}, then open in full, which shows the rest`;
+    const denseStops = denseCut.length === CHARS_SHOWN && denseCut.cut === CUT_LINE;
+    const denseOpened = denseFull.length === DENSE_CHARS && denseFull.cut === null;
+    check('popup', denseName, denseStops && denseOpened, `${denseCut.length}, ${denseCut.cut}; then ${denseFull.length}, ${denseFull.cut}`);
 
     await page.keyboard.press('Escape');
     await page.click('#tab-files');
@@ -3246,8 +3260,7 @@ async function quotesArea() {
     const sentence = sample.rounds[1][0].quotes[0].text;
     const pastName = 'a sentence past where its file stops short is counted, and a quote or a chat sentence opens its popup in full, scrolled to it, marked and flashed';
     const shownThere = [fromQuote, fromChat].every(({ flash, cut }) => flash?.text === sentence && flash.marked && flash.inView && cut === null);
-    const stopsShort = cut === cutSays(WORDS_SHOWN, (PAST_CUT + sample.docs[0].text).match(/\S+/g).length, 'words');
-    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && stopsShort && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
+    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && cut === CUT_LINE && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
   });
 
   await withPage('quotes', { before: serving(withSample(touchingHalves)) }, async (page) => {
