@@ -1688,6 +1688,9 @@
   const SAVED_NAME = 'r3con-tab';
   const SAVED_MODE_NOTE = 'open this file in R3Con to ask more';
   const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
+  const CANT_SAVE = "couldn't save the tab";
+  // How long a saved file's download link lasts: long enough for any browser to have read it.
+  const DOWNLOAD_LINK_MS = 60_000;
   /** @param {number} n */
   const savedHolds = (n) => `The file includes the full text of this tab's ${plural(n, 'file')}.`;
   const RECORDED_SOURCE = 'recorded run';
@@ -6137,18 +6140,19 @@
   }
 
   // ---------- saved tabs ----------
-  // A tab that has run saves as one .html file: the page with its stylesheet and script inline, and the tab as data.
-  // Opened anywhere, it shows the tab as the prototype shows its recorded run, and loads and sends nothing.
+  // A tab saved as one .html file: the page, inline, with the tab as data, which it shows as the prototype its replay.
 
   /** @param {string} text @returns {Promise<string>} */
   async function gzipped(text) {
     const zipped = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
-    const url = await new Promise((resolve) => {
+    /** @type {string} */
+    const url = await new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(zipped);
     });
-    return String(url).slice(String(url).indexOf(',') + 1);
+    return url.slice(url.indexOf(',') + 1);
   }
 
   /** @param {string} base64 */
@@ -6157,11 +6161,11 @@
     return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
   }
 
-  // An ask that never landed has no answer to show.
   /** @param {RunTab} tab @returns {Promise<SavedTabV1>} */
   async function savedTab(tab) {
     const { files, run } = tab;
     const representation = await (await api(`/api/runs/${run.id}/representation`)).json();
+    // An ask that never landed has no answer to show.
     const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals }) => ({ question, model, text, provenance, totals }));
     return {
       version: SAVED_VERSION,
@@ -6178,15 +6182,22 @@
   /** @param {SavedTabV1} tab */
   async function savedPage(tab) {
     const [page, style, served] = await Promise.all(PAGE_FILES.map(async (path) => (await api(path)).text()));
-    // Inline, a </script in the script would end it; escaped, it reads the same.
-    const script = served.replace(/<\/(script)/gi, '<\\/$1');
+    // Its hash is of the text the browser parses, which has its line ends as \n; and inline, a </script in it would end
+    // it, so it is escaped, which reads the same.
+    const script = served.replace(/\r\n?/g, '\n').replace(/<\/(script)/gi, '<\\/$1');
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(script)));
     const policy = `default-src 'none'; script-src 'sha256-${btoa(String.fromCharCode(...digest))}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
     const data = JSON.stringify(tab).replaceAll('<', '\\u003c');
-    return page
-      .replace(PAGE_CHARSET, () => `${PAGE_CHARSET}\n<meta http-equiv="Content-Security-Policy" content="${policy}">`)
-      .replace(PAGE_STYLE, () => `<style>${style}</style>`)
-      .replace(PAGE_SCRIPT, () => `<script type="application/json" id="${SAVED_TAB_ID}">${data}</script>\n<script>${script}</script>`);
+    /** @type {[string, string][]} */
+    const inlined = [
+      [PAGE_CHARSET, `${PAGE_CHARSET}\n<meta http-equiv="Content-Security-Policy" content="${policy}">`],
+      [PAGE_STYLE, `<style>${style}</style>`],
+      [PAGE_SCRIPT, `<script type="application/json" id="${SAVED_TAB_ID}">${data}</script>\n<script>${script}</script>`],
+    ];
+    return inlined.reduce((html, [tag, inline]) => {
+      if (!html.includes(tag)) throw new Error(`the page has no ${tag}`);
+      return html.replace(tag, () => inline);
+    }, page);
   }
 
   // The question's words, lowercase and joined by hyphens, cut after the last whole word that fits.
@@ -6202,8 +6213,7 @@
   function download(name, page) {
     const url = URL.createObjectURL(new Blob([page], { type: 'text/html' }));
     h('a', { href: url, download: name }).click();
-    // Once the click has handed it to the browser.
-    setTimeout(() => URL.revokeObjectURL(url));
+    setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_LINK_MS);
   }
 
   async function saveShown() {
@@ -6212,7 +6222,7 @@
     try {
       download(savedName(tab.run.answers[0].question), await savedPage(await savedTab(tab)));
     } catch (error) {
-      errorStatus(`couldn't save the tab · ${explain(error, /** @type {Error} */ (error).message, "couldn't save the tab")}`);
+      errorStatus(explain(error, CANT_SAVE));
     }
   }
 
@@ -6252,7 +6262,6 @@
     return read(saved);
   }
 
-  // Fills the empty tab the page opened on with the saved one: its files, then its run and asks, at once.
   /** @param {string} block */
   async function openSaved(block) {
     try {

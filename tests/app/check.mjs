@@ -7063,7 +7063,7 @@ async function answerAndFileShown(page) {
   await page.keyboard.press('Escape');
   await page.click('#tab-files');
   await page.click('#file-list .file');
-  return { lit, marks: await page.$$eval('#file-view mark', (els) => els.map((el) => el.textContent)) };
+  return { lit, marks: await page.evaluate(marksIn, '#file-view') };
 }
 
 // A tab that has run saves as one .html file, named after its question, that holds the tab and nothing of the
@@ -7141,7 +7141,7 @@ async function liveSaved(url) {
       check('live', viewOnlyName, isDeepStrictEqual(viewOnly, { hidden: true, note: SAVED_NOTE, title: `${SAVED_QUESTION} · ❀ R3Con` }), JSON.stringify(viewOnly));
       const clicked = await answerAndFileShown(page);
       const clickedName = "the run's answer, clicked in its chat, lights its sources, and a file opened marks the sentences quoted, as in the live page";
-      check('live', clickedName, clicked.lit.length > 0 && clicked.marks.length > 0 && isDeepStrictEqual(clicked, liveClicked), JSON.stringify(clicked));
+      check('live', clickedName, clicked.lit.length > 0 && clicked.marks?.marks.length > 0 && isDeepStrictEqual(clicked, liveClicked), JSON.stringify(clicked));
     });
 
     const unread = join(dir, 'unread.html');
