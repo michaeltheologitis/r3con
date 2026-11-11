@@ -2773,13 +2773,14 @@ async function popupArea() {
 }
 
 // In-page: what the popup or pane `selector` shows of a text: its meta line, its lines of JSON, where its text ends, its
-// line where the text stops short, and its scroll.
+// line where the text stops short, its scroll, and whether it has the focus.
 function shownIn(selector) {
   const pre = document.querySelector(`${selector} pre`);
   const cut = pre.querySelector('.cut');
   const text = [...pre.childNodes].filter((node) => node !== cut).map((node) => node.textContent).join('');
   const lines = pre.querySelectorAll(':scope > span:not(.cut)').length;
-  return { meta: pre.previousElementSibling.textContent, lines, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop };
+  const focused = document.activeElement === pre;
+  return { meta: pre.previousElementSibling.textContent, lines, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
 }
 
 // Words numbered from 1, so each says where it is.
@@ -2805,8 +2806,8 @@ async function popupWords() {
     const scrolled = (await page.evaluate(shownIn, '#inspector')).scrollTop;
     await page.click('#inspector .cut button');
     const full = await page.evaluate(shownIn, '#inspector');
-    const fullName = 'where its text stops, a line says how many words it shows of how many, and open in full shows the rest, to its last word, at the same scroll';
-    const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled;
+    const fullName = 'where its text stops, a line says how many words it shows of how many, and open in full shows the rest, to its last word, at the same scroll, the focus on the text';
+    const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
     check('popup', fullName, cut.cut === cutSays(WORDS_SHOWN, WORDS_SHOWN + WORDS_PAST, 'words') && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
 
     await page.keyboard.press('Escape');

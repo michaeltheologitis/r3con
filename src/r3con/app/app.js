@@ -11,8 +11,8 @@
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {{ dist: number, mid: Point, view: View }} Pinch */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
-  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
-  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number }} LoadedFile */
+  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent; its popup stops at cut.
+  /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number, words: number, cut: number }} LoadedFile */
   /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
   /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
@@ -1486,8 +1486,7 @@
 
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
-  // A file's popup stops after this many words, about a megabyte of text, and a parse's after this many lines of its
-  // JSON, about as much, until opened in full.
+  // Where a popup's text stops short, about a megabyte in, until opened in full.
   const WORDS_SHOWN = 150000;
   const LINES_SHOWN = 30000;
   const JSON_INDENT = 2;
@@ -1692,9 +1691,9 @@
   let nextUid = 0;
   let nextTab = 1;
 
-  /** @param {Omit<LoadedFile, 'bytes' | 'uid'>} file @returns {LoadedFile} */
+  /** @param {Omit<LoadedFile, 'bytes' | 'uid' | 'words' | 'cut'>} file @returns {LoadedFile} */
   function loaded(file) {
-    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++ };
+    return { ...file, bytes: new Blob([file.text]).size, uid: nextUid++, ...wordsIn(file.text) };
   }
 
   const SAMPLE_FILES = SAMPLE.docs.map((d) => loaded({ ...d, sample: true }));
@@ -3486,10 +3485,15 @@
     return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
   }
 
-  // Where a text stops short: how much of it is shown, and a button that shows it all.
-  /** @param {number} shown @param {number} total @param {string} unit @param {() => void} openInFull */
-  function cutLine(shown, total, unit, openInFull) {
-    const button = h('button', { class: 'ref', type: 'button', onclick: openInFull }, 'open in full');
+  // Where the text in `pre` stops short, and a button that shows it all, leaving the focus on the text it opened.
+  /** @param {HTMLElement} pre @param {number} shown @param {number} total @param {string} unit @param {() => void} openInFull */
+  function cutLine(pre, shown, total, unit, openInFull) {
+    const onclick = () => {
+      openInFull();
+      pre.tabIndex = -1;
+      pre.focus({ preventScroll: true });
+    };
+    const button = h('button', { class: 'ref', type: 'button', onclick }, 'open in full');
     return h('span', { class: 'cut k' }, `first ${fmtInt(shown)} of ${fmtInt(total)} ${unit} · `, button);
   }
 
@@ -3505,7 +3509,7 @@
       // One at a time: a long parse's lines, spread as arguments, overflow the stack.
       const block = new DocumentFragment();
       for (const line of lines.slice(0, shown)) block.append(hanging(line));
-      fill(pre, block, shown < lines.length && cutLine(shown, lines.length, 'lines', () => draw(lines.length)));
+      fill(pre, block, shown < lines.length && cutLine(pre, shown, lines.length, 'lines', () => draw(lines.length)));
     };
     draw(LINES_SHOWN);
     return pre;
@@ -3546,8 +3550,7 @@
   // A sentence to show past where the file stops short opens it in full.
   /** @param {Tab} tab @param {LoadedFile} file @param {TextRange | null} [at] a sentence to show */
   function markedFile(tab, file, at = null) {
-    const { words, cut } = wordsIn(file.text);
-    let end = at && at.end > cut ? file.text.length : cut;
+    let end = at && at.end > file.cut ? file.text.length : file.cut;
     /** @param {Trail | null} trail */
     const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
     /** @param {Trail | null} trail */
@@ -3561,13 +3564,13 @@
     const pre = h('pre', { class: 'code wrap' });
     const openInFull = () => {
       end = file.text.length;
-      trailPart(tab, pre, text);
+      fill(pre, text(tab.trail));
     };
     // Spans come only with a trail.
     /** @param {Trail | null} trail */
     const text = (trail) => [
       markedText(file.text, end, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at),
-      end < file.text.length && cutLine(WORDS_SHOWN, words, 'words', openInFull),
+      end < file.text.length && cutLine(pre, WORDS_SHOWN, file.words, 'words', openInFull),
     ];
     return [meta, trailPart(tab, pre, text)];
   }
