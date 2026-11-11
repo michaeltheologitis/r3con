@@ -208,7 +208,6 @@
    * What differs between the page served by r3con app and the prototype.
    * @typedef {object} Mode
    * @property {string} note
-   * @property {string} keysNote
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
@@ -1538,6 +1537,9 @@
   const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
   const SAVED_GROUP = 'saved';
   const SERVER_LABEL = 'Server';
+  // The group of a server's URL and key fields, as their ids end.
+  const SERVER_GROUP = 'other';
+  const URL_RULE = 'starts with http:// or https://';
   // r3con app's own words for a server URL it refuses.
   const CREDENTIALS_IN_URL = 'must not hold a user or password: put the key in its key field';
   const NO_HOST_IN_URL = 'must name a host';
@@ -1580,9 +1582,7 @@
   // The r3con stage, as its events name it, that each kind of node but a round's is drawn in; a replay reads first.
   const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
-  const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
   // Where r3con app keeps a key: in the system's credential store, or, where it can't, in its memory alone.
-  const KEYS_NOTE = "A remembered key is kept in this computer's keychain; servers, until the app closes.";
   const REMEMBERED = 'remembered';
   const UNTIL_CLOSED = 'until the app closes';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
@@ -5049,7 +5049,7 @@
         h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove server ${endpoint}`, onclick: () => forget(() => mode.forgetServer(endpoint), SERVER_LABEL, 'endpoint-other') }, 'remove'),
       );
     fill($('server-list'), servers.map(row));
-    $('servers-label').hidden = $('server-list').hidden = !servers.length;
+    $('server-list').hidden = !servers.length;
   }
 
   /** @param {KeyStatus} status */
@@ -5253,11 +5253,11 @@
     return h('input', {
       class: 'field',
       id: 'endpoint-other',
-      form: 'settings-form',
       type: 'text',
       inputmode: 'url',
+      autocomplete: 'off',
       pattern: 'https?://\\S+',
-      title: 'starts with http:// or https://',
+      title: URL_RULE,
       spellcheck: 'false',
       autocapitalize: 'off',
       placeholder: 'http://localhost:8000/v1',
@@ -5265,7 +5265,7 @@
     });
   }
 
-  // A provider's row is a label, a field and, below it, its state; the servers follow, then a server to add.
+  // A provider's row is a label, a field and, below it, its state; a server's row is its URL and key, then those saved.
   function keyRows() {
     const rows = Object.entries(PROVIDERS).flatMap(([provider, { label }], i) => {
       const marker = h('span', { id: `state-${provider}` });
@@ -5275,10 +5275,11 @@
       const key = keyField(provider, { autofocus: i === 0, 'aria-describedby': marker.id });
       return [h('label', { for: key.id }, `${label} API key`), key, state];
     });
+    const endpoint = endpointField({ 'aria-label': 'OpenAI-compatible server: URL' });
+    const key = keyField(SERVER_GROUP, { placeholder: 'API key, if any', 'aria-label': 'OpenAI-compatible server: API key' });
     const servers = h('ul', { class: 'k server-list', id: 'server-list', 'aria-labelledby': 'servers-label', hidden: true });
-    const endpoint = endpointField({ 'aria-label': 'add server: URL', 'aria-describedby': 'other-hint' });
-    const key = keyField('other', { placeholder: 'API key, if any', 'aria-label': 'add server: API key' });
-    return [...rows, h('span', { class: 'keys-label', id: 'servers-label', hidden: true }, 'Servers'), servers, h('label', { for: endpoint.id }, 'add server'), endpoint, key];
+    const label = h('label', { for: endpoint.id, id: 'servers-label' }, h('span', {}, 'OpenAI-compatible'), ' server');
+    return [...rows, label, endpoint, key, servers];
   }
 
   // Storage is outside input: anything but a count r3con app takes reads as the default.
@@ -5295,9 +5296,16 @@
     roundsPick.value = String(readRounds());
   }
 
+  // The groups typed in and not yet saved: a provider's key, or a server's URL and key together.
+  /** @type {Set<string>} */
+  const edited = new Set();
+
+  /** @param {EventTarget | null} el */
+  const groupOf = (el) => (el instanceof HTMLInputElement ? el.id.replace(/^(key|endpoint)-/, '') : '');
+
   function clearSettings() {
     for (const input of $('settings').querySelectorAll('input')) input.value = '';
-    $('endpoint-other', HTMLInputElement).required = false;
+    edited.clear();
   }
 
   // Right-aligned under the button; CSS owns the width, so nothing needs measuring before it opens.
@@ -5312,10 +5320,10 @@
   // beforetoggle, not toggle, so the popover is placed and cleared before its first paint.
   /** @param {ToggleEvent} e */
   function onSettingsToggle(e) {
+    // Closing them, by Escape too, saves what was typed as leaving its field would.
+    if (e.newState === 'closed') edited.forEach((group) => commit(group));
     clearSettings();
-    if (e.newState !== 'open') return;
-    placeSettings();
-    showSaveResult('');
+    if (e.newState === 'open') placeSettings();
   }
 
   let savedTimer = 0;
@@ -5326,43 +5334,51 @@
     $('settings-saved').textContent = text;
   }
 
-  let saving = false;
-
-  // A save asked for while one is in flight is dropped: it would send the same keys again.
-  async function saveSettings() {
-    if (saving) return;
-    saving = true;
-    try {
-      await saveEnteredKeys();
-    } finally {
-      saving = false;
-    }
+  // A group saves on Enter, on leaving it or on closing the settings, never while it is typed.
+  /** @param {string} group @param {boolean} [onEnter] */
+  function commit(group, onEnter = false) {
+    if (!edited.has(group)) return;
+    if (group === SERVER_GROUP) commitServer(onEnter);
+    else commitKey(group);
   }
 
-  // One at a time, so a failure stops the save with the fields not yet saved still holding what was typed.
-  async function saveEnteredKeys() {
-    const endpoint = $('endpoint-other', HTMLInputElement).value;
-    const entered = Object.keys(PROVIDERS)
-      .map((provider) => [provider, $(`key-${provider}`, HTMLInputElement).value.trim()])
-      .filter(([, key]) => key);
-    if (!entered.length && !endpoint) return showSaveResult('nothing to save');
-    for (const [provider, key] of entered) {
+  /** @param {string} provider */
+  function commitKey(provider) {
+    const field = $(`key-${provider}`, HTMLInputElement);
+    const key = field.value.trim();
+    if (key) queueSave(provider, [field], () => mode.saveKey(provider, key), PROVIDERS[provider].label);
+  }
+
+  // Enter shows a bad URL's own error; leaving names it in the save line, as that error would pull focus back.
+  /** @param {boolean} onEnter */
+  function commitServer(onEnter) {
+    const endpoint = $('endpoint-other', HTMLInputElement);
+    const keyField = $('key-other', HTMLInputElement);
+    endpoint.value = endpoint.value.trim();
+    const [url, key] = [endpoint.value, keyField.value.trim()];
+    if (!url && !key) return;
+    if (url && endpoint.checkValidity()) queueSave(SERVER_GROUP, [endpoint, keyField], () => mode.saveServer(url, key), SERVER_LABEL);
+    else if (url && onEnter) endpoint.reportValidity();
+    else showSaveResult(`${SERVER_LABEL} · needs a URL that ${URL_RULE}`);
+  }
+
+  // Saves and removes go one at a time, in order, so none lands before one asked for earlier.
+  let saving = Promise.resolve();
+
+  // A failed save stays edited, to be tried again; a saved group's fields empty unless typed in again meanwhile.
+  /** @param {string} group @param {HTMLInputElement[]} fields @param {() => Promise<KeyStatus>} request @param {string} label */
+  function queueSave(group, fields, request, label) {
+    edited.delete(group);
+    saving = saving.then(async () => {
       try {
-        renderKeys(await mode.saveKey(provider, key));
+        renderKeys(await request());
       } catch (error) {
-        return showSaveResult(`${PROVIDERS[provider].label} · ${explain(error, "couldn't save", "couldn't save the keys")}`);
+        edited.add(group);
+        return showSaveResult(`${label} · ${explain(error, "couldn't save", `couldn't save ${label}`)}`);
       }
-      $(`key-${provider}`, HTMLInputElement).value = '';
-    }
-    if (endpoint) {
-      try {
-        renderKeys(await mode.saveServer(endpoint, $('key-other', HTMLInputElement).value.trim()));
-      } catch (error) {
-        return showSaveResult(`${SERVER_LABEL} · ${explain(error, "couldn't save", "couldn't save the server")}`);
-      }
-    }
-    clearSettings();
-    showDone('saved');
+      if (!edited.has(group)) for (const field of fields) field.value = '';
+      showDone('saved');
+    });
   }
 
   /** @param {string} text */
@@ -5371,16 +5387,18 @@
     savedTimer = setTimeout(() => showSaveResult(''), SAVED_MS);
   }
 
-  // Its button goes with what it removes, so focus moves to the field that was typed in.
+  // Its button goes with what it removes, so focus moves at once to the field that was typed in.
   /** @param {() => Promise<KeyStatus>} request @param {string} label @param {string} field */
-  async function forget(request, label, field) {
-    try {
-      renderKeys(await request());
-    } catch (error) {
-      return showSaveResult(`${label} · ${explain(error, "couldn't remove", "couldn't remove a key")}`);
-    }
+  function forget(request, label, field) {
     $(field).focus();
-    showDone('removed');
+    saving = saving.then(async () => {
+      try {
+        renderKeys(await request());
+      } catch (error) {
+        return showSaveResult(`${label} · ${explain(error, "couldn't remove", "couldn't remove a key")}`);
+      }
+      showDone('removed');
+    });
   }
 
   // ---------- gestures ----------
@@ -5688,17 +5706,10 @@
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('settings').addEventListener('input', () => showSaveResult(''));
-    $('key-other').addEventListener('input', () => ($('endpoint-other', HTMLInputElement).required = Boolean($('key-other', HTMLInputElement).value.trim())));
-    // The key fields sit outside the form, so Enter there doesn't submit it on its own.
-    $('settings').addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' || e.isComposing || !targetOf(e).matches('.key')) return;
-      e.preventDefault();
-      $('settings-form', HTMLFormElement).requestSubmit();
-    });
-    $('settings-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      saveSettings();
-    });
+    $('keys').addEventListener('input', (e) => edited.add(groupOf(e.target)));
+    // Moving from a server's URL to its key stays in its group, and switching to another app leaves no field.
+    $('keys').addEventListener('focusout', (e) => document.hasFocus() && groupOf(e.target) !== groupOf(e.relatedTarget) && commit(groupOf(e.target)));
+    $('keys').addEventListener('keydown', (e) => e.key === 'Enter' && !e.isComposing && commit(groupOf(e.target), true));
     $('fit-btn').addEventListener('click', refit);
     $('replay-btn').addEventListener('click', () => state.shown.run && playRun(runTab(state.shown)));
     $('run-tabs').addEventListener('keydown', onTabKey);
@@ -5819,7 +5830,6 @@
   /** @type {Mode} */
   const prototypeMode = {
     note: PROTOTYPE_MODE_NOTE,
-    keysNote: PROTOTYPE_KEYS_NOTE,
     nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
     needsModel: (question, asks) => asks || !replaysRecording(question),
     refuseFiles: () => null,
@@ -5881,7 +5891,6 @@
   /** @type {Mode} */
   const liveMode = {
     note: '',
-    keysNote: KEYS_NOTE,
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
@@ -5940,8 +5949,6 @@
     renderPicker();
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
-    $('keys-note').textContent = mode.keysNote;
-    $('keys-note').hidden = !mode.keysNote;
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
     $('mode-note').hidden = !mode.note;

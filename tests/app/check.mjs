@@ -97,7 +97,6 @@ const TEST_HINT = '••••7f3a';
 // A key the page saved, as its row shows it: r3con app's, which fake_server.py's store remembers, and the prototype's.
 const REMEMBERED_HINT = `${TEST_HINT} · remembered`;
 const UNTIL_CLOSED_HINT = `${TEST_HINT} · until the app closes`;
-const KEYS_NOTE = "A remembered key is kept in this computer's keychain; servers, until the app closes.";
 const ENVIRONMENT_KEY = 'env-check-not-a-real-key-9c1d';
 const TEST_ENDPOINT = 'http://10.0.0.7:8000/v1';
 const SECOND_ENDPOINT = 'http://localhost:11434';
@@ -107,6 +106,10 @@ const CREDENTIALS_ENDPOINT = 'http://user:hunter2@10.0.0.9:8000/v1';
 // What r3con app answers for a server URL it refuses, as the settings show it.
 const CREDENTIALS_REFUSED = 'Server · other.endpoint: must not hold a user or password: put the key in its key field';
 const NO_HOST_REFUSED = 'Server · other.endpoint: must name a host';
+// What the settings say when a server's URL is left without http(s).
+const NO_SCHEME = 'Server · needs a URL that starts with http:// or https://';
+const NO_SCHEME_ENDPOINT = 'localhost:8000/v1';
+const SERVER_LABEL = 'OpenAI-compatible server';
 const HALF_TYPED = 'hosted_vllm/half-typed';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
@@ -118,10 +121,9 @@ const FIELD_NAMES = {
   'OpenAI API key': 'key-openai',
   'Anthropic API key': 'key-anthropic',
   'Google API key': 'key-gemini',
-  'add server: URL': 'endpoint-other',
-  'add server: API key': 'key-other',
+  'OpenAI-compatible server: URL': 'endpoint-other',
+  'OpenAI-compatible server: API key': 'key-other',
 };
-const PROTOTYPE_KEYS_NOTE = 'This prototype sends nothing.';
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
 // The page's GRID.rowGap: answer nodes stack this far apart.
@@ -435,9 +437,9 @@ async function withPage(area, { layout = LAYOUTS.desktop, url = PAGE_URL, sample
   check(area, `${layout.name}: no console errors or warnings${beyond}`, !unexpected.length && !missing.length, detail);
 }
 
-// Clicks save and waits for the settings to say "saved"; false if they never do.
-async function saveKeys(page) {
-  await page.click('#settings-save');
+// Presses Enter in `field`, which saves it, and waits for the settings to say "saved"; false if they never do.
+async function saveByEnter(page, field) {
+  await page.press(field, 'Enter');
   return becomes(page, () => document.getElementById('settings-saved').textContent === 'saved');
 }
 
@@ -831,6 +833,32 @@ function pickerState() {
 
 function keyStates() {
   return [...document.querySelectorAll('[id^="state-"]')].filter((el) => el.textContent).map((el) => el.id);
+}
+
+// In-page: `id`'s field loses focus as it does when another app takes the window's, with the page left unfocused.
+function windowBlur(id) {
+  const { hasFocus } = Document.prototype;
+  Document.prototype.hasFocus = () => false;
+  document.getElementById(id).dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+  Document.prototype.hasFocus = hasFocus;
+}
+
+// The settings' buttons in view, by name, and their paragraphs, by id: what they show besides fields and labels.
+function settingsExtras() {
+  const settings = document.getElementById('settings');
+  return {
+    buttons: [...settings.querySelectorAll('button')].filter((el) => el.checkVisibility()).map((el) => el.getAttribute('aria-label') ?? el.textContent),
+    paragraphs: [...settings.querySelectorAll('p')].map((el) => el.id),
+  };
+}
+
+// The visible label of the server's URL field, and what names the list of servers saved.
+function serverLabelling() {
+  const list = document.getElementById('server-list');
+  return {
+    field: document.getElementById('endpoint-other').labels[0]?.textContent,
+    list: document.getElementById(list.getAttribute('aria-labelledby'))?.textContent,
+  };
 }
 
 // Each provider's state as its row shows it, the text its key field is described by, and the remove buttons in view.
@@ -2237,8 +2265,9 @@ async function keys(page, checkAt) {
 
   await page.click(nodeSel('doc-0'));
   await page.click('#settings-btn');
-  const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
-  checkAt('the note under the keys says only that the prototype sends nothing', note === PROTOTYPE_KEYS_NOTE, note);
+  const extras = await page.evaluate(settingsExtras);
+  const quiet = isDeepStrictEqual(extras, { buttons: ['close settings'], paragraphs: ['settings-saved'] });
+  checkAt('the settings have no save button, no note under the keys and no server hint: only the line a save writes to', quiet, JSON.stringify(extras));
   const named = [];
   for (const [name, id] of Object.entries(FIELD_NAMES)) {
     const ids = await page.getByRole('textbox', { name, exact: true }).evaluateAll((els) => els.map((el) => el.id));
@@ -2246,22 +2275,44 @@ async function keys(page, checkAt) {
   }
   const allNamed = named.length === Object.keys(FIELD_NAMES).length;
   checkAt('each settings field is named for what it holds', allNamed, named.join(', '));
-  await page.fill('#endpoint-other', 'localhost:8000/v1');
-  await page.click('#settings-save');
-  checkAt('an endpoint without http(s) blocks the save', await blocked());
+  const labelling = await page.evaluate(serverLabelling);
+  checkAt(`"${SERVER_LABEL}" labels the server's fields and the servers saved`, isDeepStrictEqual(labelling, { field: SERVER_LABEL, list: SERVER_LABEL }), JSON.stringify(labelling));
+
+  await page.fill('#endpoint-other', NO_SCHEME_ENDPOINT);
+  await page.focus('#rounds');
+  const leftSaid = await saved();
+  const leftUnsaved = (await page.evaluate(keyRows)).servers.length === 0 && (await focusedId(page)) === 'rounds';
+  checkAt('leaving a server URL without http(s) saves nothing and says why, and focus moves on', leftSaid === NO_SCHEME && leftUnsaved, leftSaid);
+  await page.fill('#endpoint-other', NO_SCHEME_ENDPOINT);
+  await page.press('#endpoint-other', 'Enter');
+  checkAt('Enter on a server URL without http(s) saves nothing, and focus stays on it', (await blocked()) && (await focusedId(page)) === 'endpoint-other');
   await page.fill('#endpoint-other', '');
   await page.fill('#key-other', TEST_KEY);
-  await page.click('#settings-save');
-  checkAt("a server's key without its URL blocks the save", await blocked());
+  await page.press('#key-other', 'Enter');
+  const keyAlone = await saved();
+  checkAt("a server's key without its URL saves nothing and says it needs one", keyAlone === NO_SCHEME && (await states()).length === 0, keyAlone);
   await page.fill('#key-other', '');
-  await page.fill('#key-openai', TEST_KEY);
-  await page.fill('#endpoint-other', TEST_ENDPOINT);
+
+  const half = TEST_KEY.length / 2;
+  await page.focus('#key-openai');
+  await page.keyboard.type(TEST_KEY.slice(0, half));
+  await page.evaluate(windowBlur, 'key-openai');
+  await page.keyboard.type(TEST_KEY.slice(half));
+  const whileTyped = await states();
+  await page.focus('#endpoint-other');
+  const onLeave = await becomes(page, () => document.getElementById('state-openai').textContent !== '');
+  const emptied = (await page.inputValue('#key-openai')) === '';
+  const leaveName = 'a key is not saved while it is typed, nor when another app takes focus, and is saved once its field is left, which then empties';
+  checkAt(leaveName, whileTyped.length === 0 && onLeave && emptied, `${whileTyped.join(', ')} → ${(await states()).join(', ')}`);
+  await page.fill('#endpoint-other', ` ${TEST_ENDPOINT} `);
   await page.fill('#key-gemini', TEST_KEY);
-  const savedKeys = await saveKeys(page);
+  const enterSaved = await saveByEnter(page, '#key-gemini');
   const set = await states();
   const rows = await page.evaluate(keyRows);
-  const marked = savedKeys && isDeepStrictEqual(set, ['state-openai', 'state-gemini']) && isDeepStrictEqual(rows.servers, [`${TEST_ENDPOINT} · no key`]);
-  checkAt('a save marks OpenAI and Google as set, and lists the server with no key', marked, `${set.join(', ')}; ${rows.servers.join(', ')}`);
+  const stayed = (await focusedId(page)) === 'key-gemini' && (await page.inputValue('#key-gemini')) === '';
+  const marked = enterSaved && stayed && isDeepStrictEqual(set, ['state-openai', 'state-gemini']) && isDeepStrictEqual(rows.servers, [`${TEST_ENDPOINT} · no key`]);
+  const enterName = "Enter saves Google's key and focus stays in its field; leaving the server's fields saved the server, trimmed, with no key";
+  checkAt(enterName, marked, `${set.join(', ')}; ${rows.servers.join(', ')}`);
   const shownStates = { 'state-openai': UNTIL_CLOSED_HINT, 'state-gemini': UNTIL_CLOSED_HINT };
   const shownName = "each row shows its key's last four masked and how long it is kept, and each key field is described by its row's state";
   const describedBy = rows.described['key-openai'] === UNTIL_CLOSED_HINT && rows.described['key-anthropic'] === '';
@@ -2273,16 +2324,14 @@ async function keys(page, checkAt) {
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
   const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google', '10.0.0.7:8000']) && noAnthropic && !keyed.hint;
   checkAt('the picker offers only the providers with a key, and the server', onlyKeyed, keyed.groups.join(', '));
-  await page.click('#settings-save');
-  const nothing = await saved();
-  const unchanged = isDeepStrictEqual(await states(), set);
-  checkAt('a save with no field filled says so', nothing === 'nothing to save' && unchanged, nothing);
-  await page.fill('#key-anthropic', 'x');
+  await page.fill('#key-anthropic', TEST_KEY);
   checkAt('an edit clears the last save message', (await saved()) === '', await saved());
 
   await page.keyboard.press('Escape');
   const settingsOpen = await page.$eval('#settings', (el) => el.matches(':popover-open'));
   checkAt('Escape closes the settings but not the popup', !settingsOpen && Boolean(await popup(page)));
+  const escaped = await becomes(page, () => document.getElementById('state-anthropic').textContent !== '');
+  checkAt('Escape saves a key typed in and not yet saved, as leaving its field would', escaped, (await states()).join(', '));
   const holding = (value) => page.evaluate(placesHolding, value);
   const endpointHolders = (await holding(TEST_ENDPOINT)).filter((place) => place !== 'markup');
   const holders = [...(await holding(TEST_KEY)), ...endpointHolders];
@@ -2290,18 +2339,26 @@ async function keys(page, checkAt) {
   checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
   const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
-  const reopened = filled.length === 0 && isDeepStrictEqual(await states(), set);
+  const reopened = filled.length === 0 && isDeepStrictEqual(await states(), ['state-openai', 'state-anthropic', 'state-gemini']);
   checkAt('reopened, every field is empty and the providers are still set', reopened, filled.join(', '));
 
+  await page.getByRole('button', { name: 'remove Anthropic key', exact: true }).click();
+  await becomes(page, () => !document.getElementById('state-anthropic').textContent);
   await page.getByRole('button', { name: 'remove OpenAI key', exact: true }).click();
-  const removed = await becomes(page, () => document.getElementById('settings-saved').textContent === 'removed');
+  const removed = await becomes(page, () => !document.getElementById('state-openai').textContent && document.getElementById('settings-saved').textContent === 'removed');
   const afterRemove = await page.evaluate(keyRows);
   const dropped = (await page.evaluate(pickerState)).groups;
   const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google', '10.0.0.7:8000']) && (await focusedId(page)) === 'key-openai';
   checkAt("remove forgets the key, the picker drops its provider's models, and focus goes to its field", forgotten, `${JSON.stringify(afterRemove.states)}; ${dropped.join(', ')}`);
   await page.getByRole('button', { name: `remove server ${TEST_ENDPOINT}`, exact: true }).click();
-  const noServers = await becomes(page, () => document.getElementById('server-list').hidden && document.getElementById('servers-label').hidden);
+  const noServers = await becomes(page, () => document.getElementById('server-list').hidden);
   checkAt('remove forgets a server, the list hides once empty, and focus goes to the URL field', noServers && (await focusedId(page)) === 'endpoint-other');
+  await page.fill('#endpoint-other', NO_SCHEME_ENDPOINT);
+  await page.keyboard.press('Escape');
+  await page.click('#settings-btn');
+  const reported = await saved();
+  const closedName = 'a server URL without http(s) left as the settings close is not saved, and reopened they say why';
+  checkAt(closedName, reported === NO_SCHEME && (await page.evaluate(keyRows)).servers.length === 0, reported);
   await page.keyboard.press('Escape');
 }
 
@@ -2310,7 +2367,7 @@ async function serverMenu(page, checkAt) {
   await page.click('#settings-btn');
   for (const endpoint of [`${TEST_ENDPOINT}/`, `${TEST_ENDPOINT}//`, TEST_ENDPOINT, OTHER_PATH_ENDPOINT, OTHER_SCHEME_ENDPOINT]) {
     await page.fill('#endpoint-other', endpoint);
-    await saveKeys(page);
+    await saveByEnter(page, '#endpoint-other');
   }
   const listed = await servers();
   const labels = Object.keys(await page.evaluate(menuGroups));
@@ -2323,7 +2380,7 @@ async function serverMenu(page, checkAt) {
   const refusals = [];
   for (const endpoint of [CREDENTIALS_ENDPOINT, 'http:///']) {
     await page.fill('#endpoint-other', endpoint);
-    await page.click('#settings-save');
+    await page.press('#endpoint-other', 'Enter');
     await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
     refusals.push(await page.textContent('#settings-saved'));
   }
@@ -2366,7 +2423,7 @@ async function picker(page, checkAt) {
   await leaveField();
   await page.click('#settings-btn');
   await page.fill('#key-anthropic', TEST_KEY);
-  const savedKeys = await saveKeys(page);
+  const savedKeys = await saveByEnter(page, '#key-anthropic');
   await page.keyboard.press('Escape');
   const afterSave = await page.evaluate(pickerState);
   const field = await page.$eval('#model-other', (el) => (el.hidden ? null : el.value));
@@ -2479,7 +2536,7 @@ async function savedModels(page, checkAt) {
   await page.press('#model-other', 'Enter');
   await page.click('#settings-btn');
   await page.fill('#key-anthropic', TEST_KEY);
-  await saveKeys(page);
+  await saveByEnter(page, '#key-anthropic');
   await page.keyboard.press('Escape');
   const listed = await state();
   await page.getByRole('button', { name: `remove ${PROVIDER_MODEL}`, exact: true }).click();
@@ -4745,11 +4802,12 @@ async function liveSession(url) {
     check('live', readyName, ready === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`, ready);
 
     await page.click('#settings-btn');
-    const note = await page.$eval('#keys-note', (el) => (el.hidden ? null : el.textContent));
-    check('live', 'the note under the keys says where r3con app keeps them', note === KEYS_NOTE, note);
+    const extras = await page.evaluate(settingsExtras);
+    const quiet = isDeepStrictEqual(extras, { buttons: ['close settings'], paragraphs: ['settings-saved'] });
+    check('live', 'the settings have no save button and no note under the keys', quiet, JSON.stringify(extras));
     const hintWithout = (await page.evaluate(pickerState)).hint;
     await page.fill('#key-openai', TEST_KEY);
-    const marked = (await saveKeys(page)) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
+    const marked = (await saveByEnter(page, '#key-openai')) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
     const hintWith = (await page.evaluate(pickerState)).hint;
     check('live', 'with no key and no server the hint to add a key shows, and a saved key hides it', hintWithout && !hintWith, `${hintWithout} → ${hintWith}`);
     await page.keyboard.press('Escape');
@@ -4805,7 +4863,7 @@ async function liveKeyStates(url) {
   await withPage('live', { url, sample: false }, async (page) => {
     await page.click('#settings-btn');
     await page.fill('#key-openai', TEST_KEY);
-    const saved = await saveKeys(page);
+    const saved = await saveByEnter(page, '#key-openai');
     const rows = await page.evaluate(keyRows);
     const both = { 'state-openai': REMEMBERED_HINT, 'state-gemini': 'from GEMINI_API_KEY' };
     const fromEnvironment = saved && isDeepStrictEqual(rows.states, both) && isDeepStrictEqual(rows.removes, ['remove OpenAI key']);
@@ -4831,7 +4889,11 @@ function menuGroups() {
 // server, then removes a server.
 async function liveServers(url) {
   const bodies = [];
-  const before = (page) => page.on('request', (request) => request.method() === 'POST' && /^\/api\/runs(\/\w+\/asks)?$/.test(new URL(request.url()).pathname) && bodies.push(request.postDataJSON()));
+  const keySaves = [];
+  const before = (page) => {
+    page.on('request', (request) => request.method() === 'POST' && /^\/api\/runs(\/\w+\/asks)?$/.test(new URL(request.url()).pathname) && bodies.push(request.postDataJSON()));
+    page.on('request', (request) => request.method() === 'POST' && new URL(request.url()).pathname === '/api/keys' && keySaves.push(request.postDataJSON()));
+  };
   const onFirst = 'hosted_vllm/qwen3-32b';
   const onSecond = 'ollama_chat/llama3.3';
   const typedHosted = 'anthropic/claude-sonnet-5-5';
@@ -4843,9 +4905,12 @@ async function liveServers(url) {
     await page.click('#settings-btn');
     await page.fill('#endpoint-other', TEST_ENDPOINT);
     await page.fill('#key-other', TEST_KEY);
-    await saveKeys(page);
+    await saveByEnter(page, '#key-other');
+    const together = keySaves.length === 1 && keySaves[0].endpoint === TEST_ENDPOINT && keySaves[0].key === TEST_KEY;
+    const sentAs = keySaves.map(({ endpoint, key }) => `${endpoint}${key ? ' with a key' : ''}`).join(', ');
+    check('live', "moving from a server's URL to its key sends nothing, and Enter in the key sends both, once", together, sentAs);
     await page.fill('#endpoint-other', `${SECOND_ENDPOINT}/`);
-    const added = await saveKeys(page);
+    const added = await saveByEnter(page, '#endpoint-other');
     const listed = (await page.evaluate(keyRows)).servers;
     const onServer = serversOn(await keysOnServer(url));
     const both = isDeepStrictEqual(listed, [`${TEST_ENDPOINT} · ${TEST_HINT}`, `${SECOND_ENDPOINT} · no key`]) && isDeepStrictEqual(onServer, [TEST_ENDPOINT, SECOND_ENDPOINT]);
@@ -6146,7 +6211,7 @@ async function liveKeySaves(url) {
     const request = route.request();
     if (request.method() !== 'POST') return route.continue();
     const { provider } = request.postDataJSON();
-    saves.push(provider);
+    saves.push({ provider, at: Date.now() });
     if (provider === 'gemini') return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: 'refused by the check' }) });
     await new Promise((resolve) => setTimeout(resolve, SLOW_SAVE_MS));
     return route.continue();
@@ -6154,27 +6219,43 @@ async function liveKeySaves(url) {
   const before = (page) => page.route('**/api/keys', refuseGemini);
   await withPage('live', { url, sample: false, before, expectedErrors: [REFUSED_LOG] }, async (page) => {
     await page.click('#settings-btn');
-    await page.fill('#key-anthropic', TEST_KEY);
+    await page.focus('#key-anthropic');
+    await page.keyboard.type(TEST_KEY);
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Enter');
     await page.fill('#key-gemini', TEST_KEY);
-    await page.dblclick('#settings-save');
-    const named = await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
+    await page.keyboard.press('Enter');
+    const named = await becomes(page, () => document.getElementById('settings-saved').textContent.startsWith('Google'), undefined, LIVE_RUN_MS);
     const said = await page.textContent('#settings-saved');
     const marked = (await page.evaluate(keyStates)).sort();
     const onServer = keyedOn(await keysOnServer(url)).sort();
-    const keysName = 'a key save one provider refuses names it, and the set markers match the server';
+    const keysName = 'a key one provider refuses is named, and the set markers match the server';
     const matches = named && said === 'Google · refused by the check' && isDeepStrictEqual(marked, onServer);
     check('live', keysName, matches, `${said}; page ${marked.join(' ')}; server ${onServer.join(' ')}`);
     const fields = [await page.inputValue('#key-anthropic'), await page.inputValue('#key-gemini')];
-    const clearedName = 'a save stopped partway clears each key it saved and keeps the rest';
+    const clearedName = 'a key saved is cleared from its field, and a key refused stays in its own';
     check('live', clearedName, isDeepStrictEqual(fields, ['', TEST_KEY]), fields.map((value) => (value ? 'kept' : 'cleared')).join(', '));
-    check('live', 'a second click while a save is in flight sends nothing more', isDeepStrictEqual(saves, ['anthropic', 'gemini']), saves.join(' '));
+    const providers = saves.map(({ provider }) => provider);
+    const once = isDeepStrictEqual(providers, ['anthropic', 'gemini']);
+    check('live', 'typing a key sends nothing, and a second Enter while its save is in flight sends nothing more', once, providers.join(' '));
+    const waited = once && saves[1].at - saves[0].at >= SLOW_SAVE_MS;
+    check('live', 'a key committed while another is saving is sent once that save is back: one save at a time', waited, `${once ? saves[1].at - saves[0].at : '-'} ms apart`);
+
+    await page.fill('#key-anthropic', TEST_KEY);
+    await page.getByRole('button', { name: 'remove Anthropic key', exact: true }).click();
+    const removedLast = await becomes(page, () => document.getElementById('settings-saved').textContent === 'removed', undefined, LIVE_RUN_MS);
+    await page.waitForTimeout(2 * SLOW_SAVE_MS);
+    const settled = [await page.textContent('#settings-saved'), keyedOn(await keysOnServer(url))];
+    const inOrder = removedLast && settled[0] === 'removed' && !settled[1].includes('state-anthropic');
+    check('live', 'a remove clicked while a key typed there is being saved goes after that save, so the key ends removed', inOrder, JSON.stringify(settled));
   });
 }
 
 // Saves a key on its server.
 async function liveLoadProblem(url) {
   const before = (page) => page.route('**/api/keys', (route) => route.abort());
-  const failing = (route) => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'still unwell' }) });
+  let fails = 0;
+  const failing = (route) => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: ++fails === 1 ? 'still unwell' : 'still unwell, again' }) });
   await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [ABORTED_LOG, SERVER_ERROR_LOG] }, async (page) => {
     const atLoad = await becomes(page, statusIs, LOST_CONNECTION);
     await page.fill('#question', 'Which memo mentions the storm?');
@@ -6183,12 +6264,14 @@ async function liveLoadProblem(url) {
     await page.route('**/api/keys', failing);
     await page.click('#settings-btn');
     await page.fill('#key-anthropic', TEST_KEY);
-    await page.click('#settings-save');
+    await page.press('#key-anthropic', 'Enter');
     await becomes(page, () => document.getElementById('settings-saved').textContent !== '');
     await page.fill('#question', 'Which memo mentions the storm, again?');
+    const retried = await becomes(page, () => document.getElementById('settings-saved').textContent === 'Anthropic · still unwell, again');
+    check('live', 'leaving a key whose save failed tries it again', retried, await page.textContent('#settings-saved'));
     const unwell = (await page.textContent('#run-status')) === LOST_CONNECTION;
     await page.unroute('**/api/keys');
-    const saved = await saveKeys(page);
+    const saved = await saveByEnter(page, '#key-anthropic');
     await page.keyboard.press('Escape');
     const status = await page.textContent('#run-status');
     const cleared = saved && status === `${SAMPLE_DOCS} documents ready · ${DEFAULT_MODEL}`;

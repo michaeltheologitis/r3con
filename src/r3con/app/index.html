@@ -19,19 +19,13 @@
   </header>
 
   <div class="settings" id="settings" popover role="dialog" aria-label="Settings">
-    <form id="settings-form" autocomplete="off"></form>
     <div class="settings-body">
       <div class="insp-head">
         <div class="insp-title"><span class="g">● </span>settings</div>
         <button class="btn" id="settings-close" type="button" popovertarget="settings" popovertargetaction="hide" aria-label="close settings">esc</button>
       </div>
       <div class="keys" id="keys"></div>
-      <p class="k" id="other-hint">A server is self-hosted or OpenAI-compatible, such as vLLM or Ollama: pick other model on it under the question and type its model.</p>
-      <p class="k" id="keys-note"></p>
-      <div class="field-row">
-        <button class="btn run-btn" id="settings-save" type="submit" form="settings-form">save</button>
-        <span class="k" id="settings-saved" aria-live="polite"></span>
-      </div>
+      <p class="k" id="settings-saved" aria-live="polite"></p>
       <div class="rounds">
         <label for="rounds">relevance rounds</label>
         <select class="field" id="rounds"></select>
