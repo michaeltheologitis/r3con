@@ -270,7 +270,7 @@ const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
 const WORDS_SHOWN = 150000;
 const LINES_SHOWN = 30000;
 // The line where a popup's text stops short.
-const cutSays = (shown, total, unit) => `first ${shown.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} ${unit} · open in full`;
+const cutSays = (shown, total, unit) => `${shown.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} ${unit} · open in full`;
 // The page's JSON_INDENT: a parse's JSON is indented this many spaces a level.
 const JSON_INDENT = 2;
 // A stream this long, which no page uses, makes a PDF far bigger than its text.
@@ -3246,7 +3246,8 @@ async function quotesArea() {
     const sentence = sample.rounds[1][0].quotes[0].text;
     const pastName = 'a sentence past where its file stops short is counted, and a quote or a chat sentence opens its popup in full, scrolled to it, marked and flashed';
     const shownThere = [fromQuote, fromChat].every(({ flash, cut }) => flash?.text === sentence && flash.marked && flash.inView && cut === null);
-    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && cut?.startsWith('first ') && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
+    const stopsShort = cut === cutSays(WORDS_SHOWN, (PAST_CUT + sample.docs[0].text).match(/\S+/g).length, 'words');
+    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && stopsShort && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
   });
 
   await withPage('quotes', { before: serving(withSample(touchingHalves)) }, async (page) => {

@@ -3494,7 +3494,7 @@
       pre.focus({ preventScroll: true });
     };
     const button = h('button', { class: 'ref', type: 'button', onclick }, 'open in full');
-    return h('span', { class: 'cut k' }, `first ${fmtInt(shown)} of ${fmtInt(total)} ${unit} · `, button);
+    return h('span', { class: 'cut k' }, `${fmtInt(shown)} of ${fmtInt(total)} ${unit} · `, button);
   }
 
   // A block per line of the JSON, its newline kept so it copies as is, wrapping under its own indent.
