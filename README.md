@@ -14,7 +14,7 @@ organizes the relevant information, then reasons over it to produce an answer.
 
 ## App
 
-### Mac
+### Mac (silicon)
 
 [Download R3Con](https://github.com/michaeltheologitis/r3con/releases/latest/download/R3Con.dmg), open it, and drag R3Con to Applications.
 
