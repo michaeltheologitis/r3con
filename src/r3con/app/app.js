@@ -11,8 +11,8 @@
   /** @typedef {{ left: number, top: number }} Offset */
   /** @typedef {{ dist: number, mid: Point, view: View }} Pinch */
   /** @typedef {(i: number, file: LoadedFile) => Point} Origin */
-  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent. A file in a dropped or
-  // picked folder is named by its path below that folder, whose name it keeps as its `folder`.
+  // A file's size is the file's; its bytes are its text's, in UTF-8, which is what r3con is sent.
+  // A file from a dropped or picked folder keeps that folder's name.
   /** @typedef {{ name: string, text: string, size: number, bytes: number, sample: boolean, uid: number, folder?: string }} LoadedFile */
   /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
   /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
@@ -1492,8 +1492,7 @@
   const UNFOLD_TOP = 0.4;
   // A fold's line keeps the strongest kind of the lines it stands for.
   const EDGE_RANK = { context: 0, self: 1, flow: 2, cite: 3 };
-  // The file column's tree: each level's indent, the rounded elbow into a folder's last child, and how far its lines stop
-  // short of what they meet.
+  // The tree's indent per level, the elbow into a last child, and how far its lines stop short of what they meet.
   const TREE_INDENT = 72;
   const TREE_ELBOW = 5;
   const TREE_GAP = 3;
@@ -1501,8 +1500,7 @@
   const FOLDER_SCALE = 1.3;
   // An icon's 32 units, in a document node's pixels.
   const DOC_ICON_UNIT = DOC_ICON_PX / 32;
-  // How far left of its centre each kind of row's icon is drawn: a page from x 6.5, half its stroke out; a fold's dots,
-  // of radius 3, and once it is open and they turn, 8.5 apart; a folder, 11.5 units each side before it is scaled.
+  // Each icon's left edge from its centre, by its markup: a page, a fold's dots, turned once open, and a folder.
   const PAGE_LEFT = (16 - 6.5 + DOC_ICON_STROKE / 2) * DOC_ICON_UNIT;
   const DOTS_LEFT = 3 * DOC_ICON_UNIT;
   const TURNED_DOTS_LEFT = (8.5 + 3) * DOC_ICON_UNIT;
@@ -2945,8 +2943,7 @@
     tab.tree.setAttribute('d', treePath(tab, at));
   }
 
-  // How far left of a row's node its tree line stops: short of a document's page or a fold's dots, and of a folder's
-  // chevron.
+  // How far left of a row's node its tree line stops: short of its icon, or of a folder's chevron.
   /** @param {PanelRow} row */
   function tickStop(row) {
     if ('doc' in row) return PAGE_LEFT + TREE_GAP;
@@ -2954,8 +2951,7 @@
     return (row.open ? TURNED_DOTS_LEFT : DOTS_LEFT) + TREE_GAP;
   }
 
-  // The file column's tree, where its nodes are drawn: from just under each open folder's label, a line down to its last
-  // child, with a tick to each child's icon and a rounded elbow into the last.
+  // Each open folder's line, from under its label to its last child, ticks to its children and an elbow into the last.
   /** @param {Tab} tab @param {(node: PanelNode) => Point} at */
   function treePath(tab, at) {
     /** @type {{ depth: number, from: Point, ticks: Point[] }[]} */
@@ -3099,8 +3095,7 @@
   /** @param {LoadedFile} file */
   const folderPaths = (file) => foldersOf(file).map((_, k, names) => names.slice(0, k + 1).join('/'));
 
-  // The tree of `files`, whose folders' files are together: the top level as a folder with no name, and how many folders
-  // the deepest file is in.
+  // The tree of `files`, each folder's files together, under a nameless top folder, and the deepest file's depth.
   /** @param {LoadedFile[]} files */
   function folderTree(files) {
     /** @param {string} name @param {string} path @param {number} d @returns {Folder} */
@@ -3208,8 +3203,7 @@
     return a !== b && tab.nodes.has(a) && tab.nodes.has(b) ? [a, b] : null;
   }
 
-  // A folder starts open in a tab of at most FOLD_FROM_DOCS files, and opens once it holds an answer's sources, unless
-  // the user left it open or closed.
+  // Open in a tab of at most FOLD_FROM_DOCS files, or holding an answer's sources, unless the user left it otherwise.
   /** @param {Tab} tab @param {Folder} folder */
   function folderOpen(tab, folder) {
     const fold = foldingOf(tab);
@@ -3225,8 +3219,7 @@
     fold.closedRows = fold.rows.length - opened;
   }
 
-  // A folder's rows at `depth`: an open folder's own beneath it, a closed one's documents on its row. Returns how many
-  // rows opened folds added.
+  // A folder's rows, an open subfolder's beneath it; returns how many rows opened folds added.
   /** @param {Tab} tab @param {Folder} folder @param {number} depth */
   function foldFolder(tab, folder, depth) {
     const fold = foldingOf(tab);
@@ -3245,8 +3238,7 @@
     return opened;
   }
 
-  // Rows for documents that follow one another in a folder: each run of MIN_FOLD or more with nothing relevant is one
-  // fold, unless the tab has at most FOLD_FROM_DOCS documents. Returns how many rows opened folds added.
+  // Each run of MIN_FOLD or more quiet documents in a folder is one fold; returns how many rows opened folds added.
   /** @param {Folding} fold @param {DocRange} docs @param {number} depth */
   function foldRun(fold, docs, depth) {
     /** @param {number} d */
@@ -3361,6 +3353,9 @@
     return fold.stopped ? 'stopped' : 'reading…';
   }
 
+  /** @param {NodeKind} kind */
+  const columnName = (kind) => (isRound(kind) ? roundName(kind) : kind === 'parsed' ? 'parsed' : '');
+
   // Before a run a fold counts its files; in a run, its first node says whether they are read.
   /** @param {Tab} tab @param {PanelNode} node */
   function labelFold(tab, node) {
@@ -3372,7 +3367,7 @@
     name.textContent = count;
     sub.textContent = node.kind === 'doc' ? [status, row.open && 'fold'].filter(Boolean).join(' · ') : isRound(node.kind) ? roundName(node.kind) : '';
     sub.hidden = !sub.textContent;
-    const column = isRound(node.kind) ? roundName(node.kind) : node.kind === 'parsed' ? 'parsed' : '';
+    const column = columnName(node.kind);
     const stopped = node.el.classList.contains('failed') && status !== 'stopped' && 'stopped';
     node.el.setAttribute('aria-label', [count, column, row.open ? 'unfolded' : 'folded', status, stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(row.open));
@@ -3380,8 +3375,7 @@
     node.el.classList.toggle('open', row.open);
   }
 
-  // A folder's nodes count its files at any depth. Once an answer is lit, a closed folder lights, counting its sources in
-  // it, and a folder with none in it, open or closed, greys; an open one's files light themselves.
+  // Once an answer is lit, a closed folder holding its sources lights and counts them; one holding none greys.
   /** @param {Tab} tab @param {PanelNode} node @param {Folder} folder */
   function labelFolder(tab, node, folder) {
     const { open } = /** @type {FoldRow} */ (node.fold);
@@ -3395,9 +3389,8 @@
     sub.textContent = counted || (isRound(node.kind) ? roundName(node.kind) : '');
     sub.hidden = !sub.textContent;
     sub.classList.toggle('sources', Boolean(counted));
-    const column = isRound(node.kind) ? roundName(node.kind) : node.kind === 'parsed' ? 'parsed' : '';
     const stopped = node.el.classList.contains('failed') && 'stopped';
-    node.el.setAttribute('aria-label', [`${folder.name} folder`, files, column, open ? 'open' : 'closed', counted, stopped].filter(Boolean).join(', '));
+    node.el.setAttribute('aria-label', [`${folder.name} folder`, files, columnName(node.kind), open ? 'open' : 'closed', counted, stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(open));
     node.el.title = `${open ? 'close' : 'open'} ${folder.name}`;
     node.el.classList.toggle('open', open);
@@ -3498,8 +3491,7 @@
     return Boolean(showFolded(tab, id));
   }
 
-  // The documents on an answer's trail come out of their folds, and the folders holding them open, so that the trail
-  // runs through their own rows.
+  // The documents on an answer's trail leave their folds, and their folders open, so the trail runs through their rows.
   /** @param {Tab} tab @param {string} id */
   function unfoldTrail(tab, id) {
     const fold = foldingOf(tab);
@@ -3664,9 +3656,8 @@
     return { id: node.id, shows: node.fold ? callId(foldingOf(tab), node.kind, node.fold.start) : node.id };
   }
 
-  // A fold opens, or folds again, in place, and a folder stays as the user leaves it. The view stays, but isn't marked
-  // as moved, so the panel fits again when it next would; an opened fold low in the panel glides up, so that the rows it
-  // opened show.
+  // A fold opens, or folds again, in place. The view stays, but isn't marked as moved, so the panel fits again when it
+  // next would; an opened fold low in the panel glides up, so that the rows it opened show.
   /** @param {Tab} tab @param {FoldRow} row */
   function toggleFold(tab, row) {
     const fold = foldingOf(tab);
@@ -5047,8 +5038,8 @@
   /** @type {WeakMap<File, string>} */
   const droppedIn = new WeakMap();
 
-  // By path, a part at a time and by character code, as r3con's walk and r3con app's zips order files: a/b.txt before
-  // a-b/x.txt. A file in a dropped folder goes by that folder's name first, so that the folder's files keep together.
+  // By path, a part at a time and by character code, as r3con's walk and r3con app's zips order files: a/b.txt before a-b/x.txt.
+  // A dropped folder's name leads its files' paths, so that they keep together.
   /** @param {File} a @param {File} b */
   function byPath(a, b) {
     /** @param {File} file */
@@ -5172,12 +5163,12 @@
   // A path's parts below the folder that was dropped or picked, the first.
   /** @param {string} path */
   const below = (path) => path.split('/').filter(Boolean).slice(1);
-  // A file in a folder is named by its path below it, so that a/notes.txt and b/notes.txt are told apart, and keeps the
-  // folder's name for the panel's tree.
+  // A file in a folder is named by its path below it, so that a/notes.txt and b/notes.txt are told apart.
   /** @param {File} file @param {string} path */
   function named(file, path) {
-    const renamed = new File([file], below(path).join('/'), { type: file.type, lastModified: file.lastModified });
-    droppedIn.set(renamed, path.split('/').filter(Boolean)[0]);
+    const [folder, ...parts] = path.split('/').filter(Boolean);
+    const renamed = new File([file], parts.join('/'), { type: file.type, lastModified: file.lastModified });
+    droppedIn.set(renamed, folder);
     return renamed;
   }
 

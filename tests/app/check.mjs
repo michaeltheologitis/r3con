@@ -1498,9 +1498,7 @@ async function dropBatches(page, batches, files) {
   await filesCounted(page, files);
 }
 
-// Each tree line, as the page draws it, against the nodes it joins, in the panel's own units: where each spine starts
-// under its folder's label and how far it is from the folder's centre; where each tick meets its row's icon, against the
-// icon's centre and left edge, or a folder's chevron; the elbows; and how wide and how faint the line is on screen.
+// The tree lines against the nodes they join, in the panel's units: spines against labels, ticks against icons or chevrons.
 function treeGeometry(indent) {
   const path = document.querySelector('#world .tree-lines');
   const d = path.getAttribute('d') ?? '';
@@ -1560,10 +1558,10 @@ function treeGeometry(indent) {
   };
 }
 
-// The resolved colour of the page's --dim, which the tree lines and a fold draw in.
-function dimColour() {
+// The colour a page token, such as --dim, resolves to.
+function tokenColour(token) {
   const probe = document.body.appendChild(document.createElement('i'));
-  probe.style.color = 'var(--dim)';
+  probe.style.color = `var(${token})`;
   const color = getComputedStyle(probe).color;
   probe.remove();
   return color;
@@ -1581,15 +1579,6 @@ function folderLook(selector) {
     sources: sources && !sources.hidden ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
     pill: el.querySelector('.pill') !== null,
   };
-}
-
-// The resolved colour of the page's --accent-ink.
-function accentInk() {
-  const probe = document.body.appendChild(document.createElement('i'));
-  probe.style.color = 'var(--accent-ink)';
-  const color = getComputedStyle(probe).color;
-  probe.remove();
-  return color;
 }
 
 // The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them.
@@ -1612,7 +1601,7 @@ async function folders() {
     check('folders', paneName, isDeepStrictEqual(pane, ['config.yml', 'contracts.txt', 'notes.md', 'q3/incidents.csv', 'q3/q3-summary.txt', 'memo.txt']), pane.join(' | '));
 
     const geometry = await page.evaluate(treeGeometry, TREE_INDENT);
-    const dim = await page.evaluate(dimColour);
+    const dim = await page.evaluate(tokenColour, '--dim');
     const spinesFit = geometry.spines.length === 2 && geometry.spines.every((s) => s && s.off === 0 && s.underLabel >= 0 && s.underLabel <= 6);
     const ticksMeet = geometry.meets.length === 6 && geometry.meets.every((m) => m.centre !== null && Math.abs(m.centre) <= 0.5 && m.short >= 1 && m.short <= 8);
     const elbows = geometry.meets.filter((m) => m.last).length === 2 && geometry.elbows.every((r) => r === 5);
@@ -1711,7 +1700,7 @@ async function folders() {
     check('folders', autoName, isDeepStrictEqual(after, landed), after.join(' | '));
 
     await pressNode(page, folderSel('q3'));
-    const q3 = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), ink: await page.evaluate(accentInk) };
+    const q3 = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), ink: await page.evaluate(tokenColour, '--accent-ink') };
     await pressNode(page, folderSel('reports'));
     const reportsLit = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('reports')), stand: await page.evaluate(standIns, reports) };
     const litLook = (look, text) => isDeepStrictEqual(look.fills, fillsOf('light', 'lit')) && look.opacity === 1 && look.chevron === 'none' && !look.pill && look.sources?.text === text && look.sources.color === q3.ink;
@@ -1739,7 +1728,7 @@ async function folders() {
     const grey = (look) => isDeepStrictEqual(look.fills, fillsOf('light', 'unused')) && look.opacity === memoOpacity && memoOpacity < 1 && look.sources === null;
     check('folders', unusedName, grey(archive) && grey(archiveClosed), JSON.stringify({ archive, archiveClosed, memoOpacity }));
     const lines = await page.evaluate(treeGeometry, TREE_INDENT);
-    check('folders', 'tree lines are never lit: once an answer is, they keep the dim colour at 55%', lines.stroke === (await page.evaluate(dimColour)) && lines.opacity === 0.55, JSON.stringify(lines));
+    check('folders', 'tree lines are never lit: once an answer is, they keep the dim colour at 55%', lines.stroke === (await page.evaluate(tokenColour, '--dim')) && lines.opacity === 0.55, JSON.stringify(lines));
 
     await send(page, 'Which memo mentions the storm?');
     await becomes(page, landedNode, 'answer-1');
@@ -1750,7 +1739,7 @@ async function folders() {
     check('folders', askName, isDeepStrictEqual(asked, askRows), asked.join(' | '));
 
     await page.click('#theme-btn');
-    const dark = { letters: await page.evaluate(folderLook, folderSel('letters')), archive: await page.evaluate(folderLook, folderSel('archive')), ink: await page.evaluate(accentInk) };
+    const dark = { letters: await page.evaluate(folderLook, folderSel('letters')), archive: await page.evaluate(folderLook, folderSel('archive')), ink: await page.evaluate(tokenColour, '--accent-ink') };
     await pressNode(page, folderSel('reports'));
     const blue = await page.evaluate(folderLook, folderSel('reports'));
     const darkName = 'in the dark theme a folder takes its dark pair: lit, stone, and blue open';
