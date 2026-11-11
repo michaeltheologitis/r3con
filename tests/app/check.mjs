@@ -1374,20 +1374,21 @@ function panelRows() {
   return firsts.map((el) => (el.classList.contains('fold') ? `${labels(el)}${el.getAttribute('aria-expanded') === 'true' ? ' (open)' : ''}` : labels(el)));
 }
 
-// A fold's first node's count and dots, the fold colour as the page resolves it, and a document's name.
+// A fold's first node's count and dots, the dim colour as the page resolves it, and a document's name.
 function foldInk() {
   if (!document.querySelector('.node.fold.doc')) return null;
   const probe = document.createElement('span');
-  probe.style.color = 'var(--fold)';
+  probe.style.color = 'var(--dim)';
   document.body.append(probe);
-  const fold = getComputedStyle(probe).color;
+  const dim = getComputedStyle(probe).color;
   probe.remove();
   /** @param {string} selector */
   const ink = (selector) => {
     const style = getComputedStyle(/** @type {Element} */ (document.querySelector(selector)));
     return { color: style.color, weight: Number(style.fontWeight) };
   };
-  return { fold, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
+  const noFoldToken = getComputedStyle(document.documentElement).getPropertyValue('--fold') === '';
+  return { dim, noFoldToken, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
 }
 
 const filesCounted = (page, n) => page.waitForFunction((k) => document.getElementById('files-count').textContent === String(k), n);
@@ -1413,7 +1414,7 @@ async function folds() {
     await filesCounted(page, FOLD_FROM_DOCS + 1);
     const folded = await page.evaluate(panelRows);
     const rest = FOLD_FROM_DOCS + 1 - 2 * CONTEXT_DOCS;
-    const expected = [...stemsFrom(0, CONTEXT_DOCS), `${rest} more documents`, ...stemsFrom(FOLD_FROM_DOCS + 1 - CONTEXT_DOCS, FOLD_FROM_DOCS + 1)];
+    const expected = [...stemsFrom(0, CONTEXT_DOCS), `${rest} more files`, ...stemsFrom(FOLD_FROM_DOCS + 1 - CONTEXT_DOCS, FOLD_FROM_DOCS + 1)];
     const thresholdName = `a tab of ${FOLD_FROM_DOCS} documents draws a node for each; one of ${FOLD_FROM_DOCS + 1} folds all but the first and last ${CONTEXT_DOCS}, counting the rest`;
     check('folds', thresholdName, isDeepStrictEqual(all, stemsFrom(0, FOLD_FROM_DOCS)) && isDeepStrictEqual(folded, expected), `${all.length} rows; then ${folded.join(', ')}`);
   });
@@ -1423,18 +1424,18 @@ async function folds() {
     const rest = FOLDED_FILES - 2 * CONTEXT_DOCS;
     const fold = nodeSel(`doc-f${CONTEXT_DOCS}`);
     const ends = [stemsFrom(0, CONTEXT_DOCS), stemsFrom(FOLDED_FILES - CONTEXT_DOCS, FOLDED_FILES)];
-    const closed = [ends[0], `${rest} more documents`, ends[1]].flat();
+    const closed = [ends[0], `${rest} more files`, ends[1]].flat();
     const rows = await page.evaluate(panelRows);
     await pressNode(page, fold);
     const opened = await page.evaluate(panelRows);
     await pressNode(page, fold, { key: true });
     const shut = await page.evaluate(panelRows);
-    const open = [ends[0], `${rest} more documents · fold (open)`, stemsFrom(CONTEXT_DOCS, FOLDED_FILES - CONTEXT_DOCS), ends[1]].flat();
+    const open = [ends[0], `${rest} more files · fold (open)`, stemsFrom(CONTEXT_DOCS, FOLDED_FILES - CONTEXT_DOCS), ends[1]].flat();
     const beforeName = `before a run, ${FOLDED_FILES} documents show the first and last ${CONTEXT_DOCS} around one fold of the other ${rest}; a click opens it above their rows, and Enter on it folds them again`;
     check('folds', beforeName, isDeepStrictEqual(rows, closed) && isDeepStrictEqual(opened, open) && isDeepStrictEqual(shut, closed), `${rows.join(', ')}; opened ${opened.length} rows; then ${shut.length}`);
     const ink = await page.evaluate(foldInk);
-    const inkName = "a fold's first node, which opens it, counts its documents bolder than a document's name, count and dots in the fold colour";
-    check('folds', inkName, ink && ink.count.color === ink.fold && ink.dots === ink.fold && ink.count.weight > ink.name.weight, JSON.stringify(ink));
+    const inkName = "a fold's first node, which opens it, counts its files bolder than a file's name, count and dots grey, in the dim colour, as the page has no fold colour";
+    check('folds', inkName, ink && ink.count.color === ink.dim && ink.dots === ink.dim && ink.count.weight > ink.name.weight && ink.noFoldToken, JSON.stringify(ink));
   });
   await withPage('folds', { sample: false }, async (page) => {
     const folding = FOLD_FROM_DOCS + 1;
@@ -1456,6 +1457,362 @@ async function folds() {
     const name = `removing files from a folded tab leaves a node per file: ${folding} less one show all ${FOLD_FROM_DOCS}, and remove all leaves none, a fold open or not`;
     const all = stemsFrom(0, folding).filter((stem) => stem !== memoStem(gone));
     check('folds', name, isDeepStrictEqual(left, all) && emptied === 0 && openedThenEmptied === 0, `${left.length} rows; then ${emptied} and ${openedThenEmptied} nodes`);
+  });
+}
+
+// ---------- folders: a dropped folder keeps its structure, as a tree in the file column ----------
+
+// The page's tree indent and elbow, and its folder colours, back and front, normal, lit (holding sources) and unused.
+const TREE_INDENT = 72;
+const TREE_ELBOW = 5;
+const TREE_OPACITY = 0.55;
+// How far a tree line may stop short of what it meets, and how far below a label a folder's line may start.
+const TICK_SHORT_PX = { min: 1, max: 8 };
+const SPINE_GAP_PX = 6;
+// Rounding allowed in the drawing: a tick against its icon's middle and against its spine, and a line's width.
+const ALIGNED_PX = 0.5;
+const ON_SPINE_PX = 6;
+const WIDTH_SLACK_PX = 0.01;
+// A wheel's step that zooms the panel in.
+const ZOOM_IN_DELTA = -300;
+const TREE_GEOMETRY = { indent: TREE_INDENT, aligned: ALIGNED_PX, onSpine: ON_SPINE_PX };
+const FOLDER_FILLS = {
+  light: { normal: ['#2f6f9f', '#6aaed6'], lit: ['#93442a', '#c15f3c'], unused: ['#8a8075', '#b8afa4'] },
+  dark: { normal: ['#2d6a96', '#5a9cc6'], lit: ['#a5523a', '#d77757'], unused: ['#5a534c', '#857c72'] },
+};
+const rgbOf = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
+const fillsOf = (theme, state) => FOLDER_FILLS[theme][state].map(rgbOf);
+// A folder of reports with q3 in it; a folder of letters; an archive of empty files, which nothing quotes; a memo.
+const REPORTS = ['reports', [['config.yml', 'Config.\n'], ['contracts.txt', 'Contracts.\n'], ['notes.md', 'Notes.\n'], ['q3', [['incidents.csv', 'Incidents.\n'], ['q3-summary.txt', 'Q3.\n']]]]];
+const LETTERS = ['letters', Array.from({ length: 5 }, (_, i) => [`letter_${i}.txt`, `Letter ${i}.\n`])];
+const ARCHIVE = ['archive', Array.from({ length: 12 }, (_, i) => [`old_${String(i).padStart(2, '0')}.txt`, ''])];
+const EMPTY_MEMO = ['memo.txt', ''];
+const REPORTS_TREE = ['reports · 5 files (open)', '  config', '  contracts', '  notes', '  q3 · 2 files (open)', '    incidents', '    q3-summary'];
+
+// The file column's rows, indented by depth, with their labels and a folder's "(open)", "(lit)" or "(unused)".
+function treeRows(indent) {
+  const nodes = [...document.querySelectorAll('#world .node.doc')].sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
+  return nodes.map((el) => {
+    const labels = [...el.querySelectorAll('.label')].map((label) => label.textContent).filter(Boolean).join(' · ');
+    const folder = el.classList.contains('folder');
+    const open = folder && el.getAttribute('aria-expanded') === 'true' ? ' (open)' : '';
+    const state = folder && el.classList.contains('on-path') ? ' (lit)' : folder && el.classList.contains('unused') ? ' (unused)' : '';
+    return `${'  '.repeat(Math.round(parseFloat(el.style.left) / indent))}${labels}${open}${state}`;
+  });
+}
+
+const folderSel = (name) => `#world .node.folder.doc[aria-label^="${name} folder,"]`;
+const folderId = (page, name) => page.$eval(folderSel(name), (el) => el.dataset.id);
+// A tick that meets its row's icon at its middle, a little short of it.
+const meets = (m) => m.centre !== null && Math.abs(m.centre) <= ALIGNED_PX && m.short >= TICK_SHORT_PX.min && m.short <= TICK_SHORT_PX.max;
+
+// Drops each of `batches` on the panel in turn, and waits for the tab to hold `files`.
+async function dropBatches(page, batches, files) {
+  for (const items of batches) await page.evaluate(dropItems, { on: 'panel', items });
+  await filesCounted(page, files);
+}
+
+// The tree lines against the nodes they join, in the panel's units: spines against labels, ticks against icons or chevrons.
+function treeGeometry({ indent, aligned, onSpine }) {
+  const path = document.querySelector('#world .tree-lines');
+  const d = path.getAttribute('d') ?? '';
+  const tokens = d.match(/[MVHa]|-?[\d.]+/g) ?? [];
+  const segments = [];
+  let [x, y, i] = [0, 0, 0];
+  const num = () => Number(tokens[i++]);
+  while (i < tokens.length) {
+    const command = tokens[i++];
+    if (command === 'M') [x, y] = [num(), num()];
+    else if (command === 'V') segments.push({ kind: 'v', x, y1: y, y2: (y = num()) });
+    else if (command === 'H') segments.push({ kind: 'h', y, x1: x, x2: (x = num()) });
+    else {
+      const [r, , , , , dx, dy] = Array.from({ length: 7 }, num);
+      segments.push({ kind: 'arc', r, x1: x, y1: y, x2: (x += dx), y2: (y += dy) });
+    }
+  }
+  const k = parseFloat(document.getElementById('world').style.getPropertyValue('--k'));
+  const origin = document.getElementById('world').getBoundingClientRect();
+  const world = (box) => ({ left: (box.left - origin.left) / k, top: (box.top - origin.top) / k, bottom: (box.bottom - origin.top) / k, mid: ((box.top + box.bottom) / 2 - origin.top) / k });
+  const rows = [...document.querySelectorAll('#world .node.doc')]
+    .map((el) => ({ el, x: parseFloat(el.style.left), y: parseFloat(el.style.top) }))
+    .sort((a, b) => a.y - b.y)
+    .map((row) => ({ ...row, depth: Math.round(row.x / indent), folder: row.el.classList.contains('folder'), open: row.el.getAttribute('aria-expanded') === 'true' }));
+  const ticks = segments.filter((s) => s.kind === 'h');
+  const arcs = segments.filter((s) => s.kind === 'arc');
+  const spines = [];
+  const children = [];
+  rows.forEach((row, r) => {
+    const parent = rows.slice(0, r).findLast((p) => p.depth < row.depth);
+    if (parent && parent.depth === row.depth - 1 && parent.open) children.push({ row, parent });
+    if (!row.folder || !row.open) return;
+    const spine = segments.find((s) => s.kind === 'v' && Math.abs(s.x - row.x) < aligned && s.y1 > row.y);
+    const label = world(row.el.querySelector('.label').getBoundingClientRect());
+    spines.push(spine ? { off: spine.x - row.x, underLabel: spine.y1 - label.bottom } : null);
+  });
+  const meets = children.map(({ row, parent }) => {
+    const tick = ticks.find((t) => Math.abs(t.y - row.y) < aligned && Math.abs(t.x1 - parent.x) < onSpine);
+    const arc = arcs.find((a) => Math.abs(a.y2 - row.y) < aligned);
+    const end = tick ? tick.x2 : null;
+    // What a tick meets: a folder's chevron, or the shapes of a row's icon, turned or not.
+    const shapes = [...row.el.querySelectorAll(row.folder ? '.chevron svg' : '.icon svg :is(path, circle)')].map((el) => world(el.getBoundingClientRect()));
+    const box = shapes.reduce((a, b) => (a.left <= b.left ? a : b));
+    const icon = world(row.el.querySelector('.icon').getBoundingClientRect());
+    return { last: Boolean(arc), centre: tick ? tick.y - icon.mid : null, short: end === null ? null : box.left - end, folder: row.folder };
+  });
+  const style = getComputedStyle(path);
+  return {
+    spines,
+    meets,
+    loose: rows.filter((row) => row.depth === 0).filter((row) => ticks.some((t) => Math.abs(t.y - row.y) < aligned)).length,
+    ticks: ticks.length,
+    elbows: arcs.map((a) => a.r),
+    screenWidth: parseFloat(style.strokeWidth) * k,
+    opacity: Number(style.strokeOpacity),
+    stroke: style.stroke,
+  };
+}
+
+// The colour a page token, such as --dim, resolves to.
+function tokenColour(token) {
+  const probe = document.body.appendChild(document.createElement('i'));
+  probe.style.color = `var(${token})`;
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}
+
+// A folder node's look: its two fills, its node's opacity and its chevron's turn.
+function folderLook(selector) {
+  const el = document.querySelector(selector);
+  const fill = (part) => getComputedStyle(el.querySelector(`.folder-${part}`)).fill;
+  const sources = el.querySelector('.label.sources');
+  return {
+    fills: [fill('back'), fill('front')],
+    opacity: Number(getComputedStyle(el).opacity),
+    chevron: getComputedStyle(el.querySelector('.chevron svg')).rotate,
+    sources: sources && !sources.hidden ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
+    pill: el.querySelector('.pill') !== null,
+  };
+}
+
+// The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them.
+function standIns(id) {
+  const index = id.slice('doc-'.length);
+  const own = [...document.querySelectorAll('#world .node')].map((el) => el.dataset.id).filter((nodeId) => nodeId.endsWith(`-${index}`));
+  const keys = [...document.querySelectorAll('#world .edge')].map((el) => el.dataset.key);
+  const lines = keys.filter((key) => key.split('>').every((end) => own.includes(end)));
+  return { nodes: own.sort(), lines: lines.sort(), lit: [...document.querySelectorAll('#world .edge.lit')].map((el) => el.dataset.key).filter((key) => key.split('>').some((end) => own.includes(end))).sort(), onPath: own.filter((nodeId) => document.querySelector(`.node[data-id="${nodeId}"]`).classList.contains('on-path')).sort() };
+}
+
+async function folders() {
+  await withPage('folders', { sample: false }, async (page) => {
+    await dropBatches(page, [[REPORTS], [['memo.txt', 'A memo.\n']]], 6);
+    const rows = await page.evaluate(treeRows, TREE_INDENT);
+    const treeName = 'a dropped folder is its own top row, its files and subfolders beneath it a level in each, each folder counting its files at any depth, and a file dropped on its own at the top level';
+    check('folders', treeName, isDeepStrictEqual(rows, [...REPORTS_TREE, 'memo']), rows.join(' | '));
+    const pane = (await page.evaluate(filesPane)).names;
+    const paneName = "the files pane still names each file by its path below the folder it was dropped in, in the panel's order";
+    check('folders', paneName, isDeepStrictEqual(pane, ['config.yml', 'contracts.txt', 'notes.md', 'q3/incidents.csv', 'q3/q3-summary.txt', 'memo.txt']), pane.join(' | '));
+
+    const geometry = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    const dim = await page.evaluate(tokenColour, '--dim');
+    const spinesFit = geometry.spines.length === 2 && geometry.spines.every((s) => s && s.off === 0 && s.underLabel >= 0 && s.underLabel <= SPINE_GAP_PX);
+    const ticksMeet = geometry.meets.length === 6 && geometry.meets.every(meets);
+    const elbows = geometry.meets.filter((m) => m.last).length === 2 && geometry.elbows.every((r) => r === TREE_ELBOW);
+    const linesName = "each open folder's line starts just under its label at the folder's centre and runs to its last child, with a tick to each child that meets its icon, or a subfolder's chevron, at its middle, a few pixels short, and a rounded elbow into the last; a file at the top level has none";
+    check('folders', linesName, spinesFit && ticksMeet && elbows && geometry.loose === 0, JSON.stringify(geometry));
+    const inkName = 'the tree lines are 1 px on screen, in the dim colour at 55%';
+    const ink = (g) => Math.abs(g.screenWidth - 1) < WIDTH_SLACK_PX && g.stroke === dim && g.opacity === TREE_OPACITY;
+    await zoomAt(page, await boxCentre(page, '#panel'), ZOOM_IN_DELTA);
+    const zoomed = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    check('folders', `${inkName}, at any zoom`, ink(geometry) && ink(zoomed) && zoomed.ticks === geometry.ticks, `${geometry.screenWidth}, ${zoomed.screenWidth} px; ${geometry.stroke} at ${geometry.opacity}; dim ${dim}`);
+    await page.click('#fit-btn');
+
+    const look = await page.evaluate(folderLook, folderSel('q3'));
+    check('folders', 'before a run a folder is blue, its chevron pointing down while it is open, and it has no badge', isDeepStrictEqual(look.fills, fillsOf('light', 'normal')) && look.chevron === '90deg' && !look.pill, JSON.stringify(look));
+    await pressNode(page, folderSel('q3'));
+    const shut = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), focused: await page.evaluate(() => document.activeElement.getAttribute('aria-label')) };
+    await pressNode(page, folderSel('q3'), { key: true });
+    const reopened = await page.evaluate(treeRows, TREE_INDENT);
+    await page.focus(folderSel('reports'));
+    await page.keyboard.press(' ');
+    const spaced = await page.evaluate(treeRows, TREE_INDENT);
+    const closedRows = [...REPORTS_TREE.slice(0, 4), '  q3 · 2 files', 'memo'];
+    const toggled = isDeepStrictEqual(shut.rows, closedRows) && shut.look.chevron === 'none' && shut.focused === 'q3 folder, 2 files, closed' && isDeepStrictEqual(reopened, rows);
+    const toggleName = 'a click on a folder closes it, its chevron pointing right and its files gone, and keeps the focus on it; Enter opens it again, and Space closes another';
+    check('folders', toggleName, toggled && isDeepStrictEqual(spaced, ['reports · 5 files', 'memo']), `${shut.rows.join(' | ')}; ${JSON.stringify(shut.look)}; ${shut.focused}; then ${spaced.join(' | ')}`);
+  });
+
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-folders-'));
+  try {
+    for (const [path, text] of [['picked/01_memo.txt', 'A picked memo.\n'], ['picked/sub/02_memo.md', 'A memo in a subfolder.\n']]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), text);
+    }
+    await withPage('folders', { sample: false }, async (page) => {
+      await page.click('#tab-files');
+      await page.setInputFiles('#folder-input', join(dir, 'picked'));
+      await filesCounted(page, 2);
+      await page.evaluate(dropItems, { on: 'panel', items: [['picked', [['03_memo.txt', 'Another picked memo.\n']]], ['loose.txt', 'A loose memo.\n']] });
+      await filesCounted(page, 4);
+      const rows = await page.evaluate(treeRows, TREE_INDENT);
+      const names = (await page.evaluate(filesPane)).names;
+      const expected = ['picked · 3 files (open)', '  01_memo', '  sub · 1 file (open)', '    02_memo', '  03_memo', 'loose'];
+      const name = 'a picked folder is a top row as a dropped one is, and a folder of its name dropped later joins it, its files kept together where it first was, ahead of a file dropped beside them';
+      check('folders', name, isDeepStrictEqual(rows, expected) && isDeepStrictEqual(names, ['01_memo.txt', 'sub/02_memo.md', '03_memo.txt', 'loose.txt']), `${rows.join(' | ')}; ${names.join(' | ')}`);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  await withPage('folders', { sample: false }, async (page) => {
+    await dropBatches(page, [[REPORTS], [LETTERS], [ARCHIVE], [EMPTY_MEMO]], 23);
+    const closed = await page.evaluate(treeRows, TREE_INDENT);
+    const closedName = `in a tab of more than ${FOLD_FROM_DOCS} files every folder starts closed`;
+    check('folders', closedName, isDeepStrictEqual(closed, ['reports · 5 files', 'letters · 5 files', 'archive · 12 files', 'memo']), closed.join(' | '));
+    const reports = await folderId(page, 'reports');
+    const reading = (await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id))).filter((id) => !id.startsWith('doc-g'));
+
+    await pressNode(page, folderSel('letters'));
+    await pressNode(page, folderSel('archive'));
+    const opened = await page.evaluate(treeRows, TREE_INDENT);
+    const expected = ['reports · 5 files', 'letters · 5 files (open)', '  5 more files', 'archive · 12 files (open)', '  10 more files', '  old_10', '  old_11', 'memo'];
+    const fold = await page.evaluate(foldInk);
+    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, nodeSel('doc-f5'))) === 1 && (await count(page, nodeSel('doc-f10'))) === 1;
+    const scopedName = `a fold of files with nothing relevant sits on its folder's line and never reaches past the folder: two open folders' ${FOLD_FROM_DOCS + 5} quiet files fold as two, saying "files"`;
+    check('folders', scopedName, scoped && reading.length === 1, `${opened.join(' | ')}; ${reading.join(' ')}`);
+    await pressNode(page, nodeSel('doc-f10'));
+    const dots = (await page.evaluate(treeGeometry, TREE_GEOMETRY)).meets;
+    await pressNode(page, nodeSel('doc-f10'));
+    // Letters' fold; archive's, opened, its 10 files and the 2 kept in view.
+    const rows = 1 + 1 + 10 + 2;
+    check('folders', "a fold's tick meets its dots as a file's meets its page, at their middle, a few pixels short, the fold closed or open", dots.length === rows && dots.every(meets), JSON.stringify(dots));
+    check('folders', "a fold in a folder is grey, as a loose file's is: its count and dots in the dim colour", fold && fold.count.color === fold.dim && fold.dots === fold.dim, JSON.stringify(fold));
+
+    // Opened, then closed again: the user's say holds once an answer lands.
+    await pressNode(page, folderSel('letters'));
+    await page.click('#tab-chat');
+    await send(page, 'Which site logged the most incidents?');
+    await becomes(page, statusMatches, SIMULATED_DONE.source);
+    await waitLit(page);
+    const after = await page.evaluate(treeRows, TREE_INDENT);
+    const landed = [
+      'reports · 5 files (open)',
+      '  config',
+      '  contracts',
+      '  notes',
+      '  q3 · 2 files (open)',
+      '    incidents',
+      '    q3-summary',
+      'letters · 5 files · 2 sources (lit)',
+      'archive · 12 files (open) (unused)',
+      '  12 files · nothing relevant',
+      'memo',
+    ];
+    const autoName = "once the answer lands, each folder holding its sources opens, with those it is in, unless the user left it closed; one the user opened stays open; a fold in it says files, nothing relevant";
+    check('folders', autoName, isDeepStrictEqual(after, landed), after.join(' | '));
+
+    await pressNode(page, folderSel('q3'));
+    const q3 = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), ink: await page.evaluate(tokenColour, '--accent-ink') };
+    await pressNode(page, folderSel('reports'));
+    const reportsLit = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('reports')), stand: await page.evaluate(standIns, reports) };
+    const litLook = (look, text) => isDeepStrictEqual(look.fills, fillsOf('light', 'lit')) && look.opacity === 1 && look.chevron === 'none' && !look.pill && look.sources?.text === text && look.sources.color === q3.ink;
+    const q3Lit = q3.rows.includes('  q3 · 2 files · 2 sources (lit)') && litLook(q3.look, '2 sources');
+    const nested = reportsLit.rows[0] === 'reports · 5 files · 4 sources (lit)' && litLook(reportsLit.look, '4 sources');
+    const litName = "a closed folder holding the answer's sources lights terracotta, with no badge, and counts them under its name in the accent ink, any depth in it: q3's 2, then reports' 4";
+    check('folders', litName, q3Lit && nested, `${q3.rows.join(' | ')}; ${JSON.stringify(q3.look)}; ${reportsLit.rows[0]}; ${JSON.stringify(reportsLit.look)}`);
+
+    const index = reports.slice('doc-'.length);
+    const stand = reportsLit.stand;
+    const columns = ['doc', 'parsed', 'r1', 'r2'].map((kind) => `${kind}-${index}`);
+    const inside = await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id).filter((id) => /^(r\d|parsed)-[0-4]$/.test(id)));
+    const one = new Set(stand.lines.map((key) => key.split('>').map((end) => end.split('-')[0]).join('>'))).size === stand.lines.length;
+    const standName = 'a closed folder stands in for its files in every column, one node a column, with one line between columns for all of them, lit along the trail through it';
+    // The simulated answer cites some of its files' snippets and parses, and its trail goes on to the snippets' files.
+    const [doc, parsed, , r2] = columns;
+    const litThrough = isDeepStrictEqual(stand.onPath, [doc, parsed, r2]) && isDeepStrictEqual(stand.lit, [`${doc}>${r2}`, `${parsed}>answer-0`, `${r2}>answer-0`]);
+    check('folders', standName, isDeepStrictEqual(stand.nodes, columns) && inside.length === 0 && one && stand.lines.length >= 3 && litThrough, JSON.stringify({ stand, inside }));
+
+    const archive = await page.evaluate(folderLook, folderSel('archive'));
+    const memoOpacity = await page.$eval('#world .node.doc[aria-label^="memo.txt,"]', (el) => Number(getComputedStyle(el).opacity));
+    const unusedName = "once an answer is lit, a folder holding none of its sources greys to stone and dims as a file off the trail does, open or closed";
+    await pressNode(page, folderSel('archive'));
+    const archiveClosed = await page.evaluate(folderLook, folderSel('archive'));
+    const grey = (look) => isDeepStrictEqual(look.fills, fillsOf('light', 'unused')) && look.opacity === memoOpacity && memoOpacity < 1 && look.sources === null;
+    check('folders', unusedName, grey(archive) && grey(archiveClosed), JSON.stringify({ archive, archiveClosed, memoOpacity }));
+    const lines = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    check('folders', 'tree lines are never lit: once an answer is, they keep the dim colour at 55%', lines.stroke === (await page.evaluate(tokenColour, '--dim')) && lines.opacity === TREE_OPACITY, JSON.stringify(lines));
+
+    await send(page, 'Which memo mentions the storm?');
+    await becomes(page, landedNode, 'answer-1');
+    await becomes(page, (id) => document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('on-path'), 'answer-1');
+    const asked = await page.evaluate(treeRows, TREE_INDENT);
+    const askName = "an ask landing lit leaves the folders as the user left them, each closed one counting the ask's sources in it";
+    const askRows = ['reports · 5 files · 3 sources (lit)', 'letters · 5 files · 3 sources (lit)', 'archive · 12 files (unused)', 'memo'];
+    check('folders', askName, isDeepStrictEqual(asked, askRows), asked.join(' | '));
+
+    await page.click('#theme-btn');
+    const dark = { letters: await page.evaluate(folderLook, folderSel('letters')), archive: await page.evaluate(folderLook, folderSel('archive')), ink: await page.evaluate(tokenColour, '--accent-ink') };
+    await pressNode(page, folderSel('reports'));
+    const blue = await page.evaluate(folderLook, folderSel('reports'));
+    const darkName = 'in the dark theme a folder takes its dark pair: lit, stone, and blue open';
+    const darkOk = isDeepStrictEqual(dark.letters.fills, fillsOf('dark', 'lit')) && dark.letters.sources?.color === dark.ink && isDeepStrictEqual(dark.archive.fills, fillsOf('dark', 'unused')) && isDeepStrictEqual(blue.fills, fillsOf('dark', 'normal'));
+    check('folders', darkName, darkOk, JSON.stringify({ dark, blue }));
+
+    await pressNode(page, folderSel('reports'));
+    await page.click('#tab-files');
+    await page.click('#file-list li:nth-child(5) .file');
+    await page.click('#file-view >> text=show in panel');
+    const shown = { node: await count(page, '#world .node.doc[aria-label^="q3/q3-summary.txt,"]'), popup: (await popup(page))?.title, rows: (await page.evaluate(treeRows, TREE_INDENT)).slice(0, 7) };
+    const jumpName = "show in panel opens each closed folder a file is in, outermost first, and the file's popup";
+    check('folders', jumpName, shown.node === 1 && shown.popup === '● q3/q3-summary.txt' && isDeepStrictEqual(shown.rows, REPORTS_TREE), JSON.stringify(shown));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    const notes = ['notes', [['a.txt', 'A note.\n'], ['b.txt', ''], ['c.txt', '']]];
+    const other = ['other', Array.from({ length: FOLD_FROM_DOCS }, (_, i) => [`empty_${i}.txt`, ''])];
+    await dropBatches(page, [[notes], [other]], 3 + FOLD_FROM_DOCS);
+    await pressNode(page, folderSel('notes'));
+    await pressNode(page, folderSel('notes'));
+    await page.click('#tab-chat');
+    await send(page, 'Which note is relevant?');
+    await waitLit(page);
+    const id = await folderId(page, 'notes');
+    const drawn = await page.evaluate(standIns, id);
+    await pressNode(page, folderSel('other'));
+    await pressNode(page, folderSel('other'));
+    const redrawn = await page.evaluate(standIns, id);
+    const [r1, r2] = ['r1', 'r2'].map((kind) => `${kind}-${id.slice('doc-'.length)}`);
+    const name = "a closed folder's lines stay as the run drew them once the panel folds again, among them a line from its one relevant file's snippet to the next round in it";
+    check('folders', name, drawn.lines.includes(`${r1}>${r2}`) && isDeepStrictEqual(redrawn, drawn), JSON.stringify({ drawn, redrawn }));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    // A folder named as long as a label gets, of over a hundred files, in the middle row of three, closed by the user.
+    const long = 'quarterly_maintenance_rep';
+    const files = 120;
+    await dropBatches(page, [[['aaa', [['a.txt', 'A.\n']]]], [[long, Array.from({ length: files }, (_, i) => [`f_${i}.txt`, `File ${i}.\n`])]], [EMPTY_MEMO]], files + 2);
+    for (const name of ['aaa', 'aaa', long, long]) await pressNode(page, folderSel(name));
+    await page.click('#tab-chat');
+    await send(page, 'Which maintenance contractor logged the most incidents?');
+    await waitLit(page);
+    const apart = await page.evaluate(() => {
+      const box = (el) => el.querySelector('.label').getBoundingClientRect();
+      const answer = box(document.querySelector('.node.answer'));
+      const parses = [...document.querySelectorAll('.node.parsed')].map(box).filter((b) => b.bottom > answer.top && b.top < answer.bottom);
+      const rows = [...document.querySelectorAll('.node.doc')].map((el) => el.style.top);
+      return { onRow: rows.includes(document.querySelector('.node.answer').style.top), meets: parses.filter((b) => b.right > answer.left).length };
+    });
+    const name = "the answer never sits at a row's height, so a long folder label in the parse column stays clear of its label";
+    check('folders', name, isDeepStrictEqual(apart, { onRow: false, meets: 0 }), JSON.stringify(apart));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', memosFrom(0, FOLDED_FILES));
+    await filesCounted(page, FOLDED_FILES);
+    const loose = { lines: await page.$eval('#world .tree-lines', (el) => el.getAttribute('d') ?? ''), folders: await count(page, '#world .node.folder'), left: await page.$$eval('#world .node.doc', (els) => [...new Set(els.map((el) => el.style.left))]) };
+    const looseName = 'loose files draw no tree and no folder, each row at the left of the column, as before folders';
+    check('folders', looseName, loose.lines === '' && loose.folders === 0 && isDeepStrictEqual(loose.left, ['0px']), JSON.stringify(loose));
   });
 }
 
@@ -1810,7 +2167,7 @@ async function filesAddFails() {
 const removeButton = (page, name) => page.getByRole('button', { name: `remove ${name}`, exact: true });
 const focusedName = (page) => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.id);
 const removeNames = (page) => page.$$eval('#file-list .remove', (els) => els.map((el) => el.getAttribute('aria-label')));
-const docNames = (page) => page.$$eval('#world .node.doc', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
+const docNames = (page) => page.$$eval('#world .node.doc:not(.folder)', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
 
 // Each button in the files list, to open a file or remove it, is at least `px` wide and tall.
 function targetsFit(px) {
@@ -4542,13 +4899,13 @@ async function dropArea() {
     await removeButton(page, LOOSE_FILE[0]).waitFor();
     const folder = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), chat: await lastChatLine(page), error: await filesError(page) };
     const expected = {
-      names: ['panel_memo.txt', '01_summary.txt', 'loose.py', 'q3/02_incidents.md', 'q4/02_incidents.md'],
+      names: ['panel_memo.txt', 'loose.py', '01_summary.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'],
       said: '4 files added; 1 skipped.',
       chat: '4 files added; 1 skipped: the next question runs over 5 documents.',
       error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}`,
     };
     const folderName =
-      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it, and, as that walk does, nothing hidden or under __MACOSX; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
+      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it and kept together, and, as that walk does, nothing hidden or under __MACOSX; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
     check('drop', folderName, isDeepStrictEqual(folder, expected), JSON.stringify(folder));
 
     await page.evaluate(dropItems, { on: 'panel', items: [['scripts', [['a.py', 'x'], ['b.py', 'x'], ['.DS_Store', 'x']]]] });
@@ -4819,7 +5176,8 @@ async function liveStart(url) {
     const over = await page.evaluate(dropItems, { on: 'panel', items: [['panel_memo.txt', 'A memo dropped on the panel.\n'], DROPPED_FOLDER] });
     await removeButton(page, 'panel_memo.txt').waitFor();
     const added = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), said: await filesSaid(page), error: await filesError(page) };
-    const names = ['01_summary.txt', 'panel_memo.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'];
+    // A dropped folder's files keep together, ordered by its name beside the file dropped with it.
+    const names = ['panel_memo.txt', '01_summary.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'];
     const addedExpected = { names, docs: names, said: '4 files added; 1 skipped.', error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}` };
     const addedName = 'a file and a folder dropped on the empty panel are added as a drop on the files pane adds them, the folder walked and its refusals named';
     check('live', addedName, over.said === DROP_ADDS && isDeepStrictEqual(added, addedExpected), `${over.said}; ${JSON.stringify(added)}`);
@@ -5131,7 +5489,7 @@ const foldStem = ({ docs }, i) => `fold_${String(i).padStart(String(docs - 1).le
 const foldStems = (run, [first, last]) => Array.from({ length: last - first + 1 }, (_, k) => foldStem(run, first + k));
 // A run's rows once read, as panelRows gives them: each fold, and each relevant memo's own row.
 function readRows(run, folds) {
-  const rows = [...folds.map(([first, last]) => [first, `${last - first + 1} documents · nothing relevant`]), ...run.relevant.map((d) => [d, foldStem(run, d)])];
+  const rows = [...folds.map(([first, last]) => [first, `${last - first + 1} files · nothing relevant`]), ...run.relevant.map((d) => [d, foldStem(run, d)])];
   return rows.sort((a, b) => a[0] - b[0]).map(([, row]) => row);
 }
 const FOLD_RUN_ROWS = readRows(FOLD_RUN, FOLD_RUN_FOLDS);
@@ -5163,7 +5521,7 @@ async function liveFolds(url, server) {
     const reading = await page.evaluate(panelRows);
     const rest = FOLD_RUN.docs - 2 * CONTEXT_DOCS;
     const ends = [foldStems(FOLD_RUN, [0, CONTEXT_DOCS - 1]), foldStems(FOLD_RUN, [FOLD_RUN.docs - CONTEXT_DOCS, FOLD_RUN.docs - 1])];
-    const waiting = [ends[0], `${rest} documents · reading…`, ends[1]].flat();
+    const waiting = [ends[0], `${rest} files · reading…`, ends[1]].flat();
     const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
     check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
 
@@ -5245,7 +5603,7 @@ async function liveFolds(url, server) {
     const askLit = await litOnPanel(page);
     const askExpected = trailOnPage(ask.trail, ask.ids, fileNodes(FOLD_RUN.docs), 'answer-1');
     const askName = 'an ask over a folded run lands lit along its own trail, the folds as they were';
-    const folded = back.some((row) => row.includes(' documents · '));
+    const folded = back.some((row) => row.includes(' files · '));
     const asked = landed && isDeepStrictEqual(askLit, askExpected) && isDeepStrictEqual(await page.evaluate(panelRows), back);
     check('live', askName, folded && asked, `${askLit.edges.length} lines lit, ${askExpected.edges.length} on the trail; ${back.length} rows`);
   });
@@ -5323,7 +5681,7 @@ async function liveFoldsJoined(url, server) {
     server.release();
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const rows = await page.evaluate(panelRows);
-    const folds = rows.filter((row) => row.includes(' documents · '));
+    const folds = rows.filter((row) => row.includes(' files · '));
     const title = (await popup(page))?.title;
     const shown = await count(page, nodeSel(fileNode(opened)));
     // The documents kept in view, which joined a fold once read, draw no faint lines, as an opened fold's don't.
@@ -6705,7 +7063,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
