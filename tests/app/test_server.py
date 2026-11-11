@@ -12,6 +12,7 @@ import httpx2
 import keyring
 import litellm
 import pytest
+import yaml
 from keyring.backend import KeyringBackend
 from keyring.backends import fail
 from keyring.errors import KeyringLocked, PasswordDeleteError, PasswordSetError
@@ -41,7 +42,9 @@ from r3con.app.server import (
     listen,
     serve,
 )
+from r3con.masking import MASK
 from r3con.r3con import read_documents
+from r3con.settings import CONFIGS_DIR
 from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
 from tests.fakes import (
     GATE_TIMEOUT_SECONDS,
@@ -80,6 +83,8 @@ SECOND_KEY = "second-server-key-3456"
 # A known provider's URL, by which litellm places a bare name with that provider.
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1"
 CUSTOM_HEADERS = "Authorization: Bearer custom-header-key-7890\nX-Gateway-Key: gate"
+# A header's value a config file's params may send, as an OpenAI-compatible gateway takes.
+GATE_KEY = "gateway-header-key-2468"
 STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
@@ -1220,6 +1225,32 @@ def test_a_runs_representation_leaves_out_the_manifests_paths_on_this_computer(
     local = manifest.pop("sources")
     assert local["prompts"]
     assert representation_of(client, run_id)["manifest.json"] == manifest
+
+
+def test_a_runs_representation_names_no_server_header_or_masked_value(
+    client: TestClient, tmp_path: Path
+):
+    """A run on a stored server, under a config file where the server runs whose
+    params, as r3con's own config params may, carry another server and a header."""
+    config = yaml.safe_load((CONFIGS_DIR / "default.yaml").read_text())
+    params = {"api_base": SECOND_ENDPOINT, "extra_headers": {"X-Gateway-Key": GATE_KEY}}
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "default.yaml").write_text(
+        yaml.safe_dump({**config, "params": params})
+    )
+    client.post("/api/keys", json=OTHER)
+    run_id = finished_run(client, SERVED_OPENAI_MODEL, ENDPOINT)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    files = representation_of(client, run_id)
+    saved = json.dumps(files)
+    written = json.loads((run_dir / "manifest.json").read_text())["config"]["params"]
+    assert written["api_base"] == SECOND_ENDPOINT
+    assert files["manifest.json"]["config"]["params"] == {}
+    assert [
+        held
+        for held in (ENDPOINT, SECOND_ENDPOINT, OTHER_KEY, GATE_KEY, MASK)
+        if held in saved
+    ] == []
 
 
 def test_the_representation_of_a_run_still_running_is_refused(

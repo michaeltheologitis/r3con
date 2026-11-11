@@ -84,9 +84,11 @@ opened URL's fragment, ``#token=...``.
   ``ask_failed``.
 - ``GET /api/runs/{run_id}/representation`` answers, for a run that has ended, what
   ``r3con.ask`` reads of its folder, each file in ``REPRESENTATION_FILES`` by its path
-  there, the manifest without its ``sources``, which are paths on this computer: what
-  a tab saved as one file needs to ask again. A run folder that can't be read is
-  refused (409).
+  there: what a tab saved as one file needs to ask again. Its manifest leaves out its
+  ``sources``, which are paths on this computer, and its config's ``params``, empty,
+  which a config file where the server runs may fill with a server's URL or headers.
+  Nothing else there names a run's server or key: the server passes them with each
+  call. A run folder that can't be read is refused (409).
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -793,7 +795,10 @@ def _representation(run_dir: Path) -> dict[str, Any]:
     except (OSError, ValueError) as error:
         logger.warning("%s: can't read it to save (%s)", run_dir, type(error).__name__)
         raise HTTPException(409, UNREADABLE_RUN) from None
-    files["manifest.json"].pop(LOCAL_PATHS, None)
+    manifest = files["manifest.json"]
+    manifest.pop(LOCAL_PATHS, None)
+    # A config file where the server runs may set params such as api_base or headers.
+    manifest["config"]["params"] = {}
     return files
 
 
