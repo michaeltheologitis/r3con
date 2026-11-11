@@ -1510,8 +1510,11 @@
 
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
-  const PREVIEW_CHARS = 20000;
-  const PREVIEW_LINES = 5000;
+  // Until opened in full, a file's popup stops after WORDS_SHOWN words, a megabyte of prose; a parse's, LINES_SHOWN.
+  const WORDS_SHOWN = 150000;
+  const LINES_SHOWN = 30000;
+  // Far past WORDS_SHOWN words of prose: a file stops here first only if its text has few spaces.
+  const CHARS_SHOWN = 2000000;
   const JSON_INDENT = 2;
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
@@ -3715,16 +3718,33 @@
     return text ? h('p', { class: 'insp-text' }, text) : h('p', { class: 'insp-text k' }, empty);
   }
 
+  // Where the text in `pre` stops short, a button that shows it all, leaving the focus on the text it opened.
+  /** @param {HTMLElement} pre @param {() => void} openInFull */
+  function cutLine(pre, openInFull) {
+    const onclick = () => {
+      openInFull();
+      pre.tabIndex = -1;
+      pre.focus({ preventScroll: true });
+    };
+    return h('span', { class: 'cut' }, h('button', { class: 'ref', type: 'button', onclick }, 'open in full'));
+  }
+
   // A block per line of the JSON, its newline kept so it copies as is, wrapping under its own indent.
   /** @param {unknown} value */
   function jsonBlock(value) {
     const lines = JSON.stringify(value, null, JSON_INDENT).split(/(?<=\n)/);
     /** @param {string} line */
     const hanging = (line) => h('span', { style: `--indent: ${line.length - line.trimStart().length}ch` }, line);
-    return [
-      lines.length > PREVIEW_LINES ? h('div', { class: 'k' }, `first ${fmtInt(PREVIEW_LINES)} lines shown`) : null,
-      h('pre', { class: 'code wrap json' }, lines.slice(0, PREVIEW_LINES).map(hanging)),
-    ];
+    const pre = h('pre', { class: 'code wrap json' });
+    /** @param {number} shown */
+    const draw = (shown) => {
+      // One at a time: a long parse's lines, spread as arguments, overflow the stack.
+      const block = new DocumentFragment();
+      for (const line of lines.slice(0, shown)) block.append(hanging(line));
+      fill(pre, block, shown < lines.length && cutLine(pre, () => draw(lines.length)));
+    };
+    draw(LINES_SHOWN);
+    return pre;
   }
 
   /** @param {Run} run @param {string} id */
@@ -3733,25 +3753,26 @@
     return call ? h('div', { class: 'k' }, `${fmtInt(call.tokens)} tokens · ${fmtUsd(call.usd)}`) : null;
   }
 
-  /** @param {LoadedFile} file @param {TextRange} shown */
-  function fileMeta(file, shown) {
-    const meta = [fmtBytes(file.size), file.sample ? 'sample memo' : 'your file'];
-    if (shown.start) meta.push(`characters ${fmtInt(shown.start + 1)}–${fmtInt(shown.end)} shown`);
-    else if (shown.end < file.text.length) meta.push(`first ${fmtInt(PREVIEW_CHARS)} characters shown`);
-    return meta.join(' · ');
+  // Where `text` stops short: after WORDS_SHOWN words, by whitespace, or CHARS_SHOWN characters if sooner; else its end.
+  /** @param {string} text */
+  function cutOf(text) {
+    const word = /\S+/g;
+    let words = 0;
+    while (words < WORDS_SHOWN && word.exec(text) && word.lastIndex <= CHARS_SHOWN) words += 1;
+    if (words === WORDS_SHOWN) {
+      const cut = word.lastIndex;
+      return word.exec(text) ? cut : text.length;
+    }
+    if (text.length <= CHARS_SHOWN) return text.length;
+    // Never between a surrogate pair's halves.
+    const last = String.fromCodePoint(/** @type {number} */ (text.codePointAt(CHARS_SHOWN - 1)));
+    return last.length > 1 ? CHARS_SHOWN - 1 : CHARS_SHOWN;
   }
 
-  // A file's first PREVIEW_CHARS, or as many around a sentence past them, so that every sentence counted can be shown.
-  /** @param {LoadedFile} file @param {TextRange | null} at */
-  function shownPart(file, at) {
-    const start = at && at.end > PREVIEW_CHARS ? Math.max(0, Math.min(at.start - PREVIEW_CHARS / 2, file.text.length - PREVIEW_CHARS)) : 0;
-    return { start, end: Math.min(file.text.length, start + PREVIEW_CHARS) };
-  }
-
-  // The shown part of `text`, each span in `spans` marked, titled by `title`, and `at` flashed.
-  /** @param {string} text @param {TextRange} shown @param {Span[]} spans @param {(span: Span) => string} title @param {TextRange | null} at */
-  function markedText(text, shown, spans, title, at) {
-    const cuts = cutsOf([shown, ...spans, ...(at ? [at] : [])]).filter((cut) => cut >= shown.start && cut <= shown.end);
+  // `text` up to `upTo`, each span in `spans` marked, titled by `title`, and `at` flashed.
+  /** @param {string} text @param {number} upTo @param {Span[]} spans @param {(span: Span) => string} title @param {TextRange | null} at */
+  function markedText(text, upTo, spans, title, at) {
+    const cuts = cutsOf([{ start: 0, end: upTo }, ...spans, ...(at ? [at] : [])]).filter((cut) => cut <= upTo);
     return cuts.slice(1).map((end, i) => {
       const span = spans.find((r) => r.start <= cuts[i] && r.end >= end);
       const flash = at && at.start <= cuts[i] && at.end >= end;
@@ -3761,23 +3782,33 @@
     });
   }
 
+  // A sentence to show past where the file stops short opens it in full.
   /** @param {Tab} tab @param {LoadedFile} file @param {TextRange | null} [at] a sentence to show */
   function markedFile(tab, file, at = null) {
-    const shown = shownPart(file, at);
+    const cut = cutOf(file.text);
+    let end = at && at.end > cut ? file.text.length : cut;
     /** @param {Trail | null} trail */
     const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
       const used = sentences ? `${plural(sentences, 'sentence')} used` : trail?.nodes.has(docId(file)) && 'used';
-      return [fileMeta(file, shown), used && [' · ', h('span', { class: 'used' }, used)]];
+      return [fmtBytes(file.size), file.sample && ' · sample memo', used && [' · ', h('span', { class: 'used' }, used)]];
     };
     const meta = trailPart(tab, h('div', { class: 'k' }), line);
     if (!file.text) return [meta, h('p', { class: 'k' }, 'This file has no readable text.')];
+    const pre = h('pre', { class: 'code wrap' });
+    const openInFull = () => {
+      end = file.text.length;
+      fill(pre, text(tab.trail));
+    };
     // Spans come only with a trail.
     /** @param {Trail | null} trail */
-    const text = (trail) => markedText(file.text, shown, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at);
-    return [meta, trailPart(tab, h('pre', { class: 'code wrap' }), text)];
+    const text = (trail) => [
+      markedText(file.text, end, quotedOf(trail)?.spans ?? [], (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at),
+      end < file.text.length && cutLine(pre, openInFull),
+    ];
+    return [meta, trailPart(tab, pre, text)];
   }
 
   /** @param {string} summary @param {Child} body @param {string} [className] */
