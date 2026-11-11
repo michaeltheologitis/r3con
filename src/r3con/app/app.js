@@ -1486,7 +1486,7 @@
 
   const SUMMARY_CHARS = 140;
   const EXCERPT_CHARS = 60;
-  // Where a popup's text stops short, about a megabyte in, until opened in full.
+  // Until opened in full, a file's popup stops after WORDS_SHOWN words, a megabyte of prose; a parse's, LINES_SHOWN.
   const WORDS_SHOWN = 150000;
   const LINES_SHOWN = 30000;
   const JSON_INDENT = 2;
