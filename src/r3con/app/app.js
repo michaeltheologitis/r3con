@@ -5,6 +5,7 @@
   /** @typedef {'doc' | RoundKind | 'schema' | 'parsed' | 'answer'} NodeKind */
   /** @typedef {RoundKind | 'parsed'} PerDocumentKind */
   /** @typedef {Exclude<NodeKind, 'doc'>} StageKind */
+  /** @typedef {keyof typeof DOC_MARKS} DocType The type of file a document's icon marks. */
   /** @typedef {'flow' | 'cite' | 'self' | 'context'} EdgeKind */
   /** @typedef {{ x: number, y: number }} Point */
   /** @typedef {{ x: number, y: number, k: number }} View */
@@ -1497,9 +1498,36 @@
   const MACOS_METADATA_FOLDER = '__MACOSX';
   // What r3con app extracts the text of: r3con's own list, which tests/app/test_server.py holds this to.
   const EXTRACTED_SUFFIXES = ['.pdf', '.docx'];
-  const PLAIN_TEXT_SUFFIXES = ['.txt', '.md', '.markdown', '.rst', '.json', '.jsonl', '.csv', '.tsv', '.yaml', '.yml', '.html', '.xml'];
-  // What r3con's folder walk reads, its TEXT_SUFFIXES, which tests/app/test_server.py holds this to.
-  const FOLDER_SUFFIXES = [...PLAIN_TEXT_SUFFIXES, ...EXTRACTED_SUFFIXES];
+  const DOC_MARKS = {
+    text: 'M10.75 13h7.5M10.75 17.25h10.25M10.75 21.5h7.5',
+    pdf: 'M10 21V15h1.08a1.62 1.62 0 0 1 0 3.24H10M14.65 15h.6a2.1 2.1 0 0 1 2.1 2.1v1.8a2.1 2.1 0 0 1-2.1 2.1H14.65zM22 15H19.3v6M19.3 17.88h2.2',
+    word: 'M10 15h.6a2.1 2.1 0 0 1 2.1 2.1v1.8a2.1 2.1 0 0 1-2.1 2.1H10zM14.65 16.35a1.35 1.35 0 0 1 2.7 0v3.3a1.35 1.35 0 0 1-2.7 0zM21.6 15.4A1.35 1.35 0 0 0 19.3 16.35v3.3A1.35 1.35 0 0 0 21.6 20.6',
+    md: 'M11.92 21V15l1.76 3.36 1.76-3.36v6M17.38 15h.6a2.1 2.1 0 0 1 2.1 2.1v1.8a2.1 2.1 0 0 1-2.1 2.1H17.38z',
+    rst: 'M10 21V15h1.08a1.62 1.62 0 0 1 0 3.24H10M11.08 18.24L12.7 21M17.11 15.64A1.35 1.5 0 1 0 16 18A1.35 1.5 0 1 1 14.89 20.36M19.3 15h2.7M20.65 15v6',
+    json: 'M13.4 13.5c-1.1 0-1.6.5-1.6 1.5v1.6c0 .9-.4 1.4-1.3 1.4.9 0 1.3.5 1.3 1.4V21c0 1 .5 1.5 1.6 1.5M18.6 13.5c1.1 0 1.6.5 1.6 1.5v1.6c0 .9.4 1.4 1.3 1.4-.9 0-1.3.5-1.3 1.4V21c0 1-.5 1.5-1.6 1.5',
+    table: 'M10.5 12.25h11a1 1 0 0 1 1 1v9.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-9.5a1 1 0 0 1 1-1zM13.83 12.25v11.5M18.17 12.25v11.5M9.5 16.08h13M9.5 19.92h13',
+    yml: 'M9.74 15l1.35 2.88 1.35-2.88M11.1 17.88V21M14.4 21V15l1.76 3.36 1.76-3.36v6M19.86 15v6h2.4',
+    markup: 'M12.5 14.75 9.75 18l2.75 3.25M19.5 14.75 22.25 18l-2.75 3.25M17.25 14l-2.5 8',
+  };
+  // What r3con's folder walk reads, its TEXT_SUFFIXES, which tests/app/test_server.py holds this to, each with its icon.
+  /** @type {Record<string, DocType>} */
+  const SUFFIX_TYPES = {
+    '.txt': 'text',
+    '.pdf': 'pdf',
+    '.docx': 'word',
+    '.md': 'md',
+    '.markdown': 'md',
+    '.rst': 'rst',
+    '.json': 'json',
+    '.jsonl': 'json',
+    '.csv': 'table',
+    '.tsv': 'table',
+    '.yaml': 'yml',
+    '.yml': 'yml',
+    '.html': 'markup',
+    '.xml': 'markup',
+  };
+  const FOLDER_SUFFIXES = Object.keys(SUFFIX_TYPES);
   const ZIP_SUFFIX = '.zip';
   // The browser keeps about six connections to r3con app: a batch's extractions leave the rest to its other requests.
   const EXTRACTIONS_AT_ONCE = 4;
@@ -1617,10 +1645,11 @@
     fold: `<svg viewBox="0 0 32 32" fill="currentColor" aria-hidden="true">
       <circle cx="16" cy="7.5" r="3"/><circle cx="16" cy="16" r="3"/><circle cx="16" cy="24.5" r="3"/>
     </svg>`,
-    document: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    /** @param {DocType} type */
+    document: (type) => `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${DOC_ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" data-type="${type}">
       <path d="M19.25 3H8.5a2 2 0 0 0-2 2v22a2 2 0 0 0 2 2h15a2 2 0 0 0 2-2V9.25z"/>
       <path d="M19.25 3v5.25a1 1 0 0 0 1 1h5.25"/>
-      <path d="M10.75 13h7.5M10.75 17.25h10.25M10.75 21.5h7.5"/>
+      <path d="${DOC_MARKS[type]}"/>
     </svg>`,
     snippet: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="${ICON_STROKE}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M15.5 4.75h2.3a2 2 0 0 1 1.46.63l5.17 5.55a2 2 0 0 1 .54 1.37V25.5a2.5 2.5 0 0 1-2.5 2.5H10a2.5 2.5 0 0 1-2.5-2.5v-9"/>
@@ -1836,6 +1865,8 @@
   const fileLabel = (file) => shortLabel(stripExt(file.name));
   /** @param {{ name: string }} file @param {string} suffix */
   const hasSuffix = (file, suffix) => file.name.toLowerCase().endsWith(suffix);
+  /** @param {LoadedFile} file @returns {DocType} */
+  const docType = (file) => Object.entries(SUFFIX_TYPES).find(([suffix]) => hasSuffix(file, suffix))?.[1] ?? 'text';
   /** @param {string} model */
   const bareModel = (model) => model.split('/').pop();
   /** @param {LoadedFile[]} files */
@@ -2539,9 +2570,8 @@
 
   // ---------- panel: nodes and edges ----------
 
-  /** @param {NodeKind} kind @param {boolean} settled */
+  /** @param {StageKind} kind @param {boolean} settled */
   function iconFor(kind, settled) {
-    if (kind === 'doc') return ICONS.document;
     if (isRound(kind)) return ICONS.snippet;
     if (kind === 'answer') return `<span class="glyph" aria-hidden="true">${MARK}</span>`;
     return ICONS.tree(kind === 'parsed' && settled);
@@ -2573,7 +2603,7 @@
     const el = h(
       'div',
       { class: classes, tabindex: '0', role: 'button', 'data-id': id, 'aria-pressed': kind === 'answer' ? 'false' : null },
-      h('span', { class: 'icon', html: iconFor(kind, false) }),
+      h('span', { class: 'icon', html: kind === 'doc' ? ICONS.document(docType(/** @type {LoadedFile} */ (file))) : iconFor(kind, false) }),
       kind === 'answer' ? null : h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
       nodeLabels(tab, id, kind, file).map((text, i) => h('span', { class: i ? 'label' : 'label name' }, text)),
       kind === 'doc' ? h('span', { class: 'pill', hidden: true }) : null,
