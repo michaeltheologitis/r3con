@@ -18,12 +18,15 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Text Processing",
     "Typing :: Typed",
 ]
 dependencies = [
     "litellm>=1.103,<2",
+    # The first that installs on 3.15: earlier ones need fastuuid, which has no 3.15 build.
+    "litellm>=1.109; python_version >= '3.15'",
     "jinja2>=3.1.0",
     # 2.14.0 locks model_rebuild (pydantic#13419): threads' first calls raced before it.
     "pydantic>=2.14",
