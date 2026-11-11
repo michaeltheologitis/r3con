@@ -4896,12 +4896,9 @@
       return;
     }
     // Taken now, as files can be removed while a batch is read; files added over the sample memos take their place.
-    const left = tab.files.filter((f) => !f.sample);
-    const replaced = tab.files.length - left.length;
-    tab.files = [...left, ...read];
+    tab.files = [...tab.files.filter((f) => !f.sample), ...read];
     const added = `${plural(read.length, 'file')} added`;
-    const said = replaced ? `${added}, in place of the ${plural(replaced, 'sample memo')}` : added;
-    filesChanged(tab, skipped ? `${said}; ${skipped} skipped` : said);
+    filesChanged(tab, skipped ? `${added}; ${skipped} skipped` : added);
   }
 
   // The re-render drops the clicked button, and the focus with it.
@@ -4949,7 +4946,7 @@
     syncDocNodes(tab, { at });
     readyStatus();
     tellFiles(tab, { filesSaid: `${what}.` });
-    tellChat(tab, `${what}: the next question runs over ${fileCount(tab.files)}.`);
+    tellChat(tab, `${what} · ${plural(tab.files.length, 'file')} total`);
   }
 
   // How a file in a dropped or picked folder is taken, by its path below that folder, mirroring r3con's folder walk:

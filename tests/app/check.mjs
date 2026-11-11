@@ -1882,11 +1882,10 @@ async function removeArea() {
     const listed = await removeNames(page);
     const head = await page.textContent('#files-head');
     const said = [await page.textContent('#files-said'), await lastChatLine(page)];
-    const inPlace = `1 file added, in place of the ${left.length} sample memos`;
-    const saysSo = said[0] === `${inPlace}.` && said[1].startsWith(`${inPlace}:`);
+    const saysSo = isDeepStrictEqual(said, ['1 file added.', '1 file added · 1 file total']);
     const countAndSize = head.startsWith('1 document · ') && head.split(' · ').length === 2;
     const replaced = isDeepStrictEqual(listed, ['remove 06_extra_memo.txt']) && countAndSize && saysSo;
-    const replacedName = "files added over the sample memos left take their place, the pane's head giving only their count and size, and the files pane and the chat say which they replaced";
+    const replacedName = "files added over the sample memos left take their place, the pane's head giving only their count and size, the files pane saying how many were added and the chat that and the tab's total";
     check('remove', replacedName, replaced, `${listed.join(', ')}; ${head}; ${said.join(' | ')}`);
   });
 
@@ -1979,7 +1978,7 @@ async function trashArea() {
         count: String(left.length),
         tab: `1 new · ${left.length} files`,
         said: `Removed ${names[1]}.`,
-        chat: `Removed ${names[1]}: the next question runs over ${left.length} documents.`,
+        chat: `Removed ${names[1]} · ${left.length} files total`,
         status: `${left.length} documents ready · simulated run · ${DEFAULT_MODEL}`,
         unlit: true,
         // A press by mouse focuses the node it grabs, and the focus goes to the panel with it; a touch moves none.
@@ -2138,7 +2137,7 @@ async function removeAllArea() {
       buttons: undo,
       said: `Removed ${SAMPLE_DOCS} documents.`,
       live: 'polite',
-      chat: [1, `Removed ${SAMPLE_DOCS} documents: the next question runs over 0 documents.`],
+      chat: [1, `Removed ${SAMPLE_DOCS} documents · 0 files total`],
       focus: 'files-remove-all',
     };
     const removedName = `one press removes every file of the tab, which then looks as with each removed by its own remove, but for the can and the count, kept beside ${UNDO}; both buttons read ${UNDO}, named for what it puts back, the focus stays on the one pressed, and the files pane's polite line and the chat say so once`;
@@ -4218,7 +4217,7 @@ async function tabFiles() {
     const apart =
       isDeepStrictEqual(inFirst, { names: left, docs: left }) &&
       isDeepStrictEqual(copyKept, { names, docs: names }) &&
-      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [['1 new · 4 files', false], ['2 new · 2 files', true]], chat: `2 files added, in place of the ${SAMPLE_DOCS} sample memos: the next question runs over 2 documents.` }) &&
+      isDeepStrictEqual(inSecond, { names: second, docs: second, tabs: [['1 new · 4 files', false], ['2 new · 2 files', true]], chat: '2 files added · 2 files total' }) &&
       isDeepStrictEqual(firstAgain, left);
     const apartName = "each tab has its own list: a memo removed in tab 1 stays in its copy in tab 2, and files added in tab 2, in place of its sample memos, are not in tab 1";
     check('tab files', apartName, apart, JSON.stringify({ inFirst, copyKept, inSecond, firstAgain }));
@@ -4477,7 +4476,7 @@ async function dropArea() {
     const expected = {
       names: ['panel_memo.txt', '01_summary.txt', 'loose.py', 'q3/02_incidents.md', 'q4/02_incidents.md'],
       said: '4 files added; 1 skipped.',
-      chat: '4 files added; 1 skipped: the next question runs over 5 documents.',
+      chat: '4 files added; 1 skipped · 5 files total',
       error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}`,
     };
     const folderName =
@@ -4532,7 +4531,7 @@ async function dropArea() {
       await removeButton(page, '01_memo.txt').waitFor();
       const pane = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page) };
       const pickedName = 'a folder picked is read as a dropped one is, its files named by their paths below it, and the files pane counts what was left out by its suffix';
-      const pickedExpected = { names: ['01_memo.txt', 'sub/02_memo.md'], said: '2 files added, in place of the 5 sample memos; 1 skipped.' };
+      const pickedExpected = { names: ['01_memo.txt', 'sub/02_memo.md'], said: '2 files added; 1 skipped.' };
       check('drop', pickedName, isDeepStrictEqual(pane, pickedExpected), JSON.stringify(pane));
     });
   } finally {
