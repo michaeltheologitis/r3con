@@ -41,7 +41,7 @@ opened URL's fragment, ``#token=...``.
   system's credential store (keyring's: the macOS Keychain, Windows' Credential
   Manager or the Secret Service), under the service ``KEY_STORE_SERVICE`` with the
   provider's name as its account, so the server starts with the keys an earlier one
-  saved; ``DELETE`` removes a remembered key from the store too. Where the store
+  saved; ``DELETE`` removes a provider's key from the store too. Where the store
   fails, or there is none, a key is kept in memory only, until the server stops, and
   the log says so, naming the error's class but never quoting it. Servers and their
   keys are kept in memory only. The server never logs or writes a key anywhere else,
@@ -128,6 +128,7 @@ import keyring
 import litellm
 import platformdirs
 import uvicorn
+from keyring.errors import NoKeyringError
 from litellm.exceptions import BadRequestError
 from litellm.litellm_core_utils.get_llm_provider_logic import (
     declared_authenticating_provider,
@@ -424,16 +425,18 @@ def _store_failed(what: str, error: Exception) -> None:
 
 
 def _stored_keys() -> dict[Provider, SecretStr]:
-    """Each provider's key in the system's credential store. The first read that fails
-    ends the reading, so that a missing store, or a Keychain dialog denied, costs one
-    line in the log and no more dialogs."""
+    """The keys in the system's credential store, each by its provider, less any that
+    can't be read, as the log then says."""
     keys: dict[Provider, SecretStr] = {}
     for provider in KEY_VARIABLES:
         try:
             stored = keyring.get_password(KEY_STORE_SERVICE, provider)
-        except Exception as error:  # noqa: BLE001 — logged, by its class alone
-            _store_failed("Keys saved earlier are not all loaded", error)
+        except NoKeyringError as error:
+            _store_failed("No key saved earlier is loaded", error)
             break
+        except Exception as error:  # noqa: BLE001 — logged, by its class alone
+            _store_failed(f"The {provider} key saved earlier isn't loaded", error)
+            continue
         # None when there is none; a blank one, which no POST stores, counts as none.
         with contextlib.suppress(ValidationError):
             keys[provider] = STORED_KEY.validate_python(stored)
@@ -451,8 +454,14 @@ def _save_stored(provider: Provider, key: SecretStr) -> bool:
 
 
 def _delete_stored(provider: Provider) -> None:
+    """Delete ``provider``'s key from the system's credential store, if it holds one,
+    whether or not it is the one in memory: one a save failed to replace is there."""
     try:
-        keyring.delete_password(KEY_STORE_SERVICE, provider)
+        # A store answers a delete of nothing with the error of a failed one.
+        if keyring.get_password(KEY_STORE_SERVICE, provider) is not None:
+            keyring.delete_password(KEY_STORE_SERVICE, provider)
+    except NoKeyringError:
+        pass  # No store, so no key in one.
     except Exception as error:  # noqa: BLE001 — logged, by its class alone
         _store_failed(f"The {provider} key may load again next launch", error)
 
@@ -610,9 +619,8 @@ async def forget_key(request: Request) -> Response:
         return JSONResponse(_key_status(state))
     async with state.store_lock:
         state.keys.pop(body.provider, None)
-        if body.provider in state.remembered:
-            state.remembered.discard(body.provider)
-            await run_in_threadpool(_delete_stored, body.provider)
+        state.remembered.discard(body.provider)
+        await run_in_threadpool(_delete_stored, body.provider)
     return JSONResponse(_key_status(state))
 
 
