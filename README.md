@@ -10,7 +10,7 @@
 Ask a question whose evidence is spread across many documents. R3Con finds and
 organizes the relevant information, then reasons over it to produce an answer.
 
-![R3Con app: a folder of memos and one loose memo are dropped on the panel and show as a file tree; a run on them builds its representation, then lights the answer's provenance through the tree to the four memos it used; the sites folder, closed, counts its sources, clicking one of those memos in the panel opens it with the sentences the answer quotes marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
+![R3Con app, in real time: a folder of memos is dropped on the panel and shows as a file tree, then a loose memo is dropped beside it; a run on them builds its representation, then lights the answer's provenance through the tree to the four memos it used, leaving the other two grey; the sites folder, closed, counts its sources, clicking one of those memos in the panel opens it with the sentences the answer quotes marked, and the panel's answer and summary nodes open their popups](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/demo.gif)
 
 ## App
 
