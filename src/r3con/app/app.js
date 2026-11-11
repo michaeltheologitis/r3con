@@ -49,9 +49,10 @@
   /** @typedef {{ document: string, start: number, end: number, text: string, name: string }} NamedQuote A quote behind an answer, as r3con gives it. */
   /**
    * The lit answer's trail as the page draws it: its nodes and lines, as the page names them, a summary of a document
-   * read in parts as its document's; each summary on it, with the first node on it that cites the summary; the trail
-   * nodes of the summaries whose quotes it carries; and what they quote of each document, by index.
-   * @typedef {{ nodes: Set<string>, edges: Set<string>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
+   * read in parts as its document's; its sources, the documents with a node on it, by index; each summary on it, with the
+   * first node on it that cites the summary; the trail nodes of the summaries whose quotes it carries; and what they quote
+   * of each document, by index.
+   * @typedef {{ nodes: Set<string>, edges: Set<string>, sources: Set<number>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
    */
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
@@ -124,8 +125,8 @@
   /** @typedef {{ start: number, end: number }} DocRange Documents start to end, inclusive. */
   /**
    * A folder of a tab's files, from their paths: its documents, which are together in the tab, and its subfolders and
-   * runs of documents, in order. Its index among the tab's folders names its nodes.
-   * @typedef {DocRange & { name: string, path: string, index: number, items: (Folder | DocRange)[] }} Folder
+   * runs of documents, in order.
+   * @typedef {DocRange & { name: string, path: string, items: (Folder | DocRange)[] }} Folder
    */
   /**
    * Documents start to end, inclusive, as one row: a run of them with nothing relevant, or a folder's; or opened, the
@@ -2374,8 +2375,12 @@
     if (!trail) return null;
     const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
     /** @type {Trail} */
-    const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
-    for (const id of named.values()) if (id) drawn.nodes.add(id);
+    const drawn = { nodes: new Set(), edges: new Set(), sources: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
+    for (const [node, id] of named) {
+      if (!id) continue;
+      drawn.nodes.add(id);
+      if (node !== TRAIL_ANSWER) drawn.sources.add(/** @type {number} */ (docIndex(run, node.slice(node.lastIndexOf(':') + 1))));
+    }
     for (const [from, to, kind] of trail.edges) {
       const [pageFrom, pageTo] = [named.get(from), named.get(to)];
       if (!pageFrom || !pageTo) continue;
@@ -3077,8 +3082,9 @@
   // run whose model parses every document stays folded. A tab with folders draws its file column as their tree, where a
   // closed folder stands in for what is in it as a fold does, and a fold never reaches past its folder.
 
+  // A folder's nodes are named by its path, which may hold the > that a line's key joins its ends with.
   /** @param {NodeKind} kind @param {FoldRow} row */
-  const foldId = (kind, row) => (row.folder ? `${kind}-g${row.folder.index}` : `${kind}-f${row.start}`);
+  const foldId = (kind, row) => (row.folder ? `${kind}-g${encodeURIComponent(row.folder.path)}` : `${kind}-f${row.start}`);
   /** @param {DocRange} row */
   const foldDocs = (row) => range(row.end - row.start + 1).map((k) => row.start + k);
   // A call is kept under its node's id, and reading a file under the document's own node.
@@ -3097,9 +3103,8 @@
   // the deepest file is in.
   /** @param {LoadedFile[]} files */
   function folderTree(files) {
-    let count = 0;
     /** @param {string} name @param {string} path @param {number} d @returns {Folder} */
-    const folder = (name, path, d) => ({ name, path, index: count++, start: d, end: d, items: [] });
+    const folder = (name, path, d) => ({ name, path, start: d, end: d, items: [] });
     const top = folder('', '', 0);
     // The folders the last file was in.
     let path = [top];
@@ -3274,7 +3279,8 @@
     return docs.length;
   }
 
-  // The answers centre on the rows as they'd be with every fold closed, so that opening one doesn't move them.
+  // The answers centre on the rows as they'd be with every fold closed, so that opening one doesn't move them; a folder's
+  // rows count as they are, so the answers stay centred on the files shown.
   /** @param {Tab} tab */
   function foldPlan(tab) {
     const fold = foldingOf(tab);
@@ -3374,16 +3380,15 @@
     node.el.classList.toggle('open', row.open);
   }
 
-  // A folder's nodes count its files at any depth. Once an answer is lit, a closed folder lights, counting the files in it
-  // on the trail, its sources, and a folder with none in it, open or closed, greys; an open one's files light themselves.
+  // A folder's nodes count its files at any depth. Once an answer is lit, a closed folder lights, counting its sources in
+  // it, and a folder with none in it, open or closed, greys; an open one's files light themselves.
   /** @param {Tab} tab @param {PanelNode} node @param {Folder} folder */
   function labelFolder(tab, node, folder) {
     const { open } = /** @type {FoldRow} */ (node.fold);
     const files = plural(folder.end - folder.start + 1, 'file');
     const { trail } = tab;
     const head = node.kind === 'doc';
-    const onTrail = new Set(head ? [...(trail?.nodes ?? [])].map((id) => docOf(tab, id)) : []);
-    const sources = foldDocs(folder).filter((d) => onTrail.has(d)).length;
+    const sources = head && trail ? foldDocs(folder).filter((d) => trail.sources.has(d)).length : 0;
     const counted = !open && sources > 0 && plural(sources, 'source');
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
     name.textContent = `${shortLabel(folder.name)} · ${files}`;
@@ -3422,7 +3427,7 @@
     if (!node.fold) return;
     labelFold(tab, node);
     const head = tab.nodes.get(foldId('doc', node.fold));
-    if (head && head !== node) labelFold(tab, head);
+    if (head && head !== node && !node.fold.folder) labelFold(tab, head);
   }
 
   /** @param {Folding} fold @param {string} id @param {CallState} call */
@@ -3498,8 +3503,7 @@
   /** @param {Tab} tab @param {string} id */
   function unfoldTrail(tab, id) {
     const fold = foldingOf(tab);
-    const trail = trailOf(runTab(tab).run, id);
-    const docs = [...(trail?.nodes ?? [])].flatMap((node) => docOf(tab, node) ?? []);
+    const docs = [...(trailOf(runTab(tab).run, id)?.sources ?? [])];
     const folders = docs.flatMap((d) => folderPaths(fold.files[d]));
     if (docs.every((d) => fold.relevant.has(d)) && folders.every((path) => fold.sourced.has(path))) return;
     for (const d of docs) fold.relevant.add(d);
@@ -3560,8 +3564,10 @@
     const fold = foldingOf(tab);
     /** @type {Line[]} */
     const lines = [];
+    // A fold's, or a folder's, are its first and last document's: each was shown all but itself.
     for (const node of tab.nodes.values()) {
-      if (isPerDocument(node.kind)) lines.push(...linesInto(tab, `${node.kind}-${node.fold ? node.fold.start : docOf(tab, node.id)}`));
+      const docs = node.fold ? new Set([node.fold.start, node.fold.end]) : [docOf(tab, node.id)];
+      if (isPerDocument(node.kind)) for (const d of docs) lines.push(...linesInto(tab, `${node.kind}-${d}`));
     }
     if (tab.nodes.has('schema')) lines.push(...linesInto(tab, 'schema'));
     const lit = run.lit ?? RUN_ANSWER;

@@ -1767,6 +1767,25 @@ async function folders() {
   });
 
   await withPage('folders', { sample: false }, async (page) => {
+    const notes = ['notes', [['a.txt', 'A note.\n'], ['b.txt', ''], ['c.txt', '']]];
+    const other = ['other', Array.from({ length: FOLD_FROM_DOCS }, (_, i) => [`empty_${i}.txt`, ''])];
+    await dropBatches(page, [[notes], [other]], 3 + FOLD_FROM_DOCS);
+    await pressNode(page, folderSel('notes'));
+    await pressNode(page, folderSel('notes'));
+    await page.click('#tab-chat');
+    await send(page, 'Which note is relevant?');
+    await waitLit(page);
+    const id = await folderId(page, 'notes');
+    const drawn = await page.evaluate(standIns, id);
+    await pressNode(page, folderSel('other'));
+    await pressNode(page, folderSel('other'));
+    const redrawn = await page.evaluate(standIns, id);
+    const [r1, r2] = ['r1', 'r2'].map((kind) => `${kind}-${id.slice('doc-'.length)}`);
+    const name = "a closed folder's lines stay as the run drew them once the panel folds again, among them a line from its one relevant file's snippet to the next round in it";
+    check('folders', name, drawn.lines.includes(`${r1}>${r2}`) && isDeepStrictEqual(redrawn, drawn), JSON.stringify({ drawn, redrawn }));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
     await page.setInputFiles('#file-input', memosFrom(0, FOLDED_FILES));
     await filesCounted(page, FOLDED_FILES);
     const loose = { lines: await page.$eval('#world .tree-lines', (el) => el.getAttribute('d') ?? ''), folders: await count(page, '#world .node.folder'), left: await page.$$eval('#world .node.doc', (els) => [...new Set(els.map((el) => el.style.left))]) };
