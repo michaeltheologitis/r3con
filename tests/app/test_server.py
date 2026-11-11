@@ -1602,13 +1602,13 @@ def test_a_zip_without_a_valid_name_is_refused_with_what_is_wrong(
 
 def test_the_page_walks_a_folder_for_the_suffixes_read_documents_walks_for():
     script = (APP_DIR / "app.js").read_text(encoding="utf-8")
-    plain = re.search(r"const PLAIN_TEXT_SUFFIXES = \[(.*?)\];", script)
-    assert plain is not None
+    typed = re.search(r"const SUFFIX_TYPES = \{(.*?)\};", script, re.DOTALL)
+    assert typed is not None
     walked = re.search(r"const FOLDER_SUFFIXES = (.*?);", script)
     assert walked is not None
-    assert walked[1] == "[...PLAIN_TEXT_SUFFIXES, ...EXTRACTED_SUFFIXES]"
-    listed = set(re.findall(r"'([^']+)'", plain[1]))
-    assert listed == r3con.TEXT_SUFFIXES - set(r3con._EXTRACTORS)
+    assert walked[1] == "Object.keys(SUFFIX_TYPES)"
+    listed = set(re.findall(r"'([^']+)': '", typed[1]))
+    assert listed == r3con.TEXT_SUFFIXES
 
 
 @pytest.mark.parametrize(

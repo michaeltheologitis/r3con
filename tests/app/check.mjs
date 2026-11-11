@@ -5845,6 +5845,71 @@ async function liveWord(url) {
   });
 }
 
+// The approved icon for each suffix r3con reads, kept apart from the page's SUFFIX_TYPES so that a changed one fails.
+const DOC_TYPES = {
+  '.txt': 'text',
+  '.pdf': 'pdf',
+  '.docx': 'word',
+  '.md': 'md',
+  '.markdown': 'md',
+  '.rst': 'rst',
+  '.json': 'json',
+  '.jsonl': 'json',
+  '.csv': 'table',
+  '.tsv': 'table',
+  '.yaml': 'yml',
+  '.yml': 'yml',
+  '.html': 'markup',
+  '.xml': 'markup',
+};
+// A document named for each suffix, one in capitals, and two that get the text icon: one of another suffix, one of none.
+const TYPED_NAMES = {
+  ...Object.fromEntries(Object.entries(DOC_TYPES).map(([suffix, type]) => [`${suffix.slice(1)}${suffix}`, type])),
+  'CAPS.MD': 'md',
+  'other.log': 'text',
+  README: 'text',
+};
+// The page's opacity for a node off a lit trail.
+const OFF_TRAIL_OPACITY = '0.3';
+
+// Each document's node out of a fold: its label, the type its icon marks and what it draws, and how it is lit.
+function docNodes() {
+  return [...document.querySelectorAll('#world .node.doc:not(.fold)')].map((el) => {
+    const svg = el.querySelector('.icon svg');
+    const strokes = new Set([...svg.querySelectorAll('path')].map((path) => getComputedStyle(path).stroke));
+    const ink = { onPath: el.classList.contains('on-path'), opacity: getComputedStyle(el).opacity, strokes: [...strokes] };
+    return { label: el.querySelector('.name').textContent, type: svg.dataset.type, drawn: svg.innerHTML, ...ink };
+  });
+}
+
+async function liveIcons(url) {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
+    const extracted = { '.pdf': documents['01_memo.pdf'], '.docx': documents['report.docx'] };
+    const names = Object.keys(TYPED_NAMES);
+    await page.setInputFiles('#file-input', names.map((name) => ({ ...(extracted[extname(name)] ?? memo(name, `The ${name} memo.\n`)), name })));
+    await filesCounted(page, names.length);
+    await pressNode(page, nodeSel(`doc-f${CONTEXT_DOCS}`));
+    const nodes = await page.evaluate(docNodes);
+    const typed = Object.fromEntries(nodes.map((n) => [n.label, n.type]));
+    const expected = Object.fromEntries(Object.entries(TYPED_NAMES).map(([name, type]) => [name.split('.')[0], type]));
+    const drawings = new Map(nodes.map((n) => [n.type, n.drawn]));
+    const ownDrawing = nodes.every((n) => drawings.get(n.type) === n.drawn) && new Set(drawings.values()).size === drawings.size;
+    const typesName = `a document's icon marks its type by its suffix, in any case, each of the ${new Set(Object.values(DOC_TYPES)).size} types drawn its own way, and a name with another suffix or none gets the text icon`;
+    check('live', typesName, isDeepStrictEqual(typed, expected) && ownDrawing, JSON.stringify(typed));
+
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ran = await page.evaluate(docNodes);
+    const accent = [SCHEME_PAGE_COLORS.light['--accent']];
+    const onPath = ran.filter((n) => n.onPath);
+    const off = ran.filter((n) => !n.onPath);
+    const inked = onPath.every((n) => isDeepStrictEqual(n.strokes, accent)) && off.every((n) => n.opacity === OFF_TRAIL_OPACITY);
+    const inkName = "once a run's answer is lit, the icons of documents on its trail draw in the accent, and those off it dim";
+    const looks = (list) => [...new Set(list.map((n) => `${n.strokes.join(' ')} at ${n.opacity}`))].join(', ');
+    check('live', inkName, done && onPath.length > 0 && off.length > 0 && inked, `${onPath.length} on: ${looks(onPath)}; ${off.length} off: ${looks(off)}`);
+  });
+}
+
 const utf16 = (name, text, bom = []) => ({ name, mimeType: 'text/plain', buffer: Buffer.concat([Buffer.from(bom), Buffer.from(text, 'utf16le')]) });
 // Its ASCII text, each character four bytes, low byte first.
 const utf32 = (name, text) => ({ name, mimeType: 'text/plain', buffer: Buffer.from([...UTF32LE_BOM, ...[...text].flatMap((c) => [c.charCodeAt(0), 0, 0, 0])]) });
@@ -6550,6 +6615,7 @@ async function live() {
     await liveUnreadable(url);
     await livePdf(url);
     await liveWord(url);
+    await liveIcons(url);
     await liveBatches(url);
     await liveNotText(url);
     await liveStaleToken(url);
