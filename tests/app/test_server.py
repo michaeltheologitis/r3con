@@ -29,8 +29,10 @@ from r3con.app.server import (
     MAX_RELEVANCE_ROUNDS,
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
+    REPRESENTATION_FILES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
+    UNREADABLE_RUN,
     UNREADABLE_ZIP,
     ZIP_ENCRYPTED_FLAG,
     ServerState,
@@ -1190,6 +1192,69 @@ def test_an_ask_over_a_run_folder_it_cannot_read_fails_saying_why_and_sends_noth
     assert not (run_dir / "asks").exists()
 
 
+def representation_of(client: TestClient, run_id: str) -> dict[str, Any]:
+    response = client.get(f"/api/runs/{run_id}/representation")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_a_runs_representation_is_all_an_ask_reads_of_its_folder(
+    client: TestClient, llm: FakeLLM, tmp_path: Path
+):
+    files = representation_of(client, finished_run(client))
+    copy = tmp_path / "copy"
+    for path, content in files.items():
+        (copy / path).parent.mkdir(parents=True, exist_ok=True)
+        (copy / path).write_text(json.dumps(content), encoding="utf-8")
+    answer = r3con.ask(copy, ASK["question"], completion=llm)
+    assert list(files) == list(REPRESENTATION_FILES)
+    assert answer.answer == ANSWER["answer"]
+
+
+def test_a_runs_representation_leaves_out_the_manifests_paths_on_this_computer(
+    client: TestClient,
+):
+    run_id = finished_run(client)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    local = manifest.pop("sources")
+    assert local["prompts"]
+    assert representation_of(client, run_id)["manifest.json"] == manifest
+
+
+def test_the_representation_of_a_run_still_running_is_refused(
+    held_llm: FakeLLM, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.get(f"/api/runs/{run_id}/representation")
+        held_llm.gate.set()
+        assert run_events(client, run_id)[-1]["type"] == "run_finished"
+    assert response.status_code == 409
+    assert "still running" in response.json()["error"]
+
+
+@pytest.mark.parametrize("path", REPRESENTATION_FILES)
+def test_the_representation_of_a_run_folder_missing_a_file_or_not_json_is_refused(
+    client: TestClient, caplog: pytest.LogCaptureFixture, path: str
+):
+    run_id = finished_run(client)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    (run_dir / path).write_text("{not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        broken = client.get(f"/api/runs/{run_id}/representation")
+        (run_dir / path).unlink()
+        missing = client.get(f"/api/runs/{run_id}/representation")
+    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert [broken.status_code, missing.status_code] == [409, 409]
+    assert broken.json() == missing.json() == {"error": UNREADABLE_RUN}
+    assert logged == [
+        f"{run_dir}: can't read it to save (JSONDecodeError)",
+        f"{run_dir}: can't read it to save (FileNotFoundError)",
+    ]
+
+
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(
     client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1653,6 +1718,7 @@ def test_forgetting_a_server_takes_its_url(client: TestClient):
     [
         ("GET", "/api/runs/nothing/events"),
         ("POST", "/api/runs/nothing/asks"),
+        ("GET", "/api/runs/nothing/representation"),
         ("POST", "/api/runs/nothing/cancel"),
         ("GET", "/api/asks/nothing/events"),
         ("POST", "/api/asks/nothing/cancel"),

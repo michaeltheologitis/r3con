@@ -6,8 +6,9 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { gunzipSync } from 'node:zlib';
 
 // An ESM import ignores NODE_PATH, where a global Playwright is found; require honours it.
 const require = createRequire(import.meta.url);
@@ -7012,6 +7013,155 @@ async function liveElsewhere() {
   });
 }
 
+// A tab saved as one file: the question it is named after, its name, the ask over its run, and the files it holds, the
+// sample memos and DROPPED_FOLDER's three documents, in the tab's order.
+const SAVED_QUESTION = 'Which site logged the most incidents?';
+const SAVED_NAME = 'which-site-logged-the-most-incidents.html';
+const SAVED_ASK = 'Which memo is the registry?';
+const SAVED_FOLDER = 'reports';
+const SAVED_FOLDER_FILES = [
+  ['01_summary.txt', 'A summary in a dropped folder.\n'],
+  ['q3/02_incidents.md', 'Incidents in Q3.\n'],
+  ['q4/02_incidents.md', 'Incidents in Q4.\n'],
+];
+const SAVED_FILES = SAMPLE_DOCS + SAVED_FOLDER_FILES.length;
+const savedHolds = (n) => `The file includes the full text of this tab's ${n} files.`;
+const SAVED_NOTE = 'open this file in R3Con to ask more';
+const SAVED_VERSION = 1;
+const SAVED_BLOCK = /<script type="application\/json" id="r3con-tab">([\s\S]*?)<\/script>/;
+// What an answer in the file holds: what the page shows of it, and never the server it ran on.
+const SAVED_ANSWER_FIELDS = ['model', 'provenance', 'question', 'text', 'totals'];
+// r3con app's REPRESENTATION_FILES: each file of a run's folder an ask reads.
+const REPRESENTATION_FILES = ['manifest.json', 'ids.json', 'names.json', 'relevance/result.json', 'structuring/schema/result.json', 'structuring/parsing/result.json'];
+const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
+const UNREAD_VERSION = 99;
+
+// The shown tab as drawn, each node by its name, icon and whether it is lit, so that two pages compare.
+function tabShown() {
+  const texts = (selector, from = document) => [...from.querySelectorAll(selector)].map((el) => el.textContent);
+  const nodes = [...document.querySelectorAll('#world .node')].map((el) => {
+    const icon = el.querySelector('.icon svg')?.dataset.type ?? '';
+    return `${el.getAttribute('aria-label')} · ${icon}${el.classList.contains('on-path') ? ' · lit' : ''}`;
+  });
+  const turns = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].map((turn) => texts('.line.user .t, .log-head .t, .line.answer .t', turn));
+  return {
+    tab: document.querySelector('.run-tab[aria-selected="true"]').textContent,
+    status: document.getElementById('run-status').textContent,
+    nodes: nodes.sort(),
+    edges: document.querySelectorAll('#world .edge').length,
+    lit: document.querySelectorAll('#world .edge.lit').length,
+    turns,
+    files: texts('#file-list .file'),
+  };
+}
+
+// What the shown tab draws once the chat's line of the run's answer is clicked, and the first file's marks once opened.
+async function answerAndFileShown(page) {
+  await page.click('#tab-chat');
+  await page.click(`${CHAT} .line.answer[data-node="answer-0"]`);
+  const lit = (await page.evaluate(tabShown)).nodes.filter((node) => node.endsWith(' · lit'));
+  await page.keyboard.press('Escape');
+  await page.click('#tab-files');
+  await page.click('#file-list .file');
+  return { lit, marks: await page.$$eval('#file-view mark', (els) => els.map((el) => el.textContent)) };
+}
+
+// A tab that has run saves as one .html file, named after its question, that holds the tab and nothing of the
+// settings; opened on its own and offline, it shows the tab as the live page drew it, view-only, and loads nothing.
+async function liveSaved(url) {
+  const headers = { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' };
+  for (const body of [{ provider: 'openai', key: TEST_KEY }, { provider: 'other', endpoint: TEST_ENDPOINT, key: ENVIRONMENT_KEY }]) {
+    await fetch(new URL('/api/keys', url), { method: 'POST', headers, body: JSON.stringify(body) });
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-saved-'));
+  try {
+    const file = join(dir, SAVED_NAME);
+    let live;
+    let liveClicked;
+    await withPage('live', { url, sample: false, memos: true }, async (page) => {
+      await page.evaluate(dropItems, { on: 'panel', items: [DROPPED_FOLDER] });
+      await filesCounted(page, SAVED_FILES);
+      const before = await page.isHidden('#save-btn');
+      await page.click('#tab-chat');
+      await send(page, SAVED_QUESTION);
+      await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+      await send(page, SAVED_ASK);
+      await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+      await pressNode(page, folderSel('q4'));
+      const offered = (await page.isVisible('#save-btn')) && (await page.isEnabled('#save-btn'));
+      check('live', "save is offered once the tab's run has landed, not before", before && offered);
+      await page.click('#save-btn');
+      const said = await page.textContent('#save-what');
+      const [download] = await Promise.all([page.waitForEvent('download'), page.click('#save-confirm')]);
+      await download.saveAs(file);
+      const saidName = "save first says, in one line, that the file holds the text of the tab's files, then saves it named after the tab's question";
+      check('live', saidName, said === savedHolds(SAVED_FILES) && download.suggestedFilename() === SAVED_NAME, `${said}; ${download.suggestedFilename()}`);
+      live = await page.evaluate(tabShown);
+      liveClicked = await answerAndFileShown(page);
+    });
+
+    const html = readFileSync(file, 'utf8');
+    const block = JSON.parse(SAVED_BLOCK.exec(html)[1]);
+    const names = [...sampleMemos().map((m) => m.name), ...SAVED_FOLDER_FILES.map(([name]) => name)];
+    const folders = [...sampleMemos().map(() => undefined), ...SAVED_FOLDER_FILES.map(() => SAVED_FOLDER)];
+    const texts = [...sampleMemos().map((m) => m.buffer.toString()), ...SAVED_FOLDER_FILES.map(([, text]) => text)];
+    const held = {
+      version: block.version,
+      names: block.files.map((f) => f.name),
+      folders: block.files.map((f) => f.folder),
+      texts: JSON.parse(gunzipSync(Buffer.from(block.texts, 'base64')).toString()),
+      representation: Object.keys(block.representation),
+    };
+    const holdsName = "the file holds the tab as one JSON block of version 1: each file's name and dropped folder, their texts gzipped, and r3con app's representation of the run";
+    check('live', holdsName, isDeepStrictEqual(held, { version: SAVED_VERSION, names, folders, texts, representation: REPRESENTATION_FILES }), JSON.stringify({ ...held, texts: held.texts.length }));
+    const kept = [TEST_KEY, ENVIRONMENT_KEY, TEST_ENDPOINT, tokenOf(url)].filter((secret) => html.includes(secret));
+    const fields = [...new Set(block.run.answers.flatMap((answer) => Object.keys(answer)))].sort();
+    const keptName = "it holds no key, no server from the settings and no launch token, and its answers only what the page shows of them";
+    check('live', keptName, !kept.length && fields.every((f) => SAVED_ANSWER_FIELDS.includes(f)) && block.run.answers.length === 2, `${kept.join(' ')}; ${fields.join(' ')}`);
+
+    const fileUrl = pathToFileURL(file).href;
+    const requests = [];
+    const offline = async (page) => {
+      await page.context().setOffline(true);
+      page.on('request', (request) => requests.push(request.url()));
+    };
+    await withPage('live', { url: fileUrl, sample: false, before: offline }, async (page) => {
+      await becomes(page, statusMatches, LIVE_DONE.source);
+      const saved = await page.evaluate(tabShown);
+      check('live', 'opened on its own and offline, the saved file loads nothing but itself and sends nothing', isDeepStrictEqual(requests, [fileUrl]), requests.join(' '));
+      const sameName = "it shows the tab as the live page drew it: its tab and status, its panel's nodes, folders, icons and lit lines, the run's and the ask's turns, and its files";
+      const differ = Object.keys(live).filter((key) => !isDeepStrictEqual(live[key], saved[key]));
+      check('live', sameName, !differ.length, differ.map((key) => `${key}: ${JSON.stringify(saved[key]).slice(0, 300)}`).join(' | '));
+      const viewOnly = {
+        hidden: await page.$$eval('#ask-form, #new-tab-btn, #settings-btn, #save-btn, #replay-btn', (els) => els.every((el) => el.checkVisibility() === false)),
+        note: await page.textContent('#mode-note'),
+        title: await page.title(),
+      };
+      const viewOnlyName = 'it is view-only: no ask box, new tab, settings, save or replay, and a quiet line says to open the file in R3Con to ask more';
+      check('live', viewOnlyName, isDeepStrictEqual(viewOnly, { hidden: true, note: SAVED_NOTE, title: `${SAVED_QUESTION} · ❀ R3Con` }), JSON.stringify(viewOnly));
+      const clicked = await answerAndFileShown(page);
+      const clickedName = "the run's answer, clicked in its chat, lights its sources, and a file opened marks the sentences quoted, as in the live page";
+      check('live', clickedName, clicked.lit.length > 0 && clicked.marks.length > 0 && isDeepStrictEqual(clicked, liveClicked), JSON.stringify(clicked));
+    });
+
+    const unread = join(dir, 'unread.html');
+    writeFileSync(unread, html.replace(`{"version":${SAVED_VERSION},`, `{"version":${UNREAD_VERSION},`));
+    await withPage('live', { url: pathToFileURL(unread).href, sample: false, expectedErrors: [CANT_OPEN_SAVED] }, async (page) => {
+      const refused = await becomes(page, statusIs, `● ${CANT_OPEN_SAVED}`);
+      check('live', 'a file whose tab is of a version this page has no reader for says it could not open it', refused, await page.textContent('#run-status'));
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The prototype runs nothing on r3con app, so it has no run to save.
+async function prototypeSaves() {
+  await withPage('saved', {}, async (page) => {
+    check('saved', 'the prototype offers no save, even once its recorded run has landed', await page.isHidden('#save-btn'));
+  });
+}
+
 // A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
@@ -7052,7 +7202,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [liveSaved, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
@@ -7062,7 +7212,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

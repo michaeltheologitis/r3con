@@ -180,6 +180,21 @@
    * @property {SVGPathElement} tree the file column's tree lines
    * @property {Set<string>} placed the nodes the user dragged since the panel was last laid out
    */
+  /**
+   * A tab saved as one file, in version 1, as the file's SAVED_TAB_ID block holds it: each file's name, size and dropped
+   * folder; their texts, a JSON list in the same order, gzipped, in base64; each folder by path, and whether it was left
+   * open; its run as the page holds it (documents by index, quotes in UTF-16 code units) with the answers that landed,
+   * the run's own first; and r3con app's representation of the run, all an ask reads of its folder.
+   * @typedef {object} SavedTabV1
+   * @property {1} version
+   * @property {{ name: string, size: number, folder?: string }[]} files
+   * @property {string} texts
+   * @property {[string, boolean][]} folders
+   * @property {Pick<Run, 'ids' | 'rounds' | 'schema' | 'parsed' | 'totals'> & { answers: SavedAnswer[] }} run
+   * @property {Record<string, unknown>} representation
+   */
+  /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals'>} SavedAnswer */
+  /** @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[] }} OpenedTab A saved tab, read. */
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
@@ -1662,6 +1677,20 @@
   const RAN_FIRST = "The tab's run started first, so its files are locked.";
   const DROP_ADDS = 'drop to add files';
   const DROP_LOCKED = 'this tab has run · press + for a new tab';
+  const SAVED_TAB_ID = 'r3con-tab';
+  const SAVED_VERSION = 1;
+  // The page's files as r3con app serves them, which a saved tab's file holds inline, and where it links the last two.
+  const PAGE_FILES = ['/', '/app.css', '/app.js'];
+  const PAGE_CHARSET = '<meta charset="utf-8">';
+  const PAGE_STYLE = '<link rel="stylesheet" href="app.css">';
+  const PAGE_SCRIPT = '<script src="app.js"></script>';
+  const SAVED_NAME_CHARS = 60;
+  const SAVED_NAME = 'r3con-tab';
+  const SAVED_MODE_NOTE = 'open this file in R3Con to ask more';
+  const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
+  /** @param {number} n */
+  const savedHolds = (n) => `The file includes the full text of this tab's ${plural(n, 'file')}.`;
+  const RECORDED_SOURCE = 'recorded run';
 
   const ICONS = {
     chevron: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -1734,10 +1763,11 @@
   const side = $('side');
   const resizer = $('resizer');
 
-  // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
-  // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
-  // once and never reaches storage.
-  const live = ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
+  // A tab saved as one file carries it here, and the page shows that tab wherever it is opened. Otherwise, served by
+  // r3con app on this computer the page runs r3con; anywhere else it is the prototype, which sends nothing. The launch
+  // token lives only in this closure: it leaves the address bar at once and never reaches storage.
+  const savedBlock = document.getElementById(SAVED_TAB_ID);
+  const live = !savedBlock && ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
   const token = live ? takeToken() : null;
 
   function takeToken() {
@@ -1828,7 +1858,7 @@
     // Every tab, in order; init lists the first, the shown tab: empty, or in the prototype the sample memos, which its
     // recorded run needs.
     tabs: [],
-    shown: newTab(live ? [] : SAMPLE_FILES),
+    shown: newTab(live || savedBlock ? [] : SAMPLE_FILES),
     // The streams open on r3con app, a run's events or an ask's: each `{ kind, tab, job, stopping }`, with
     // the run or ask as `job`, dropped once closed.
     streams: new Set(),
@@ -2248,7 +2278,7 @@
       parsed: SAMPLE.parsed,
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
-      source: 'recorded run',
+      source: RECORDED_SOURCE,
     };
     const { text, provenance } = SAMPLE.answer;
     return { ...run, answers: [{ question: SAMPLE.question, model: SAMPLE.model, text, provenance: provenanceOf(run, provenance) }] };
@@ -4224,7 +4254,8 @@
     updateTabs();
     // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
     offer($('stop-btn', HTMLButtonElement), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
-    $('replay-btn').hidden = live || !state.shown.run;
+    $('replay-btn').hidden = mode !== prototypeMode || !state.shown.run;
+    offer($('save-btn', HTMLButtonElement), live && landed(state.shown, RUN_ANSWER), !tabBusy(state.shown));
   }
 
   function updateHint() {
@@ -4527,20 +4558,20 @@
       showAnswer(tab, narr);
       finishRun(tab, narr);
       for (let k = 1; k < run.answers.length; k += 1) redrawAsk(tab, answerId(k));
-      if (!run.simulated) offerRecordedAsks(narr);
+      if (run.source === RECORDED_SOURCE) offerRecordedAsks(narr);
     });
     t += TIMING.litDelay;
     at(t, () => lightRun(tab));
     return steps;
   }
 
+  /** @param {{ at: number, run: () => void }[]} steps */
+  const runAtOnce = (steps) => steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
+
   /** @param {RunTab} tab @param {Narrator} narr */
   function playTimeline(tab, narr) {
     const steps = buildTimeline(tab, narr);
-    if (reduceMotion()) {
-      steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
-      return;
-    }
+    if (reduceMotion()) return runAtOnce(steps);
     for (const s of steps) tab.timers.push(setTimeout(s.run, s.at));
   }
 
@@ -4768,12 +4799,16 @@
   function prototypeAsk(tab, question, model) {
     const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
-    /** @type {Answer} */
-    const ask = recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), source: 'recorded' } : simulatedAsk(run, question, model);
+    landAsk(tab, recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), source: 'recorded' } : simulatedAsk(run, question, model));
+  }
+
+  // An ask whose answer is already here lands at once.
+  /** @param {RunTab} tab @param {Answer} ask */
+  function landAsk(tab, ask) {
     const id = addAsk(tab, ask);
-    const narr = askTurn(tab, question, model);
+    const narr = askTurn(tab, ask.question, ask.model);
     showAnswer(tab, narr, id);
-    sayReady(narr, model, ask.source === 'simulated', ask.totals);
+    sayReady(narr, ask.model, ask.source === 'simulated', ask.totals);
     lightLanded(tab, id);
   }
 
@@ -4948,7 +4983,7 @@
       ),
     );
     $('files-count').textContent = String(files.length);
-    $('files-locked').hidden = !run;
+    $('files-locked').hidden = !run || mode === savedMode;
     $('file-actions').hidden = $('drop-hint').hidden = Boolean(run);
     $('drop-overlay').textContent = run ? DROP_LOCKED : DROP_ADDS;
     markFiles();
@@ -5969,13 +6004,16 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      // The platform closes an open settings popover on this same Escape.
-      if (e.key !== 'Escape' || $('settings').matches(':popover-open')) return;
+      // The platform closes an open popover on this same Escape.
+      if (e.key !== 'Escape' || document.querySelector(':popover-open')) return;
       if (!inspector.hidden) closeInspector(true);
       else if (!$('file-view').hidden) closeFile();
     });
 
     $('arrange-btn').addEventListener('click', arrange);
+    $('save-note').addEventListener('beforetoggle', onSaveNoteToggle);
+    $('save-note').addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'open' && $('save-confirm').focus());
+    $('save-confirm').addEventListener('click', saveShown);
     $('settings').addEventListener('beforetoggle', onSettingsToggle);
     window.addEventListener('resize', () => $('settings').matches(':popover-open') && placeSettings());
     $('settings').addEventListener('input', () => showSaveResult(''));
@@ -6048,8 +6086,9 @@
       });
     }
 
+    // A saved tab's file leaves files dragged over it to the browser, which opens them.
     /** @param {DragEvent} e @returns {e is DragEvent & { dataTransfer: DataTransfer }} */
-    const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files');
+    const hasFiles = (e) => mode !== savedMode && [...(e.dataTransfer?.types ?? [])].includes('Files');
     // The panel and the side column take files alike. A node dragged in the panel is pointer events, never a drag of files.
     // The overlay is on while the drag is over any element in the frame, counted, as WebKit sends no relatedTarget.
     let dragDepth = 0;
@@ -6095,6 +6134,141 @@
     }).observe(panel);
     new ResizeObserver(fitSideToFrame).observe(frame);
     new ResizeObserver(positionInspector).observe(inspector);
+  }
+
+  // ---------- saved tabs ----------
+  // A tab that has run saves as one .html file: the page with its stylesheet and script inline, and the tab as data.
+  // Opened anywhere, it shows the tab as the prototype shows its recorded run, and loads and sends nothing.
+
+  /** @param {string} text @returns {Promise<string>} */
+  async function gzipped(text) {
+    const zipped = await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+    const url = await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsDataURL(zipped);
+    });
+    return String(url).slice(String(url).indexOf(',') + 1);
+  }
+
+  /** @param {string} base64 */
+  function gunzipped(base64) {
+    const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+    return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  }
+
+  // An ask that never landed has no answer to show.
+  /** @param {RunTab} tab @returns {Promise<SavedTabV1>} */
+  async function savedTab(tab) {
+    const { files, run } = tab;
+    const representation = await (await api(`/api/runs/${run.id}/representation`)).json();
+    const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals }) => ({ question, model, text, provenance, totals }));
+    return {
+      version: SAVED_VERSION,
+      files: files.map(({ name, size, folder }) => ({ name, size, folder })),
+      texts: await gzipped(JSON.stringify(files.map((f) => f.text))),
+      folders: [...tab.folders],
+      run: { ids: run.ids, rounds: run.rounds, schema: run.schema, parsed: run.parsed, totals: run.totals, answers },
+      representation,
+    };
+  }
+
+  // The page as r3con app serves it, with `tab`. Its policy lets in only its own script and inline styles, and its data
+  // has every < escaped, so nothing in it can end the element it is in.
+  /** @param {SavedTabV1} tab */
+  async function savedPage(tab) {
+    const [page, style, served] = await Promise.all(PAGE_FILES.map(async (path) => (await api(path)).text()));
+    // Inline, a </script in the script would end it; escaped, it reads the same.
+    const script = served.replace(/<\/(script)/gi, '<\\/$1');
+    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(script)));
+    const policy = `default-src 'none'; script-src 'sha256-${btoa(String.fromCharCode(...digest))}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
+    const data = JSON.stringify(tab).replaceAll('<', '\\u003c');
+    return page
+      .replace(PAGE_CHARSET, () => `${PAGE_CHARSET}\n<meta http-equiv="Content-Security-Policy" content="${policy}">`)
+      .replace(PAGE_STYLE, () => `<style>${style}</style>`)
+      .replace(PAGE_SCRIPT, () => `<script type="application/json" id="${SAVED_TAB_ID}">${data}</script>\n<script>${script}</script>`);
+  }
+
+  // The question's words, lowercase and joined by hyphens, cut after the last whole word that fits.
+  /** @param {string} question */
+  function savedName(question) {
+    const words = question.toLowerCase().replace(/['’]/g, '').match(/[\p{L}\p{N}]+/gu) ?? [];
+    const stem = words.join('-').slice(0, SAVED_NAME_CHARS + 1);
+    const cut = stem.length > SAVED_NAME_CHARS ? stem.replace(/-?[^-]*$/, '') || stem.slice(0, SAVED_NAME_CHARS) : stem;
+    return `${cut || SAVED_NAME}.html`;
+  }
+
+  /** @param {string} name @param {string} page */
+  function download(name, page) {
+    const url = URL.createObjectURL(new Blob([page], { type: 'text/html' }));
+    h('a', { href: url, download: name }).click();
+    // Once the click has handed it to the browser.
+    setTimeout(() => URL.revokeObjectURL(url));
+  }
+
+  async function saveShown() {
+    const tab = runTab(state.shown);
+    $('save-note').hidePopover();
+    try {
+      download(savedName(tab.run.answers[0].question), await savedPage(await savedTab(tab)));
+    } catch (error) {
+      errorStatus(`couldn't save the tab · ${explain(error, /** @type {Error} */ (error).message, "couldn't save the tab")}`);
+    }
+  }
+
+  // Right-aligned under its button, saying what the file holds before it is saved.
+  /** @param {ToggleEvent} e */
+  function onSaveNoteToggle(e) {
+    if (e.newState !== 'open') return;
+    const button = $('save-btn').getBoundingClientRect();
+    const note = $('save-note');
+    note.style.right = `${root.clientWidth - button.right}px`;
+    note.style.top = `${button.bottom + POPOVER_GAP}px`;
+    $('save-what').textContent = savedHolds(state.shown.files.length);
+  }
+
+  // Each version's reader, kept for good, so that a tab saved by any R3Con opens.
+  /** @type {Record<number, (saved: SavedTabV1) => Promise<OpenedTab>>} */
+  const SAVED_READERS = {
+    async 1({ files, texts, folders, run, representation }) {
+      /** @type {string[]} */
+      const text = JSON.parse(await gunzipped(texts));
+      const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
+      const [own, ...asks] = run.answers;
+      return {
+        files: docs,
+        folders: new Map(folders),
+        run: { ...run, simulated: false, docs, ...withIds(run.ids), calls: null, answers: [own], lit: null },
+        asks: asks.map((ask) => ({ ...ask, source: 'live' })),
+      };
+    },
+  };
+
+  /** @param {string} block @returns {Promise<OpenedTab>} */
+  async function readSaved(block) {
+    const saved = JSON.parse(block);
+    const read = SAVED_READERS[saved?.version];
+    if (!read) throw new Error(`no reader for version ${saved?.version}`);
+    return read(saved);
+  }
+
+  // Fills the empty tab the page opened on with the saved one: its files, then its run and asks, at once.
+  /** @param {string} block */
+  async function openSaved(block) {
+    try {
+      const { files, folders, run, asks } = await readSaved(block);
+      const { question } = run.answers[0];
+      const tab = runTab(state.shown);
+      Object.assign(tab, { files, folders });
+      tellChat(tab, `Loaded ${fileCount(files)}.`);
+      Object.assign(tab, { run, turn: addTurn(tab, question) });
+      renderFiles();
+      playRun(tab);
+      for (const ask of asks) landAsk(tab, ask);
+      document.title = `${question} · ${document.title}`;
+    } catch (error) {
+      errorStatus(explain(error, CANT_OPEN_SAVED));
+    }
   }
 
   // ---------- modes ----------
@@ -6206,7 +6380,11 @@
     return names.length ? `no readable text in ${someNames(names)}; nothing was sent` : null;
   }
 
-  const mode = live ? liveMode : prototypeMode;
+  // A saved tab's file has no ask box: it shows its run at once, as it was.
+  /** @type {Mode} */
+  const savedMode = { ...prototypeMode, note: SAVED_MODE_NOTE, play: (tab, narr) => runAtOnce(buildTimeline(tab, narr)) };
+
+  const mode = live ? liveMode : savedBlock ? savedMode : prototypeMode;
 
   function init() {
     restoreTheme();
@@ -6214,7 +6392,7 @@
     fitSideToFrame();
     removeStored(RETIRED_SETTINGS_KEY);
     buildSettings();
-    if (!live) questionEl.value = SAMPLE.question;
+    if (mode === prototypeMode) questionEl.value = SAMPLE.question;
     openTab(state.shown);
     showTabContents(state.shown);
     syncDocNodes(state.shown);
@@ -6226,6 +6404,9 @@
     $('mode-note').textContent = mode.note;
     $('mode-note').hidden = !mode.note;
     wire();
+    if (!savedBlock) return;
+    for (const id of ['ask-form', 'new-tab-btn', 'settings-btn']) $(id).hidden = true;
+    openSaved(savedBlock.textContent ?? '');
   }
 
   init();
