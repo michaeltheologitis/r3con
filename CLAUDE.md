@@ -17,7 +17,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 
 - `uv run ruff check`, `uv run ruff format --check` and `uv run pyright`: lint, format and types.
 - `npx --yes --package typescript@7.0.2 tsc -p tsconfig.json`: the app script's types, from its JSDoc.
-- `uv run pytest`: the unit tests, with sockets disabled and live tests deselected, so nothing reaches the network. CI also runs them on Python 3.11 to 3.14, at the lowest allowed dependency versions, and against the built wheel.
+- `uv run pytest`: the unit tests, with sockets disabled and live tests deselected, so nothing reaches the network. CI also runs them on Python 3.11 to 3.15, at the lowest allowed dependency versions, and against the built wheel.
 - `uv run pytest -m "live and not experiment"`: an end-to-end run against OpenAI, billed to `OPENAI_API_KEY` and skipped without it. The unit tests fake the model, so run it when a change affects what the model is sent or how it is called. A manual CI dispatch runs it by default.
 - `uv run pytest -m experiment`: the experiments, measured live runs that cost far more. Run them only when Michael asks (in CI, a dispatch with `experiment` on); plain `-m live` includes them.
 - `NODE_PATH=$(npm root -g) node tests/app/check.mjs`: the app's page checks, in headless Chromium through Playwright, which they find via `NODE_PATH` (elsewhere, run `npm i -g playwright && npx playwright install chromium` once). Their live area serves the page with `tests/app/fake_server.py`, a scripted model behind the real server, through `uv`. Run them for any change to `src/r3con/app/`.
