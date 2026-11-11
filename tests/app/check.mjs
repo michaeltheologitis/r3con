@@ -7013,8 +7013,7 @@ async function liveElsewhere() {
   });
 }
 
-// A tab saved as one file: the question it is named after, its name, the ask over its run, and the files it holds, the
-// sample memos and DROPPED_FOLDER's three documents, in the tab's order.
+// The files a saved tab holds: the sample memos, then DROPPED_FOLDER's three documents.
 const SAVED_QUESTION = 'Which site logged the most incidents?';
 const SAVED_NAME = 'which-site-logged-the-most-incidents.html';
 const SAVED_ASK = 'Which memo is the registry?';
@@ -7025,6 +7024,10 @@ const SAVED_FOLDER_FILES = [
   ['q4/02_incidents.md', 'Incidents in Q4.\n'],
 ];
 const SAVED_FILES = SAMPLE_DOCS + SAVED_FOLDER_FILES.length;
+// The run's own answer and SAVED_ASK's.
+const SAVED_ANSWERS = 2;
+// How much of a differing part of the page a check's detail quotes.
+const DETAIL_CHARS = 300;
 const savedHolds = (n) => `The file includes the full text of this tab's ${n} files.`;
 const SAVED_NOTE = 'open this file in R3Con to ask more';
 const SAVED_VERSION = 1;
@@ -7055,7 +7058,6 @@ function tabShown() {
   };
 }
 
-// What the shown tab draws once the chat's line of the run's answer is clicked, and the first file's marks once opened.
 async function answerAndFileShown(page) {
   await page.click('#tab-chat');
   await page.click(`${CHAT} .line.answer[data-node="answer-0"]`);
@@ -7066,8 +7068,6 @@ async function answerAndFileShown(page) {
   return { lit, marks: await page.evaluate(marksIn, '#file-view') };
 }
 
-// A tab that has run saves as one .html file, named after its question, that holds the tab and nothing of the
-// settings; opened on its own and offline, it shows the tab as the live page drew it, view-only, and loads nothing.
 async function liveSaved(url) {
   const headers = { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' };
   for (const body of [{ provider: 'openai', key: TEST_KEY }, { provider: 'other', endpoint: TEST_ENDPOINT, key: ENVIRONMENT_KEY }]) {
@@ -7117,7 +7117,7 @@ async function liveSaved(url) {
     const kept = [TEST_KEY, ENVIRONMENT_KEY, TEST_ENDPOINT, tokenOf(url)].filter((secret) => html.includes(secret));
     const fields = [...new Set(block.run.answers.flatMap((answer) => Object.keys(answer)))].sort();
     const keptName = "it holds no key, no server from the settings and no launch token, and its answers only what the page shows of them";
-    check('live', keptName, !kept.length && fields.every((f) => SAVED_ANSWER_FIELDS.includes(f)) && block.run.answers.length === 2, `${kept.join(' ')}; ${fields.join(' ')}`);
+    check('live', keptName, !kept.length && fields.every((f) => SAVED_ANSWER_FIELDS.includes(f)) && block.run.answers.length === SAVED_ANSWERS, `${kept.join(' ')}; ${fields.join(' ')}`);
 
     const fileUrl = pathToFileURL(file).href;
     const requests = [];
@@ -7131,7 +7131,7 @@ async function liveSaved(url) {
       check('live', 'opened on its own and offline, the saved file loads nothing but itself and sends nothing', isDeepStrictEqual(requests, [fileUrl]), requests.join(' '));
       const sameName = "it shows the tab as the live page drew it: its tab and status, its panel's nodes, folders, icons and lit lines, the run's and the ask's turns, and its files";
       const differ = Object.keys(live).filter((key) => !isDeepStrictEqual(live[key], saved[key]));
-      check('live', sameName, !differ.length, differ.map((key) => `${key}: ${JSON.stringify(saved[key]).slice(0, 300)}`).join(' | '));
+      check('live', sameName, !differ.length, differ.map((key) => `${key}: ${JSON.stringify(saved[key]).slice(0, DETAIL_CHARS)}`).join(' | '));
       const viewOnly = {
         hidden: await page.$$eval('#ask-form, #new-tab-btn, #settings-btn, #save-btn, #replay-btn', (els) => els.every((el) => el.checkVisibility() === false)),
         note: await page.textContent('#mode-note'),

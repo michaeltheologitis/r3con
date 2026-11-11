@@ -181,16 +181,12 @@
    * @property {Set<string>} placed the nodes the user dragged since the panel was last laid out
    */
   /**
-   * A tab saved as one file, in version 1, as the file's SAVED_TAB_ID block holds it: each file's name, size and dropped
-   * folder; their texts, a JSON list in the same order, gzipped, in base64; each folder by path, and whether it was left
-   * open; its run as the page holds it (documents by index, quotes in UTF-16 code units) with the answers that landed,
-   * the run's own first; and r3con app's representation of the run, all an ask reads of its folder.
    * @typedef {object} SavedTabV1
    * @property {1} version
    * @property {{ name: string, size: number, folder?: string }[]} files
-   * @property {string} texts
+   * @property {string} texts the files' texts, a JSON list in their order, gzipped, in base64
    * @property {[string, boolean][]} folders
-   * @property {Pick<Run, 'ids' | 'rounds' | 'schema' | 'parsed' | 'totals'> & { answers: SavedAnswer[] }} run
+   * @property {Pick<Run, 'ids' | 'rounds' | 'schema' | 'parsed' | 'totals'> & { answers: SavedAnswer[] }} run its quotes count UTF-16 code units
    * @property {Record<string, unknown>} representation
    */
   /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals'>} SavedAnswer */
@@ -1766,10 +1762,11 @@
   const side = $('side');
   const resizer = $('resizer');
 
-  // A tab saved as one file carries it here, and the page shows that tab wherever it is opened. Otherwise, served by
-  // r3con app on this computer the page runs r3con; anywhere else it is the prototype, which sends nothing. The launch
-  // token lives only in this closure: it leaves the address bar at once and never reaches storage.
+  // A saved tab's file shows that tab, wherever it is opened.
   const savedBlock = document.getElementById(SAVED_TAB_ID);
+  // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
+  // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
+  // once and never reaches storage.
   const live = !savedBlock && ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
   const token = live ? takeToken() : null;
 
@@ -4805,7 +4802,6 @@
     landAsk(tab, recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), source: 'recorded' } : simulatedAsk(run, question, model));
   }
 
-  // An ask whose answer is already here lands at once.
   /** @param {RunTab} tab @param {Answer} ask */
   function landAsk(tab, ask) {
     const id = addAsk(tab, ask);
@@ -6140,7 +6136,6 @@
   }
 
   // ---------- saved tabs ----------
-  // A tab saved as one .html file: the page, inline, with the tab as data, which it shows as the prototype its replay.
 
   /** @param {string} text @returns {Promise<string>} */
   async function gzipped(text) {
@@ -6177,13 +6172,11 @@
     };
   }
 
-  // The page as r3con app serves it, with `tab`. Its policy lets in only its own script and inline styles, and its data
-  // has every < escaped, so nothing in it can end the element it is in.
+  // Its policy admits only its own script, and every < in the data is escaped, so no data can end its element.
   /** @param {SavedTabV1} tab */
   async function savedPage(tab) {
     const [page, style, served] = await Promise.all(PAGE_FILES.map(async (path) => (await api(path)).text()));
-    // Its hash is of the text the browser parses, which has its line ends as \n; and inline, a </script in it would end
-    // it, so it is escaped, which reads the same.
+    // Hashed as the browser parses it, line ends as \n; a </script would end it inline, and escaped reads the same.
     const script = served.replace(/\r\n?/g, '\n').replace(/<\/(script)/gi, '<\\/$1');
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(script)));
     const policy = `default-src 'none'; script-src 'sha256-${btoa(String.fromCharCode(...digest))}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'`;
@@ -6200,7 +6193,6 @@
     }, page);
   }
 
-  // The question's words, lowercase and joined by hyphens, cut after the last whole word that fits.
   /** @param {string} question */
   function savedName(question) {
     const words = question.toLowerCase().replace(/['’]/g, '').match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -6226,7 +6218,6 @@
     }
   }
 
-  // Right-aligned under its button, saying what the file holds before it is saved.
   /** @param {ToggleEvent} e */
   function onSaveNoteToggle(e) {
     if (e.newState !== 'open') return;
@@ -6237,29 +6228,23 @@
     $('save-what').textContent = savedHolds(state.shown.files.length);
   }
 
-  // Each version's reader, kept for good, so that a tab saved by any R3Con opens.
-  /** @type {Record<number, (saved: SavedTabV1) => Promise<OpenedTab>>} */
-  const SAVED_READERS = {
-    async 1({ files, texts, folders, run, representation }) {
-      /** @type {string[]} */
-      const text = JSON.parse(await gunzipped(texts));
-      const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
-      const [own, ...asks] = run.answers;
-      return {
-        files: docs,
-        folders: new Map(folders),
-        run: { ...run, simulated: false, docs, ...withIds(run.ids), calls: null, answers: [own], lit: null },
-        asks: asks.map((ask) => ({ ...ask, source: 'live' })),
-      };
-    },
-  };
-
+  // Every later version keeps a reader for each before it, so that a tab saved by any R3Con opens.
   /** @param {string} block @returns {Promise<OpenedTab>} */
   async function readSaved(block) {
+    /** @type {SavedTabV1} */
     const saved = JSON.parse(block);
-    const read = SAVED_READERS[saved?.version];
-    if (!read) throw new Error(`no reader for version ${saved?.version}`);
-    return read(saved);
+    if (saved?.version !== SAVED_VERSION) throw new Error(`no reader for version ${saved?.version}`);
+    const { files, texts, folders, run } = saved;
+    /** @type {string[]} */
+    const text = JSON.parse(await gunzipped(texts));
+    const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
+    const [own, ...asks] = run.answers;
+    return {
+      files: docs,
+      folders: new Map(folders),
+      run: { ...run, simulated: false, docs, ...withIds(run.ids), calls: null, answers: [own], lit: null },
+      asks: asks.map((ask) => ({ ...ask, source: 'live' })),
+    };
   }
 
   /** @param {string} block */
@@ -6389,7 +6374,6 @@
     return names.length ? `no readable text in ${someNames(names)}; nothing was sent` : null;
   }
 
-  // A saved tab's file has no ask box: it shows its run at once, as it was.
   /** @type {Mode} */
   const savedMode = { ...prototypeMode, note: SAVED_MODE_NOTE, play: (tab, narr) => runAtOnce(buildTimeline(tab, narr)) };
 

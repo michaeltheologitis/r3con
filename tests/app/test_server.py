@@ -1267,23 +1267,33 @@ def test_the_representation_of_a_run_still_running_is_refused(
 
 
 @pytest.mark.parametrize("path", REPRESENTATION_FILES)
-def test_the_representation_of_a_run_folder_missing_a_file_or_not_json_is_refused(
-    client: TestClient, caplog: pytest.LogCaptureFixture, path: str
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [
+        (
+            lambda file: file.write_text("{not json", encoding="utf-8"),
+            "JSONDecodeError",
+        ),
+        (Path.unlink, "FileNotFoundError"),
+    ],
+    ids=["not json", "missing"],
+)
+def test_the_representation_of_a_run_folder_with_a_file_it_cannot_read_is_refused(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    damage: Callable[[Path], object],
+    error: str,
 ):
     run_id = finished_run(client)
     run_dir = Path(run_events(client, run_id)[0]["run_dir"])
-    (run_dir / path).write_text("{not json", encoding="utf-8")
+    damage(run_dir / path)
     with caplog.at_level(logging.WARNING, logger="r3con.app"):
-        broken = client.get(f"/api/runs/{run_id}/representation")
-        (run_dir / path).unlink()
-        missing = client.get(f"/api/runs/{run_id}/representation")
+        response = client.get(f"/api/runs/{run_id}/representation")
     logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
-    assert [broken.status_code, missing.status_code] == [409, 409]
-    assert broken.json() == missing.json() == {"error": UNREADABLE_RUN}
-    assert logged == [
-        f"{run_dir}: can't read it to save (JSONDecodeError)",
-        f"{run_dir}: can't read it to save (FileNotFoundError)",
-    ]
+    assert response.status_code == 409
+    assert response.json() == {"error": UNREADABLE_RUN}
+    assert logged == [f"{run_dir}: can't read it to save ({error})"]
 
 
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(
