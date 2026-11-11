@@ -129,6 +129,7 @@ ANSWER = {
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
 REMEMBERED_OPENAI = {"source": "here", "hint": OPENAI_KEY[-4:], "remembered": True}
+UNTIL_CLOSED_OPENAI = {**REMEMBERED_OPENAI, "remembered": False}
 
 
 class BrokenKeyring(KeyringBackend):
@@ -933,7 +934,7 @@ def test_removing_a_key_a_failed_save_left_in_the_store_removes_it_there(
     store.passwords[KEY_STORE_SERVICE, "openai"] = SECOND_KEY
     keyring.set_keyring(store)
     saved = client.post("/api/keys", json=STORED_OPENAI).json()["openai"]
-    assert saved == {**REMEMBERED_OPENAI, "remembered": False}
+    assert saved == UNTIL_CLOSED_OPENAI
     client.request("DELETE", "/api/keys", json={"provider": "openai"})
     assert store.passwords == {}
 
@@ -955,8 +956,8 @@ def test_without_a_working_store_a_key_lasts_until_the_app_closes_and_is_never_l
             client.request("DELETE", "/api/keys", json={"provider": "openai"})
         )
     assert [response.status_code for response in responses] == [200] * 3
-    kept = {**REMEMBERED_OPENAI, "remembered": False}
-    assert [response.json()["openai"] for response in responses] == [kept, kept, None]
+    kept = [response.json()["openai"] for response in responses]
+    assert kept == [UNTIL_CLOSED_OPENAI, UNTIL_CLOSED_OPENAI, None]
     assert {call["api_key"] for call in llm.requests} == {OPENAI_KEY}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.app"] == said
     assert OPENAI_KEY not in caplog.text
