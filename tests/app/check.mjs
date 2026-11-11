@@ -265,16 +265,17 @@ const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a stat
 const LIVE_ASK = 'live ask over this run';
 const PDF_TEXT = 'Incidents this quarter: 7.';
 const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
-// The page's PREVIEW_CHARS: a file's preview shows this much of its text, and says so when there is more.
-const PREVIEW_CHARS = 20000;
-const PREVIEW_NOTE = 'first 20,000 characters shown';
-// The page's PREVIEW_LINES: a parse's popup shows this many lines of its JSON, and says so when there are more.
-const PREVIEW_LINES = 5000;
-const PREVIEW_LINES_NOTE = 'first 5,000 lines shown';
+// The page's WORDS_SHOWN, CHARS_SHOWN and LINES_SHOWN: a file's popup stops after this many words, or characters if
+// sooner, and a parse's after this many lines of its JSON, until opened in full.
+const WORDS_SHOWN = 150000;
+const CHARS_SHOWN = 2000000;
+const LINES_SHOWN = 30000;
+// The line where a popup's text stops short: its button alone.
+const CUT_LINE = 'open in full';
 // The page's JSON_INDENT: a parse's JSON is indented this many spaces a level.
 const JSON_INDENT = 2;
-// A stream this long, which no page uses, makes a PDF of more bytes than its preview has characters.
-const PDF_PADDING = PREVIEW_CHARS + 5000;
+// A stream this long, which no page uses, makes a PDF far bigger than its text.
+const PDF_PADDING = 25000;
 // The Markdown r3con makes of report.docx below.
 const WORD_TEXT = 'Incidents by site:\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |\n| Merrow | 3 |';
 const ZIPPED_TEXT = 'A memo that came in a zip.\n';
@@ -310,8 +311,6 @@ const MIME_TYPES = {
 };
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF32LE_BOM = [0xff, 0xfe, 0x00, 0x00];
-// More bytes in UTF-16 than PREVIEW_CHARS, but fewer characters.
-const LONG_UTF16_CHARS = PREVIEW_CHARS * 0.75;
 const WRITE_DOCUMENTS =
   'import json, sys; from pathlib import Path; from tests.documents import WRITERS\n' +
   'for name, spec in json.loads(sys.argv[2]).items(): WRITERS[Path(name).suffix](Path(sys.argv[1], name), **spec)';
@@ -622,10 +621,14 @@ function serving(edit) {
 const withFewerMemos = withSample((sample) => ({ ...sample, docs: sample.docs.slice(0, FEWER_MEMOS) }));
 const withNoAsks = (script) => script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, 'const RECORDED_ASKS = [];');
 
-// app.js with the sample's first parse holding its first record over and over, past PREVIEW_LINES lines of JSON.
+// The sample's first parse holding its first record over and over, each record more than two lines of JSON, so past
+// LINES_SHOWN lines; and app.js with it.
+function longParse() {
+  const [field, [record]] = Object.entries(recordedSample().parsed[0].parse).find(([, records]) => records.length);
+  return { [field]: Array(LINES_SHOWN / 2).fill(record) };
+}
 const withLongParse = withSample((sample) => {
-  const [field, [record]] = Object.entries(sample.parsed[0].parse).find(([, records]) => records.length);
-  sample.parsed[0].parse = { [field]: Array(PREVIEW_LINES).fill(record) };
+  sample.parsed[0].parse = longParse();
   return sample;
 });
 
@@ -1371,20 +1374,21 @@ function panelRows() {
   return firsts.map((el) => (el.classList.contains('fold') ? `${labels(el)}${el.getAttribute('aria-expanded') === 'true' ? ' (open)' : ''}` : labels(el)));
 }
 
-// A fold's first node's count and dots, the fold colour as the page resolves it, and a document's name.
+// A fold's first node's count and dots, the dim colour as the page resolves it, and a document's name.
 function foldInk() {
   if (!document.querySelector('.node.fold.doc')) return null;
   const probe = document.createElement('span');
-  probe.style.color = 'var(--fold)';
+  probe.style.color = 'var(--dim)';
   document.body.append(probe);
-  const fold = getComputedStyle(probe).color;
+  const dim = getComputedStyle(probe).color;
   probe.remove();
   /** @param {string} selector */
   const ink = (selector) => {
     const style = getComputedStyle(/** @type {Element} */ (document.querySelector(selector)));
     return { color: style.color, weight: Number(style.fontWeight) };
   };
-  return { fold, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
+  const noFoldToken = getComputedStyle(document.documentElement).getPropertyValue('--fold') === '';
+  return { dim, noFoldToken, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
 }
 
 const filesCounted = (page, n) => page.waitForFunction((k) => document.getElementById('files-count').textContent === String(k), n);
@@ -1410,7 +1414,7 @@ async function folds() {
     await filesCounted(page, FOLD_FROM_DOCS + 1);
     const folded = await page.evaluate(panelRows);
     const rest = FOLD_FROM_DOCS + 1 - 2 * CONTEXT_DOCS;
-    const expected = [...stemsFrom(0, CONTEXT_DOCS), `${rest} more documents`, ...stemsFrom(FOLD_FROM_DOCS + 1 - CONTEXT_DOCS, FOLD_FROM_DOCS + 1)];
+    const expected = [...stemsFrom(0, CONTEXT_DOCS), `${rest} more files`, ...stemsFrom(FOLD_FROM_DOCS + 1 - CONTEXT_DOCS, FOLD_FROM_DOCS + 1)];
     const thresholdName = `a tab of ${FOLD_FROM_DOCS} documents draws a node for each; one of ${FOLD_FROM_DOCS + 1} folds all but the first and last ${CONTEXT_DOCS}, counting the rest`;
     check('folds', thresholdName, isDeepStrictEqual(all, stemsFrom(0, FOLD_FROM_DOCS)) && isDeepStrictEqual(folded, expected), `${all.length} rows; then ${folded.join(', ')}`);
   });
@@ -1420,18 +1424,18 @@ async function folds() {
     const rest = FOLDED_FILES - 2 * CONTEXT_DOCS;
     const fold = nodeSel(`doc-f${CONTEXT_DOCS}`);
     const ends = [stemsFrom(0, CONTEXT_DOCS), stemsFrom(FOLDED_FILES - CONTEXT_DOCS, FOLDED_FILES)];
-    const closed = [ends[0], `${rest} more documents`, ends[1]].flat();
+    const closed = [ends[0], `${rest} more files`, ends[1]].flat();
     const rows = await page.evaluate(panelRows);
     await pressNode(page, fold);
     const opened = await page.evaluate(panelRows);
     await pressNode(page, fold, { key: true });
     const shut = await page.evaluate(panelRows);
-    const open = [ends[0], `${rest} more documents · fold (open)`, stemsFrom(CONTEXT_DOCS, FOLDED_FILES - CONTEXT_DOCS), ends[1]].flat();
+    const open = [ends[0], `${rest} more files · fold (open)`, stemsFrom(CONTEXT_DOCS, FOLDED_FILES - CONTEXT_DOCS), ends[1]].flat();
     const beforeName = `before a run, ${FOLDED_FILES} documents show the first and last ${CONTEXT_DOCS} around one fold of the other ${rest}; a click opens it above their rows, and Enter on it folds them again`;
     check('folds', beforeName, isDeepStrictEqual(rows, closed) && isDeepStrictEqual(opened, open) && isDeepStrictEqual(shut, closed), `${rows.join(', ')}; opened ${opened.length} rows; then ${shut.length}`);
     const ink = await page.evaluate(foldInk);
-    const inkName = "a fold's first node, which opens it, counts its documents bolder than a document's name, count and dots in the fold colour";
-    check('folds', inkName, ink && ink.count.color === ink.fold && ink.dots === ink.fold && ink.count.weight > ink.name.weight, JSON.stringify(ink));
+    const inkName = "a fold's first node, which opens it, counts its files bolder than a file's name, count and dots grey, in the dim colour, as the page has no fold colour";
+    check('folds', inkName, ink && ink.count.color === ink.dim && ink.dots === ink.dim && ink.count.weight > ink.name.weight && ink.noFoldToken, JSON.stringify(ink));
   });
   await withPage('folds', { sample: false }, async (page) => {
     const folding = FOLD_FROM_DOCS + 1;
@@ -1453,6 +1457,362 @@ async function folds() {
     const name = `removing files from a folded tab leaves a node per file: ${folding} less one show all ${FOLD_FROM_DOCS}, and remove all leaves none, a fold open or not`;
     const all = stemsFrom(0, folding).filter((stem) => stem !== memoStem(gone));
     check('folds', name, isDeepStrictEqual(left, all) && emptied === 0 && openedThenEmptied === 0, `${left.length} rows; then ${emptied} and ${openedThenEmptied} nodes`);
+  });
+}
+
+// ---------- folders: a dropped folder keeps its structure, as a tree in the file column ----------
+
+// The page's tree indent and elbow, and its folder colours, back and front, normal, lit (holding sources) and unused.
+const TREE_INDENT = 72;
+const TREE_ELBOW = 5;
+const TREE_OPACITY = 0.55;
+// How far a tree line may stop short of what it meets, and how far below a label a folder's line may start.
+const TICK_SHORT_PX = { min: 1, max: 8 };
+const SPINE_GAP_PX = 6;
+// Rounding allowed in the drawing: a tick against its icon's middle and against its spine, and a line's width.
+const ALIGNED_PX = 0.5;
+const ON_SPINE_PX = 6;
+const WIDTH_SLACK_PX = 0.01;
+// A wheel's step that zooms the panel in.
+const ZOOM_IN_DELTA = -300;
+const TREE_GEOMETRY = { indent: TREE_INDENT, aligned: ALIGNED_PX, onSpine: ON_SPINE_PX };
+const FOLDER_FILLS = {
+  light: { normal: ['#2f6f9f', '#6aaed6'], lit: ['#93442a', '#c15f3c'], unused: ['#8a8075', '#b8afa4'] },
+  dark: { normal: ['#2d6a96', '#5a9cc6'], lit: ['#a5523a', '#d77757'], unused: ['#5a534c', '#857c72'] },
+};
+const rgbOf = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
+const fillsOf = (theme, state) => FOLDER_FILLS[theme][state].map(rgbOf);
+// A folder of reports with q3 in it; a folder of letters; an archive of empty files, which nothing quotes; a memo.
+const REPORTS = ['reports', [['config.yml', 'Config.\n'], ['contracts.txt', 'Contracts.\n'], ['notes.md', 'Notes.\n'], ['q3', [['incidents.csv', 'Incidents.\n'], ['q3-summary.txt', 'Q3.\n']]]]];
+const LETTERS = ['letters', Array.from({ length: 5 }, (_, i) => [`letter_${i}.txt`, `Letter ${i}.\n`])];
+const ARCHIVE = ['archive', Array.from({ length: 12 }, (_, i) => [`old_${String(i).padStart(2, '0')}.txt`, ''])];
+const EMPTY_MEMO = ['memo.txt', ''];
+const REPORTS_TREE = ['reports · 5 files (open)', '  config', '  contracts', '  notes', '  q3 · 2 files (open)', '    incidents', '    q3-summary'];
+
+// The file column's rows, indented by depth, with their labels and a folder's "(open)", "(lit)" or "(unused)".
+function treeRows(indent) {
+  const nodes = [...document.querySelectorAll('#world .node.doc')].sort((a, b) => parseFloat(a.style.top) - parseFloat(b.style.top));
+  return nodes.map((el) => {
+    const labels = [...el.querySelectorAll('.label')].map((label) => label.textContent).filter(Boolean).join(' · ');
+    const folder = el.classList.contains('folder');
+    const open = folder && el.getAttribute('aria-expanded') === 'true' ? ' (open)' : '';
+    const state = folder && el.classList.contains('on-path') ? ' (lit)' : folder && el.classList.contains('unused') ? ' (unused)' : '';
+    return `${'  '.repeat(Math.round(parseFloat(el.style.left) / indent))}${labels}${open}${state}`;
+  });
+}
+
+const folderSel = (name) => `#world .node.folder.doc[aria-label^="${name} folder,"]`;
+const folderId = (page, name) => page.$eval(folderSel(name), (el) => el.dataset.id);
+// A tick that meets its row's icon at its middle, a little short of it.
+const meets = (m) => m.centre !== null && Math.abs(m.centre) <= ALIGNED_PX && m.short >= TICK_SHORT_PX.min && m.short <= TICK_SHORT_PX.max;
+
+// Drops each of `batches` on the panel in turn, and waits for the tab to hold `files`.
+async function dropBatches(page, batches, files) {
+  for (const items of batches) await page.evaluate(dropItems, { on: 'panel', items });
+  await filesCounted(page, files);
+}
+
+// The tree lines against the nodes they join, in the panel's units: spines against labels, ticks against icons or chevrons.
+function treeGeometry({ indent, aligned, onSpine }) {
+  const path = document.querySelector('#world .tree-lines');
+  const d = path.getAttribute('d') ?? '';
+  const tokens = d.match(/[MVHa]|-?[\d.]+/g) ?? [];
+  const segments = [];
+  let [x, y, i] = [0, 0, 0];
+  const num = () => Number(tokens[i++]);
+  while (i < tokens.length) {
+    const command = tokens[i++];
+    if (command === 'M') [x, y] = [num(), num()];
+    else if (command === 'V') segments.push({ kind: 'v', x, y1: y, y2: (y = num()) });
+    else if (command === 'H') segments.push({ kind: 'h', y, x1: x, x2: (x = num()) });
+    else {
+      const [r, , , , , dx, dy] = Array.from({ length: 7 }, num);
+      segments.push({ kind: 'arc', r, x1: x, y1: y, x2: (x += dx), y2: (y += dy) });
+    }
+  }
+  const k = parseFloat(document.getElementById('world').style.getPropertyValue('--k'));
+  const origin = document.getElementById('world').getBoundingClientRect();
+  const world = (box) => ({ left: (box.left - origin.left) / k, top: (box.top - origin.top) / k, bottom: (box.bottom - origin.top) / k, mid: ((box.top + box.bottom) / 2 - origin.top) / k });
+  const rows = [...document.querySelectorAll('#world .node.doc')]
+    .map((el) => ({ el, x: parseFloat(el.style.left), y: parseFloat(el.style.top) }))
+    .sort((a, b) => a.y - b.y)
+    .map((row) => ({ ...row, depth: Math.round(row.x / indent), folder: row.el.classList.contains('folder'), open: row.el.getAttribute('aria-expanded') === 'true' }));
+  const ticks = segments.filter((s) => s.kind === 'h');
+  const arcs = segments.filter((s) => s.kind === 'arc');
+  const spines = [];
+  const children = [];
+  rows.forEach((row, r) => {
+    const parent = rows.slice(0, r).findLast((p) => p.depth < row.depth);
+    if (parent && parent.depth === row.depth - 1 && parent.open) children.push({ row, parent });
+    if (!row.folder || !row.open) return;
+    const spine = segments.find((s) => s.kind === 'v' && Math.abs(s.x - row.x) < aligned && s.y1 > row.y);
+    const label = world(row.el.querySelector('.label').getBoundingClientRect());
+    spines.push(spine ? { off: spine.x - row.x, underLabel: spine.y1 - label.bottom } : null);
+  });
+  const meets = children.map(({ row, parent }) => {
+    const tick = ticks.find((t) => Math.abs(t.y - row.y) < aligned && Math.abs(t.x1 - parent.x) < onSpine);
+    const arc = arcs.find((a) => Math.abs(a.y2 - row.y) < aligned);
+    const end = tick ? tick.x2 : null;
+    // What a tick meets: a folder's chevron, or the shapes of a row's icon, turned or not.
+    const shapes = [...row.el.querySelectorAll(row.folder ? '.chevron svg' : '.icon svg :is(path, circle)')].map((el) => world(el.getBoundingClientRect()));
+    const box = shapes.reduce((a, b) => (a.left <= b.left ? a : b));
+    const icon = world(row.el.querySelector('.icon').getBoundingClientRect());
+    return { last: Boolean(arc), centre: tick ? tick.y - icon.mid : null, short: end === null ? null : box.left - end, folder: row.folder };
+  });
+  const style = getComputedStyle(path);
+  return {
+    spines,
+    meets,
+    loose: rows.filter((row) => row.depth === 0).filter((row) => ticks.some((t) => Math.abs(t.y - row.y) < aligned)).length,
+    ticks: ticks.length,
+    elbows: arcs.map((a) => a.r),
+    screenWidth: parseFloat(style.strokeWidth) * k,
+    opacity: Number(style.strokeOpacity),
+    stroke: style.stroke,
+  };
+}
+
+// The colour a page token, such as --dim, resolves to.
+function tokenColour(token) {
+  const probe = document.body.appendChild(document.createElement('i'));
+  probe.style.color = `var(${token})`;
+  const color = getComputedStyle(probe).color;
+  probe.remove();
+  return color;
+}
+
+// A folder node's look: its two fills, its node's opacity and its chevron's turn.
+function folderLook(selector) {
+  const el = document.querySelector(selector);
+  const fill = (part) => getComputedStyle(el.querySelector(`.folder-${part}`)).fill;
+  const sources = el.querySelector('.label.sources');
+  return {
+    fills: [fill('back'), fill('front')],
+    opacity: Number(getComputedStyle(el).opacity),
+    chevron: getComputedStyle(el.querySelector('.chevron svg')).rotate,
+    sources: sources && !sources.hidden ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
+    pill: el.querySelector('.pill') !== null,
+  };
+}
+
+// The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them.
+function standIns(id) {
+  const index = id.slice('doc-'.length);
+  const own = [...document.querySelectorAll('#world .node')].map((el) => el.dataset.id).filter((nodeId) => nodeId.endsWith(`-${index}`));
+  const keys = [...document.querySelectorAll('#world .edge')].map((el) => el.dataset.key);
+  const lines = keys.filter((key) => key.split('>').every((end) => own.includes(end)));
+  return { nodes: own.sort(), lines: lines.sort(), lit: [...document.querySelectorAll('#world .edge.lit')].map((el) => el.dataset.key).filter((key) => key.split('>').some((end) => own.includes(end))).sort(), onPath: own.filter((nodeId) => document.querySelector(`.node[data-id="${nodeId}"]`).classList.contains('on-path')).sort() };
+}
+
+async function folders() {
+  await withPage('folders', { sample: false }, async (page) => {
+    await dropBatches(page, [[REPORTS], [['memo.txt', 'A memo.\n']]], 6);
+    const rows = await page.evaluate(treeRows, TREE_INDENT);
+    const treeName = 'a dropped folder is its own top row, its files and subfolders beneath it a level in each, each folder counting its files at any depth, and a file dropped on its own at the top level';
+    check('folders', treeName, isDeepStrictEqual(rows, [...REPORTS_TREE, 'memo']), rows.join(' | '));
+    const pane = (await page.evaluate(filesPane)).names;
+    const paneName = "the files pane still names each file by its path below the folder it was dropped in, in the panel's order";
+    check('folders', paneName, isDeepStrictEqual(pane, ['config.yml', 'contracts.txt', 'notes.md', 'q3/incidents.csv', 'q3/q3-summary.txt', 'memo.txt']), pane.join(' | '));
+
+    const geometry = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    const dim = await page.evaluate(tokenColour, '--dim');
+    const spinesFit = geometry.spines.length === 2 && geometry.spines.every((s) => s && s.off === 0 && s.underLabel >= 0 && s.underLabel <= SPINE_GAP_PX);
+    const ticksMeet = geometry.meets.length === 6 && geometry.meets.every(meets);
+    const elbows = geometry.meets.filter((m) => m.last).length === 2 && geometry.elbows.every((r) => r === TREE_ELBOW);
+    const linesName = "each open folder's line starts just under its label at the folder's centre and runs to its last child, with a tick to each child that meets its icon, or a subfolder's chevron, at its middle, a few pixels short, and a rounded elbow into the last; a file at the top level has none";
+    check('folders', linesName, spinesFit && ticksMeet && elbows && geometry.loose === 0, JSON.stringify(geometry));
+    const inkName = 'the tree lines are 1 px on screen, in the dim colour at 55%';
+    const ink = (g) => Math.abs(g.screenWidth - 1) < WIDTH_SLACK_PX && g.stroke === dim && g.opacity === TREE_OPACITY;
+    await zoomAt(page, await boxCentre(page, '#panel'), ZOOM_IN_DELTA);
+    const zoomed = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    check('folders', `${inkName}, at any zoom`, ink(geometry) && ink(zoomed) && zoomed.ticks === geometry.ticks, `${geometry.screenWidth}, ${zoomed.screenWidth} px; ${geometry.stroke} at ${geometry.opacity}; dim ${dim}`);
+    await page.click('#fit-btn');
+
+    const look = await page.evaluate(folderLook, folderSel('q3'));
+    check('folders', 'before a run a folder is blue, its chevron pointing down while it is open, and it has no badge', isDeepStrictEqual(look.fills, fillsOf('light', 'normal')) && look.chevron === '90deg' && !look.pill, JSON.stringify(look));
+    await pressNode(page, folderSel('q3'));
+    const shut = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), focused: await page.evaluate(() => document.activeElement.getAttribute('aria-label')) };
+    await pressNode(page, folderSel('q3'), { key: true });
+    const reopened = await page.evaluate(treeRows, TREE_INDENT);
+    await page.focus(folderSel('reports'));
+    await page.keyboard.press(' ');
+    const spaced = await page.evaluate(treeRows, TREE_INDENT);
+    const closedRows = [...REPORTS_TREE.slice(0, 4), '  q3 · 2 files', 'memo'];
+    const toggled = isDeepStrictEqual(shut.rows, closedRows) && shut.look.chevron === 'none' && shut.focused === 'q3 folder, 2 files, closed' && isDeepStrictEqual(reopened, rows);
+    const toggleName = 'a click on a folder closes it, its chevron pointing right and its files gone, and keeps the focus on it; Enter opens it again, and Space closes another';
+    check('folders', toggleName, toggled && isDeepStrictEqual(spaced, ['reports · 5 files', 'memo']), `${shut.rows.join(' | ')}; ${JSON.stringify(shut.look)}; ${shut.focused}; then ${spaced.join(' | ')}`);
+  });
+
+  const dir = mkdtempSync(join(tmpdir(), 'r3con-folders-'));
+  try {
+    for (const [path, text] of [['picked/01_memo.txt', 'A picked memo.\n'], ['picked/sub/02_memo.md', 'A memo in a subfolder.\n']]) {
+      mkdirSync(dirname(join(dir, path)), { recursive: true });
+      writeFileSync(join(dir, path), text);
+    }
+    await withPage('folders', { sample: false }, async (page) => {
+      await page.click('#tab-files');
+      await page.setInputFiles('#folder-input', join(dir, 'picked'));
+      await filesCounted(page, 2);
+      await page.evaluate(dropItems, { on: 'panel', items: [['picked', [['03_memo.txt', 'Another picked memo.\n']]], ['loose.txt', 'A loose memo.\n']] });
+      await filesCounted(page, 4);
+      const rows = await page.evaluate(treeRows, TREE_INDENT);
+      const names = (await page.evaluate(filesPane)).names;
+      const expected = ['picked · 3 files (open)', '  01_memo', '  sub · 1 file (open)', '    02_memo', '  03_memo', 'loose'];
+      const name = 'a picked folder is a top row as a dropped one is, and a folder of its name dropped later joins it, its files kept together where it first was, ahead of a file dropped beside them';
+      check('folders', name, isDeepStrictEqual(rows, expected) && isDeepStrictEqual(names, ['01_memo.txt', 'sub/02_memo.md', '03_memo.txt', 'loose.txt']), `${rows.join(' | ')}; ${names.join(' | ')}`);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  await withPage('folders', { sample: false }, async (page) => {
+    await dropBatches(page, [[REPORTS], [LETTERS], [ARCHIVE], [EMPTY_MEMO]], 23);
+    const closed = await page.evaluate(treeRows, TREE_INDENT);
+    const closedName = `in a tab of more than ${FOLD_FROM_DOCS} files every folder starts closed`;
+    check('folders', closedName, isDeepStrictEqual(closed, ['reports · 5 files', 'letters · 5 files', 'archive · 12 files', 'memo']), closed.join(' | '));
+    const reports = await folderId(page, 'reports');
+    const reading = (await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id))).filter((id) => !id.startsWith('doc-g'));
+
+    await pressNode(page, folderSel('letters'));
+    await pressNode(page, folderSel('archive'));
+    const opened = await page.evaluate(treeRows, TREE_INDENT);
+    const expected = ['reports · 5 files', 'letters · 5 files (open)', '  5 more files', 'archive · 12 files (open)', '  10 more files', '  old_10', '  old_11', 'memo'];
+    const fold = await page.evaluate(foldInk);
+    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, nodeSel('doc-f5'))) === 1 && (await count(page, nodeSel('doc-f10'))) === 1;
+    const scopedName = `a fold of files with nothing relevant sits on its folder's line and never reaches past the folder: two open folders' ${FOLD_FROM_DOCS + 5} quiet files fold as two, saying "files"`;
+    check('folders', scopedName, scoped && reading.length === 1, `${opened.join(' | ')}; ${reading.join(' ')}`);
+    await pressNode(page, nodeSel('doc-f10'));
+    const dots = (await page.evaluate(treeGeometry, TREE_GEOMETRY)).meets;
+    await pressNode(page, nodeSel('doc-f10'));
+    // Letters' fold; archive's, opened, its 10 files and the 2 kept in view.
+    const rows = 1 + 1 + 10 + 2;
+    check('folders', "a fold's tick meets its dots as a file's meets its page, at their middle, a few pixels short, the fold closed or open", dots.length === rows && dots.every(meets), JSON.stringify(dots));
+    check('folders', "a fold in a folder is grey, as a loose file's is: its count and dots in the dim colour", fold && fold.count.color === fold.dim && fold.dots === fold.dim, JSON.stringify(fold));
+
+    // Opened, then closed again: the user's say holds once an answer lands.
+    await pressNode(page, folderSel('letters'));
+    await page.click('#tab-chat');
+    await send(page, 'Which site logged the most incidents?');
+    await becomes(page, statusMatches, SIMULATED_DONE.source);
+    await waitLit(page);
+    const after = await page.evaluate(treeRows, TREE_INDENT);
+    const landed = [
+      'reports · 5 files (open)',
+      '  config',
+      '  contracts',
+      '  notes',
+      '  q3 · 2 files (open)',
+      '    incidents',
+      '    q3-summary',
+      'letters · 5 files · 2 sources (lit)',
+      'archive · 12 files (open) (unused)',
+      '  12 files · nothing relevant',
+      'memo',
+    ];
+    const autoName = "once the answer lands, each folder holding its sources opens, with those it is in, unless the user left it closed; one the user opened stays open; a fold in it says files, nothing relevant";
+    check('folders', autoName, isDeepStrictEqual(after, landed), after.join(' | '));
+
+    await pressNode(page, folderSel('q3'));
+    const q3 = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), ink: await page.evaluate(tokenColour, '--accent-ink') };
+    await pressNode(page, folderSel('reports'));
+    const reportsLit = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('reports')), stand: await page.evaluate(standIns, reports) };
+    const litLook = (look, text) => isDeepStrictEqual(look.fills, fillsOf('light', 'lit')) && look.opacity === 1 && look.chevron === 'none' && !look.pill && look.sources?.text === text && look.sources.color === q3.ink;
+    const q3Lit = q3.rows.includes('  q3 · 2 files · 2 sources (lit)') && litLook(q3.look, '2 sources');
+    const nested = reportsLit.rows[0] === 'reports · 5 files · 4 sources (lit)' && litLook(reportsLit.look, '4 sources');
+    const litName = "a closed folder holding the answer's sources lights terracotta, with no badge, and counts them under its name in the accent ink, any depth in it: q3's 2, then reports' 4";
+    check('folders', litName, q3Lit && nested, `${q3.rows.join(' | ')}; ${JSON.stringify(q3.look)}; ${reportsLit.rows[0]}; ${JSON.stringify(reportsLit.look)}`);
+
+    const index = reports.slice('doc-'.length);
+    const stand = reportsLit.stand;
+    const columns = ['doc', 'parsed', 'r1', 'r2'].map((kind) => `${kind}-${index}`);
+    const inside = await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id).filter((id) => /^(r\d|parsed)-[0-4]$/.test(id)));
+    const one = new Set(stand.lines.map((key) => key.split('>').map((end) => end.split('-')[0]).join('>'))).size === stand.lines.length;
+    const standName = 'a closed folder stands in for its files in every column, one node a column, with one line between columns for all of them, lit along the trail through it';
+    // The simulated answer cites some of its files' snippets and parses, and its trail goes on to the snippets' files.
+    const [doc, parsed, , r2] = columns;
+    const litThrough = isDeepStrictEqual(stand.onPath, [doc, parsed, r2]) && isDeepStrictEqual(stand.lit, [`${doc}>${r2}`, `${parsed}>answer-0`, `${r2}>answer-0`]);
+    check('folders', standName, isDeepStrictEqual(stand.nodes, columns) && inside.length === 0 && one && stand.lines.length >= 3 && litThrough, JSON.stringify({ stand, inside }));
+
+    const archive = await page.evaluate(folderLook, folderSel('archive'));
+    const memoOpacity = await page.$eval('#world .node.doc[aria-label^="memo.txt,"]', (el) => Number(getComputedStyle(el).opacity));
+    const unusedName = "once an answer is lit, a folder holding none of its sources greys to stone and dims as a file off the trail does, open or closed";
+    await pressNode(page, folderSel('archive'));
+    const archiveClosed = await page.evaluate(folderLook, folderSel('archive'));
+    const grey = (look) => isDeepStrictEqual(look.fills, fillsOf('light', 'unused')) && look.opacity === memoOpacity && memoOpacity < 1 && look.sources === null;
+    check('folders', unusedName, grey(archive) && grey(archiveClosed), JSON.stringify({ archive, archiveClosed, memoOpacity }));
+    const lines = await page.evaluate(treeGeometry, TREE_GEOMETRY);
+    check('folders', 'tree lines are never lit: once an answer is, they keep the dim colour at 55%', lines.stroke === (await page.evaluate(tokenColour, '--dim')) && lines.opacity === TREE_OPACITY, JSON.stringify(lines));
+
+    await send(page, 'Which memo mentions the storm?');
+    await becomes(page, landedNode, 'answer-1');
+    await becomes(page, (id) => document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('on-path'), 'answer-1');
+    const asked = await page.evaluate(treeRows, TREE_INDENT);
+    const askName = "an ask landing lit leaves the folders as the user left them, each closed one counting the ask's sources in it";
+    const askRows = ['reports · 5 files · 3 sources (lit)', 'letters · 5 files · 3 sources (lit)', 'archive · 12 files (unused)', 'memo'];
+    check('folders', askName, isDeepStrictEqual(asked, askRows), asked.join(' | '));
+
+    await page.click('#theme-btn');
+    const dark = { letters: await page.evaluate(folderLook, folderSel('letters')), archive: await page.evaluate(folderLook, folderSel('archive')), ink: await page.evaluate(tokenColour, '--accent-ink') };
+    await pressNode(page, folderSel('reports'));
+    const blue = await page.evaluate(folderLook, folderSel('reports'));
+    const darkName = 'in the dark theme a folder takes its dark pair: lit, stone, and blue open';
+    const darkOk = isDeepStrictEqual(dark.letters.fills, fillsOf('dark', 'lit')) && dark.letters.sources?.color === dark.ink && isDeepStrictEqual(dark.archive.fills, fillsOf('dark', 'unused')) && isDeepStrictEqual(blue.fills, fillsOf('dark', 'normal'));
+    check('folders', darkName, darkOk, JSON.stringify({ dark, blue }));
+
+    await pressNode(page, folderSel('reports'));
+    await page.click('#tab-files');
+    await page.click('#file-list li:nth-child(5) .file');
+    await page.click('#file-view >> text=show in panel');
+    const shown = { node: await count(page, '#world .node.doc[aria-label^="q3/q3-summary.txt,"]'), popup: (await popup(page))?.title, rows: (await page.evaluate(treeRows, TREE_INDENT)).slice(0, 7) };
+    const jumpName = "show in panel opens each closed folder a file is in, outermost first, and the file's popup";
+    check('folders', jumpName, shown.node === 1 && shown.popup === '● q3/q3-summary.txt' && isDeepStrictEqual(shown.rows, REPORTS_TREE), JSON.stringify(shown));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    const notes = ['notes', [['a.txt', 'A note.\n'], ['b.txt', ''], ['c.txt', '']]];
+    const other = ['other', Array.from({ length: FOLD_FROM_DOCS }, (_, i) => [`empty_${i}.txt`, ''])];
+    await dropBatches(page, [[notes], [other]], 3 + FOLD_FROM_DOCS);
+    await pressNode(page, folderSel('notes'));
+    await pressNode(page, folderSel('notes'));
+    await page.click('#tab-chat');
+    await send(page, 'Which note is relevant?');
+    await waitLit(page);
+    const id = await folderId(page, 'notes');
+    const drawn = await page.evaluate(standIns, id);
+    await pressNode(page, folderSel('other'));
+    await pressNode(page, folderSel('other'));
+    const redrawn = await page.evaluate(standIns, id);
+    const [r1, r2] = ['r1', 'r2'].map((kind) => `${kind}-${id.slice('doc-'.length)}`);
+    const name = "a closed folder's lines stay as the run drew them once the panel folds again, among them a line from its one relevant file's snippet to the next round in it";
+    check('folders', name, drawn.lines.includes(`${r1}>${r2}`) && isDeepStrictEqual(redrawn, drawn), JSON.stringify({ drawn, redrawn }));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    // A folder named as long as a label gets, of over a hundred files, in the middle row of three, closed by the user.
+    const long = 'quarterly_maintenance_rep';
+    const files = 120;
+    await dropBatches(page, [[['aaa', [['a.txt', 'A.\n']]]], [[long, Array.from({ length: files }, (_, i) => [`f_${i}.txt`, `File ${i}.\n`])]], [EMPTY_MEMO]], files + 2);
+    for (const name of ['aaa', 'aaa', long, long]) await pressNode(page, folderSel(name));
+    await page.click('#tab-chat');
+    await send(page, 'Which maintenance contractor logged the most incidents?');
+    await waitLit(page);
+    const apart = await page.evaluate(() => {
+      const box = (el) => el.querySelector('.label').getBoundingClientRect();
+      const answer = box(document.querySelector('.node.answer'));
+      const parses = [...document.querySelectorAll('.node.parsed')].map(box).filter((b) => b.bottom > answer.top && b.top < answer.bottom);
+      const rows = [...document.querySelectorAll('.node.doc')].map((el) => el.style.top);
+      return { onRow: rows.includes(document.querySelector('.node.answer').style.top), meets: parses.filter((b) => b.right > answer.left).length };
+    });
+    const name = "the answer never sits at a row's height, so a long folder label in the parse column stays clear of its label";
+    check('folders', name, isDeepStrictEqual(apart, { onRow: false, meets: 0 }), JSON.stringify(apart));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', memosFrom(0, FOLDED_FILES));
+    await filesCounted(page, FOLDED_FILES);
+    const loose = { lines: await page.$eval('#world .tree-lines', (el) => el.getAttribute('d') ?? ''), folders: await count(page, '#world .node.folder'), left: await page.$$eval('#world .node.doc', (els) => [...new Set(els.map((el) => el.style.left))]) };
+    const looseName = 'loose files draw no tree and no folder, each row at the left of the column, as before folders';
+    check('folders', looseName, loose.lines === '' && loose.folders === 0 && isDeepStrictEqual(loose.left, ['0px']), JSON.stringify(loose));
   });
 }
 
@@ -1767,26 +2127,14 @@ const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? nul
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
-    const longUtf16 = utf16('utf16_long.txt', 'A Notepad note, saved as Unicode. '.repeat(LONG_UTF16_CHARS).slice(0, LONG_UTF16_CHARS), UTF16LE_BOM);
-    const longText = memo('long.txt', 'A long memo. '.repeat(PREVIEW_CHARS).slice(0, PREVIEW_CHARS + 1));
-    const texts = [memo('notes.log', 'A log line.\n'), longUtf16, longText];
-    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), ...texts]);
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), memo('notes.log', 'A log line.\n')]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
     const expected = `Not added: 01_memo.pdf, memos.zip, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
     const name = 'the prototype refuses a PDF, a .docx and a zip, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
-    const added = isDeepStrictEqual(listed, ['remove long.txt', 'remove notes.log', 'remove utf16_long.txt']);
+    const added = isDeepStrictEqual(listed, ['remove notes.log']);
     check('files', name, added && error === expected, `${listed.join(', ')}; ${error}`);
-
-    const shown = await openFileView(page, 'utf16_long.txt');
-    const whole = shown.meta === `${fmtKb(longUtf16.buffer.length)} · your file` && shown.text.length === LONG_UTF16_CHARS;
-    const wholeName = "a UTF-16 file of more bytes than the preview's characters, but fewer characters, shows its whole text, with no note that only its start is shown";
-    check('files', wholeName, longUtf16.buffer.length > PREVIEW_CHARS && whole, `${shown.meta}; ${shown.text.length} characters`);
-    await page.click('#file-back');
-    const cut = await openFileView(page, 'long.txt');
-    const noted = cut.meta === `${fmtKb(longText.buffer.length)} · your file · ${PREVIEW_NOTE}` && cut.text.length === PREVIEW_CHARS;
-    check('files', `a file whose text is longer than the preview shows its first ${PREVIEW_CHARS} characters, and says so`, noted, `${cut.meta}; ${cut.text.length} characters`);
   });
 }
 
@@ -1819,7 +2167,7 @@ async function filesAddFails() {
 const removeButton = (page, name) => page.getByRole('button', { name: `remove ${name}`, exact: true });
 const focusedName = (page) => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.id);
 const removeNames = (page) => page.$$eval('#file-list .remove', (els) => els.map((el) => el.getAttribute('aria-label')));
-const docNames = (page) => page.$$eval('#world .node.doc', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
+const docNames = (page) => page.$$eval('#world .node.doc:not(.folder)', (els) => els.map((el) => el.getAttribute('aria-label').split(',')[0]));
 
 // Each button in the files list, to open a file or remove it, is at least `px` wide and tall.
 function targetsFit(px) {
@@ -2770,11 +3118,85 @@ async function popupArea() {
   });
 
   await withPage('popup', { before: serving(withLongParse) }, async (page) => {
+    const total = JSON.stringify(longParse(), null, JSON_INDENT).split('\n').length;
     await inspect(page, 'parsed-0');
-    const lines = await count(page, '#inspector pre.code > span');
-    const notes = await page.$$eval('#inspector > .k', (els) => els.map((el) => el.textContent));
-    const capName = `a parse of more than ${PREVIEW_LINES} lines shows its first ${PREVIEW_LINES} and says so`;
-    check('popup', capName, lines === PREVIEW_LINES && notes.includes(PREVIEW_LINES_NOTE), `${lines} lines; ${notes.join(' | ')}`);
+    const cut = await page.evaluate(shownIn, '#inspector');
+    await page.click('#inspector .cut button');
+    const full = await page.evaluate(shownIn, '#inspector');
+    const capName = `a parse of more than ${LINES_SHOWN} lines of JSON shows its first ${LINES_SHOWN}, then open in full, which shows them all`;
+    const cutThere = cut.lines === LINES_SHOWN && cut.cut === CUT_LINE;
+    check('popup', capName, cutThere && full.lines === total && full.cut === null, `${cut.lines} lines, ${cut.cut}; then ${full.lines}, ${full.cut}`);
+  });
+}
+
+// In-page: what the popup or pane `selector` shows of a text: its meta line, its lines of JSON, its length and where it
+// ends, its line where the text stops short, its scroll, and whether it has the focus.
+function shownIn(selector) {
+  const pre = document.querySelector(`${selector} pre`);
+  const cut = pre.querySelector('.cut');
+  const text = [...pre.childNodes].filter((node) => node !== cut).map((node) => node.textContent).join('');
+  const lines = pre.querySelectorAll(':scope > span:not(.cut)').length;
+  const focused = document.activeElement === pre;
+  return { meta: pre.previousElementSibling.textContent, lines, length: text.length, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
+}
+
+// Words numbered from 1, so each says where it is.
+const numberedWords = (n) => `${Array.from({ length: n }, (_, i) => `w${i + 1}`).join(' ')}\n`;
+const docNode = (name) => `.node.doc[aria-label^="${name},"]`;
+
+// Enough words past where a popup stops short that its text, opened in full, runs on past the line that said so.
+const WORDS_PAST = 1000;
+// A 3 MB file with no spaces, as minified JSON or base64 is: one word.
+const DENSE_CHARS = 3000000;
+
+// A file of more words than its popup shows, one of exactly as many, and one of more characters with no spaces.
+async function popupWords() {
+  await withPage('popup', { sample: false }, async (page) => {
+    const long = memo('long.txt', numberedWords(WORDS_SHOWN + WORDS_PAST));
+    const within = memo('within.txt', numberedWords(WORDS_SHOWN));
+    const dense = memo('dense.txt', 'x'.repeat(DENSE_CHARS));
+    await page.setInputFiles('#file-input', [long, within, dense]);
+    await filesCounted(page, 3);
+    await page.click(docNode('long.txt'));
+    const cut = await page.evaluate(shownIn, '#inspector');
+    const stopsName = `a file of more than ${WORDS_SHOWN} words shows its ${WORDS_SHOWN}th word and not the next`;
+    check('popup', stopsName, cut.end.endsWith(` w${WORDS_SHOWN}`), JSON.stringify(cut.end));
+
+    await page.$eval('#inspector pre', (el) => (el.scrollTop = el.scrollHeight));
+    const scrolled = (await page.evaluate(shownIn, '#inspector')).scrollTop;
+    await page.click('#inspector .cut button');
+    const full = await page.evaluate(shownIn, '#inspector');
+    const fullName = 'where its text stops, a line says only open in full, which shows the rest, to its last word, at the same scroll, the focus on the text';
+    const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
+    check('popup', fullName, cut.cut === CUT_LINE && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
+
+    await page.keyboard.press('Escape');
+    await page.click(docNode('within.txt'));
+    const whole = await page.evaluate(shownIn, '#inspector');
+    const withinName = `a file of ${WORDS_SHOWN} words shows whole, with no open in full`;
+    check('popup', withinName, whole.end.endsWith(` w${WORDS_SHOWN}\n`) && whole.cut === null, JSON.stringify(whole));
+
+    await page.keyboard.press('Escape');
+    await page.click(docNode('dense.txt'));
+    const denseCut = await page.evaluate(shownIn, '#inspector');
+    await page.click('#inspector .cut button');
+    const denseFull = await page.evaluate(shownIn, '#inspector');
+    const denseName = `a file of ${DENSE_CHARS} characters and no spaces stops at ${CHARS_SHOWN}, then open in full, which shows the rest`;
+    const denseStops = denseCut.length === CHARS_SHOWN && denseCut.cut === CUT_LINE;
+    const denseOpened = denseFull.length === DENSE_CHARS && denseFull.cut === null;
+    check('popup', denseName, denseStops && denseOpened, `${denseCut.length}, ${denseCut.cut}; then ${denseFull.length}, ${denseFull.cut}`);
+
+    await page.keyboard.press('Escape');
+    await page.click('#tab-files');
+    const pane = await openFileView(page, 'within.txt');
+    const sized = whole.meta === fmtKb(within.buffer.length) && pane.meta === whole.meta;
+    check('popup', "a user's file is not called your file, in its popup or the files pane: the meta line gives its size", sized && !(await page.textContent('body')).includes('your file'), `${whole.meta}; ${pane.meta}`);
+  });
+
+  await withPage('popup', {}, async (page) => {
+    await page.click(docNode(recordedSample().docs[0].name));
+    const { meta } = await page.evaluate(shownIn, '#inspector');
+    check('popup', "a sample memo's popup still says so", meta.includes(' · sample memo'), meta);
   });
 }
 
@@ -2815,8 +3237,8 @@ const prefixed = (prefix) => (sample) => {
 };
 // An emoji, two UTF-16 code units and one code point, then lines enough to scroll the memo's popup.
 const EMOJI_PREFIX = `🚧🚧 Roadworks notice.\n${Array.from({ length: 60 }, (_, i) => `Filler line ${i + 1}.`).join('\n')}\n`;
-// Lines enough that all of the memo's quotes fall past its preview.
-const PAST_PREVIEW = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(PREVIEW_CHARS / 30));
+// Seven words a line, lines enough that all of the memo's quotes fall past where its popup stops short.
+const PAST_CUT = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(WORDS_SHOWN / 7));
 
 // The sample with nothing located in its first memo: round 1 quotes nothing, and round 2 one sentence r3con didn't find.
 function unlocatedFirstMemo(sample) {
@@ -3179,20 +3601,22 @@ async function quotesArea() {
     check('quotes', unitsName, unitsOk, `${JSON.stringify(marks)}; flashed ${JSON.stringify(flash?.text)} in view ${flash?.inView}`);
   });
 
-  await withPage('quotes', { before: serving(withSample(prefixed(PAST_PREVIEW))) }, async (page) => {
-    const pill = (await page.evaluate(pillsOn))[(await docIdsOf(page))[0]]?.[0];
+  await withPage('quotes', { before: serving(withSample(prefixed(PAST_CUT))) }, async (page) => {
+    const docId = (await docIdsOf(page))[0];
+    const pill = (await page.evaluate(pillsOn))[docId]?.[0];
+    await inspect(page, docId);
+    const cut = (await page.evaluate(shownIn, '#inspector')).cut;
     await quotesOf(page, 'r2-0');
     await page.click('#inspector .quote >> nth=0');
-    const fromQuote = { flash: await page.evaluate(flashed), meta: (await page.evaluate(marksIn, '#inspector')).meta };
+    const fromQuote = { flash: await page.evaluate(flashed), cut: (await page.evaluate(shownIn, '#inspector')).cut };
     await page.keyboard.press('Escape');
     await openSentences(page);
     await page.click('.sentences .sentence >> nth=0');
-    const fromChat = await page.evaluate(flashed);
+    const fromChat = { flash: await page.evaluate(flashed), cut: (await page.evaluate(shownIn, '#inspector')).cut };
     const sentence = sample.rounds[1][0].quotes[0].text;
-    const windowed = /characters [\d,]+–[\d,]+ shown/.test(fromQuote.meta);
-    const pastName = 'a sentence past the preview is counted, and a quote or a chat sentence opens its popup at it, the text around it shown, marked and flashed';
-    const shownThere = [fromQuote.flash, fromChat].every((f) => f?.text === sentence && f.marked && f.inView);
-    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && shownThere && windowed, `${fromQuote.meta}; ${JSON.stringify([fromQuote.flash, fromChat])}`);
+    const pastName = 'a sentence past where its file stops short is counted, and a quote or a chat sentence opens its popup in full, scrolled to it, marked and flashed';
+    const shownThere = [fromQuote, fromChat].every(({ flash, cut }) => flash?.text === sentence && flash.marked && flash.inView && cut === null);
+    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && cut === CUT_LINE && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
   });
 
   await withPage('quotes', { before: serving(withSample(touchingHalves)) }, async (page) => {
@@ -4474,13 +4898,13 @@ async function dropArea() {
     await removeButton(page, LOOSE_FILE[0]).waitFor();
     const folder = { names: (await page.evaluate(filesPane)).names, said: await filesSaid(page), chat: await lastChatLine(page), error: await filesError(page) };
     const expected = {
-      names: ['panel_memo.txt', '01_summary.txt', 'loose.py', 'q3/02_incidents.md', 'q4/02_incidents.md'],
+      names: ['panel_memo.txt', 'loose.py', '01_summary.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'],
       said: '4 files added; 1 skipped.',
       chat: '4 files added; 1 skipped · 5 files total',
       error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}`,
     };
     const folderName =
-      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it, and, as that walk does, nothing hidden or under __MACOSX; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
+      "a folder dropped on the panel is read through every batch its reader gives: only the text, PDF and Word files r3con run reads in a folder, named by their paths below it and kept together, and, as that walk does, nothing hidden or under __MACOSX; a file dropped beside it is taken as it is; the files pane counts as skipped only what was left out by its suffix, and names a file the browser couldn't read";
     check('drop', folderName, isDeepStrictEqual(folder, expected), JSON.stringify(folder));
 
     await page.evaluate(dropItems, { on: 'panel', items: [['scripts', [['a.py', 'x'], ['b.py', 'x'], ['.DS_Store', 'x']]]] });
@@ -4751,7 +5175,8 @@ async function liveStart(url) {
     const over = await page.evaluate(dropItems, { on: 'panel', items: [['panel_memo.txt', 'A memo dropped on the panel.\n'], DROPPED_FOLDER] });
     await removeButton(page, 'panel_memo.txt').waitFor();
     const added = { names: (await page.evaluate(filesPane)).names, docs: await docNames(page), said: await filesSaid(page), error: await filesError(page) };
-    const names = ['01_summary.txt', 'panel_memo.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'];
+    // A dropped folder's files keep together, ordered by its name beside the file dropped with it.
+    const names = ['panel_memo.txt', '01_summary.txt', 'q3/02_incidents.md', 'q4/02_incidents.md'];
     const addedExpected = { names, docs: names, said: '4 files added; 1 skipped.', error: `Not added: moved.txt. ${BROWSER_COULD_NOT_READ}` };
     const addedName = 'a file and a folder dropped on the empty panel are added as a drop on the files pane adds them, the folder walked and its refusals named';
     check('live', addedName, over.said === DROP_ADDS && isDeepStrictEqual(added, addedExpected), `${over.said}; ${JSON.stringify(added)}`);
@@ -5063,7 +5488,7 @@ const foldStem = ({ docs }, i) => `fold_${String(i).padStart(String(docs - 1).le
 const foldStems = (run, [first, last]) => Array.from({ length: last - first + 1 }, (_, k) => foldStem(run, first + k));
 // A run's rows once read, as panelRows gives them: each fold, and each relevant memo's own row.
 function readRows(run, folds) {
-  const rows = [...folds.map(([first, last]) => [first, `${last - first + 1} documents · nothing relevant`]), ...run.relevant.map((d) => [d, foldStem(run, d)])];
+  const rows = [...folds.map(([first, last]) => [first, `${last - first + 1} files · nothing relevant`]), ...run.relevant.map((d) => [d, foldStem(run, d)])];
   return rows.sort((a, b) => a[0] - b[0]).map(([, row]) => row);
 }
 const FOLD_RUN_ROWS = readRows(FOLD_RUN, FOLD_RUN_FOLDS);
@@ -5095,7 +5520,7 @@ async function liveFolds(url, server) {
     const reading = await page.evaluate(panelRows);
     const rest = FOLD_RUN.docs - 2 * CONTEXT_DOCS;
     const ends = [foldStems(FOLD_RUN, [0, CONTEXT_DOCS - 1]), foldStems(FOLD_RUN, [FOLD_RUN.docs - CONTEXT_DOCS, FOLD_RUN.docs - 1])];
-    const waiting = [ends[0], `${rest} documents · reading…`, ends[1]].flat();
+    const waiting = [ends[0], `${rest} files · reading…`, ends[1]].flat();
     const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
     check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
 
@@ -5177,7 +5602,7 @@ async function liveFolds(url, server) {
     const askLit = await litOnPanel(page);
     const askExpected = trailOnPage(ask.trail, ask.ids, fileNodes(FOLD_RUN.docs), 'answer-1');
     const askName = 'an ask over a folded run lands lit along its own trail, the folds as they were';
-    const folded = back.some((row) => row.includes(' documents · '));
+    const folded = back.some((row) => row.includes(' files · '));
     const asked = landed && isDeepStrictEqual(askLit, askExpected) && isDeepStrictEqual(await page.evaluate(panelRows), back);
     check('live', askName, folded && asked, `${askLit.edges.length} lines lit, ${askExpected.edges.length} on the trail; ${back.length} rows`);
   });
@@ -5255,7 +5680,7 @@ async function liveFoldsJoined(url, server) {
     server.release();
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const rows = await page.evaluate(panelRows);
-    const folds = rows.filter((row) => row.includes(' documents · '));
+    const folds = rows.filter((row) => row.includes(' files · '));
     const title = (await popup(page))?.title;
     const shown = await count(page, nodeSel(fileNode(opened)));
     // The documents kept in view, which joined a fold once read, draw no faint lines, as an opened fold's don't.
@@ -5766,13 +6191,8 @@ async function livePdf(url) {
     check('live', scanName, two && sentToApp && scanRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
 
     const shown = await openFileView(page, '01_memo.pdf');
-    const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B · your file`, text: PDF_TEXT });
+    const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B`, text: PDF_TEXT });
     check('live', "the files tab shows a PDF's extracted text and its file's size", extracted, JSON.stringify(shown));
-    await page.click('#file-back');
-    const big = await openFileView(page, '03_padded.pdf');
-    const whole = isDeepStrictEqual(big, { meta: `${fmtKb(padded.buffer.length)} · your file`, text: PADDED_TEXT });
-    const bigName = "a PDF of more bytes than the preview's characters, but fewer characters of text, shows its whole text, with no note that only its start is shown";
-    check('live', bigName, padded.buffer.length > PREVIEW_CHARS && whole, JSON.stringify(big));
 
     await page.click('#tab-chat');
     const started = runPosted(page);
@@ -5833,7 +6253,7 @@ async function liveWord(url) {
     check('live', emptyName, one && sentToApp && emptyRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
 
     const shown = await openFileView(page, 'report.docx');
-    const extracted = isDeepStrictEqual(shown, { meta: `${fmtSize(report.buffer.length)} · your file`, text: WORD_TEXT });
+    const extracted = isDeepStrictEqual(shown, { meta: fmtSize(report.buffer.length), text: WORD_TEXT });
     check('live', "the files tab shows a Word file's text as Markdown, its table and all, and its file's size", extracted, JSON.stringify(shown));
 
     await page.click('#tab-chat');
@@ -6642,7 +7062,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
