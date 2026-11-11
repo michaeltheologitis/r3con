@@ -8,10 +8,12 @@
   --panel: light-dark(#f4f2ef, #141312);
   --fg: light-dark(#1f1e1c, #e8e5e1);
   --dim: light-dark(#736b62, #968e84);
-  /* Folds of documents with nothing relevant: a muted slate blue, apart from the warm text and the orange trail,
-     its dimmer shade for what a fold says of them; both 4.5:1 or more on the panel. */
-  --fold: light-dark(#465d7e, #8ea4c4);
-  --fold-dim: light-dark(#58708f, #7689a3);
+  /* A folder, back and front: blue; terracotta, closed, holding the lit answer's sources; stone holding none. */
+  --folder-back: light-dark(#2f6f9f, #2d6a96);
+  --folder-front: light-dark(#6aaed6, #5a9cc6);
+  --folder-lit-back: light-dark(#93442a, #a5523a);
+  --folder-unused-back: light-dark(#8a8075, #5a534c);
+  --folder-unused-front: light-dark(#b8afa4, #857c72);
   --line: light-dark(#e5e0d9, #2e2b28);
   --code: light-dark(#f0ece7, #232120);
   --accent: light-dark(#c15f3c, #d77757);
@@ -229,11 +231,9 @@ p { margin: 0; }
   border-radius: 1em;
 }
 .node.void { opacity: 0.45; }
-/* A fold: a run of documents with nothing relevant as one row, counted in the fold colour in every column and
-   readable where its icons dim. Its first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
-.node.fold .label { color: var(--fold-dim); }
-.node.fold .name { color: var(--fold); }
-.node.fold.doc .icon { color: var(--fold); }
+/* A fold: a run of documents with nothing relevant as one row, counted in every column and readable where its icons
+   dim. Its first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
+.node.fold.doc .icon { color: var(--dim); }
 .node.fold.doc .name { font-weight: 700; }
 .node.fold.doc.open .icon { rotate: 90deg; }
 .node.fold.void { opacity: 1; }
@@ -257,6 +257,21 @@ p { margin: 0; }
 /* Off the trail a fold's icons dim with the other nodes, while its text keeps 4.5:1: it marks where its documents are. */
 .drawing.is-lit .node.fold { opacity: 1; }
 .drawing.is-lit .node.fold .icon { opacity: 0.3; }
+/* The file column's tree: thin and quiet, under the nodes, 1px on screen at any zoom as the edges are, never lit. */
+.tree-lines { fill: none; stroke: var(--dim); stroke-opacity: 0.55; stroke-width: calc(1px / var(--k, 1)); stroke-linecap: round; }
+/* A folder's chevron, left of it, points down while it is open. */
+.node .chevron { position: absolute; top: calc(var(--node-icon) / 2); width: 12px; height: 12px; translate: -50% -50%; color: var(--dim); }
+.node .chevron svg { display: block; width: 100%; height: 100%; transition: rotate 0.15s; }
+.node.folder.open .chevron svg { rotate: 90deg; }
+.node.folder:hover .chevron { color: var(--fg); }
+.folder-back { fill: var(--folder-back); }
+.folder-front { fill: var(--folder-front); }
+.drawing.is-lit .node.folder.on-path { --folder-back: var(--folder-lit-back); --folder-front: var(--accent); }
+.drawing.is-lit .node.folder.unused { --folder-back: var(--folder-unused-back); --folder-front: var(--folder-unused-front); }
+.drawing.is-lit .node.on-path .label.sources { color: var(--accent-ink); }
+/* An open folder never lights: its files do. Holding sources, it keeps its name readable and dims its icon, as a fold. */
+.drawing.is-lit .node.folder.open:not(.unused) { opacity: 1; }
+.drawing.is-lit .node.folder.open:not(.unused) :is(.icon, .chevron) { opacity: 0.3; }
 .fill-orange { fill: var(--fill-orange); }
 .fill-yellow { fill: var(--fill-yellow); }
 .fill-blue { fill: var(--fill-blue); }
