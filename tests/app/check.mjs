@@ -265,16 +265,17 @@ const NOT_FOUND_LOG = 'Failed to load resource: the server responded with a stat
 const LIVE_ASK = 'live ask over this run';
 const PDF_TEXT = 'Incidents this quarter: 7.';
 const PADDED_TEXT = 'A memo padded with a stream that no page uses.';
-// The page's PREVIEW_CHARS: a file's preview shows this much of its text, and says so when there is more.
-const PREVIEW_CHARS = 20000;
-const PREVIEW_NOTE = 'first 20,000 characters shown';
-// The page's PREVIEW_LINES: a parse's popup shows this many lines of its JSON, and says so when there are more.
-const PREVIEW_LINES = 5000;
-const PREVIEW_LINES_NOTE = 'first 5,000 lines shown';
+// The page's WORDS_SHOWN, CHARS_SHOWN and LINES_SHOWN: a file's popup stops after this many words, or characters if
+// sooner, and a parse's after this many lines of its JSON, until opened in full.
+const WORDS_SHOWN = 150000;
+const CHARS_SHOWN = 2000000;
+const LINES_SHOWN = 30000;
+// The line where a popup's text stops short: its button alone.
+const CUT_LINE = 'open in full';
 // The page's JSON_INDENT: a parse's JSON is indented this many spaces a level.
 const JSON_INDENT = 2;
-// A stream this long, which no page uses, makes a PDF of more bytes than its preview has characters.
-const PDF_PADDING = PREVIEW_CHARS + 5000;
+// A stream this long, which no page uses, makes a PDF far bigger than its text.
+const PDF_PADDING = 25000;
 // The Markdown r3con makes of report.docx below.
 const WORD_TEXT = 'Incidents by site:\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |\n| Merrow | 3 |';
 const ZIPPED_TEXT = 'A memo that came in a zip.\n';
@@ -310,8 +311,6 @@ const MIME_TYPES = {
 };
 const UTF16LE_BOM = [0xff, 0xfe];
 const UTF32LE_BOM = [0xff, 0xfe, 0x00, 0x00];
-// More bytes in UTF-16 than PREVIEW_CHARS, but fewer characters.
-const LONG_UTF16_CHARS = PREVIEW_CHARS * 0.75;
 const WRITE_DOCUMENTS =
   'import json, sys; from pathlib import Path; from tests.documents import WRITERS\n' +
   'for name, spec in json.loads(sys.argv[2]).items(): WRITERS[Path(name).suffix](Path(sys.argv[1], name), **spec)';
@@ -622,10 +621,14 @@ function serving(edit) {
 const withFewerMemos = withSample((sample) => ({ ...sample, docs: sample.docs.slice(0, FEWER_MEMOS) }));
 const withNoAsks = (script) => script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, 'const RECORDED_ASKS = [];');
 
-// app.js with the sample's first parse holding its first record over and over, past PREVIEW_LINES lines of JSON.
+// The sample's first parse holding its first record over and over, each record more than two lines of JSON, so past
+// LINES_SHOWN lines; and app.js with it.
+function longParse() {
+  const [field, [record]] = Object.entries(recordedSample().parsed[0].parse).find(([, records]) => records.length);
+  return { [field]: Array(LINES_SHOWN / 2).fill(record) };
+}
 const withLongParse = withSample((sample) => {
-  const [field, [record]] = Object.entries(sample.parsed[0].parse).find(([, records]) => records.length);
-  sample.parsed[0].parse = { [field]: Array(PREVIEW_LINES).fill(record) };
+  sample.parsed[0].parse = longParse();
   return sample;
 });
 
@@ -1767,26 +1770,14 @@ const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? nul
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
-    const longUtf16 = utf16('utf16_long.txt', 'A Notepad note, saved as Unicode. '.repeat(LONG_UTF16_CHARS).slice(0, LONG_UTF16_CHARS), UTF16LE_BOM);
-    const longText = memo('long.txt', 'A long memo. '.repeat(PREVIEW_CHARS).slice(0, PREVIEW_CHARS + 1));
-    const texts = [memo('notes.log', 'A log line.\n'), longUtf16, longText];
-    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), ...texts]);
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), memo('notes.log', 'A log line.\n')]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
     const expected = `Not added: 01_memo.pdf, memos.zip, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
     const name = 'the prototype refuses a PDF, a .docx and a zip, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
-    const added = isDeepStrictEqual(listed, ['remove long.txt', 'remove notes.log', 'remove utf16_long.txt']);
+    const added = isDeepStrictEqual(listed, ['remove notes.log']);
     check('files', name, added && error === expected, `${listed.join(', ')}; ${error}`);
-
-    const shown = await openFileView(page, 'utf16_long.txt');
-    const whole = shown.meta === `${fmtKb(longUtf16.buffer.length)} · your file` && shown.text.length === LONG_UTF16_CHARS;
-    const wholeName = "a UTF-16 file of more bytes than the preview's characters, but fewer characters, shows its whole text, with no note that only its start is shown";
-    check('files', wholeName, longUtf16.buffer.length > PREVIEW_CHARS && whole, `${shown.meta}; ${shown.text.length} characters`);
-    await page.click('#file-back');
-    const cut = await openFileView(page, 'long.txt');
-    const noted = cut.meta === `${fmtKb(longText.buffer.length)} · your file · ${PREVIEW_NOTE}` && cut.text.length === PREVIEW_CHARS;
-    check('files', `a file whose text is longer than the preview shows its first ${PREVIEW_CHARS} characters, and says so`, noted, `${cut.meta}; ${cut.text.length} characters`);
   });
 }
 
@@ -2771,11 +2762,85 @@ async function popupArea() {
   });
 
   await withPage('popup', { before: serving(withLongParse) }, async (page) => {
+    const total = JSON.stringify(longParse(), null, JSON_INDENT).split('\n').length;
     await inspect(page, 'parsed-0');
-    const lines = await count(page, '#inspector pre.code > span');
-    const notes = await page.$$eval('#inspector > .k', (els) => els.map((el) => el.textContent));
-    const capName = `a parse of more than ${PREVIEW_LINES} lines shows its first ${PREVIEW_LINES} and says so`;
-    check('popup', capName, lines === PREVIEW_LINES && notes.includes(PREVIEW_LINES_NOTE), `${lines} lines; ${notes.join(' | ')}`);
+    const cut = await page.evaluate(shownIn, '#inspector');
+    await page.click('#inspector .cut button');
+    const full = await page.evaluate(shownIn, '#inspector');
+    const capName = `a parse of more than ${LINES_SHOWN} lines of JSON shows its first ${LINES_SHOWN}, then open in full, which shows them all`;
+    const cutThere = cut.lines === LINES_SHOWN && cut.cut === CUT_LINE;
+    check('popup', capName, cutThere && full.lines === total && full.cut === null, `${cut.lines} lines, ${cut.cut}; then ${full.lines}, ${full.cut}`);
+  });
+}
+
+// In-page: what the popup or pane `selector` shows of a text: its meta line, its lines of JSON, its length and where it
+// ends, its line where the text stops short, its scroll, and whether it has the focus.
+function shownIn(selector) {
+  const pre = document.querySelector(`${selector} pre`);
+  const cut = pre.querySelector('.cut');
+  const text = [...pre.childNodes].filter((node) => node !== cut).map((node) => node.textContent).join('');
+  const lines = pre.querySelectorAll(':scope > span:not(.cut)').length;
+  const focused = document.activeElement === pre;
+  return { meta: pre.previousElementSibling.textContent, lines, length: text.length, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
+}
+
+// Words numbered from 1, so each says where it is.
+const numberedWords = (n) => `${Array.from({ length: n }, (_, i) => `w${i + 1}`).join(' ')}\n`;
+const docNode = (name) => `.node.doc[aria-label^="${name},"]`;
+
+// Enough words past where a popup stops short that its text, opened in full, runs on past the line that said so.
+const WORDS_PAST = 1000;
+// A 3 MB file with no spaces, as minified JSON or base64 is: one word.
+const DENSE_CHARS = 3000000;
+
+// A file of more words than its popup shows, one of exactly as many, and one of more characters with no spaces.
+async function popupWords() {
+  await withPage('popup', { sample: false }, async (page) => {
+    const long = memo('long.txt', numberedWords(WORDS_SHOWN + WORDS_PAST));
+    const within = memo('within.txt', numberedWords(WORDS_SHOWN));
+    const dense = memo('dense.txt', 'x'.repeat(DENSE_CHARS));
+    await page.setInputFiles('#file-input', [long, within, dense]);
+    await filesCounted(page, 3);
+    await page.click(docNode('long.txt'));
+    const cut = await page.evaluate(shownIn, '#inspector');
+    const stopsName = `a file of more than ${WORDS_SHOWN} words shows its ${WORDS_SHOWN}th word and not the next`;
+    check('popup', stopsName, cut.end.endsWith(` w${WORDS_SHOWN}`), JSON.stringify(cut.end));
+
+    await page.$eval('#inspector pre', (el) => (el.scrollTop = el.scrollHeight));
+    const scrolled = (await page.evaluate(shownIn, '#inspector')).scrollTop;
+    await page.click('#inspector .cut button');
+    const full = await page.evaluate(shownIn, '#inspector');
+    const fullName = 'where its text stops, a line says only open in full, which shows the rest, to its last word, at the same scroll, the focus on the text';
+    const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
+    check('popup', fullName, cut.cut === CUT_LINE && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
+
+    await page.keyboard.press('Escape');
+    await page.click(docNode('within.txt'));
+    const whole = await page.evaluate(shownIn, '#inspector');
+    const withinName = `a file of ${WORDS_SHOWN} words shows whole, with no open in full`;
+    check('popup', withinName, whole.end.endsWith(` w${WORDS_SHOWN}\n`) && whole.cut === null, JSON.stringify(whole));
+
+    await page.keyboard.press('Escape');
+    await page.click(docNode('dense.txt'));
+    const denseCut = await page.evaluate(shownIn, '#inspector');
+    await page.click('#inspector .cut button');
+    const denseFull = await page.evaluate(shownIn, '#inspector');
+    const denseName = `a file of ${DENSE_CHARS} characters and no spaces stops at ${CHARS_SHOWN}, then open in full, which shows the rest`;
+    const denseStops = denseCut.length === CHARS_SHOWN && denseCut.cut === CUT_LINE;
+    const denseOpened = denseFull.length === DENSE_CHARS && denseFull.cut === null;
+    check('popup', denseName, denseStops && denseOpened, `${denseCut.length}, ${denseCut.cut}; then ${denseFull.length}, ${denseFull.cut}`);
+
+    await page.keyboard.press('Escape');
+    await page.click('#tab-files');
+    const pane = await openFileView(page, 'within.txt');
+    const sized = whole.meta === fmtKb(within.buffer.length) && pane.meta === whole.meta;
+    check('popup', "a user's file is not called your file, in its popup or the files pane: the meta line gives its size", sized && !(await page.textContent('body')).includes('your file'), `${whole.meta}; ${pane.meta}`);
+  });
+
+  await withPage('popup', {}, async (page) => {
+    await page.click(docNode(recordedSample().docs[0].name));
+    const { meta } = await page.evaluate(shownIn, '#inspector');
+    check('popup', "a sample memo's popup still says so", meta.includes(' · sample memo'), meta);
   });
 }
 
@@ -2816,8 +2881,8 @@ const prefixed = (prefix) => (sample) => {
 };
 // An emoji, two UTF-16 code units and one code point, then lines enough to scroll the memo's popup.
 const EMOJI_PREFIX = `🚧🚧 Roadworks notice.\n${Array.from({ length: 60 }, (_, i) => `Filler line ${i + 1}.`).join('\n')}\n`;
-// Lines enough that all of the memo's quotes fall past its preview.
-const PAST_PREVIEW = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(PREVIEW_CHARS / 30));
+// Seven words a line, lines enough that all of the memo's quotes fall past where its popup stops short.
+const PAST_CUT = 'A filler line, ahead of the memo.\n'.repeat(Math.ceil(WORDS_SHOWN / 7));
 
 // The sample with nothing located in its first memo: round 1 quotes nothing, and round 2 one sentence r3con didn't find.
 function unlocatedFirstMemo(sample) {
@@ -3180,20 +3245,22 @@ async function quotesArea() {
     check('quotes', unitsName, unitsOk, `${JSON.stringify(marks)}; flashed ${JSON.stringify(flash?.text)} in view ${flash?.inView}`);
   });
 
-  await withPage('quotes', { before: serving(withSample(prefixed(PAST_PREVIEW))) }, async (page) => {
-    const pill = (await page.evaluate(pillsOn))[(await docIdsOf(page))[0]]?.[0];
+  await withPage('quotes', { before: serving(withSample(prefixed(PAST_CUT))) }, async (page) => {
+    const docId = (await docIdsOf(page))[0];
+    const pill = (await page.evaluate(pillsOn))[docId]?.[0];
+    await inspect(page, docId);
+    const cut = (await page.evaluate(shownIn, '#inspector')).cut;
     await quotesOf(page, 'r2-0');
     await page.click('#inspector .quote >> nth=0');
-    const fromQuote = { flash: await page.evaluate(flashed), meta: (await page.evaluate(marksIn, '#inspector')).meta };
+    const fromQuote = { flash: await page.evaluate(flashed), cut: (await page.evaluate(shownIn, '#inspector')).cut };
     await page.keyboard.press('Escape');
     await openSentences(page);
     await page.click('.sentences .sentence >> nth=0');
-    const fromChat = await page.evaluate(flashed);
+    const fromChat = { flash: await page.evaluate(flashed), cut: (await page.evaluate(shownIn, '#inspector')).cut };
     const sentence = sample.rounds[1][0].quotes[0].text;
-    const windowed = /characters [\d,]+–[\d,]+ shown/.test(fromQuote.meta);
-    const pastName = 'a sentence past the preview is counted, and a quote or a chat sentence opens its popup at it, the text around it shown, marked and flashed';
-    const shownThere = [fromQuote.flash, fromChat].every((f) => f?.text === sentence && f.marked && f.inView);
-    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && shownThere && windowed, `${fromQuote.meta}; ${JSON.stringify([fromQuote.flash, fromChat])}`);
+    const pastName = 'a sentence past where its file stops short is counted, and a quote or a chat sentence opens its popup in full, scrolled to it, marked and flashed';
+    const shownThere = [fromQuote, fromChat].every(({ flash, cut }) => flash?.text === sentence && flash.marked && flash.inView && cut === null);
+    check('quotes', pastName, pill === String(SAMPLE_QUOTED.pills[0]) && cut === CUT_LINE && shownThere, `${cut}; ${JSON.stringify([fromQuote, fromChat])}`);
   });
 
   await withPage('quotes', { before: serving(withSample(touchingHalves)) }, async (page) => {
@@ -5767,13 +5834,8 @@ async function livePdf(url) {
     check('live', scanName, two && sentToApp && scanRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
 
     const shown = await openFileView(page, '01_memo.pdf');
-    const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B · your file`, text: PDF_TEXT });
+    const extracted = isDeepStrictEqual(shown, { meta: `${memoPdf.buffer.length} B`, text: PDF_TEXT });
     check('live', "the files tab shows a PDF's extracted text and its file's size", extracted, JSON.stringify(shown));
-    await page.click('#file-back');
-    const big = await openFileView(page, '03_padded.pdf');
-    const whole = isDeepStrictEqual(big, { meta: `${fmtKb(padded.buffer.length)} · your file`, text: PADDED_TEXT });
-    const bigName = "a PDF of more bytes than the preview's characters, but fewer characters of text, shows its whole text, with no note that only its start is shown";
-    check('live', bigName, padded.buffer.length > PREVIEW_CHARS && whole, JSON.stringify(big));
 
     await page.click('#tab-chat');
     const started = runPosted(page);
@@ -5834,7 +5896,7 @@ async function liveWord(url) {
     check('live', emptyName, one && sentToApp && emptyRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
 
     const shown = await openFileView(page, 'report.docx');
-    const extracted = isDeepStrictEqual(shown, { meta: `${fmtSize(report.buffer.length)} · your file`, text: WORD_TEXT });
+    const extracted = isDeepStrictEqual(shown, { meta: fmtSize(report.buffer.length), text: WORD_TEXT });
     check('live', "the files tab shows a Word file's text as Markdown, its table and all, and its file's size", extracted, JSON.stringify(shown));
 
     await page.click('#tab-chat');
@@ -6643,7 +6705,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, quotesArea, gestures, scale, chatWidthArea, live];
+  const areas = [load, beforeRun, folds, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
