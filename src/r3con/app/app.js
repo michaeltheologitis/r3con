@@ -5162,8 +5162,8 @@
     if (tooSoon) return;
     const tab = state.shown;
     const { files, removed } = tab;
-    if (removed) changeFiles(removed.files, `Restored ${fileCount(removed.files)}`, { at: removed.at });
-    else changeFiles([], `Removed ${fileCount()}`, { removed: { files, at: docPositions(tab) } });
+    if (removed) changeFiles(removed.files, `Restored ${plural(removed.files.length, 'file')}`, { at: removed.at });
+    else changeFiles([], `Removed ${plural(files.length, 'file')}`, { removed: { files, at: docPositions(tab) } });
   }
 
   /** @param {LoadedFile[]} files @param {string} what @param {FilesChange} [change] */

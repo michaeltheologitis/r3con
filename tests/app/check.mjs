@@ -2483,9 +2483,9 @@ async function removeAllArea() {
       hint: removedHint,
       can: true,
       buttons: undo,
-      said: `Removed ${SAMPLE_DOCS} documents.`,
+      said: `Removed ${SAMPLE_DOCS} files.`,
       live: 'polite',
-      chat: [1, `Removed ${SAMPLE_DOCS} documents · 0 files total`],
+      chat: [1, `Removed ${SAMPLE_DOCS} files · 0 files total`],
       focus: 'files-remove-all',
     };
     const removedName = `one press removes every file of the tab, which then looks as with each removed by its own remove, but for the can and the count, kept beside ${UNDO}; both buttons read ${UNDO}, named for what it puts back, the focus stays on the one pressed, and the files pane's polite line and the chat say so once`;
@@ -2494,7 +2494,7 @@ async function removeAllArea() {
     await pressRemoveAll(page, '#files-remove-all');
     const restored = { files: await filesShown(page), nodes: await count(page, '#world .node'), said: await page.textContent('#files-said'), focus: await focusedId(page) };
     const restoredName = `${UNDO} puts back the same files in the same order, their nodes too, and the tab is as before the removal, its recorded run included; the focus stays on the button, which offers ${REMOVE_ALL} again`;
-    const back = { files: before, nodes: SAMPLE_DOCS, said: `Restored ${SAMPLE_DOCS} documents.`, focus: 'files-remove-all' };
+    const back = { files: before, nodes: SAMPLE_DOCS, said: `Restored ${SAMPLE_DOCS} files.`, focus: 'files-remove-all' };
     check('remove all', restoredName, isDeepStrictEqual(restored, back), JSON.stringify(restored));
 
     await page.waitForTimeout(PRESS_GUARD_MS);
