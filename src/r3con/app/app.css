@@ -392,6 +392,8 @@ p { margin: 0; }
 }
 .code.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .code.json > span { display: block; padding-left: var(--indent); text-indent: calc(-1 * var(--indent)); }
+/* Where a long text stops short, under its last line shown. */
+.cut { display: block; margin-top: 0.7em; }
 .used { color: var(--accent-ink); }
 .trail-line:empty { display: none; }
 mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--accent); }
