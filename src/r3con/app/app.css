@@ -231,8 +231,7 @@ p { margin: 0; }
   border-radius: 1em;
 }
 .node.void { opacity: 0.45; }
-/* A fold: a run of documents with nothing relevant as one row, counted in every column and readable where its icons
-   dim. Its first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
+/* A fold's first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
 .node.fold.doc .icon { color: var(--dim); }
 .node.fold.doc .name { font-weight: 700; }
 .node.fold.doc.open .icon { rotate: 90deg; }
@@ -259,7 +258,6 @@ p { margin: 0; }
 .drawing.is-lit .node.fold .icon { opacity: 0.3; }
 /* The file column's tree: thin and quiet, under the nodes, 1px on screen at any zoom as the edges are, never lit. */
 .tree-lines { fill: none; stroke: var(--dim); stroke-opacity: 0.55; stroke-width: calc(1px / var(--k, 1)); stroke-linecap: round; }
-/* A folder's chevron, left of it, points down while it is open. */
 .node .chevron { position: absolute; top: calc(var(--node-icon) / 2); width: 12px; height: 12px; translate: -50% -50%; color: var(--dim); }
 .node .chevron svg { display: block; width: 100%; height: 100%; transition: rotate 0.15s; }
 .node.folder.open .chevron svg { rotate: 90deg; }

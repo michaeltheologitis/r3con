@@ -50,10 +50,9 @@
   /** @typedef {{ document: string, start: number, end: number, text: string, name: string }} NamedQuote A quote behind an answer, as r3con gives it. */
   /**
    * The lit answer's trail as the page draws it: its nodes and lines, as the page names them, a summary of a document
-   * read in parts as its document's; its sources, the documents with a node on it, by index; each summary on it, with the
-   * first node on it that cites the summary; the trail nodes of the summaries whose quotes it carries; and what they quote
-   * of each document, by index.
-   * @typedef {{ nodes: Set<string>, edges: Set<string>, sources: Set<number>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
+   * read in parts as its document's; each summary on it, with the first node on it that cites the summary; the trail
+   * nodes of the summaries whose quotes it carries; and what they quote of each document, by index.
+   * @typedef {{ nodes: Set<string>, edges: Set<string>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
    */
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
@@ -124,16 +123,8 @@
   /** @typedef {[string, string, EdgeKind, ('draw' | 'fade')?]} Line A line to draw: from, to, its kind, and how it enters. */
   /** @typedef {'working' | 'done' | 'failed'} CallState */
   /** @typedef {{ start: number, end: number }} DocRange Documents start to end, inclusive. */
-  /**
-   * A folder of a tab's files, from their paths: its documents, which are together in the tab, and its subfolders and
-   * runs of documents, in order.
-   * @typedef {DocRange & { name: string, path: string, items: (Folder | DocRange)[] }} Folder
-   */
-  /**
-   * Documents start to end, inclusive, as one row: a run of them with nothing relevant, or a folder's; or opened, the
-   * fold above their own rows and the folder above its own. Its depth in the file column's tree sets its indent.
-   * @typedef {DocRange & { open: boolean, depth: number, folder?: Folder }} FoldRow
-   */
+  /** @typedef {DocRange & { name: string, path: string, items: (Folder | DocRange)[] }} Folder Its documents, kept together. */
+  /** @typedef {DocRange & { open: boolean, depth: number, folder?: Folder }} FoldRow A fold's or a folder's documents as one row. */
   /** @typedef {FoldRow | { doc: number, depth: number }} PanelRow */
   /**
    * How a tab of more than FOLD_FROM_DOCS documents, or with folders, folds them.
@@ -2404,12 +2395,8 @@
     if (!trail) return null;
     const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
     /** @type {Trail} */
-    const drawn = { nodes: new Set(), edges: new Set(), sources: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
-    for (const [node, id] of named) {
-      if (!id) continue;
-      drawn.nodes.add(id);
-      if (node !== TRAIL_ANSWER) drawn.sources.add(/** @type {number} */ (docIndex(run, node.slice(node.lastIndexOf(':') + 1))));
-    }
+    const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
+    for (const id of named.values()) if (id) drawn.nodes.add(id);
     for (const [from, to, kind] of trail.edges) {
       const [pageFrom, pageTo] = [named.get(from), named.get(to)];
       if (!pageFrom || !pageTo) continue;
@@ -2973,7 +2960,6 @@
     tab.tree.setAttribute('d', treePath(tab, at));
   }
 
-  // How far left of a row's node its tree line stops: short of its icon, or of a folder's chevron.
   /** @param {PanelRow} row */
   function tickStop(row) {
     if ('doc' in row) return PAGE_LEFT + TREE_GAP;
@@ -2981,30 +2967,29 @@
     return (row.open ? TURNED_DOTS_LEFT : DOTS_LEFT) + TREE_GAP;
   }
 
-  // Each open folder's line, from under its label to its last child, ticks to its children and an elbow into the last.
   /** @param {Tab} tab @param {(node: PanelNode) => Point} at */
   function treePath(tab, at) {
     /** @type {{ depth: number, from: Point, ticks: Point[] }[]} */
     const open = [];
-    let d = '';
+    let pathData = '';
     const close = () => {
       const { from, ticks } = /** @type {{ from: Point, ticks: Point[] }} */ (open.pop());
       const last = ticks.pop();
       if (!last) return;
       const top = from.y + DOC_ICON_HALF + LABEL_LINE_PX + TREE_GAP;
-      d += `M${from.x} ${top}V${last.y - TREE_ELBOW}a${TREE_ELBOW} ${TREE_ELBOW} 0 0 0 ${TREE_ELBOW} ${TREE_ELBOW}H${last.x}`;
-      for (const tick of ticks) d += `M${from.x} ${tick.y}H${tick.x}`;
+      pathData += `M${from.x} ${top}V${last.y - TREE_ELBOW}a${TREE_ELBOW} ${TREE_ELBOW} 0 0 0 ${TREE_ELBOW} ${TREE_ELBOW}H${last.x}`;
+      for (const tick of ticks) pathData += `M${from.x} ${tick.y}H${tick.x}`;
     };
     for (const row of tab.fold?.rows ?? []) {
       while (open.length && open[open.length - 1].depth >= row.depth) close();
       const node = tab.nodes.get('doc' in row ? docId(foldingOf(tab).files[row.doc]) : foldId('doc', row));
       if (!node) continue;
-      const p = at(node);
-      open.at(-1)?.ticks.push({ x: p.x - tickStop(row), y: p.y });
-      if (!('doc' in row) && row.folder && row.open) open.push({ depth: row.depth, from: p, ticks: [] });
+      const point = at(node);
+      open.at(-1)?.ticks.push({ x: point.x - tickStop(row), y: point.y });
+      if (!('doc' in row) && row.folder && row.open) open.push({ depth: row.depth, from: point, ticks: [] });
     }
     while (open.length) close();
-    return d;
+    return pathData;
   }
 
   function refreshHighlight() {
@@ -3105,8 +3090,7 @@
   // ---------- panel: folding ----------
   // A panel of hundreds of rows is unreadable, so a tab of more than FOLD_FROM_DOCS documents folds those with nothing
   // relevant, as a diff folds unchanged lines. Only a snippet, or the answer's trail, gives a document its own row: a
-  // run whose model parses every document stays folded. A tab with folders draws its file column as their tree, where a
-  // closed folder stands in for what is in it as a fold does, and a fold never reaches past its folder.
+  // run whose model parses every document stays folded.
 
   // A folder's nodes are named by its path, which may hold the > that a line's key joins its ends with.
   /** @param {NodeKind} kind @param {FoldRow} row */
@@ -3121,7 +3105,6 @@
   // The folders a file is in, outermost first: the one it was dropped in, then those its name says.
   /** @param {LoadedFile} file */
   const foldersOf = (file) => [file.folder ?? '', ...file.name.split('/').slice(0, -1)].filter(Boolean);
-  // Each folder a file is in, by its path.
   /** @param {LoadedFile} file */
   const folderPaths = (file) => foldersOf(file).map((_, k, names) => names.slice(0, k + 1).join('/'));
 
@@ -3129,25 +3112,24 @@
   /** @param {LoadedFile[]} files */
   function folderTree(files) {
     /** @param {string} name @param {string} path @param {number} d @returns {Folder} */
-    const folder = (name, path, d) => ({ name, path, start: d, end: d, items: [] });
-    const top = folder('', '', 0);
-    // The folders the last file was in.
-    let path = [top];
+    const newFolder = (name, path, d) => ({ name, path, start: d, end: d, items: [] });
+    const top = newFolder('', '', 0);
+    let openFolders = [top];
     let depth = 0;
     files.forEach((file, d) => {
       const names = foldersOf(file);
       depth = Math.max(depth, names.length);
       let k = 0;
-      while (k < names.length && path[k + 1]?.name === names[k]) k += 1;
-      path = path.slice(0, k + 1);
+      while (k < names.length && openFolders[k + 1]?.name === names[k]) k += 1;
+      openFolders = openFolders.slice(0, k + 1);
       for (const name of names.slice(k)) {
-        const parent = path[path.length - 1];
-        const inner = folder(name, parent.path ? `${parent.path}/${name}` : name, d);
+        const parent = openFolders[openFolders.length - 1];
+        const inner = newFolder(name, parent.path ? `${parent.path}/${name}` : name, d);
         parent.items.push(inner);
-        path.push(inner);
+        openFolders.push(inner);
       }
-      for (const f of path) f.end = d;
-      const { items } = path[path.length - 1];
+      for (const folder of openFolders) folder.end = d;
+      const { items } = openFolders[openFolders.length - 1];
       const last = items.at(-1);
       if (last && !('items' in last)) last.end = d;
       else items.push({ start: d, end: d });
@@ -3167,8 +3149,8 @@
     });
     /** @param {number[]} a @param {number[]} b */
     const compare = (a, b) => {
-      const k = a.findIndex((v, j) => v !== b[j]);
-      return k < 0 ? 0 : a[k] - b[k];
+      const index = a.findIndex((value, i) => value !== b[i]);
+      return index < 0 ? 0 : a[index] - b[index];
     };
     return keyed.sort((a, b) => compare(a.key, b.key)).map(({ file }) => file);
   }
@@ -3301,8 +3283,7 @@
     return docs.length;
   }
 
-  // The answers centre on the rows as they'd be with every fold closed, so that opening one doesn't move them; a folder's
-  // rows count as they are, so the answers stay centred on the files shown.
+  // The answers centre on the rows as they'd be with every fold closed, so that opening one doesn't move them.
   /** @param {Tab} tab */
   function foldPlan(tab) {
     const fold = foldingOf(tab);
@@ -3326,7 +3307,9 @@
       if (!row.open) for (const kind of perDocument) layout.set(foldId(kind, row), { x: x(kind), y });
     });
     layout.set('schema', { x: x('schema'), y: 0 });
-    const first = { x: x('answer'), y: ((fold.closedRows - 1) * GRID.rowGap) / 2 };
+    // Never at a row's height, where a long label in the parse column, such as a folder's, would run into theirs.
+    const middle = ((fold.closedRows - 1) * GRID.rowGap) / 2;
+    const first = { x: x('answer'), y: fold.closedRows % 2 ? middle + GRID.rowGap / 2 : middle };
     range(tab.run?.answers.length ?? 1).forEach((k) => layout.set(answerId(k), answerSpot(first, k)));
     return layout;
   }
@@ -3405,14 +3388,14 @@
     node.el.classList.toggle('open', row.open);
   }
 
-  // Once an answer is lit, a closed folder holding its sources lights and counts them; one holding none greys.
   /** @param {Tab} tab @param {PanelNode} node @param {Folder} folder */
   function labelFolder(tab, node, folder) {
     const { open } = /** @type {FoldRow} */ (node.fold);
     const files = plural(folder.end - folder.start + 1, 'file');
     const { trail } = tab;
     const head = node.kind === 'doc';
-    const sources = head && trail ? foldDocs(folder).filter((d) => trail.sources.has(d)).length : 0;
+    const onTrail = new Set(head ? [...(trail?.nodes ?? [])].map((id) => docOf(tab, id)) : []);
+    const sources = foldDocs(folder).filter((d) => onTrail.has(d)).length;
     const counted = !open && sources > 0 && plural(sources, 'source');
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
     name.textContent = `${shortLabel(folder.name)} · ${files}`;
@@ -3525,7 +3508,7 @@
   /** @param {Tab} tab @param {string} id */
   function unfoldTrail(tab, id) {
     const fold = foldingOf(tab);
-    const docs = [...(trailOf(runTab(tab).run, id)?.sources ?? [])];
+    const docs = [...(trailOf(runTab(tab).run, id)?.nodes ?? [])].flatMap((node) => docOf(tab, node) ?? []);
     const folders = docs.flatMap((d) => folderPaths(fold.files[d]));
     if (docs.every((d) => fold.relevant.has(d)) && folders.every((path) => fold.sourced.has(path))) return;
     for (const d of docs) fold.relevant.add(d);
@@ -5069,9 +5052,9 @@
   const droppedIn = new WeakMap();
 
   // By path, a part at a time and by character code, as r3con's walk and r3con app's zips order files: a/b.txt before a-b/x.txt.
-  // A dropped folder's name leads its files' paths, so that they keep together.
   /** @param {File} a @param {File} b */
   function byPath(a, b) {
+    // A dropped folder's name leads, so that its files keep together.
     /** @param {File} file */
     const path = (file) => [droppedIn.get(file) ?? [], file.name.split('/')].flat();
     const [x, y] = [path(a), path(b)];
