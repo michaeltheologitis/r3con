@@ -42,6 +42,8 @@ BUNDLED = (
     "toga",
     # Toga's Mac web view, which loads AppKit and WebKit.
     "toga_cocoa.widgets.webview",
+    # Toga's Mac dialogs, the Save panel a tab is saved through among them.
+    "toga_cocoa.dialogs",
     # keyring's Keychain calls, which load the Security framework.
     "keyring.backends.macOS.api",
 )

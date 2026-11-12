@@ -1,7 +1,7 @@
 // Checks the run panel in src/r3con/app/ (index.html, app.css, app.js) in headless Chromium: node tests/app/check.mjs
 // The live area serves it with tests/app/fake_server.py, through uv.
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
@@ -5086,12 +5086,12 @@ async function stopArea() {
 // ---------- live: served by r3con app, with a scripted model ----------
 
 // Starts fake_server.py with no provider key in its environment but those in `keys`, in a process group of its own.
-function startFakeServer(keys = {}) {
+function startFakeServer(keys = {}, args = []) {
   const logsDir = mkdtempSync(join(tmpdir(), 'r3con-checks-'));
   const env = { ...process.env };
   for (const variable of KEY_VARIABLES) delete env[variable];
   Object.assign(env, keys);
-  const server = spawn('uv', [...FAKE_SERVER, logsDir], { cwd: REPO_DIR, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const server = spawn('uv', [...FAKE_SERVER, logsDir, ...args], { cwd: REPO_DIR, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   server.stderr.on('data', (chunk) => (stderr += chunk));
   const exited = new Promise((resolve) => {
@@ -5114,11 +5114,11 @@ function startFakeServer(keys = {}) {
     rmSync(logsDir, { recursive: true, force: true });
   };
   const release = () => writeFileSync(join(logsDir, RELEASE_FILE), '');
-  return { url, stop, release };
+  return { url, stop, release, logsDir };
 }
 
-async function withFakeServer(body, keys) {
-  const server = startFakeServer(keys);
+async function withFakeServer(body, keys, args) {
+  const server = startFakeServer(keys, args);
   try {
     await body(await server.url, server);
   } catch (error) {
@@ -7155,6 +7155,47 @@ async function liveSaved(url) {
   }
 }
 
+// fake_server.py's Save dialog, given --save-dialog: it saves in DIALOG_FOLDER, cancels and fails as its questions say.
+const SAVE_DIALOG = '--save-dialog';
+const DIALOG_FOLDER = 'saved';
+const CANCELLED_QUESTION = `${SAVED_QUESTION} (cancel the save)`;
+const NO_ROOM_QUESTION = `${SAVED_QUESTION} (no room to save)`;
+const UNWRITABLE_SAVE = "● The file couldn't be written there, so the tab isn't saved.";
+const CANCELLED_NAME = 'which-site-logged-the-most-incidents-cancel-the-save.html';
+
+// Runs `question` over the sample memos and saves the tab: r3con app's answer to the save, the status line once an error
+// shows there or none has in SETTLE_TIMEOUT_MS, and what the page downloaded.
+async function savedThroughDialog(page, question) {
+  const downloads = [];
+  page.on('download', (download) => downloads.push(download.suggestedFilename()));
+  await send(page, question);
+  await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+  await page.click('#save-btn');
+  const [answered] = await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/saves'), page.click('#save-confirm')]);
+  await becomes(page, () => document.querySelector('#run-status .err') !== null);
+  return { answered: answered.status(), status: await page.textContent('#run-status'), downloads };
+}
+
+// In the Mac app, whose web view has no downloads, a tab is saved through r3con app's Save dialog.
+async function liveSaveDialog(url, server) {
+  const saved = (name) => join(server.logsDir, DIALOG_FOLDER, name);
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const { answered, status, downloads } = await savedThroughDialog(page, SAVED_QUESTION);
+    const held = existsSync(saved(SAVED_NAME)) && JSON.parse(SAVED_BLOCK.exec(readFileSync(saved(SAVED_NAME), 'utf8'))[1]);
+    const savedName = "with r3con app's Save dialog, save sends the file there, under the question's name, and the page downloads nothing";
+    check('live', savedName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && held?.version === SAVED_VERSION, `${answered}; ${status}; ${downloads}`);
+  });
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const { answered, status, downloads } = await savedThroughDialog(page, CANCELLED_QUESTION);
+    const cancelName = 'a save cancelled in the dialog is quiet: the status still says the run is done, and nothing is written';
+    check('live', cancelName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && !existsSync(join(server.logsDir, DIALOG_FOLDER, CANCELLED_NAME)), `${answered}; ${status}`);
+  });
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [SERVER_ERROR_LOG] }, async (page) => {
+    const { answered, status } = await savedThroughDialog(page, NO_ROOM_QUESTION);
+    check('live', "a save the dialog's folder can't take says so in the status, in r3con app's words", answered === 500 && status === UNWRITABLE_SAVE, `${answered}; ${status}`);
+  });
+}
+
 // The prototype runs nothing on r3con app, so it has no run to save.
 async function prototypeSaves() {
   await withPage('saved', {}, async (page) => {
@@ -7206,6 +7247,7 @@ async function live() {
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
+  await withFakeServer(liveSaveDialog, {}, [SAVE_DIALOG]);
   await liveElsewhere();
 }
 

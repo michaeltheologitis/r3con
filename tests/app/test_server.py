@@ -30,12 +30,15 @@ from r3con.app.server import (
     MAX_RELEVANCE_ROUNDS,
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
+    NO_SAVE_DIALOG,
     REPRESENTATION_FILES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
     UNREADABLE_RUN,
     UNREADABLE_ZIP,
+    UNWRITABLE_SAVE,
     ZIP_ENCRYPTED_FLAG,
+    ChooseSavePath,
     ServerState,
     _server,
     create_app,
@@ -136,6 +139,11 @@ ANSWER = {
     "answer": "Northgate",
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
+SAVES = "/api/saves"
+MAX_SAVE_BYTES = 1_000
+SAVED_NAME = "which-site-logged-the-most-incidents.html"
+CHOSEN_NAME = "chosen.html"
+SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 REMEMBERED_OPENAI = {"source": "here", "hint": OPENAI_KEY[-4:], "remembered": True}
 UNTIL_CLOSED_OPENAI = {**REMEMBERED_OPENAI, "remembered": False}
 
@@ -252,8 +260,15 @@ def logs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
-def client_for(model: FakeLLM, logs_dir: Path, **options: Any) -> TestClient:
-    state = ServerState(logs_dir=logs_dir, completion=model)
+def client_for(
+    model: FakeLLM,
+    logs_dir: Path,
+    choose_save_path: ChooseSavePath | None = None,
+    **options: Any,
+) -> TestClient:
+    state = ServerState(
+        logs_dir=logs_dir, completion=model, choose_save_path=choose_save_path
+    )
     app = create_app(token=TOKEN, port=PORT, state=state, **options)
     return TestClient(app, base_url=BASE_URL, headers=AUTH)
 
@@ -478,6 +493,7 @@ def test_the_page_and_its_files_are_revalidated_on_every_load(
         ("GET", "/api/keys"),
         ("POST", f"{DOCUMENT_TEXT}?name=memo.pdf"),
         ("POST", f"{DOCUMENT_ZIP}?name={ZIP_NAME}"),
+        ("POST", f"{SAVES}?name={SAVED_NAME}"),
     ],
 )
 @pytest.mark.parametrize(
@@ -1294,6 +1310,139 @@ def test_the_representation_of_a_run_folder_with_a_file_it_cannot_read_is_refuse
     assert response.status_code == 409
     assert response.json() == {"error": UNREADABLE_RUN}
     assert logged == [f"{run_dir}: can't read it to save ({error})"]
+
+
+class FakeSaveDialog:
+    """A Save dialog, at the screen: it answers each name it is shown with
+    ``chooses``, as the user would, ``None`` for a cancel."""
+
+    def __init__(self, chooses: Path | None) -> None:
+        self.chooses = chooses
+        self.shown: list[str] = []
+
+    def __call__(self, name: str) -> Path | None:
+        self.shown.append(name)
+        return self.chooses
+
+
+def save(client: TestClient, name: str = SAVED_NAME, tab: bytes = SAVED_TAB):
+    return client.post(SAVES, params={"name": name}, content=tab)
+
+
+def test_a_tab_is_saved_where_the_save_dialog_chose_named_as_the_page_suggested(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path
+):
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
+    with client_for(llm, logs_dir, dialog) as client:
+        response = save(client)
+    assert response.status_code == 204
+    assert dialog.shown == [SAVED_NAME]
+    assert (tmp_path / CHOSEN_NAME).read_bytes() == SAVED_TAB
+
+
+def test_a_save_cancelled_in_the_dialog_is_answered_and_writes_nothing(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path
+):
+    dialog = FakeSaveDialog(None)
+    with client_for(llm, logs_dir, dialog) as client:
+        response = save(client)
+    assert (response.status_code, dialog.shown) == (204, [SAVED_NAME])
+    # The working directory, where a write to the bare suggested name would land.
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_save_over_an_earlier_one_replaces_it(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path
+):
+    earlier = tmp_path / CHOSEN_NAME
+    earlier.write_text("an earlier saved tab")
+    with client_for(llm, logs_dir, FakeSaveDialog(earlier)) as client:
+        response = save(client)
+    assert response.status_code == 204
+    assert [path.name for path in tmp_path.iterdir()] == [CHOSEN_NAME]
+    assert earlier.read_bytes() == SAVED_TAB
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../tab.html",
+        "/tmp/tab.html",
+        "saved/tab.html",
+        "saved\\tab.html",
+        "tab.htm",
+        "",
+    ],
+)
+def test_a_save_not_named_as_one_html_file_is_refused_before_any_dialog(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path, name: str
+):
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
+    with client_for(llm, logs_dir, dialog) as client:
+        response = save(client, name)
+    assert response.status_code == 422
+    assert "name: String should match pattern" in response.json()["error"]
+    assert dialog.shown == []
+
+
+def test_a_save_over_the_body_limit_is_refused_before_any_dialog(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path
+):
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
+    with client_for(llm, logs_dir, dialog, max_body_bytes=MAX_SAVE_BYTES) as client:
+        response = save(client, tab=b"x" * (MAX_SAVE_BYTES + 1))
+    assert response.status_code == 413
+    assert dialog.shown == []
+
+
+# "folder" stands for a file the save would replace, and must leave as it was.
+@pytest.mark.parametrize(
+    ("chosen", "error"),
+    [(f"gone/{CHOSEN_NAME}", "FileNotFoundError"), ("folder", "IsADirectoryError")],
+)
+def test_a_save_where_the_file_cannot_be_written_is_refused_and_logged(
+    llm: FakeLLM,
+    logs_dir: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    chosen: str,
+    error: str,
+):
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "folder" / "kept.txt").write_text("kept")
+    with (
+        client_for(llm, logs_dir, FakeSaveDialog(tmp_path / chosen)) as client,
+        caplog.at_level(logging.WARNING, logger="r3con.app"),
+    ):
+        response = save(client)
+    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert response.status_code == 500
+    assert response.json() == {"error": UNWRITABLE_SAVE}
+    assert logged == [f"{tmp_path / chosen}: a saved tab isn't written ({error})"]
+    assert [path.name for path in tmp_path.rglob("*")] == ["folder", "kept.txt"]
+
+
+def test_a_server_with_no_save_dialog_refuses_a_save_for_its_page_to_download(
+    client: TestClient,
+):
+    response = save(client)
+    assert (response.status_code, response.json()) == (404, {"error": NO_SAVE_DIALOG})
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+@pytest.mark.parametrize(
+    ("dialog", "flag"), [(None, ""), (FakeSaveDialog(None), "&save=dialog")]
+)
+def test_only_a_server_with_a_save_dialog_opens_its_page_saying_so(
+    logs_dir: Path, dialog: FakeSaveDialog | None, flag: str
+):
+    listener = listen(0)
+    try:
+        _, url = _server(listener, logs_dir, None, choose_save_path=dialog)
+    finally:
+        listener.close()
+    assert re.fullmatch(rf"http://127\.0\.0\.1:\d+/#token=[\w-]+{flag}", url)
 
 
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(

@@ -89,6 +89,14 @@ opened URL's fragment, ``#token=...``.
   which a config file where the server runs may fill with a server's URL or headers.
   Nothing else there names a run's server or key: the server passes them with each
   call. A run folder that can't be read is refused (409).
+- ``POST /api/saves?name=<file name>``, with a saved tab's ``.html`` as the body, asks
+  the server's ``choose_save_path`` where to save it, suggesting ``name``, and writes
+  it there, whole or not at all, answering 204, also when nothing is chosen. ``name``
+  must be a file name, no folder in it, ending in ``.html`` (422). Only a server with
+  a ``choose_save_path``, as the Mac app's, has it (404 otherwise), and it opens its
+  page with ``save=dialog`` beside its token: a page opened without it downloads the
+  file. A file that can't be written is refused (500), the log naming where and the
+  error's class; a file it was to replace stays as it was.
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -260,12 +268,19 @@ REPRESENTATION_FILES = (
 # The manifest's paths on this computer, which a saved tab would carry to whoever opens it.
 LOCAL_PATHS = "sources"
 UNREADABLE_RUN = "This run's folder can't be read, so it can't be saved."
+NO_SAVE_DIALOG = "This app saves a tab as a download."
+SAVE_DIALOG = "save=dialog"
+UNWRITABLE_SAVE = "The file couldn't be written there, so the tab isn't saved."
+# A file name alone: in a suggested name, the Save dialog would open a folder in it.
+SAVED_FILE_NAME = r"^[^/\\\x00]+\.html$"
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
 FORBID_EXTRA = ConfigDict(extra="forbid")
 
 logger = get_logger("app")
+# Where the user chooses to save the file a name suggests, or None if they cancel.
+ChooseSavePath = Callable[[str], Path | None]
 Parsed = TypeVar("Parsed")
 Result = TypeVar("Result")
 
@@ -323,6 +338,11 @@ class RunRequest(BaseModel):
 class DocumentQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Text
+
+
+class SaveQuery(BaseModel):
+    model_config = FORBID_EXTRA
+    name: Annotated[str, StringConstraints(pattern=SAVED_FILE_NAME)]
 
 
 class AskRequest(BaseModel):
@@ -392,6 +412,7 @@ class ServerState:
     )
     workers: list[threading.Thread] = field(default_factory=list)
     stopping: bool = False
+    choose_save_path: ChooseSavePath | None = None
 
 
 def _state(request: Request) -> ServerState:
@@ -807,6 +828,36 @@ async def representation(request: Request) -> Response:
     return JSONResponse(await run_in_threadpool(_representation, run_dir))
 
 
+async def save_tab(request: Request) -> Response:
+    choose = _state(request).choose_save_path
+    if choose is None:
+        raise HTTPException(404, NO_SAVE_DIALOG)
+    query = _valid(SaveQuery.model_validate, dict(request.query_params))
+    body = await request.body()
+    # Off the event loop, which a dialog waiting for the user would hold up.
+    path = await run_in_threadpool(choose, query.name)
+    if path is None:
+        return Response(status_code=204)
+    try:
+        await run_in_threadpool(_write_whole, path, body)
+    except OSError as error:
+        logger.warning("%s: a saved tab isn't written (%s)", path, type(error).__name__)
+        raise HTTPException(500, UNWRITABLE_SAVE) from None
+    return Response(status_code=204)
+
+
+def _write_whole(path: Path, body: bytes) -> None:
+    """Write ``body`` at ``path`` in full or not at all, so that a file there stays as
+    it was if the write fails partway, as on a full disk."""
+    unfinished = path.with_name(f".{path.name}.{secrets.token_hex(ID_BYTES)}")
+    try:
+        unfinished.write_bytes(body)
+        unfinished.replace(path)
+    except OSError:
+        unfinished.unlink(missing_ok=True)
+        raise
+
+
 async def events(request: Request, *, kind: Kind) -> Response:
     job = _job(_state(request).jobs[kind], request.path_params["job_id"], kind)
     return StreamingResponse(_stream(job), media_type="text/event-stream")
@@ -893,6 +944,7 @@ def create_app(
             Route("/api/keys", forget_key, methods=["DELETE"]),
             Route("/api/documents/text", document_text, methods=["POST"]),
             Route("/api/documents/zip", document_zip, methods=["POST"]),
+            Route("/api/saves", save_tab, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(
@@ -965,9 +1017,11 @@ def _server(
     logs_dir: Path,
     completion: Callable[..., Any] | None,
     key_service: str = APP_KEY_SERVICE,
+    choose_save_path: ChooseSavePath | None = None,
 ) -> tuple[_Server, str]:
     """A server for ``listener``, with the keys under ``key_service`` in the
-    credential store, and the URL that opens its page."""
+    credential store, saving a tab where ``choose_save_path`` says, and the URL that
+    opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
     keys = _stored_keys(key_service)
@@ -977,10 +1031,12 @@ def _server(
         key_service=key_service,
         keys=keys,
         remembered=set(keys),
+        choose_save_path=choose_save_path,
     )
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
-    return _Server(config, state), f"http://{HOST}:{port}/#token={token}"
+    saves = "" if choose_save_path is None else f"&{SAVE_DIALOG}"
+    return _Server(config, state), f"http://{HOST}:{port}/#token={token}{saves}"
 
 
 def serve(
@@ -989,13 +1045,15 @@ def serve(
     logs_dir: Path = LOGS_DIR,
     completion: Callable[..., Any] | None = None,
     key_service: str = APP_KEY_SERVICE,
+    choose_save_path: ChooseSavePath | None = None,
 ) -> tuple[str, Callable[[], None]]:
-    """Start the server on a thread of its own, its keys saved under ``key_service``.
-    Returns the URL that opens the page, with this launch's token, and a function that
-    stops the server, returning once its runs and asks have ended, at most
-    ``WORKERS_EXIT_SECONDS`` after its connections have closed."""
+    """Start the server on a thread of its own, its keys saved under ``key_service``,
+    saving a tab where ``choose_save_path`` says, if given. Returns the URL that opens
+    the page, with this launch's token, and a function that stops the server,
+    returning once its runs and asks have ended, at most ``WORKERS_EXIT_SECONDS``
+    after its connections have closed."""
     listener = listen(port)
-    server, url = _server(listener, logs_dir, completion, key_service)
+    server, url = _server(listener, logs_dir, completion, key_service, choose_save_path)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
