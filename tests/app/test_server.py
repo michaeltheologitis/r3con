@@ -37,6 +37,7 @@ from r3con.app.server import (
     UNREADABLE_IMPORT,
     UNREADABLE_RUN,
     UNREADABLE_ZIP,
+    UNWRITABLE_IMPORT,
     UNWRITABLE_SAVE,
     ZIP_ENCRYPTED_FLAG,
     ChooseSavePath,
@@ -1319,7 +1320,13 @@ def test_an_imported_run_keeps_no_param_override_or_other_field_of_its_manifest(
     manifest = json.loads((run_dir / "manifest.json").read_text())
     sent = len(llm.requests)
     assert ask_events(client, run_id)[-1]["type"] == "ask_finished"
-    assert sorted(manifest) == ["config", "litellm_model", "run_folder", "task"]
+    assert sorted(manifest) == [
+        "config",
+        "litellm_model",
+        "r3con_version",
+        "run_folder",
+        "task",
+    ]
     assert sorted(manifest["config"]) == [
         "model",
         "name",
@@ -1358,8 +1365,19 @@ def damaged(
             damaged(lambda f: f["manifest.json"]["config"].update({"name": "../x"})),
             "String should match pattern",
         ),
+        (
+            damaged(lambda f: f["manifest.json"]["config"].update({"seed": 7})),
+            "Extra inputs",
+        ),
     ],
-    ids=["path", "missing", "not-an-object", "prompt-path", "config-path"],
+    ids=[
+        "path",
+        "missing",
+        "not-an-object",
+        "prompt-path",
+        "config-path",
+        "config-field",
+    ],
 )
 def test_an_import_not_shaped_as_a_runs_files_is_refused_plainly_and_writes_nothing(
     client: TestClient,
@@ -1412,6 +1430,26 @@ def test_an_import_r3con_cannot_ask_over_is_refused_logged_and_leaves_nothing(
     )
     assert len(logged) == 1 and logged[0].startswith("An imported run is refused")
     assert run_folders(logs_dir) == before
+
+
+def test_an_import_whose_folder_cannot_be_written_is_refused_and_logged(
+    client: TestClient, llm: FakeLLM, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    saved = representation_of(client, finished_run(client))
+    taken = tmp_path / "taken"
+    taken.write_text("a file where the logs dir would be")
+    with (
+        client_for(llm, taken) as elsewhere,
+        caplog.at_level(logging.WARNING, logger="r3con.app"),
+    ):
+        response = elsewhere.post(IMPORTS, json=saved)
+    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert (response.status_code, response.json()) == (
+        500,
+        {"error": UNWRITABLE_IMPORT},
+    )
+    assert len(logged) == 1 and "an imported run isn't written" in logged[0]
+    assert taken.read_text() == "a file where the logs dir would be"
 
 
 def test_an_import_over_the_body_limit_is_refused_and_writes_nothing(

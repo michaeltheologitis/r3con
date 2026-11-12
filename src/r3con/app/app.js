@@ -1693,6 +1693,8 @@
   const SAVED_MODE_NOTE = 'open this file in R3Con to ask more';
   const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
   const HTML_SUFFIX = '.html';
+  // Where a saved tab's block starts: past the page's stylesheet and markup, well inside this many bytes of its file.
+  const SAVED_HEAD_BYTES = 256 * 1024;
   // r3con app took a run's texts in one body of at most its MAX_BODY_BYTES, so no tab that ran holds more.
   const MAX_SAVED_TEXT_BYTES = 64 * 1024 * 1024;
   // A saved tab's block: its texts, compressed, and its run twice over, each no more than r3con app takes.
@@ -5058,7 +5060,7 @@
     $('file-list-view').hidden = false;
   }
 
-  /** @param {File} file @returns {Promise<string>} */
+  /** @param {Blob} file @returns {Promise<string>} */
   function readText(file) {
     return new Promise((resolve) => {
       const reader = new FileReader();
@@ -5098,10 +5100,12 @@
   // A tab's batches are read and added one after another, so that each one's lines in the files pane stand.
   /** @param {Picked} batch @param {Tab} tab */
   function addFiles(batch, tab) {
+    const locked = Boolean(tab.run);
+    tellFiles(tab, { filesError: '' });
     tab.reading += 1;
     updateHint();
     tab.adding = tab.adding
-      .then(() => addBatch(batch, tab))
+      .then(() => addBatch(batch, tab, locked))
       .catch((error) => failedToAdd(tab, error))
       .finally(() => {
         tab.reading -= 1;
@@ -5158,11 +5162,17 @@
     addFilesError(tab, explain(error, "Couldn't add those files.", "couldn't add files"));
   }
 
-  /** @param {Picked} batch @param {Tab} tab */
-  async function addBatch({ files, skipped, failed }, tab) {
-    // A tab closed, or run, since its files were picked takes none of them, so they aren't read.
+  // A saved tab among the files opens as a tab of its own, in `tab` only if it was all there was and `tab` is empty.
+  /** @param {Picked} batch @param {Tab} tab @param {boolean} locked whether `tab` had run when they were picked */
+  async function addBatch({ files, skipped, failed }, tab, locked) {
     if (!state.tabs.includes(tab)) return;
-    const picked = pickFiles(files);
+    const found = await Promise.all(pickFiles(files).map(async (file) => ({ file, block: await savedBlockOf(file) })));
+    const picked = found.flatMap(({ file, block }) => (block === null ? [file] : []));
+    const alone = !picked.length && !failed.length;
+    for (const [i, { file, block }] of found.filter((f) => f.block !== null).entries()) await importTab(file.name, /** @type {string} */ (block), tab, alone && !i);
+    if (locked) return addFilesError(tab, notAdded(picked.map((f) => f.name), LOCKED_DROP));
+    if (found.length > picked.length && alone) return;
+    // A tab closed, or run, since its files were picked takes none of them, so they aren't read.
     if (tab.run) return addFilesError(tab, notAdded([...failed, ...picked.map((f) => f.name)], RAN_FIRST) || RAN_FIRST);
     if (!picked.length && !failed.length) return addFilesError(tab, skipped ? noDocuments(skipped) : 'No files found there. Try picking the files themselves.');
     /** @type {LoadedFile[]} */
@@ -6101,7 +6111,7 @@
       input.addEventListener('change', () => {
         // Copied now: a file input's list empties once its value is reset.
         const files = /** @type {FileList} */ (input.files);
-        if (files.length) addPicked(fromFolders([...files]), state.shown);
+        if (files.length) addFiles(fromFolders([...files]), state.shown);
         input.value = '';
       });
     }
@@ -6134,7 +6144,7 @@
       showTab('files');
       // A tab that has run keeps its run's files, so what is dropped on it is refused unread.
       const unread = { files: pickFiles([...e.dataTransfer.files]), skipped: 0, failed: [] };
-      addPicked(tab.run ? unread : await filesFromDrop(e.dataTransfer), tab);
+      addFiles(tab.run ? unread : await filesFromDrop(e.dataTransfer), tab);
     });
     // However a drag ends, dropped anywhere or called off, the overlay goes, whatever dragleave was missed.
     const dragEnded = () => {
@@ -6281,11 +6291,13 @@
   const orNull = (shape) => (/** @type {unknown} */ value) => value === null || fits(value, shape);
   /** @param {unknown} value */
   const isCount = (value) => Number.isInteger(value) && /** @type {number} */ (value) >= 0;
-  /** @param {(value: unknown) => boolean} check */
-  const recordOf = (check) => (/** @type {unknown} */ value) => fits(value, 'object') && !Array.isArray(value) && Object.values(/** @type {object} */ (value)).every(check);
-  // A name as the page itself names a file or folder: no part of it . or .., and no \ or NUL.
   /** @param {unknown} value */
-  const isPath = (value) => typeof value === 'string' && !/[\\\0]/.test(value) && value.split('/').every((part) => part && part !== '.' && part !== '..');
+  const isObject = (value) => fits(value, 'object') && !Array.isArray(value);
+  /** @param {(value: unknown) => boolean} check */
+  const recordOf = (check) => (/** @type {unknown} */ value) => isObject(value) && Object.values(/** @type {object} */ (value)).every(check);
+  // A file's or folder's name, never one that climbs out of where it is: no .. part, no leading / and no NUL.
+  /** @param {unknown} value */
+  const isPath = (value) => typeof value === 'string' && value !== '' && !value.startsWith('/') && !value.includes('\0') && !value.split('/').includes('..');
   const TOTALS = { 'tokens?': orNull('number'), 'usd?': orNull('number') };
   // r3con's quote, as an event gives it, with the trail node of the summary quoting it.
   const QUOTE = { text: 'string', start: orNull(isCount), end: orNull(isCount), 'match?': orNull('string'), 'score?': orNull('number'), summary: 'string' };
@@ -6294,7 +6306,7 @@
     version: (version) => version === 1,
     files: [{ name: isPath, size: isCount, 'folder?': isPath }],
     texts: 'string',
-    folders: [(pair) => fits(pair, [() => true]) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
+    folders: [(pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
     run: {
       ids: ['string'],
       rounds: [[{ summary: 'string', provenance: [isCount], quotes: [QUOTE] }]],
@@ -6311,17 +6323,20 @@
         },
       ],
     },
-    representation: recordOf((file) => fits(file, 'object') && !Array.isArray(file)),
+    representation: recordOf(isObject),
   };
 
-  // Its lists per document have one entry per file, its rounds as many as a run has, and each index is a file's.
+  // Its lists per document have one entry per file, its rounds as many as a run has, each index is a file's, and its
+  // run is the one its representation is of, document for document.
   /** @param {SavedTabV1} saved */
-  function consistent({ files, run }) {
+  function consistent({ files, run, representation }) {
     const n = files.length;
     const perDocument = [run.ids, run.parsed, ...run.rounds].every((list) => list.length === n);
-    const cited = run.answers.flatMap(({ provenance }) => (provenance ? [...provenance.summary_ids, ...provenance.parse_ids] : []));
+    const cited = run.answers.flatMap((a) => /** @type {Provenance} */ (a.provenance)).flatMap((p) => [...p.summary_ids, ...p.parse_ids]);
     const indices = [...run.rounds.flat().flatMap((s) => s.provenance), ...run.parsed.flatMap((p) => p.provenance), ...cited];
-    return n > 0 && perDocument && run.rounds.length >= 1 && run.rounds.length <= MAX_ROUNDS && run.answers.length > 0 && indices.every((d) => d < n);
+    const ids = /** @type {Record<string, unknown>} */ (representation['ids.json'] ?? {});
+    const sameRun = Object.keys(ids).length === n && run.ids.every((id, d) => Object.hasOwn(ids, id) && ids[id] === d);
+    return n > 0 && perDocument && run.rounds.length >= 1 && run.rounds.length <= MAX_ROUNDS && run.answers.length > 0 && indices.every((d) => d < n) && sameRun;
   }
 
   // Outside input when imported, or opened from a file someone else saved: read only once its shape is checked, and its
@@ -6380,24 +6395,25 @@
     }
   }
 
-  // The saved tab a file's text holds, found as a browser opening the file finds it, which DOMParser does without
-  // running anything in it.
-  /** @param {string} text */
-  function savedBlockIn(text) {
-    if (!text.includes(SAVED_TAB_ID)) return null;
-    const found = new DOMParser().parseFromString(text, 'text/html').getElementById(SAVED_TAB_ID);
+  // The saved tab a .html file holds, for r3con app to open, found as a browser opening the file finds it, which
+  // DOMParser does without running anything in it.
+  /** @param {File} file @returns {Promise<string | null>} */
+  async function savedBlockOf(file) {
+    if (!live || !hasSuffix(file, HTML_SUFFIX)) return null;
+    if (!(await readText(file.slice(0, SAVED_HEAD_BYTES))).includes(`id="${SAVED_TAB_ID}"`)) return null;
+    const found = new DOMParser().parseFromString(await readText(file), 'text/html').getElementById(SAVED_TAB_ID);
     return found instanceof HTMLScriptElement && found.type === 'application/json' ? found.text : null;
   }
 
   // A saved tab, its run made again at r3con app, which asks over it as over any other: in the tab it was dropped or
-  // picked in, if that is empty, else in a new one.
-  /** @param {string} name @param {string} block @param {Tab} from */
-  async function importTab(name, block, from) {
+  // picked in, if it may `fill` that and it is empty, with nothing else coming, else in a new one.
+  /** @param {string} name @param {string} block @param {Tab} from @param {boolean} fill */
+  async function importTab(name, block, from, fill) {
     try {
       const opened = await readSaved(block);
       const imported = await api('/api/imports', { method: 'POST', body: opened.representation });
       opened.run.id = (await imported.json()).run_id;
-      const empty = !from.files.length && !from.run && !from.reading && state.tabs.includes(from);
+      const empty = fill && !from.files.length && !from.run && from.reading === 1 && state.tabs.includes(from);
       const tab = empty ? from : openTab(newTab([]));
       switchTab(tab);
       fillTab(tab, opened);
@@ -6405,22 +6421,6 @@
     } catch (error) {
       addFilesError(from, notAdded([name], explain(error, CANT_IMPORT)));
     }
-  }
-
-  // A saved tab among `batch`'s files opens as a tab of its own; the rest are `tab`'s, or once it has run, refused unread.
-  /** @param {Picked} batch @param {Tab} tab */
-  async function addPicked(batch, tab) {
-    tellFiles(tab, { filesError: '' });
-    /** @type {File[]} */
-    const rest = [];
-    for (const file of batch.files) {
-      const block = hasSuffix(file, HTML_SUFFIX) ? savedBlockIn(await readText(file)) : null;
-      if (block === null) rest.push(file);
-      else await importTab(file.name, block, tab);
-    }
-    if (tab.run) return addFilesError(tab, notAdded(rest.map((f) => f.name), LOCKED_DROP));
-    if (rest.length < batch.files.length && !rest.length && !batch.failed.length) return;
-    addFiles({ ...batch, files: rest }, tab);
   }
 
   // ---------- modes ----------

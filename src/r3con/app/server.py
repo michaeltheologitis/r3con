@@ -107,7 +107,8 @@ opened URL's fragment, ``#token=...``.
   no more than ``MAX_BODY_BYTES``. Of the manifest, it keeps only the question, the
   config, without the params and overrides a file could make an ask send, and the
   model. A body that isn't so, or a folder r3con can't ask over, is refused (422) in
-  one plain line, the log saying why, and nothing of it is left.
+  one plain line, the log saying why, and nothing of it is left; so is a folder that
+  can't be written (500).
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -186,7 +187,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
-from r3con.config import PromptStage, ReasoningPath
+from r3con.config import DEFAULT_CONFIG, PromptStage, RunConfig
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import one_line
 from r3con.pipeline import read_representation
@@ -288,9 +289,13 @@ UNWRITABLE_SAVE = "The file couldn't be written there, so the tab isn't saved."
 # A file name alone: in a suggested name, the Save dialog would open a folder in it.
 SAVED_FILE_NAME = r"^[^/\\\x00]+\.html$"
 UNREADABLE_IMPORT = "Its run can't be asked again: it isn't a run this R3Con can read."
+UNWRITABLE_IMPORT = "Its run can't be made again here: R3Con couldn't write its folder."
 # r3con's prompt versions, v1, v2 and so on: a version is a file's name, so nothing else.
 PROMPT_VERSION = r"^v\d+$"
 CONFIG_NAME = r"^[\w-]+$"
+# What an imported run's config leaves out: params an ask would send, a server's URL or a
+# header among them, and the overrides that may hold them.
+UNIMPORTED = {"params", "overrides"}
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
@@ -363,20 +368,22 @@ class SaveQuery(BaseModel):
     name: Annotated[str, StringConstraints(pattern=SAVED_FILE_NAME)]
 
 
-class ImportedConfig(BaseModel):
-    """A saved run's config, without its params and overrides, which an ask over the
-    imported run would otherwise send."""
+class ImportedConfig(RunConfig):
+    """A saved run's config, as a run of this app's has it, whose name and prompt
+    versions, each a file's name, are names alone; it is written without
+    ``UNIMPORTED``."""
 
-    name: Annotated[str, StringConstraints(pattern=CONFIG_NAME)]
-    model: Text
-    relevance_rounds: Annotated[int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)]
-    reasoning: ReasoningPath
+    name: Annotated[str, StringConstraints(pattern=CONFIG_NAME)] = DEFAULT_CONFIG
+    relevance_rounds: Annotated[
+        int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)
+    ] = DEFAULT_RELEVANCE_ROUNDS
     prompts: dict[
         PromptStage, Annotated[str, StringConstraints(pattern=PROMPT_VERSION)]
-    ]
+    ] = Field(default_factory=dict)
 
 
 class ImportedManifest(BaseModel):
+    r3con_version: str | None = None
     task: str
     config: ImportedConfig
     litellm_model: Text
@@ -846,12 +853,19 @@ def _imported(logs_dir: Path, run: ImportedRun) -> Path:
     """The folder ``run`` is made again in, new, in ``logs_dir``; refused if r3con
     can't ask over it, and then removed."""
     folder = logs_dir / new_run_folder()
-    files = run.model_dump(by_alias=True)
+    files = run.model_dump(by_alias=True, exclude={"manifest": {"config": UNIMPORTED}})
     files["manifest.json"]["run_folder"] = folder.name
     try:
         for path in REPRESENTATION_FILES:
             (folder / path).parent.mkdir(parents=True, exist_ok=True)
             (folder / path).write_text(json.dumps(files[path]), encoding="utf-8")
+    except OSError as error:
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.warning(
+            "%s: an imported run isn't written (%s)", folder, type(error).__name__
+        )
+        raise HTTPException(500, UNWRITABLE_IMPORT) from None
+    try:
         read_representation(folder)
     # r3con's reader trusts the folders r3con writes: one from a file can fail it anyhow.
     except Exception as error:  # noqa: BLE001 — logged, by its class alone

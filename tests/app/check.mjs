@@ -7140,6 +7140,15 @@ async function liveImport(url, server) {
   });
 
   await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html], LOOSE_FILE] });
+    const both = await becomes(page, () => document.querySelectorAll('.run-tab').length === 2, undefined, LIVE_RUN_MS);
+    await showRunTab(page, 0);
+    const first = { files: (await page.evaluate(filesPane)).names, ran: (await count(page, '#world .node.answer')) > 0 };
+    const mixedName = "a saved tab dropped with other files on an empty tab opens in a tab of its own, and the empty tab takes the others";
+    check('live', mixedName, both && isDeepStrictEqual(first, { files: [LOOSE_FILE[0]], ran: false }), JSON.stringify(first));
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
     await page.setInputFiles('#file-input', { name: SAVED_NAME, mimeType: 'text/html', buffer: Buffer.from(html) });
     const picked = (await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS)) && (await page.textContent('#files-count')) === String(SAVED_FILES);
     check('live', 'picked with + add files, a saved tab opens as one too', picked && (await tabCount(page)) === 1, await page.textContent('#run-status'));
@@ -7293,6 +7302,20 @@ async function liveSaveDialog(url, server) {
   });
 }
 
+// The prototype sends nothing, so a saved tab's file is one of its text files there.
+async function prototypeImports() {
+  const html = '<!doctype html><title>A saved tab</title><script type="application/json" id="r3con-tab">{"version":1}</script>\n';
+  await withPage('saved', { sample: false }, async (page) => {
+    const calls = [];
+    page.on('request', (request) => request.url().includes('/api/') && calls.push(request.url()));
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    // Files added over the sample memos take their place.
+    await filesCounted(page, 1);
+    const names = (await page.evaluate(filesPane)).names;
+    check('saved', "in the prototype, a saved tab's file is a document like any other, and nothing is sent", !calls.length && isDeepStrictEqual(names, [SAVED_NAME]) && (await tabCount(page)) === 1, `${names}; ${calls.join(' ')}`);
+  });
+}
+
 // The prototype runs nothing on r3con app, so it has no run to save.
 async function prototypeSaves() {
   await withPage('saved', {}, async (page) => {
@@ -7351,7 +7374,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, live];
+  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
