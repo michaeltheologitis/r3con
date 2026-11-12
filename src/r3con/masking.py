@@ -24,17 +24,20 @@ are:
   known-public header (``Content-Type``, ``anthropic-beta``); in a parameter with a
   credential's name (:func:`is_credential_name`), such as ``api_key`` or ``metadata``'s
   ``langfuse_secret_key``, unless it is a path that exists (:func:`is_path`); and in a
-  URL, such as ``api_base``, as its password, or its user name when it has none, or as
-  any value in its query but a public one (Azure's ``api-version``, watsonx's
-  ``version``). The keys of a dict under a key that JSON Schema names fields or
-  patterns with (``properties``, ``patternProperties``, ``$defs``, …) are not
-  parameters' names. The rule goes by that key's name, not by whether the dict is a
-  schema, so it holds wherever the key sits: in a tool's ``parameters``, in
-  ``response_format`` or ``guided_json``, or anywhere else. The keys of a
-  ``litellm.Router`` whose ``.completion`` is the run's ``completion`` are registered
-  too. Every string in a dict-valued ``vertex_credentials`` is masked, the public
-  ``token_uri`` too, since a service account's field names do not say which are
-  secret. A ``completion`` wrapper that adds a key of its own must register it;
+  URL, such as ``api_base``, as its password, or its user name when it has none, each
+  host's of a multi-host DSN (``postgres://u:K1@h1,v:K2@h2/db``), or as any value in
+  its query but a public one (Azure's ``api-version``, watsonx's ``version``). A JSON
+  object written as a string, as SAP AI Core's service key in ``api_key``, is read as
+  the dict it holds (:func:`json_object`). The keys of a dict under a key that JSON
+  Schema names fields or patterns with (``properties``, ``patternProperties``,
+  ``$defs``, …) are not parameters' names. The rule goes by that key's name, not by
+  whether the dict is a schema, so it holds wherever the key sits: in a tool's
+  ``parameters``, in ``response_format`` or ``guided_json``, or anywhere else. The
+  keys of a ``litellm.Router`` whose ``.completion`` is the run's ``completion`` are
+  registered too. Every string in a ``vertex_credentials`` dict, or JSON object, is
+  masked, the public ``token_uri`` too, since a service account's field names do not
+  say which are secret. A ``completion`` wrapper that adds a key of its own must
+  register it;
 - the value of every environment variable with a credential's name, where litellm finds
   a provider's key, or one of the names litellm reads a credential under that do not
   say so (:data:`_UNNAMED_CREDENTIAL_VARIABLES`, such as ``SNOWFLAKE_JWT`` and
@@ -42,7 +45,14 @@ are:
   (:func:`is_path`), as ``GOOGLE_APPLICATION_CREDENTIALS`` and
   ``GITHUB_COPILOT_TOKEN_DIR`` hold, or is shorter than
   :data:`_MIN_ENVIRONMENT_SECRET_CHARS`, or :data:`_MIN_MASKED_KEY_CHARS` for a name
-  that ends in ``api_key`` or ``apikey``, a provider's key.
+  that ends in ``api_key`` or ``apikey``, a provider's key. A value that holds a JSON
+  object is read as its fields, at any depth, each held to the same rule by its own
+  name: SAP AI Core's ``AICORE_SERVICE_KEY`` and Cloud Foundry's ``VCAP_SERVICES``,
+  where litellm finds its ``clientsecret``, are not masked whole, but that field is;
+- each line of the body of a PEM private key, at least :data:`_MIN_MASKED_KEY_CHARS`
+  long, in a known key or in any environment value or field, whatever its name and
+  despite its whitespace, its line breaks real or written ``\\n``, as litellm reads
+  SAP's ``AICORE_KEY_STR``: so the key is masked however an error lays it out.
 
 A key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as vLLM's
 ``EMPTY``, and is left alone. A secret in a URL's path, as some hosted MCP servers
@@ -54,10 +64,11 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import json
 import os
 import re
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import SimpleNamespace
 from typing import Any
@@ -91,6 +102,9 @@ _UNNAMED_CREDENTIAL_VARIABLES = frozenset(
 _CREDENTIAL_NAME = re.compile(
     "api_?key$|^oci_key$|token|secret|password|credential|webhook", re.IGNORECASE
 )
+# A PEM private key's body, between its label lines.
+_PRIVATE_KEY = re.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----(.*?)-----END ", re.DOTALL)
+_PEM_LINE_BREAK = re.compile(r"\s+|\\n")
 # A name's words, whatever its case: snake_case, kebab-case, camelCase, SCREAMING_CASE.
 _NAME_WORDS = re.compile("[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
 # Whole words only: "auth" begins "author" and "authority", which name no credential.
@@ -113,11 +127,12 @@ _lock = threading.Lock()
 
 
 def register_key(key: str | None) -> None:
-    """Have :func:`masked` mask ``key`` from now on, for as long as the process runs,
-    unless it is shorter than :data:`_MIN_MASKED_KEY_CHARS`."""
+    """Have :func:`masked` mask ``key``, and each line of a PEM private key's body in
+    it, from now on, for as long as the process runs, unless ``key`` is shorter than
+    :data:`_MIN_MASKED_KEY_CHARS`."""
     if key and len(key) >= _MIN_MASKED_KEY_CHARS:
         with _lock:
-            _registered.add(key)
+            _registered.update([key, *_private_key_lines(key)])
 
 
 def is_credential_name(name: str) -> bool:
@@ -159,6 +174,17 @@ def masked(text: str) -> str:
     for key in sorted(known, key=len, reverse=True):
         text = text.replace(key, MASK)
     return text
+
+
+def json_object(text: str) -> dict[str, Any]:
+    """The fields of the JSON object ``text`` holds, as SAP AI Core's service key does;
+    none when it holds no JSON object."""
+    if not text.lstrip().startswith("{"):
+        return {}
+    try:
+        return json.loads(text)
+    except ValueError:
+        return {}
 
 
 def plain(data: Any) -> Any:
@@ -234,7 +260,28 @@ def _located(detail: Mapping[str, Any]) -> str:
 
 
 def _environment_secrets() -> list[str]:
-    return [value for name, value in os.environ.items() if _is_secret(name, value)]
+    environment = os.environ.items()
+    return [secret for name, value in environment for secret in _secrets(name, value)]
+
+
+def _secrets(name: str, value: Any) -> Iterator[str]:
+    if isinstance(value, dict):
+        for field, item in value.items():
+            yield from _secrets(field, item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _secrets(name, item)
+    elif isinstance(value, str):
+        if _is_secret(name, value):
+            yield value
+        yield from _private_key_lines(value)
+        yield from _secrets(name, json_object(value))
+
+
+def _private_key_lines(text: str) -> list[str]:
+    bodies = (match[1] for match in _PRIVATE_KEY.finditer(text))
+    lines = (line for body in bodies for line in _PEM_LINE_BREAK.split(body))
+    return [line for line in lines if len(line) >= _MIN_MASKED_KEY_CHARS]
 
 
 def _is_secret(name: str, value: str) -> bool:

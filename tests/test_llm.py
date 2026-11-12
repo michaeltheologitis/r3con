@@ -131,6 +131,8 @@ KEY = "sk-not-a-real-key-0123456789"
 # No shape litellm's own redactor knows: only r3con's masking can hide it.
 PLAIN_KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 SERVER = "https://llm.example.com/v1"
+PRIVATE_KEY = f"-----BEGIN PRIVATE KEY-----\n{PLAIN_KEY}\n-----END PRIVATE KEY-----\n"
+SAP_SERVICE_KEY = json.dumps({"clientid": "sb-memo-reader", "clientsecret": PLAIN_KEY})
 BAD_REQUEST = "BadRequestError: litellm.BadRequestError: "
 CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
 LONG_RETRY_AFTER_SECONDS = 60
@@ -1217,6 +1219,10 @@ SENT_CREDENTIALS = {
         {"api_base": f"https://{PLAIN_KEY}@llm.example.com/v1"},
         PLAIN_KEY,
     ),
+    "url-password-holding-a-comma": (
+        {"api_base": f"https://reader:{PLAIN_KEY},2026@llm.example.com/v1"},
+        f"{PLAIN_KEY},2026",
+    ),
     "url-code": ({"api_base": f"{SERVER}?code={PLAIN_KEY}"}, PLAIN_KEY),
     "url-sig": ({"api_base": f"{SERVER}?sv=2026-01-01&sig={PLAIN_KEY}"}, PLAIN_KEY),
     "url-signature": ({"api_base": f"{SERVER}?signature={PLAIN_KEY}"}, PLAIN_KEY),
@@ -1248,6 +1254,12 @@ SENT_CREDENTIALS = {
     ),
     "in-a-set": ({"extra_body": {"auth_tokens": {PLAIN_KEY}}}, PLAIN_KEY),
     "an-integer": ({"api_key": DIGITS_KEY}, str(DIGITS_KEY)),
+    "sap-service-key-in-api-key": ({"api_key": SAP_SERVICE_KEY}, PLAIN_KEY),
+    "json-object-written-as-a-string": (
+        {"extra_body": {"gateway": json.dumps({"api_key": PLAIN_KEY})}},
+        PLAIN_KEY,
+    ),
+    "private-key-line": ({"oci_key": PRIVATE_KEY}, PLAIN_KEY),
     "header-named-like-request-data": ({"headers": {"metadata": PLAIN_KEY}}, PLAIN_KEY),
     "callback-key-in-metadata": (
         {"metadata": {"langfuse_secret_key": PLAIN_KEY}},
@@ -1316,6 +1328,16 @@ def test_a_credential_is_registered_whatever_its_shape_or_place_in_the_params(
 ):
     register_credentials(params)
     assert masked(f"refused {credential}") == "refused REDACTED"
+
+
+def test_each_password_of_a_multi_host_dsn_is_registered_and_its_hosts_and_users_not():
+    first, second = "first-key-q7RkT2mX", "second-key-L4sWzX1c"
+    dsn = f"postgres://reader:{first}@db1.example.com,writer:{second}@db2.example.com/m"
+    register_credentials({"api_base": dsn})
+    assert masked(f"{dsn} {first} {second}") == (
+        "postgres://reader:REDACTED@db1.example.com,writer:REDACTED@db2.example.com/m"
+        " REDACTED REDACTED"
+    )
 
 
 def test_a_vertex_credentials_path_that_exists_is_not_registered(tmp_path):

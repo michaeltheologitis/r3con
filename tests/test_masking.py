@@ -1,3 +1,4 @@
+import json
 import pwd
 from datetime import UTC, date, datetime, time
 
@@ -18,6 +19,25 @@ ECHOED = f"Incorrect API key provided: {KEY}"
 MASKED = "Incorrect API key provided: REDACTED"
 # Each would be cut by a pattern without word boundaries, such as litellm's sk-[…]{13,}.
 LOOKS_LIKE_A_KEY = "/home/u/risk-assessment-runs/logs/desk-reservations_2026_q3.csv"
+SECRET = "not-a-real-secret-Zq8VwN3cXe5RtY"
+CLIENT_ID = "sb-memo-reader!b1|aicore!b540"
+AUTH_URL = "https://memos.authentication.example.com"
+API_URL = "https://api.ai.example.com"
+# An SAP AI Core service key, as a binding writes one: only its client secret is secret.
+SERVICE_KEY = {
+    "clientid": CLIENT_ID,
+    "clientsecret": SECRET,
+    "credential-type": "binding-secret",
+    "url": AUTH_URL,
+    "serviceurls": {"AI_API_URL": API_URL},
+}
+PEM_LINES = ["not-a-real-pem-line-one-q7RkT2mX", "not-a-real-pem-line-two-L4sWzX1c"]
+PRIVATE_KEY = "\n".join(
+    ["-----BEGIN PRIVATE KEY-----", *PEM_LINES, "-----END PRIVATE KEY-----", ""]
+)
+CERTIFICATE = (
+    "-----BEGIN CERTIFICATE-----\nnot-a-real-cert-q7RkT2mX\n-----END CERTIFICATE-----\n"
+)
 
 
 class Parse(BaseModel):
@@ -126,6 +146,77 @@ def test_a_credential_starting_with_a_tilde_and_a_name_is_masked_with_no_user_lo
     monkeypatch.setattr(pwd, "getpwnam", lookup)
     monkeypatch.setenv("MEMO_READER_TOKEN", "~somename/memo-reader-2026")
     assert masked("refused ~somename/memo-reader-2026") == "refused REDACTED"
+
+
+# Where litellm's SAP provider finds a service key in the environment, and its shape.
+SAP_SERVICE_KEYS = {
+    "service-key": ("AICORE_SERVICE_KEY", SERVICE_KEY),
+    "service-key-under-credentials": (
+        "AICORE_SERVICE_KEY",
+        {"credentials": SERVICE_KEY},
+    ),
+    "cloud-foundry-binding": (
+        "VCAP_SERVICES",
+        {"aicore": [{"label": "aicore", "credentials": SERVICE_KEY}]},
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "service_key"), SAP_SERVICE_KEYS.values(), ids=SAP_SERVICE_KEYS
+)
+def test_a_service_keys_client_secret_is_masked_alone_and_its_other_fields_are_not(
+    monkeypatch, name, service_key
+):
+    monkeypatch.setenv(name, json.dumps(service_key, indent=2))
+    sent = f"{CLIENT_ID} to {AUTH_URL} for {API_URL} (binding-secret)"
+    assert masked(f"{sent} refused {SECRET}") == f"{sent} refused REDACTED"
+
+
+# Where a PEM private key sits in the environment, and how it is written there.
+PRIVATE_KEYS = {
+    "sap-key-string": ("AICORE_KEY_STR", PRIVATE_KEY),
+    "sap-key-string-with-escaped-line-breaks": (
+        "AICORE_KEY_STR",
+        PRIVATE_KEY.replace("\n", "\\n"),
+    ),
+    "oci-key": ("OCI_KEY", PRIVATE_KEY),
+    "sap-x509-service-key": (
+        "AICORE_SERVICE_KEY",
+        json.dumps(
+            {"clientid": CLIENT_ID, "certificate": CERTIFICATE, "key": PRIVATE_KEY}
+        ),
+    ),
+}
+# The private key as an error may lay it out, and that text masked.
+LAID_OUT = {
+    "a-line-alone": (f"refused {PEM_LINES[1]}", "refused REDACTED"),
+    "json-escaped": (
+        json.dumps(PRIVATE_KEY),
+        (
+            '"-----BEGIN PRIVATE KEY-----\\nREDACTED\\nREDACTED'
+            '\\n-----END PRIVATE KEY-----\\n"'
+        ),
+    ),
+    "on-one-line": (
+        " ".join(PRIVATE_KEY.split()),
+        "-----BEGIN PRIVATE KEY----- REDACTED REDACTED -----END PRIVATE KEY-----",
+    ),
+}
+
+
+@pytest.mark.parametrize(("name", "value"), PRIVATE_KEYS.values(), ids=PRIVATE_KEYS)
+@pytest.mark.parametrize(("text", "shown"), LAID_OUT.values(), ids=LAID_OUT)
+def test_a_private_keys_body_is_masked_line_by_line_however_an_error_lays_it_out(
+    monkeypatch, name, value, text, shown
+):
+    monkeypatch.setenv(name, value)
+    assert masked(text) == shown
+
+
+def test_a_public_certificate_is_not_masked(monkeypatch):
+    monkeypatch.setenv("AICORE_CERT_STR", CERTIFICATE)
+    assert masked(CERTIFICATE) == CERTIFICATE
 
 
 # Each name, and whether it says that what it holds is a credential.
