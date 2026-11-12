@@ -97,6 +97,18 @@ opened URL's fragment, ``#token=...``.
   page with ``save=dialog`` beside its token: a page opened without it downloads the
   file. A file that can't be written is refused (500), the log naming where and the
   error's class; a file it was to replace stays as it was.
+- ``POST /api/imports``, with what a saved tab's file holds of its run's folder, as
+  ``GET /api/runs/{run_id}/representation`` answers it, makes that folder again, in a
+  new folder of its own in the logs dir, and answers ``{run_id}``: a run that has
+  ended, which an ask goes over as over any other. It writes each file in
+  ``REPRESENTATION_FILES`` under its own name, never at a path from the body. The
+  body must hold each of them, a JSON object, and nothing else, a manifest whose
+  config is a run of this app's, its prompt versions named as r3con names them, and
+  no more than ``MAX_BODY_BYTES``. Of the manifest, it keeps only the question, the
+  config, without the params and overrides a file could make an ask send, and the
+  model. A body that isn't so, or a folder r3con can't ask over, is refused (422) in
+  one plain line, the log saying why, and nothing of it is left; so is a folder that
+  can't be written (500).
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -128,6 +140,7 @@ import json
 import lzma
 import os
 import secrets
+import shutil
 import signal
 import socket
 import threading
@@ -162,6 +175,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic_core import PydanticCustomError
 from starlette.applications import Starlette
@@ -174,9 +188,11 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
+from r3con.config import DEFAULT_CONFIG, PromptStage, RunConfig
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import one_line
-from r3con.runs import EventRecorder
+from r3con.pipeline import read_representation
+from r3con.runs import EventRecorder, new_run_folder
 from r3con.runtime.llm import quiet_litellm
 
 Provider = Literal["openai", "anthropic", "gemini"]
@@ -273,6 +289,17 @@ SAVE_DIALOG = "save=dialog"
 UNWRITABLE_SAVE = "The file couldn't be written there, so the tab isn't saved."
 # A file name alone: in a suggested name, the Save dialog would open a folder in it.
 SAVED_FILE_NAME = r"^[^/\\\x00]+\.html$"
+UNREADABLE_IMPORT = "Its run can't be asked again: it isn't a run this R3Con can read."
+UNWRITABLE_IMPORT = "Its run can't be made again here: R3Con couldn't write its folder."
+# r3con's prompt versions, v1, v2 and so on: a version is a file's name, so nothing else.
+PROMPT_VERSION = r"^v\d+$"
+CONFIG_NAME = r"^[\w-]+$"
+# What an ask would send of an imported run's config: a server's URL or headers, say.
+UNIMPORTED = {"params", "overrides"}
+DIRECT_ONLY = "an imported run is asked directly, never with code the model writes"
+NOT_ONE_INDEX_EACH = (
+    "must give each document one index, 0 to n - 1, and names.json a name"
+)
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
@@ -343,6 +370,54 @@ class DocumentQuery(BaseModel):
 class SaveQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Annotated[str, StringConstraints(pattern=SAVED_FILE_NAME)]
+
+
+class ImportedConfig(RunConfig):
+    """A saved run's config, as a run of this app's has it, whose name and prompt
+    versions, each a file's name, are names alone; it is written without
+    ``UNIMPORTED``."""
+
+    name: Annotated[str, StringConstraints(pattern=CONFIG_NAME)] = DEFAULT_CONFIG
+    relevance_rounds: Annotated[
+        int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)
+    ] = DEFAULT_RELEVANCE_ROUNDS
+    prompts: dict[
+        PromptStage, Annotated[str, StringConstraints(pattern=PROMPT_VERSION)]
+    ] = Field(default_factory=dict)
+
+    # A file would otherwise have each ask run the coding agent, steered by its text.
+    @field_validator("reasoning")
+    @classmethod
+    def _direct(cls, reasoning: str) -> str:
+        if reasoning != "direct":
+            raise PydanticCustomError("reasoning", DIRECT_ONLY)
+        return reasoning
+
+
+class ImportedManifest(BaseModel):
+    r3con_version: str | None = None
+    task: str
+    config: ImportedConfig
+    litellm_model: Text
+
+
+class ImportedRun(BaseModel):
+    """What ``POST /api/imports`` takes: each file of a run's folder an ask reads."""
+
+    model_config = FORBID_EXTRA
+    manifest: ImportedManifest = Field(alias="manifest.json")
+    ids: dict[str, int] = Field(alias="ids.json")
+    names: dict[str, str] = Field(alias="names.json")
+    relevance: dict[str, Any] = Field(alias="relevance/result.json")
+    schema_proposal: dict[str, Any] = Field(alias="structuring/schema/result.json")
+    parsing: dict[str, Any] = Field(alias="structuring/parsing/result.json")
+
+    @model_validator(mode="after")
+    def _one_index_each(self) -> ImportedRun:
+        indices = sorted(self.ids.values()) == list(range(len(self.ids)))
+        if not indices or self.names.keys() != self.ids.keys():
+            raise PydanticCustomError("ids", NOT_ONE_INDEX_EACH)
+        return self
 
 
 class AskRequest(BaseModel):
@@ -793,6 +868,47 @@ def _run_dir(state: ServerState, run_id: str) -> Path:
     return Path(started["run_dir"])
 
 
+def _imported(logs_dir: Path, run: ImportedRun) -> Path:
+    """The folder ``run`` is made again in, new, in ``logs_dir``; refused if r3con
+    can't ask over it, and then removed."""
+    folder = logs_dir / new_run_folder()
+    files = run.model_dump(by_alias=True, exclude={"manifest": {"config": UNIMPORTED}})
+    files["manifest.json"]["run_folder"] = folder.name
+    try:
+        for path in REPRESENTATION_FILES:
+            (folder / path).parent.mkdir(parents=True, exist_ok=True)
+            (folder / path).write_text(json.dumps(files[path]), encoding="utf-8")
+    except OSError as error:
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.warning(
+            "%s: an imported run isn't written (%s)", folder, type(error).__name__
+        )
+        raise HTTPException(500, UNWRITABLE_IMPORT) from None
+    try:
+        read_representation(folder)
+    # r3con's reader trusts the folders r3con writes: one from a file can fail it anyhow.
+    except Exception as error:  # noqa: BLE001 — logged, by its class alone
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.warning("An imported run is refused (%s).", type(error).__name__)
+        raise HTTPException(422, UNREADABLE_IMPORT) from None
+    return folder
+
+
+async def import_run(request: Request) -> Response:
+    state = _state(request)
+    try:
+        body = ImportedRun.model_validate_json(await request.body())
+    except ValidationError as error:
+        # A field's place may name a key from the file: %r keeps it on one line.
+        logger.warning("An imported run is refused: %r", _explain(error))
+        raise HTTPException(422, UNREADABLE_IMPORT) from None
+    folder = await run_in_threadpool(_imported, state.logs_dir, body)
+    run_id = secrets.token_hex(ID_BYTES)
+    events = [{"type": "run_started", "run_dir": str(folder)}, {"type": "run_finished"}]
+    state.jobs["run"][run_id] = Job(events=events)
+    return JSONResponse({"run_id": run_id}, status_code=201)
+
+
 async def start_ask(request: Request) -> Response:
     state = _state(request)
     run_dir = _run_dir(state, request.path_params["run_id"])
@@ -946,6 +1062,7 @@ def create_app(
             Route("/api/documents/zip", document_zip, methods=["POST"]),
             Route("/api/saves", save_tab, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
+            Route("/api/imports", import_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(
                 "/api/runs/{job_id}/cancel",

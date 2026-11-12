@@ -24,6 +24,7 @@ from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
     DEFAULT_RELEVANCE_ROUNDS,
+    DIRECT_ONLY,
     ENCRYPTED_ZIP,
     KEYLESS_SERVER_KEY,
     MAC_APP_KEY_SERVICE,
@@ -31,11 +32,14 @@ from r3con.app.server import (
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
     NO_SAVE_DIALOG,
+    NOT_ONE_INDEX_EACH,
     REPRESENTATION_FILES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
+    UNREADABLE_IMPORT,
     UNREADABLE_RUN,
     UNREADABLE_ZIP,
+    UNWRITABLE_IMPORT,
     UNWRITABLE_SAVE,
     ZIP_ENCRYPTED_FLAG,
     ChooseSavePath,
@@ -140,6 +144,9 @@ ANSWER = {
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
 SAVES = "/api/saves"
+IMPORTS = "/api/imports"
+# A server a crafted file's params would send an imported run's asks to, with its key.
+ELSEWHERE = "http://127.0.0.1:12/v1"
 MAX_SAVE_BYTES = 1_000
 SAVED_NAME = "which-site-logged-the-most-incidents.html"
 CHOSEN_NAME = "chosen.html"
@@ -494,6 +501,7 @@ def test_the_page_and_its_files_are_revalidated_on_every_load(
         ("POST", f"{DOCUMENT_TEXT}?name=memo.pdf"),
         ("POST", f"{DOCUMENT_ZIP}?name={ZIP_NAME}"),
         ("POST", f"{SAVES}?name={SAVED_NAME}"),
+        ("POST", IMPORTS),
     ],
 )
 @pytest.mark.parametrize(
@@ -1267,6 +1275,194 @@ def test_a_runs_representation_names_no_server_header_or_masked_value(
         for held in (ENDPOINT, SECOND_ENDPOINT, OTHER_KEY, GATE_KEY, MASK)
         if held in saved
     ] == []
+
+
+def imported(client: TestClient, files: dict[str, Any]) -> str:
+    response = client.post(IMPORTS, json=files)
+    assert response.status_code == 201, response.text
+    return response.json()["run_id"]
+
+
+def run_folders(logs_dir: Path) -> list[str]:
+    return sorted(folder.name for folder in logs_dir.iterdir())
+
+
+def test_a_saved_runs_representation_imports_as_a_new_run_asked_like_any_other(
+    client: TestClient, logs_dir: Path
+):
+    saved = representation_of(client, finished_run(client))
+    before = run_folders(logs_dir)
+    run_id = imported(client, saved)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    written = sorted(str(path.relative_to(run_dir)) for path in run_dir.rglob("*.*"))
+    events = ask_events(client, run_id)
+    assert [event["type"] for event in events] == ASK_EVENTS
+    assert run_dir.parent == logs_dir and run_dir.name not in before
+    assert written == sorted(REPRESENTATION_FILES)
+    resaved = representation_of(client, run_id)
+    assert {path: resaved[path] for path in REPRESENTATION_FILES[1:]} == {
+        path: saved[path] for path in REPRESENTATION_FILES[1:]
+    }
+
+
+def test_an_imported_run_keeps_no_param_override_or_other_field_of_its_manifest(
+    client: TestClient, llm: FakeLLM
+):
+    saved = representation_of(client, finished_run(client))
+    config = saved["manifest.json"]["config"]
+    saved["manifest.json"] = {
+        **saved["manifest.json"],
+        "config": {**config, "params": {"api_base": ELSEWHERE}, "overrides": {"x": 1}},
+        "ask_of": "another-run",
+        "sources": {"config": "/somewhere/default.yaml"},
+    }
+    client.post("/api/keys", json=STORED_OPENAI)
+    run_id = imported(client, saved)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    sent = len(llm.requests)
+    assert ask_events(client, run_id)[-1]["type"] == "ask_finished"
+    assert sorted(manifest) == [
+        "config",
+        "litellm_model",
+        "r3con_version",
+        "run_folder",
+        "task",
+    ]
+    assert sorted(manifest["config"]) == [
+        "model",
+        "name",
+        "prompts",
+        "reasoning",
+        "relevance_rounds",
+    ]
+    assert transport(llm)[sent:] == [{"api_key": OPENAI_KEY}]
+
+
+def renamed_first_id(files: dict[str, Any]) -> None:
+    for name in ("ids.json", "names.json"):
+        files[name]["renamed"] = files[name].pop(next(iter(files[name])))
+
+
+@pytest.mark.parametrize(
+    ("damage", "logged"),
+    [
+        (lambda f: f.update({"../escape.json": {}}), "Extra inputs"),
+        (lambda f: f.pop("ids.json"), "ids.json: Field required"),
+        (lambda f: f.update({"ids.json": []}), "Input should be an object"),
+        (
+            lambda f: f["manifest.json"]["config"]["prompts"].update(
+                {"reasoning/direct": "../../../escape"}
+            ),
+            "String should match pattern",
+        ),
+        (
+            lambda f: f["manifest.json"]["config"].update({"name": "../x"}),
+            "String should match pattern",
+        ),
+        (lambda f: f["manifest.json"]["config"].update({"seed": 7}), "Extra inputs"),
+        (
+            lambda f: f["manifest.json"]["config"].update({"reasoning": "coding"}),
+            DIRECT_ONLY,
+        ),
+        (
+            lambda f: f["ids.json"].update({next(iter(f["ids.json"])): -1}),
+            NOT_ONE_INDEX_EACH,
+        ),
+        (
+            lambda f: f["ids.json"].update(dict.fromkeys(list(f["ids.json"])[:2], 0)),
+            NOT_ONE_INDEX_EACH,
+        ),
+        (lambda f: f["names.json"].update({"extra": "x.txt"}), NOT_ONE_INDEX_EACH),
+        (lambda f: f["relevance/result.json"].pop("rounds"), "refused (ValueError)"),
+        (
+            lambda f: f["manifest.json"]["config"]["prompts"].update(
+                {"reasoning/direct": "v999"}
+            ),
+            "refused (FileNotFoundError)",
+        ),
+        (renamed_first_id, "refused (ValueError)"),
+    ],
+    ids=[
+        "path",
+        "missing",
+        "not-an-object",
+        "prompt-path",
+        "config-path",
+        "config-field",
+        "coding",
+        "negative-index",
+        "repeated-index",
+        "names-differ",
+        "no-rounds",
+        "no-such-prompt",
+        "unknown-snippet-id",
+    ],
+)
+def test_an_import_not_a_run_r3con_can_ask_is_refused_plainly_and_writes_nothing(
+    client: TestClient,
+    logs_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+    damage: Callable[[dict[str, Any]], object],
+    logged: str,
+):
+    saved = representation_of(client, finished_run(client))
+    before = run_folders(logs_dir)
+    damage(saved)
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        response = client.post(IMPORTS, json=saved)
+    said = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert (response.status_code, response.json()) == (
+        422,
+        {"error": UNREADABLE_IMPORT},
+    )
+    assert len(said) == 1 and logged in said[0]
+    assert run_folders(logs_dir) == before
+
+
+def test_a_refused_imports_log_line_keeps_a_key_from_the_file_on_one_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+):
+    saved = representation_of(client, finished_run(client))
+    saved["ids.json"] = {"x\nFAKE warning line": "no"}
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        client.post(IMPORTS, json=saved)
+    said = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert len(said) == 1 and "\n" not in said[0]
+    assert "x\\nFAKE warning line" in said[0]
+
+
+def test_an_import_whose_folder_cannot_be_written_is_refused_and_logged(
+    client: TestClient, llm: FakeLLM, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    saved = representation_of(client, finished_run(client))
+    taken = tmp_path / "taken"
+    taken.write_text("a file where the logs dir would be")
+    with (
+        client_for(llm, taken) as elsewhere,
+        caplog.at_level(logging.WARNING, logger="r3con.app"),
+    ):
+        response = elsewhere.post(IMPORTS, json=saved)
+    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert (response.status_code, response.json()) == (
+        500,
+        {"error": UNWRITABLE_IMPORT},
+    )
+    assert len(logged) == 1 and "an imported run isn't written" in logged[0]
+    assert taken.read_text() == "a file where the logs dir would be"
+
+
+def test_an_import_over_the_body_limit_is_refused_and_writes_nothing(
+    llm: FakeLLM, logs_dir: Path
+):
+    with client_for(llm, logs_dir) as client:
+        saved = representation_of(client, finished_run(client))
+    before = run_folders(logs_dir)
+    body = json.dumps(saved)
+    with client_for(llm, logs_dir, max_body_bytes=len(body) - 1) as client:
+        response = client.post(IMPORTS, content=body)
+    assert response.status_code == 413
+    assert run_folders(logs_dir) == before
 
 
 def test_the_representation_of_a_run_still_running_is_refused(
