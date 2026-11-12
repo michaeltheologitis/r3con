@@ -36,6 +36,7 @@ USAGE = {
 THOUGHT = "Count the memos first."
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 PEM = f"-----BEGIN PRIVATE KEY-----\n{KEY}\n-----END PRIVATE KEY-----\n"
+SAP_SERVICE_KEY = json.dumps({"clientid": "sb-memo-reader", "clientsecret": KEY})
 SERVER = "https://llm.example.com/v1"
 # A JSON Schema whose fields' names look like a credential's.
 SCHEMA = {
@@ -138,6 +139,19 @@ WITHIN_REQUEST_DATA = {
     "header-of-a-tool-in-extra-body": (
         {"extra_body": {"tools": [{"headers": {"X-Key": KEY}}]}},
         {"extra_body": {"tools": [{"headers": {"X-Key": "REDACTED"}}]}},
+    ),
+}
+# A run's environment and params, with KEY where litellm finds a secret within one.
+SECRETS_WITHIN = {
+    "sap-service-keys-client-secret": ({"AICORE_SERVICE_KEY": SAP_SERVICE_KEY}, {}),
+    "sap-private-keys-line": ({"AICORE_KEY_STR": PEM}, {}),
+    "first-hosts-password": (
+        {},
+        {"api_base": f"postgres://u:{KEY}@db1.example.com,v:pw-0123456789@db2/memos"},
+    ),
+    "second-hosts-password": (
+        {},
+        {"api_base": f"postgres://u:pw-0123456789@db1.example.com,v:{KEY}@db2/memos"},
     ),
 }
 # Params with no credential, though names in them look like one's.
@@ -651,6 +665,23 @@ def test_a_provider_error_that_echoes_the_servers_password_is_written_masked(
     assert not [text for text in written if KEY in text]
     [failed] = [e for e in events_in(logger.dir) if e["type"] == "run_failed"]
     assert "can't reach https://reader:REDACTED@llm.example.com/v1" in failed["error"]
+
+
+@pytest.mark.parametrize(
+    ("environment", "params"), SECRETS_WITHIN.values(), ids=SECRETS_WITHIN
+)
+def test_a_secret_within_a_credential_is_masked_in_every_file_when_an_error_echoes_it(
+    llm, logger, monkeypatch, environment, params
+):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    echoed = litellm.AuthenticationError(
+        f"refused {KEY}", llm_provider="openai", model=MODEL
+    )
+    refused_with(llm, logger, params, echoed)
+    written = [path.read_text() for path in logger.dir.rglob("*") if path.is_file()]
+    assert not [text for text in written if KEY in text]
+    assert "refused REDACTED" in (logger.dir / "relevance" / "error.txt").read_text()
 
 
 def test_the_manifest_records_the_settings_it_is_given(logger):
