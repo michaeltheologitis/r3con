@@ -411,6 +411,8 @@ p { margin: 0; }
 .code.json > span { display: block; padding-left: var(--indent); text-indent: calc(-1 * var(--indent)); }
 /* Where a long text stops short, under its last line shown, and left out of a copy of it. */
 .cut { display: block; margin-top: 0.7em; user-select: none; -webkit-user-select: none; }
+/* As tall as the lines of a long text not drawn above or below the view; near it, each part drawn starts a line. */
+.code .gap, .code.near > span { display: block; }
 .used { color: var(--accent-ink); }
 .trail-line:empty { display: none; }
 mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--accent); }
