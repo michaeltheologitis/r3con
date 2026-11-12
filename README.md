@@ -26,6 +26,8 @@ organizes the relevant information, then reasons over it to produce an answer.
 brew install michaeltheologitis/r3con/r3con
 ```
 
+Either way, R3Con updates itself: **R3Con → Check for Updates…**
+
 ### Any computer
 
 First install uv:
