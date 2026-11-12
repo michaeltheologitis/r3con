@@ -1,9 +1,12 @@
 """The Mac app's window (r3con.app.window), with Toga faked at the screen."""
 
 import asyncio
+import os
 import runpy
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -13,8 +16,8 @@ import pytest
 import toga
 
 from r3con.app import window
-from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen
-from tests.fakes import FakeKeyring
+from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen, serve
+from tests.fakes import GATE_TIMEOUT_SECONDS, FakeKeyring, FakeLLM
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
 TIMEOUT_SECONDS = 10
@@ -24,6 +27,16 @@ R3CON_APP_KEY = "sk-saved-by-r3con-app-5678"
 SAVED_NAME = "which-site-logged-the-most-incidents.html"
 CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
+# AppKit's NSTerminateNow: what Toga answers a Dock Quit or a logout with.
+NS_TERMINATE_NOW = 1
+HELD_RUN = {
+    "question": "Which memo?",
+    "model": "openai/held-model",
+    "documents": ["A memo."],
+}
+# Past the stop's bound, and well short of the held call's answer, at GATE_TIMEOUT_SECONDS.
+QUIT_BOUND_SECONDS = window.QUIT_SECONDS + 1
+WINDOW_THREAD = "window"
 
 
 class FakeWebView:
@@ -61,18 +74,32 @@ class FakeWindow:
         return self.chooses
 
 
+class FakeBackend:
+    """Toga 0.5.7's Mac backend for the app, as AppKit asks it on a Dock Quit or a
+    logout: it lets the app end at once."""
+
+    def cocoa_applicationShouldTerminate(self, sender: object) -> int:
+        return NS_TERMINATE_NOW
+
+
 class FakeApp:
     """Toga's app, the running one as ``app``. Its main loop opens a window on
     ``startup``'s web view, reads the page there as a user would, saves the key in
     ``saving``, if any, as its settings would, and with ``saving_tab``, saves a tab
-    as its page would, then quits as the app menu's Quit does, which ``on_exit``
-    allows or not, or with ``quits_mid_save``, once the tab's Save dialog is open.
-    Its event loop runs while the page is read, as Toga's does."""
+    as its page would, and with ``running``, starts a run on that model and waits for
+    its call. Then it quits as the app menu's Quit does, which ``on_exit`` allows or
+    not, or with ``quits_mid_save``, once the tab's Save dialog is open; or with
+    ``quits_from_dock``, as the Dock's Quit or a logout does, noting what that left
+    done, ``ended``, by the time it returns, if it does. Its event loop runs while the
+    page is read, as Toga's does."""
 
     app: "FakeApp"
     saving: dict[str, str] | None = None
     saving_tab = False
+    running: FakeLLM | None = None
     quits_mid_save = False
+    quits_from_dock = False
+    exits: list[int]
 
     def __init__(
         self, *, startup: Callable[..., FakeWebView], on_exit: Callable[..., bool]
@@ -81,6 +108,7 @@ class FakeApp:
         self.on_exit = on_exit
         self.main_window = FakeWindow()
         self.windows = [self.main_window]
+        self._impl = FakeBackend()
         type(self).app = self
 
     def main_loop(self) -> None:
@@ -95,7 +123,13 @@ class FakeApp:
             await asyncio.to_thread(self.main_window.opened.wait, TIMEOUT_SECONDS)
         else:
             await reading
-        self.quits = self.on_exit(self)
+        self.quit_at = time.monotonic()
+        if self.quits_from_dock:
+            self._impl.cocoa_applicationShouldTerminate(self)
+            hidden = all(shown.hidden for shown in self.windows)
+            self.ended = (hidden, refuses(self.url), [*self.exits])
+        else:
+            self.quits = self.on_exit(self)
         await reading
 
     def read_page(self) -> None:
@@ -116,6 +150,9 @@ class FakeApp:
                     headers=auth,
                     content=SAVED_TAB,
                 )
+            if self.running is not None:
+                self.started = http.post("/api/runs", json=HELD_RUN, headers=auth)
+                self.running.called.wait(TIMEOUT_SECONDS)
 
 
 @pytest.fixture
@@ -132,6 +169,19 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeApp]:
     monkeypatch.setattr(toga, "WebView", FakeWebView)
     monkeypatch.setattr(toga, "SaveFileDialog", fake_save_file_dialog)
     return apps
+
+
+@pytest.fixture(autouse=True)
+def exits(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
+    """The codes the window ends the process with, which here it never does: a window
+    left running on a thread is waited for, so that it never ends pytest's."""
+    codes: list[int] = []
+    monkeypatch.setattr(os, "_exit", codes.append)
+    monkeypatch.setattr(FakeApp, "exits", codes, raising=False)
+    yield codes
+    for running in threading.enumerate():
+        if running.name == WINDOW_THREAD:
+            running.join()
 
 
 @pytest.fixture(autouse=True)
@@ -237,7 +287,7 @@ def test_quitting_with_a_save_dialog_open_cancels_its_save_and_stops_the_server(
     monkeypatch.setattr(FakeApp, "saving_tab", True)
     monkeypatch.setattr(FakeApp, "quits_mid_save", True)
     monkeypatch.setattr(FakeWindow, "answers", False)
-    running = threading.Thread(target=window.main, daemon=True)
+    running = threading.Thread(target=window.main, name=WINDOW_THREAD, daemon=True)
     running.start()
     running.join(TIMEOUT_SECONDS)
     (app,) = opened
@@ -246,12 +296,51 @@ def test_quitting_with_a_save_dialog_open_cancels_its_save_and_stops_the_server(
     assert refuses(app.url)
 
 
-def test_quitting_hides_the_window_then_stops_the_server(opened: list[FakeApp]):
+def test_quitting_hides_the_window_then_stops_the_server_and_ends_the_process(
+    opened: list[FakeApp], exits: list[int]
+):
     window.main()
     (app,) = opened
     assert app.quits
     assert all(shown.hidden for shown in app.windows)
     assert refuses(app.url)
+    assert exits == [0]
+
+
+def test_a_dock_quit_or_a_logout_hides_the_window_and_stops_the_server_before_it_ends(
+    opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(FakeApp, "quits_from_dock", True)
+    window.main()
+    (app,) = opened
+    hidden, stopped, exited = app.ended
+    assert (hidden, stopped, exited) == (True, True, [0])
+
+
+def test_quitting_with_a_model_call_in_flight_ends_the_process_without_waiting_for_it(
+    opened: list[FakeApp],
+    exits: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    held = FakeLLM().answers(relevance="A memo.")
+    held.gate.clear()
+    monkeypatch.setattr(
+        window, "serve", partial(serve, logs_dir=tmp_path, completion=held)
+    )
+    monkeypatch.setattr(FakeApp, "running", held)
+    try:
+        window.main()
+        ended = time.monotonic()
+    finally:
+        held.gate.set()
+    (app,) = opened
+    assert (app.started.status_code, held.called.is_set()) == (202, True)
+    assert ended - app.quit_at < QUIT_BOUND_SECONDS < GATE_TIMEOUT_SECONDS
+    assert exits == [0]
+    for worker in threading.enumerate():
+        if worker.name.startswith("r3con-app-"):
+            worker.join(TIMEOUT_SECONDS)
 
 
 def test_python_m_r3con_opens_the_window_in_the_mac_app(
