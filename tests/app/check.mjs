@@ -1689,8 +1689,8 @@ async function folders() {
     await pressNode(page, archiveFold, { key: true });
     const dots = (await page.evaluate(treeGeometry, TREE_GEOMETRY)).meets;
     await pressNode(page, archiveFold, { key: true });
-    // Letters' 5 files; archive's, its fold opened above the 6 it holds, between its ends.
-    const rows = 5 + CONTEXT_DOCS + 1 + 6 + CONTEXT_DOCS;
+    // Letters' 5 files, archive's 12, and its opened fold's own row.
+    const rows = 5 + 12 + 1;
     check('folders', "a fold's tick meets its dots as a file's meets its page, at their middle, a few pixels short, the fold closed or open", dots.length === rows && dots.every(meets), JSON.stringify(dots));
     check('folders', "a fold in a folder is grey, as a loose file's is: its count and dots in the dim colour", fold && fold.count.color === fold.dim && fold.dots === fold.dim, JSON.stringify(fold));
 
@@ -1794,37 +1794,30 @@ async function folders() {
 
   await withPage('folders', { sample: false }, async (page) => {
     // Quiet folders of 4, 5, 7 and 10 files at the tab's start, middle and end, loose files between, and one of 12.
-    const quietFolder = (name, n) => [name, Array.from({ length: n }, (_, i) => [`${name}_${String(i + 1).padStart(2, '0')}.txt`, ''])];
     const sizes = { four: 4, five: 5, seven: 7, big: 12, ten: 10 };
+    const stems = (name) => Array.from({ length: sizes[name] }, (_, i) => `${name}_${String(i + 1).padStart(2, '0')}`);
+    const quietFolder = (name) => [name, stems(name).map((stem) => [`${stem}.txt`, ''])];
     const loose = ['loose_1.txt', 'loose_2.txt', 'loose_3.txt'].map((name) => [name, '']);
-    const [four, ...others] = Object.entries(sizes).map(([name, n]) => [quietFolder(name, n)]);
+    const [four, ...others] = Object.keys(sizes).map((name) => [quietFolder(name)]);
     const total = Object.values(sizes).reduce((a, b) => a + b, loose.length);
     await dropBatches(page, [four, loose, ...others], total);
     // From the keyboard, as each opened folder pushes the next out of view.
     for (const name of Object.keys(sizes)) await pressNode(page, folderSel(name), { key: true });
-    const filesOf = (name) => Array.from({ length: sizes[name] }, (_, i) => `  ${name}_${String(i + 1).padStart(2, '0')}`);
+    const filesOf = (name) => stems(name).map((stem) => `  ${stem}`);
+    const opened = (name, rows = filesOf(name)) => [`${name} · ${sizes[name]} files (open)`, ...rows];
     const big = filesOf('big');
     /** @param {string[]} fold the rows of the folder of 12 */
-    const rowsWith = (fold) => [
-      ...['four · 4 files (open)', ...filesOf('four')],
-      'loose_1',
-      'loose_2',
-      'loose_3',
-      ...['five · 5 files (open)', ...filesOf('five')],
-      ...['seven · 7 files (open)', ...filesOf('seven')],
-      ...['big · 12 files (open)', ...fold],
-      ...['ten · 10 files (open)', ...filesOf('ten')],
-    ];
+    const rowsWith = (fold) => [...opened('four'), 'loose_1', 'loose_2', 'loose_3', ...opened('five'), ...opened('seven'), ...opened('big', fold), ...opened('ten')];
     const before = await page.evaluate(treeRows, TREE_INDENT);
     const expectedBefore = rowsWith([...big.slice(0, CONTEXT_DOCS), `  ${sizes.big - 2 * CONTEXT_DOCS} more files`, ...big.slice(-CONTEXT_DOCS)]);
-    const smallName = `in a tab of ${total} files, an opened folder of ${FOLD_FROM_DOCS} files or fewer shows them all, wherever it sits, as do loose files beside folders; one of ${sizes.big} folds all but its own first and last ${CONTEXT_DOCS}`;
-    check('folders', `before a run, ${smallName}`, isDeepStrictEqual(before, expectedBefore), before.join(' | '));
+    const small = `in a tab of ${total} files, an opened folder of ${FOLD_FROM_DOCS} files or fewer shows them all, wherever it sits, as do loose files beside folders`;
+    check('folders', `before a run, ${small}; one of ${sizes.big} folds all but its own first and last ${CONTEXT_DOCS}`, isDeepStrictEqual(before, expectedBefore), before.join(' | '));
     await page.click('#tab-chat');
     await send(page, 'Which memo is relevant?');
     const done = await becomes(page, statusMatches, SIMULATED_DONE.source);
     const after = await page.evaluate(treeRows, TREE_INDENT);
     const expectedAfter = rowsWith([`  ${sizes.big} files · nothing relevant`]);
-    check('folders', `after a run of none relevant, ${smallName.replace(` all but its own first and last ${CONTEXT_DOCS}`, ' whole')}`, done && isDeepStrictEqual(after, expectedAfter), after.join(' | '));
+    check('folders', `after a run with nothing relevant, ${small}; one of ${sizes.big} folds whole`, done && isDeepStrictEqual(after, expectedAfter), after.join(' | '));
   });
 
   await withPage('folders', { sample: false }, async (page) => {
