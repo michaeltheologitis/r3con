@@ -3946,15 +3946,17 @@
       const [from, to] = near(y, pre.clientHeight * DRAWN_VIEWS);
       redraw(from, to);
       measure();
-      const total = offset(heights.length);
+      const [top, total] = [offset(first), offset(heights.length)];
       const scale = Math.min(1, MAX_SCROLL_PX / total);
-      const kept = scrolled - pad() - (offset(i) - offset(first)) - delta;
-      const keep = !atBottom && first > 0 && kept >= 0 && Math.abs(kept - offset(first) * scale) < MAX_DRIFT_PX;
-      gapAbove = keep ? kept : offset(first) * scale;
+      // From the top of the scroll to `y`, past the gap above.
+      const into = pad() + offset(i) - top + delta;
+      const kept = scrolled - into;
+      const keep = !atBottom && first > 0 && kept >= 0 && Math.abs(kept - top * scale) < MAX_DRIFT_PX;
+      gapAbove = keep ? kept : top * scale;
       gapBelow = (total - offset(last)) * scale;
       above.style.height = `${gapAbove}px`;
       below.style.height = `${gapBelow}px`;
-      if (!keep) pre.scrollTop = atBottom ? pre.scrollHeight : pad() + gapAbove + offset(i) - offset(first) + delta;
+      if (!keep) pre.scrollTop = atBottom ? pre.scrollHeight : gapAbove + into;
     }
 
     function update() {

@@ -3160,10 +3160,9 @@ async function scrolledToEnd(selector) {
   return { end: text.slice(-20), inView: line.top >= box.top && line.bottom <= box.bottom, length: text.length };
 }
 
-// Copies what `select`, run in the page with `arg`, selects there, and returns what the clipboard then holds.
-async function copied(page, select, arg) {
+// Copies what is selected in the page, and returns what the clipboard then holds.
+async function copied(page) {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
-  await page.evaluate(select, arg);
   await page.keyboard.press('ControlOrMeta+C');
   return page.evaluate(() => navigator.clipboard.readText());
 }
@@ -3191,7 +3190,8 @@ async function popupWords() {
     const stopsName = `a file of more than ${WORDS_SHOWN} words shows its ${WORDS_SHOWN}th word and not the next`;
     check('popup', stopsName, cut.end.endsWith(` w${WORDS_SHOWN}`), JSON.stringify(cut.end));
 
-    const all = await copied(page, () => getSelection().selectAllChildren(document.querySelector('#inspector pre')));
+    await page.$eval('#inspector pre', (pre) => getSelection().selectAllChildren(pre));
+    const all = await copied(page);
     const copyName = 'a copy of all of a text that stops short is the text up to where it stops, without the line that says so';
     const shownText = numberedWords(WORDS_SHOWN + WORDS_PAST).slice(0, cut.length);
     check('popup', copyName, all === shownText, `${all.length} characters, ending ${JSON.stringify(all.slice(-20))}`);
@@ -3247,8 +3247,8 @@ const DRAWN_CHARS = 50_000;
 function marksInView() {
   const pre = document.querySelector('#inspector pre');
   const box = pre.getBoundingClientRect();
-  const inView = (mark) => mark.getBoundingClientRect().bottom > box.top && mark.getBoundingClientRect().top < box.bottom;
-  return [...pre.querySelectorAll('mark')].filter(inView).map((mark) => ({ text: mark.textContent, multi: mark.classList.contains('multi') }));
+  const inView = (r) => r.bottom > box.top && r.top < box.bottom;
+  return [...pre.querySelectorAll('mark')].filter((mark) => inView(mark.getBoundingClientRect())).map((mark) => ({ text: mark.textContent, multi: mark.classList.contains('multi') }));
 }
 
 // In-page: scrolls the end of the first part of the popup's text drawn to the middle of the view, selects from that part
@@ -3278,7 +3278,7 @@ async function popupHuge() {
     await page.click('#inspector .cut button');
     const opened = (await page.evaluate(shownIn, '#inspector')).length;
     const selected = await page.evaluate(acrossParts);
-    const across = await copied(page, () => {});
+    const across = await copied(page);
     const acrossName = 'a copy of a selection across the parts of a text drawn near the view is that text';
     check('popup', acrossName, selected.parts > 1 && across === selected.text, `${selected.parts} parts; ${across.length} of ${selected.text.length} characters`);
     const end = await page.evaluate(scrolledToEnd, '#inspector');
