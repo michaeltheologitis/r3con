@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 import httpx2
 import pytest
@@ -90,14 +91,14 @@ class FakeApp:
         reading = asyncio.create_task(asyncio.to_thread(self.read_page))
         if self.quits_mid_save:
             await asyncio.to_thread(self.main_window.opened.wait, TIMEOUT_SECONDS)
-            self.quits = self.on_exit(self)
+        else:
+            await reading
+        self.quits = self.on_exit(self)
         await reading
-        if not self.quits_mid_save:
-            self.quits = self.on_exit(self)
 
     def read_page(self) -> None:
         base_url, fragment = self.url.split("/#")
-        token = fragment.removeprefix("token=").split("&")[0]
+        token = parse_qs(fragment)["token"][0]
         auth = {"Authorization": f"Bearer {token}"}
         with httpx2.Client(
             base_url=base_url, timeout=TIMEOUT_SECONDS, trust_env=False

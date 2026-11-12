@@ -38,6 +38,7 @@ from r3con.app.server import (
     UNREADABLE_ZIP,
     UNWRITABLE_SAVE,
     ZIP_ENCRYPTED_FLAG,
+    ChooseSavePath,
     ServerState,
     _server,
     create_app,
@@ -258,8 +259,15 @@ def logs_dir(tmp_path: Path) -> Path:
     return tmp_path / "runs"
 
 
-def client_for(model: FakeLLM, logs_dir: Path, **options: Any) -> TestClient:
-    state = ServerState(logs_dir=logs_dir, completion=model)
+def client_for(
+    model: FakeLLM,
+    logs_dir: Path,
+    choose_save_path: ChooseSavePath | None = None,
+    **options: Any,
+) -> TestClient:
+    state = ServerState(
+        logs_dir=logs_dir, completion=model, choose_save_path=choose_save_path
+    )
     app = create_app(token=TOKEN, port=PORT, state=state, **options)
     return TestClient(app, base_url=BASE_URL, headers=AUTH)
 
@@ -1316,12 +1324,6 @@ class FakeSaveDialog:
         return self.chooses
 
 
-def saving_client(llm: FakeLLM, logs_dir: Path, dialog: FakeSaveDialog) -> TestClient:
-    state = ServerState(logs_dir=logs_dir, completion=llm, choose_save_path=dialog)
-    app = create_app(token=TOKEN, port=PORT, state=state, max_body_bytes=MAX_SAVE_BYTES)
-    return TestClient(app, base_url=BASE_URL, headers=AUTH)
-
-
 def save(client: TestClient, name: str = SAVED_NAME, tab: bytes = SAVED_TAB):
     return client.post(SAVES, params={"name": name}, content=tab)
 
@@ -1330,7 +1332,7 @@ def test_a_tab_is_saved_where_the_save_dialog_chose_named_as_the_page_suggested(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
     dialog = FakeSaveDialog(tmp_path / "chosen.html")
-    with saving_client(llm, logs_dir, dialog) as client:
+    with client_for(llm, logs_dir, dialog) as client:
         response = save(client)
     assert response.status_code == 204
     assert dialog.shown == [SAVED_NAME]
@@ -1341,7 +1343,7 @@ def test_a_save_cancelled_in_the_dialog_is_answered_and_writes_nothing(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
     dialog = FakeSaveDialog(None)
-    with saving_client(llm, logs_dir, dialog) as client:
+    with client_for(llm, logs_dir, dialog) as client:
         response = save(client)
     assert (response.status_code, dialog.shown) == (204, [SAVED_NAME])
     # The working directory, where a write to the bare suggested name would land.
@@ -1353,7 +1355,7 @@ def test_a_save_over_an_earlier_one_replaces_it(
 ):
     earlier = tmp_path / "chosen.html"
     earlier.write_text("an earlier saved tab")
-    with saving_client(llm, logs_dir, FakeSaveDialog(earlier)) as client:
+    with client_for(llm, logs_dir, FakeSaveDialog(earlier)) as client:
         response = save(client)
     assert response.status_code == 204
     assert [path.name for path in tmp_path.iterdir()] == ["chosen.html"]
@@ -1375,7 +1377,7 @@ def test_a_save_not_named_as_one_html_file_is_refused_before_any_dialog(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path, name: str
 ):
     dialog = FakeSaveDialog(tmp_path / "chosen.html")
-    with saving_client(llm, logs_dir, dialog) as client:
+    with client_for(llm, logs_dir, dialog) as client:
         response = save(client, name)
     assert response.status_code == 422
     assert "name: String should match pattern" in response.json()["error"]
@@ -1386,7 +1388,7 @@ def test_a_save_over_the_body_limit_is_refused_before_any_dialog(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
     dialog = FakeSaveDialog(tmp_path / "chosen.html")
-    with saving_client(llm, logs_dir, dialog) as client:
+    with client_for(llm, logs_dir, dialog, max_body_bytes=MAX_SAVE_BYTES) as client:
         response = save(client, tab=b"x" * (MAX_SAVE_BYTES + 1))
     assert response.status_code == 413
     assert dialog.shown == []
@@ -1409,7 +1411,7 @@ def test_a_save_where_the_file_cannot_be_written_is_refused_and_logged(
     (tmp_path / "folder").mkdir()
     (tmp_path / "folder" / "kept.txt").write_text("kept")
     with (
-        saving_client(llm, logs_dir, FakeSaveDialog(tmp_path / chosen)) as client,
+        client_for(llm, logs_dir, FakeSaveDialog(tmp_path / chosen)) as client,
         caplog.at_level(logging.WARNING, logger="r3con.app"),
     ):
         response = save(client)
