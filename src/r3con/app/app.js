@@ -6279,7 +6279,7 @@
     if (typeof shape === 'function') return shape(value);
     if (typeof shape === 'string') return typeof value === shape && value !== null;
     if (Array.isArray(shape)) return Array.isArray(value) && value.every((item) => fits(item, shape[0]));
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+    if (!isObject(value)) return false;
     const object = /** @type {Record<string, unknown>} */ (value);
     /** @param {string} key */
     const named = (key) => key.replace(/\?$/, '');
@@ -6355,14 +6355,14 @@
     if (version !== SAVED_VERSION) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
     if (!fits(saved, SAVED_TAB_V1) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
     const { files, texts, folders, run, representation } = /** @type {SavedTabV1} */ (saved);
-    /** @type {unknown} */
+    /** @type {string[]} */
     const text = await gunzipped(texts, MAX_SAVED_TEXT_BYTES)
       .then(JSON.parse)
       .catch((error) => {
         throw error instanceof ServerError ? error : new ServerError(DAMAGED_SAVE);
       });
-    if (!fits(text, ['string']) || /** @type {string[]} */ (text).length !== files.length) throw new ServerError(DAMAGED_SAVE);
-    const docs = files.map((f, d) => loaded({ ...f, text: /** @type {string[]} */ (text)[d], sample: false }));
+    if (!fits(text, ['string']) || text.length !== files.length) throw new ServerError(DAMAGED_SAVE);
+    const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
     const [own, ...asks] = run.answers;
     return {
       files: docs,
