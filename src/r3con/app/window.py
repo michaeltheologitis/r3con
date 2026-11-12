@@ -13,8 +13,8 @@ app's menu or in the Dock, or logging out hides it, then stops the server as
 still in flight is cut off, and its run folder left without ``run_failed``. If Toga
 can't start the app, the server stops before the error goes on. Its web view has no
 downloads, so a tab is saved through a Save dialog on the window. It updates itself
-through Sparkle (:mod:`r3con.app.updates`). Toga is the Mac app's own: neither r3con
-nor its ``app`` extra installs it.
+through Sparkle (:mod:`r3con.app.updates`), and opens without updates whatever stops
+them. Toga is the Mac app's own: neither r3con nor its ``app`` extra installs it.
 """
 
 from __future__ import annotations
@@ -86,7 +86,11 @@ def main() -> None:
     def page(app: toga.App, **kwargs: Any) -> toga.Widget:
         for window in app.windows:
             window.size = WINDOW_SIZE
-        updates.start(app)
+        # Updates are optional: whatever stops them, the window still opens.
+        try:
+            updates.start(app)
+        except Exception:
+            logger.exception("Sparkle's updater failed: %s.", updates.NO_UPDATES)
         return toga.WebView(url=url)
 
     def hide(app: toga.App, **kwargs: Any) -> bool:

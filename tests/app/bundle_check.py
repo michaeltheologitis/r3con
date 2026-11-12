@@ -17,13 +17,11 @@ the page, and the API with this launch's token, must answer, a PDF encrypted as 
 ones often are must read back as its text, which pypdf does only with an AES library
 (here pycryptodome: cryptography is Linux-only), and once the server has stopped,
 nothing must. Last, it checks the app's updates: its Info.plist must give Sparkle an
-https feed, a public EdDSA key and the app's version to compare, Sparkle.framework must
-load and have the updater controller the app starts, and Sparkle's code must be signed
-as Sparkle's docs sign it, with the app's team and timestamp.
+https feed and the app's version to compare, and Sparkle's code must be signed as
+Sparkle's docs sign it. That the app starts Sparkle, its key and all, the window's
+launch in mac-app.yml checks.
 """
 
-import base64
-import binascii
 import ctypes
 import importlib.metadata
 import json
@@ -39,7 +37,7 @@ from collections.abc import Mapping
 from email.parser import HeaderParser
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -72,19 +70,10 @@ BACKEND = "uv-build"
 # What encrypted_pdf's PDF says, which the server must read back from it.
 ENCRYPTED_PDF_TEXT = "Read through AES-256."
 SPARKLE = Path("Contents/Frameworks/Sparkle.framework")
-# Sparkle's code as its docs sign it (.github/briefcase/sign_sparkle.py), inside out.
+# Sparkle's code as its docs sign it (.github/briefcase/patched_briefcase.py).
 SPARKLE_CODE = ("Versions/B/Autoupdate", "Versions/B/Updater.app", ".")
-ED25519_KEY_BYTES = 32
 # In `codesign --display --verbose=2`'s description of a signature.
 CODE_FLAGS = re.compile(r"\bflags=0x[0-9a-f]+\((?P<flags>[^)]*)\)")
-TEAM = re.compile(r"^TeamIdentifier=(?P<team>.*)$", re.MULTILINE)
-TIMESTAMP = re.compile(r"^Timestamp=", re.MULTILINE)
-
-
-class Signature(NamedTuple):
-    flags: frozenset[str]
-    team: str
-    timestamped: bool
 
 
 def imported(name: str, resources: Path) -> Path:
@@ -252,96 +241,53 @@ def encrypted_pdf_text(base_url: str, token: str) -> str:
 
 def update_feed(info: Mapping[str, object]) -> str:
     """The feed Sparkle updates the app from, by the app's Info.plist ``info``, which
-    must also give it a public EdDSA key to check updates by, and the app's version as
-    CFBundleVersion, which Sparkle compares with the feed's."""
+    must be https, as Sparkle does not require, and which must give the app's version
+    as CFBundleVersion, which Sparkle compares with the feed's."""
     feed = str(info.get("SUFeedURL", ""))
     if not feed.startswith("https://"):
         sys.exit(f"SUFeedURL is {feed!r}, not an https URL")
-    key = str(info.get("SUPublicEDKey", ""))
-    try:
-        size = len(base64.b64decode(key, validate=True))
-    except binascii.Error:
-        size = 0
-    if size != ED25519_KEY_BYTES:
-        sys.exit(f"SUPublicEDKey {key!r} is not a base64 Ed25519 public key")
     version, shown = info.get("CFBundleVersion"), info.get("CFBundleShortVersionString")
     if version != shown:
         sys.exit(f"CFBundleVersion is {version!r}, not the app's version, {shown!r}")
     return feed
 
 
-def sparkle_loads(framework: Path) -> str:
-    """Load ``framework`` as the app does, which must give it the updater controller
-    the app starts; its version."""
-    # The bundle's own Toga bridge and app, on the path once main has added them.
-    from rubicon.objc import ObjCClass  # pyright: ignore[reportMissingImports]
-
-    from r3con.app.updates import UPDATER_CONTROLLER
-
-    bundle = ObjCClass("NSBundle").bundleWithPath(str(framework))
-    if bundle is None or not bundle.load():
-        sys.exit(f"{framework} does not load")
-    try:
-        ObjCClass(UPDATER_CONTROLLER)
-    except NameError:
-        sys.exit(f"{framework} has no {UPDATER_CONTROLLER}")
-    info = plistlib.loads((framework / "Resources" / "Info.plist").read_bytes())
-    return info["CFBundleShortVersionString"]
-
-
-def signature(described: str) -> Signature:
-    """The signature ``codesign --display --verbose=2`` describes as ``described``."""
-    flags, team = CODE_FLAGS.search(described), TEAM.search(described)
-    return Signature(
-        frozenset(flags["flags"].split(",") if flags else ()),
-        team["team"] if team else "",
-        TIMESTAMP.search(described) is not None,
-    )
-
-
-def unlike_sparkles_docs(
-    code: Signature, entitlements: str, app: Signature
-) -> list[str]:
-    """How a signature of Sparkle's code, ``code``, with ``entitlements`` as
-    ``codesign --display --entitlements - --xml`` gives them, is not as Sparkle's docs
-    sign it, with the team and timestamp of the app's, ``app``."""
+def unlike_sparkles_docs(described: str, entitlements: str) -> list[str]:
+    """How the signature of Sparkle's code that ``codesign --display --verbose=2``
+    describes as ``described``, with the ``entitlements`` its ``--entitlements -
+    --xml`` gives, is not as Sparkle's docs sign it: with no entitlements, and with the
+    hardened runtime unless ad hoc."""
+    found = CODE_FLAGS.search(described)
+    flags = set(found["flags"].split(",") if found else ())
     problems = []
-    if "runtime" not in code.flags:
+    if "adhoc" not in flags and "runtime" not in flags:
         problems.append("no hardened runtime")
     granted = plistlib.loads(entitlements.encode()) if entitlements.strip() else {}
     if granted:
         problems.append(f"entitlements {', '.join(sorted(granted))}")
-    if code.team != app.team:
-        problems.append(f"team {code.team}, not the app's, {app.team}")
-    if code.timestamped != app.timestamped:
-        problems.append("a timestamp" if code.timestamped else "no timestamp")
     return problems
 
 
-def codesign(*args: str) -> subprocess.CompletedProcess[str]:
-    """``codesign`` run with ``args``, which must succeed."""
-    done = subprocess.run(
-        ["codesign", *args], capture_output=True, text=True, check=False
-    )
-    if done.returncode:
-        sys.exit(f"codesign {' '.join(args)} failed: {done.stderr}")
-    return done
-
-
 def sparkle_signed(app: Path) -> list[str]:
-    """How each of Sparkle's code in ``app`` is signed, which must verify strictly and
-    be as Sparkle's docs sign it, with the app's team and timestamp."""
-    expected = signature(codesign("--display", "--verbose=2", str(app)).stderr)
+    """How each of Sparkle's code in ``app`` is signed, which must be as Sparkle's docs
+    sign it."""
     signed = []
     for relative in SPARKLE_CODE:
         code = app / SPARKLE / relative
-        codesign("--verify", "--strict", str(code))
-        found = signature(codesign("--display", "--verbose=2", str(code)).stderr)
-        entitlements = codesign("--display", "--entitlements", "-", "--xml", str(code))
-        problems = unlike_sparkles_docs(found, entitlements.stdout, expected)
+        command = ["codesign", "--display", "--verbose=2", "--entitlements", "-"]
+        shown = subprocess.run(
+            [*command, "--xml", str(code)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if shown.returncode:
+            sys.exit(f"codesign could not describe {code}: {shown.stderr}")
+        problems = unlike_sparkles_docs(shown.stderr, shown.stdout)
         if problems:
             sys.exit(f"{code} is signed with {', '.join(problems)}")
-        signed.append(f"{SPARKLE / relative}: {','.join(sorted(found.flags))}")
+        flags = CODE_FLAGS.search(shown.stderr)
+        signed.append(f"{SPARKLE / relative}: {flags[0] if flags else 'no flags'}")
     return signed
 
 
@@ -401,7 +347,6 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     print("stopped: nothing answers")
     info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
     print(f"Sparkle checks {update_feed(info)} for a version after {__version__}")
-    print(f"Sparkle {sparkle_loads(app / SPARKLE)}: loads, as the app starts it")
     for signed in sparkle_signed(app):
         print(f"{signed}: signed as Sparkle's docs sign it")
 

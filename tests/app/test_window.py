@@ -266,7 +266,21 @@ def test_a_mac_app_with_sparkle_checks_for_updates_from_its_app_menu(
     (objc.frameworks / updates.SPARKLE).mkdir(parents=True)
     window.main()
     (app,) = opened
-    assert [command.text for command in app.commands] == [updates.CHECK_FOR_UPDATES]
+    assert updates.CHECK_FOR_UPDATES in app.commands
+
+
+def test_the_window_opens_whatever_stops_the_apps_updates(
+    opened: list[FakeApp], objc: FakeObjC, capsys: pytest.CaptureFixture[str]
+):
+    # A runtime without NSBundle, which updates.start does not expect.
+    objc.classes.clear()
+    window.main()
+    (app,) = opened
+    assert app.page.status_code == 200
+    # The window's log, on stderr, with the traceback.
+    logged = capsys.readouterr().err
+    assert f"Sparkle's updater failed: {updates.NO_UPDATES}." in logged
+    assert "NameError: ObjC Class 'NSBundle' couldn't be found." in logged
 
 
 def test_the_window_opens_at_its_size(opened: list[FakeApp]):
