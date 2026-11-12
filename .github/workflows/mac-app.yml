@@ -24,12 +24,17 @@ on:
       sign:
         type: boolean
         default: false
+      # The release's, for its update feed.
+      notes:
+        type: string
+        default: ""
     secrets:
       MACOS_CERTIFICATE: {required: false}
       MACOS_CERTIFICATE_PASSWORD: {required: false}
       APP_STORE_CONNECT_KEY: {required: false}
       APP_STORE_CONNECT_KEY_ID: {required: false}
       APP_STORE_CONNECT_ISSUER_ID: {required: false}
+      SPARKLE_PRIVATE_KEY: {required: false}
 
 permissions:
   contents: read
@@ -47,6 +52,8 @@ env:
   BUILD_CONSTRAINTS: build/build-constraints.txt
   # Where pyproject.toml's requirement_installer_args has pip find every wheel.
   WHEELS: build/wheels
+  # The bundle's own Python, in the app.
+  APP_PYTHON: Contents/Frameworks/Python.framework/Versions/3.14/bin/python3
 
 jobs:
   app:
@@ -87,8 +94,10 @@ jobs:
       # Its CFBundleVersion, which Sparkle compares with the feed's to find a newer
       # release, is the project's version, not Briefcase's default, 1.
       - name: Build the app
+        id: build
         run: |
           version=$(uv version --short)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --config "build='$version'" --no-input
       - uses: ./.github/actions/sparkle
         id: sparkle
@@ -102,6 +111,24 @@ jobs:
           rm -r "$framework/XPCServices" "$framework/Versions/B/XPCServices"
           cp "$SPARKLE/LICENSE" "$framework/Versions/B/Resources/LICENSE"
           ditto "$framework" "$(echo build/r3con/macos/app/*.app)/Contents/Frameworks/Sparkle.framework"
+      # So that a run without SPARKLE_PRIVATE_KEY makes and checks its feed as a release
+      # does; before signing, which seals Info.plist.
+      - name: Make a throwaway update key for the app
+        if: ${{ !inputs.sign }}
+        run: |
+          app=$(echo build/r3con/macos/app/*.app)
+          umask 077
+          public=$("$app/$APP_PYTHON" -I -B -c '
+          import site, sys
+          from base64 import b64encode
+          from pathlib import Path
+          site.addsitedir(sys.argv[1])
+          from Crypto.PublicKey import ECC
+          key = ECC.generate(curve="Ed25519")
+          Path(sys.argv[2]).write_text(b64encode(key.seed).decode())
+          print(b64encode(key.public_key().export_key(format="raw")).decode())
+          ' "$app/Contents/Resources/app_packages" "$RUNNER_TEMP/update-key")
+          plutil -replace SUPublicEDKey -string "$public" "$app/Contents/Info.plist"
       # After the build, so that the key is absent while pip and the build backend run.
       - name: Import the Developer ID certificate into a keychain of its own
         if: inputs.sign
@@ -171,6 +198,47 @@ jobs:
           if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
           fi
+      # The asset name the feed's download URL ends with; a rename keeps signature and ticket.
+      - name: Name the .dmg R3Con.dmg
+        run: mv dist/R3Con-*.dmg dist/R3Con.dmg
+      # generate_appcast signs the .dmg only if the app's SUPublicEDKey is the key's public
+      # half, and else just warns (generate_appcast/Appcast.swift): its edSignature and
+      # sign_update's check of the feed show both are signed by the key the app trusts.
+      - name: Make the update feed
+        env:
+          SPARKLE: ${{ steps.sparkle.outputs.path }}
+          SIGNED: ${{ inputs.sign }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          NOTES: ${{ inputs.notes }}
+          DOWNLOADS: https://github.com/${{ github.repository }}/releases/download/v${{ steps.build.outputs.version }}/
+        run: |
+          if [ "$SIGNED" = true ]; then
+            key=$SPARKLE_PRIVATE_KEY
+            if [ -z "$key" ]; then
+              echo "::error::macos-signing has no SPARKLE_PRIVATE_KEY."
+              exit 1
+            fi
+          else
+            key=$(cat "$RUNNER_TEMP/update-key")
+            rm "$RUNNER_TEMP/update-key"
+            echo "::add-mask::$key"
+            # No release, no notes: these stand in, so that the feed embeds some.
+            NOTES=${NOTES:-"**Sample notes.** A run that isn't signed embeds these in its feed."}
+          fi
+          feed="$RUNNER_TEMP/feed"
+          # The .dmg alone: one update, no deltas.
+          mkdir "$feed"
+          cp -c dist/R3Con.dmg "$feed/"
+          # Empty notes, as from a body of only trailers: no file, so the update has none.
+          if [ -n "$NOTES" ]; then
+            printf '%s\n' "$NOTES" > "$feed/R3Con.md"
+          fi
+          printf '%s\n' "$key" | "$SPARKLE/bin/generate_appcast" --ed-key-file - --download-url-prefix "$DOWNLOADS" --embed-release-notes -o dist/appcast.xml "$feed"
+          printf '%s\n' "$key" | "$SPARKLE/bin/sign_update" --verify --ed-key-file - dist/appcast.xml
+          if ! grep -F 'sparkle:edSignature=' dist/appcast.xml; then
+            echo "::error::The feed's .dmg is unsigned: the key isn't the one the app trusts."
+            exit 1
+          fi
       # As a user would: out of the .dmg, into a folder they can write to.
       - name: Install the app from its .dmg
         run: |
@@ -200,7 +268,7 @@ jobs:
       # Keychain dialog would wait for a click no one makes.
       - name: Check the bundle with its own Python
         timeout-minutes: 10
-        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
+        run: '"$APP/$APP_PYTHON" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
@@ -221,7 +289,7 @@ jobs:
             exit 1
           fi
           # The page stores its settings by its origin, so every launch takes the same port.
-          own=$("$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B -c '
+          own=$("$APP/$APP_PYTHON" -I -B -c '
           import site, sys
           sys.path.append(sys.argv[1])
           site.addsitedir(sys.argv[2])
@@ -322,7 +390,9 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.sign && 'r3con-mac-app-signed' || 'r3con-mac-app' }}
-          path: dist/*.dmg
+          path: |
+            dist/R3Con.dmg
+            dist/appcast.xml
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

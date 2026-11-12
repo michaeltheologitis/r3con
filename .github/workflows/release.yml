@@ -30,6 +30,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,6 +76,18 @@ jobs:
             release=true
           fi
           echo "release=$release" >> "$GITHUB_OUTPUT"
+      # The release commit's body is the notes; its trailers are attribution, not notes.
+      - name: Build the notes
+        id: notes
+        run: |
+          delimiter=$(openssl rand -hex 16)
+          {
+            echo "notes<<$delimiter"
+            git log -1 --format=%b "$GITHUB_SHA" |
+              sed -E '/^(Co-Authored-By|Claude-Session): /Id' |
+              git stripspace
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
@@ -88,6 +101,7 @@ jobs:
     uses: ./.github/workflows/mac-app.yml
     with:
       sign: ${{ needs.build.outputs.release == 'true' }}
+      notes: ${{ needs.build.outputs.notes }}
     # macos-signing's environment secrets: the caller must name them, and the called job resolves them.
     secrets:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -95,6 +109,7 @@ jobs:
       APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
       APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
       APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
 
   publish:
     if: needs.build.outputs.release == 'true'
@@ -125,26 +140,19 @@ jobs:
         with:
           name: dist
           path: dist/
+      # R3Con.dmg and the update feed that pyproject.toml's SUFeedURL reads.
       - uses: actions/download-artifact@v8
         with:
           name: r3con-mac-app-signed
           path: dist/
-      # The same name every release, for the README's releases/latest/download/R3Con.dmg; mv fails unless exactly one matches.
-      - name: Name the .dmg R3Con.dmg
-        run: mv dist/R3Con-*.dmg dist/R3Con.dmg
-      # The release commit's body is the notes; its trailers are attribution, not notes.
-      - name: Build the notes
-        run: |
-          git log -1 --format=%b "$GITHUB_SHA" |
-            sed -E '/^(Co-Authored-By|Claude-Session): /Id' |
-            git stripspace > notes.md
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          NOTES: ${{ needs.build.outputs.notes }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file notes.md --verify-tag
+            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes "$NOTES" --verify-tag
           else
-            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes-file notes.md --target "$GITHUB_SHA"
+            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes "$NOTES" --target "$GITHUB_SHA"
           fi
