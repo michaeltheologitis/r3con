@@ -1,4 +1,5 @@
 import importlib.util
+import plistlib
 import re
 import threading
 from collections.abc import Iterator
@@ -15,6 +16,8 @@ from tests.app.bundle_check import (
     loads,
     pinned,
     round_trip,
+    unlike_sparkles_docs,
+    update_feed,
 )
 from tests.fakes import FakeKeyring
 
@@ -202,3 +205,94 @@ def test_loads_imports_a_python_extension_but_only_loads_a_plain_library(
     extension = "pydantic_core._pydantic_core"
     with pytest.raises(SystemExit, match=f"{extension} is imported from"):
         loads(extension, origin(extension), tmp_path)
+
+
+FEED = (
+    "https://github.com/michaeltheologitis/r3con/releases/latest/download/appcast.xml"
+)
+UPDATES_INFO = {
+    "SUFeedURL": FEED,
+    "CFBundleShortVersionString": "0.6.20",
+    "CFBundleVersion": "0.6.20",
+}
+# As `codesign --display --verbose=2` describes signatures of Sparkle's Autoupdate, on
+# its stderr: by a Developer ID, and ad hoc.
+SIGNED_BY_DEVELOPER_ID = """\
+Executable=/Applications/R3Con.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
+Identifier=Autoupdate
+Format=Mach-O universal (x86_64 arm64)
+CodeDirectory v=20500 size=6214 flags=0x10000(runtime) hashes=183+7 location=embedded
+Signature size=9045
+Authority=Developer ID Application: An Example (TEAM123456)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Nov 12, 2026 at 10:21:43
+Info.plist=not bound
+TeamIdentifier=TEAM123456
+Runtime Version=14.0.0
+Sealed Resources=none
+Internal requirements count=1 size=224
+"""
+SIGNED_AD_HOC = """\
+Executable=/Applications/R3Con.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
+Identifier=Autoupdate-55554944ee6295b05bf83d4f87e17bb073d143e6
+Format=Mach-O universal (x86_64 arm64)
+CodeDirectory v=20400 size=2676 flags=0x2(adhoc) hashes=77+2 location=embedded
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+Sealed Resources=none
+Internal requirements count=0 size=12
+"""
+ENTITLEMENTS = plistlib.dumps(
+    {"com.apple.security.cs.disable-library-validation": True}
+)
+
+
+def test_update_feed_is_the_https_feed_of_an_app_that_gives_its_version():
+    assert update_feed(UPDATES_INFO) == FEED
+
+
+@pytest.mark.parametrize(
+    ("changed", "problem"),
+    [
+        ({"SUFeedURL": "http://example.com/appcast.xml"}, "not an https URL"),
+        ({"SUFeedURL": ""}, "not an https URL"),
+        ({"CFBundleVersion": "1"}, "CFBundleVersion is '1', not the app's version"),
+    ],
+    ids=["http feed", "no feed", "briefcase's build"],
+)
+def test_update_feed_exits_on_settings_sparkle_could_not_update_by(
+    changed: dict[str, str], problem: str
+):
+    with pytest.raises(SystemExit, match=re.escape(problem)):
+        update_feed(UPDATES_INFO | changed)
+
+
+@pytest.mark.parametrize(
+    "described", [SIGNED_BY_DEVELOPER_ID, SIGNED_AD_HOC], ids=["developer id", "ad hoc"]
+)
+def test_sparkles_code_signed_as_its_docs_do_is_fine(described: str):
+    assert unlike_sparkles_docs(described, "") == []
+
+
+@pytest.mark.parametrize(
+    ("described", "entitlements", "problem"),
+    [
+        (
+            SIGNED_BY_DEVELOPER_ID.replace("0x10000(runtime)", "0x0(none)"),
+            "",
+            "no hardened runtime",
+        ),
+        (
+            SIGNED_AD_HOC,
+            ENTITLEMENTS.decode(),
+            "entitlements com.apple.security.cs.disable-library-validation",
+        ),
+    ],
+    ids=["no runtime", "the app's entitlements"],
+)
+def test_unlike_sparkles_docs_names_how_its_code_is_signed_otherwise(
+    described: str, entitlements: str, problem: str
+):
+    assert unlike_sparkles_docs(described, entitlements) == [problem]

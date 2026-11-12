@@ -11,6 +11,7 @@ on:
       - "uv.lock"
       - "tests/app/bundle_check.py"
       - ".github/briefcase/**"
+      - ".github/actions/sparkle/**"
       - ".github/workflows/mac-app.yml"
   workflow_dispatch:
     inputs:
@@ -83,8 +84,24 @@ jobs:
       # package's minimum macOS, 11.0), so that pip picks the wheels Briefcase's would.
       - name: Download the bundle's wheels, by uv.lock's hashes
         run: '"$RUNNER_TEMP/briefcase/bin/python" -m pip download --require-hashes --only-binary :all: --no-deps --platform macosx_11_0_arm64 --dest "$WHEELS" -r "$CONSTRAINTS" -r "$BUILD_CONSTRAINTS"'
+      # Its CFBundleVersion, which Sparkle compares with the feed's to find a newer
+      # release, is the project's version, not Briefcase's default, 1.
       - name: Build the app
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
+        run: |
+          version=$(uv version --short)
+          "$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --config "build='$version'" --no-input
+      - uses: ./.github/actions/sparkle
+        id: sparkle
+      # Before the app is signed. It isn't sandboxed, so it enables none of Sparkle's XPC
+      # services, which Sparkle's docs then let it drop. Sparkle's licence goes with it.
+      - name: Add Sparkle to the app
+        env:
+          SPARKLE: ${{ steps.sparkle.outputs.path }}
+        run: |
+          framework="$SPARKLE/Sparkle.framework"
+          rm -r "$framework/XPCServices" "$framework/Versions/B/XPCServices"
+          cp "$SPARKLE/LICENSE" "$framework/Versions/B/Resources/LICENSE"
+          ditto "$framework" "$(echo build/r3con/macos/app/*.app)/Contents/Frameworks/Sparkle.framework"
       # After the build, so that the key is absent while pip and the build backend run.
       - name: Import the Developer ID certificate into a keychain of its own
         if: inputs.sign
@@ -114,15 +131,16 @@ jobs:
           fi
           echo "sha1=$(echo "$identity" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
           echo "name=$(echo "$identity" | sed -E 's/^[^"]*"(.*)"$/\1/')" >> "$GITHUB_OUTPUT"
+      # patched_briefcase.py signs Sparkle's code as Sparkle's docs do, and the rest as Briefcase does.
       - name: Package the app and its .dmg
         if: ${{ !inputs.sign }}
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input'
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -I .github/briefcase/patched_briefcase.py package macOS app --adhoc-sign --no-input'
       # Signed, the app is stapled before it is packed, so that it keeps a ticket out of the .dmg.
       - name: Sign the app and zip it
         if: inputs.sign
         env:
           IDENTITY: ${{ steps.identity.outputs.sha1 }}
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --packaging-format zip --identity "$IDENTITY" --no-notarize --no-input'
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -I .github/briefcase/patched_briefcase.py package macOS app --packaging-format zip --identity "$IDENTITY" --no-notarize --no-input'
       - name: Notarize the app and staple its ticket
         if: inputs.sign
         id: notarize-app
@@ -136,14 +154,7 @@ jobs:
         if: inputs.sign
         env:
           IDENTITY: ${{ steps.identity.outputs.sha1 }}
-        run: |
-          "$RUNNER_TEMP/briefcase/bin/python" -I -c '
-          import sys
-          from briefcase.__main__ import main
-          from briefcase.platforms.macOS.app import macOSAppPackageCommand
-          macOSAppPackageCommand.sign_app = lambda *args, **kwargs: None
-          sys.exit(main())
-          ' package macOS app --identity "$IDENTITY" --no-notarize --no-input
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -I .github/briefcase/patched_briefcase.py --keep-signature package macOS app --identity "$IDENTITY" --no-notarize --no-input'
       - name: Notarize the .dmg and staple its ticket
         if: inputs.sign
         id: notarize
@@ -193,9 +204,11 @@ jobs:
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
+      # At INFO, so that the log shows Sparkle's updater started.
       - name: Open the app's window
         run: |
-          "$APP/Contents/MacOS/R3Con" &
+          launched=$(date '+%Y-%m-%d %H:%M:%S')
+          R3CON_LOG_LEVEL=INFO "$APP/Contents/MacOS/R3Con" &
           pid=$!
           port=
           for _ in $(seq 60); do
@@ -220,19 +233,25 @@ jobs:
             exit 1
           fi
           curl -fsS "http://127.0.0.1:$port/" | grep "<title>"
-          # Only the window's page asks for /api/keys with the token. The app's stdout,
-          # where uvicorn logs each request, goes to the system log.
-          keys=
+          # Only the window's page asks for /api/keys with the token. The app's stdout and
+          # stderr, where uvicorn logs each request and r3con its lines, go to the
+          # system log: here, all of it since the launch.
+          keys='"GET /api/keys HTTP/1.1" 200'
+          logged=
           for _ in $(seq 30); do
-            keys=$(log show --last 2m --style compact --predicate 'process == "R3Con"' | grep -F '"GET /api/keys HTTP/1.1" 200' || true)
-            [ -n "$keys" ] && break
+            logged=$(log show --start "$launched" --style compact --predicate 'process == "R3Con"')
+            grep -qF "$keys" <<< "$logged" && break
             sleep 2
           done
-          if [ -z "$keys" ]; then
+          if ! grep -F "$keys" <<< "$logged"; then
             echo "::error::The window's page never asked the server for /api/keys with the token."
             exit 1
           fi
-          echo "$keys"
+          # Before the page loads: Sparkle's error when its updater can't start, then r3con's line.
+          if ! grep -F "Sparkle's updater started" <<< "$logged" || grep -F 'Fatal updater error' <<< "$logged"; then
+            echo "::error::The app didn't start Sparkle's updater."
+            exit 1
+          fi
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           # Quit as the Dock's Quit or a logout asks: the app must stop its server before it ends.
           gone() { case "$(ps -o stat= -p "$pid")" in "" | Z*) return 0 ;; *) return 1 ;; esac; }
@@ -282,7 +301,8 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| Bundle identifier | \`$(plutil -extract CFBundleIdentifier raw "$plist")\` |"
-            echo "| Version | $(plutil -extract CFBundleShortVersionString raw "$plist") |"
+            echo "| Version | $(plutil -extract CFBundleShortVersionString raw "$plist") ($(plutil -extract CFBundleVersion raw "$plist")) |"
+            echo "| Sparkle | $(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Frameworks/Sparkle.framework/Resources/Info.plist") |"
             echo "| Architectures (pydantic_core) | $(lipo -archs "$compiled") |"
             echo "| \`$(basename "$APP")\` | $(du -sh "$APP" | cut -f1) |"
             echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"

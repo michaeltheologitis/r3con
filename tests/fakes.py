@@ -6,9 +6,11 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import litellm
+import toga
 from keyring.backend import KeyringBackend
 from keyring.compat import properties
 from keyring.errors import PasswordDeleteError
@@ -449,3 +451,102 @@ class FileKeyring(KeyringBackend):
         stored = self._stored()
         stored.setdefault(service, {})[username] = password
         Path(os.environ[KEYRING_FILE]).write_text(json.dumps(stored))
+
+
+class FakeCommand:
+    """Toga's command, which keeps what it is made with: ``action`` is its handler."""
+
+    ABOUT = "about"
+
+    def __init__(
+        self,
+        action: Callable[..., None] | None,
+        text: str,
+        *,
+        group: toga.Group,
+        section: int = 0,
+        order: int = 0,
+        id: str | None = None,
+    ) -> None:
+        self.action = action
+        self.text = text
+        self.group, self.section, self.order = group, section, order
+        self.id = id or text
+
+
+class FakeCommands(dict[str, FakeCommand]):
+    """Toga's set of an app's commands, by id, which its menus show. Toga 0.5.7 adds
+    its About command before the app's startup, which on the Mac is the app menu's
+    first, in section -1."""
+
+    def __init__(self) -> None:
+        about = FakeCommand(
+            None, "About", group=toga.Group.APP, section=-1, id=FakeCommand.ABOUT
+        )
+        super().__init__({about.id: about})
+
+    def add(self, *commands: FakeCommand) -> None:
+        self.update((command.id, command) for command in commands)
+
+
+class FakeUpdaterController:
+    """Sparkle's SPUStandardUpdaterController. Its init answers nil unless it
+    ``initializes``; its updater can check for updates once started, unless it
+    ``fails`` to start; and it counts the checks it is asked for."""
+
+    def __init__(self, *, initializes: bool, fails: bool) -> None:
+        self.initializes, self.fails = initializes, fails
+        self.updater: SimpleNamespace | None = None
+        self.checks = 0
+
+    def initWithStartingUpdater(
+        self, start: bool, *, updaterDelegate: object, userDriverDelegate: object
+    ) -> "FakeUpdaterController | None":
+        self.updater = SimpleNamespace(canCheckForUpdates=start and not self.fails)
+        return self if self.initializes else None
+
+    def checkForUpdates(self, sender: object) -> None:
+        self.checks += 1
+
+
+class FakeObjC:
+    """rubicon.objc's ``ObjCClass``, as the Mac app's Objective-C runtime answers it.
+    The main bundle's private Frameworks folder is ``frameworks``. NSBundle finds a
+    bundle at a path only where there is a folder. Sparkle's loads unless ``loads`` is
+    False, which makes its updater controller found unless ``has_controller`` is False.
+    Each controller made is in ``controllers``; one answers its init with nil if
+    ``initializes`` is False, and its updater fails to start if ``starts`` is False."""
+
+    def __init__(self, frameworks: Path) -> None:
+        self.frameworks = frameworks
+        self.loads = self.has_controller = self.initializes = self.starts = True
+        self.controllers: list[FakeUpdaterController] = []
+        main_bundle = SimpleNamespace(privateFrameworksPath=str(frameworks))
+        self.classes: dict[str, SimpleNamespace] = {
+            "NSBundle": SimpleNamespace(
+                mainBundle=main_bundle, bundleWithPath=self._bundle_with_path
+            )
+        }
+
+    def ObjCClass(self, name: str) -> SimpleNamespace:
+        try:
+            return self.classes[name]
+        except KeyError:
+            # As rubicon raises for a class the runtime does not have.
+            raise NameError(f"ObjC Class '{name}' couldn't be found.") from None
+
+    def _bundle_with_path(self, path: str) -> SimpleNamespace | None:
+        return SimpleNamespace(load=self._load) if Path(path).is_dir() else None
+
+    def _load(self) -> bool:
+        if self.loads and self.has_controller:
+            controller = SimpleNamespace(alloc=self._alloc)
+            self.classes["SPUStandardUpdaterController"] = controller
+        return self.loads
+
+    def _alloc(self) -> FakeUpdaterController:
+        controller = FakeUpdaterController(
+            initializes=self.initializes, fails=not self.starts
+        )
+        self.controllers.append(controller)
+        return controller

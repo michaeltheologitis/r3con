@@ -16,17 +16,24 @@ dialog would wait for a click no one makes. Then it serves the app as the window
 the page, and the API with this launch's token, must answer, a PDF encrypted as signed
 ones often are must read back as its text, which pypdf does only with an AES library
 (here pycryptodome: cryptography is Linux-only), and once the server has stopped,
-nothing must.
+nothing must. Last, it checks the app's updates: its Info.plist must give Sparkle an
+https feed and the app's version to compare, and Sparkle's code must be signed as
+Sparkle's docs sign it. That the app starts Sparkle, its key and all, the window's
+launch in mac-app.yml checks.
 """
 
 import ctypes
 import importlib.metadata
 import json
+import plistlib
+import re
 import secrets
 import site
+import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Mapping
 from email.parser import HeaderParser
 from io import BytesIO
 from pathlib import Path
@@ -62,6 +69,11 @@ PROJECT = "r3context"
 BACKEND = "uv-build"
 # What encrypted_pdf's PDF says, which the server must read back from it.
 ENCRYPTED_PDF_TEXT = "Read through AES-256."
+SPARKLE = Path("Contents/Frameworks/Sparkle.framework")
+# Sparkle's code as its docs sign it (.github/briefcase/patched_briefcase.py).
+SPARKLE_CODE = ("Versions/B/Autoupdate", "Versions/B/Updater.app", ".")
+# In `codesign --display --verbose=2`'s description of a signature.
+CODE_FLAGS = re.compile(r"\bflags=0x[0-9a-f]+\((?P<flags>[^)]*)\)")
 
 
 def imported(name: str, resources: Path) -> Path:
@@ -227,6 +239,58 @@ def encrypted_pdf_text(base_url: str, token: str) -> str:
     return text
 
 
+def update_feed(info: Mapping[str, object]) -> str:
+    """The feed Sparkle updates the app from, by the app's Info.plist ``info``, which
+    must be https, as Sparkle does not require, and which must give the app's version
+    as CFBundleVersion, which Sparkle compares with the feed's."""
+    feed = str(info.get("SUFeedURL", ""))
+    if not feed.startswith("https://"):
+        sys.exit(f"SUFeedURL is {feed!r}, not an https URL")
+    version, shown = info.get("CFBundleVersion"), info.get("CFBundleShortVersionString")
+    if version != shown:
+        sys.exit(f"CFBundleVersion is {version!r}, not the app's version, {shown!r}")
+    return feed
+
+
+def unlike_sparkles_docs(described: str, entitlements: str) -> list[str]:
+    """How the signature of Sparkle's code that ``codesign --display --verbose=2``
+    describes as ``described``, with the ``entitlements`` its ``--entitlements -
+    --xml`` gives, is not as Sparkle's docs sign it: with no entitlements, and with the
+    hardened runtime unless ad hoc."""
+    found = CODE_FLAGS.search(described)
+    flags = set(found["flags"].split(",") if found else ())
+    problems = []
+    if "adhoc" not in flags and "runtime" not in flags:
+        problems.append("no hardened runtime")
+    granted = plistlib.loads(entitlements.encode()) if entitlements.strip() else {}
+    if granted:
+        problems.append(f"entitlements {', '.join(sorted(granted))}")
+    return problems
+
+
+def sparkle_signed(app: Path) -> list[str]:
+    """How each of Sparkle's code in ``app`` is signed, which must be as Sparkle's docs
+    sign it."""
+    signed = []
+    for relative in SPARKLE_CODE:
+        code = app / SPARKLE / relative
+        command = ["codesign", "--display", "--verbose=2", "--entitlements", "-"]
+        shown = subprocess.run(
+            [*command, "--xml", str(code)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if shown.returncode:
+            sys.exit(f"codesign could not describe {code}: {shown.stderr}")
+        problems = unlike_sparkles_docs(shown.stderr, shown.stdout)
+        if problems:
+            sys.exit(f"{code} is signed with {', '.join(problems)}")
+        flags = CODE_FLAGS.search(shown.stderr)
+        signed.append(f"{SPARKLE / relative}: {flags[0] if flags else 'no flags'}")
+    return signed
+
+
 def answers(url: str) -> bool:
     try:
         urlopen(url, timeout=TIMEOUT_SECONDS).close()
@@ -281,6 +345,10 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     if answers(f"{base_url}/"):
         sys.exit("the server still answers after its stop")
     print("stopped: nothing answers")
+    info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+    print(f"Sparkle checks {update_feed(info)} for a version after {__version__}")
+    for signed in sparkle_signed(app):
+        print(f"{signed}: signed as Sparkle's docs sign it")
 
 
 if __name__ == "__main__":
