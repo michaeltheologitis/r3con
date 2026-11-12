@@ -151,6 +151,7 @@ p { margin: 0; }
   white-space: nowrap;
 }
 .new-tab { flex: none; min-width: 24px; min-height: 24px; }
+.save-tab { flex: none; min-height: 24px; margin-left: auto; padding-left: 2ch; }
 /* A tab is its button and the × after it, drawn as one block. */
 .run-tab, .tab-close { color: var(--tab-ink); background: var(--code); }
 .run-tab { padding: 0.15em 1.2ch; border-radius: 4px 0 0 4px; }
@@ -311,7 +312,7 @@ p { margin: 0; }
   color: var(--dim);
 }
 
-.inspector, .settings {
+.inspector, .settings, .save-note {
   overflow: auto;
   padding: 0.9em 2ch 1em;
   background: var(--bg);
@@ -339,6 +340,9 @@ p { margin: 0; }
   color: var(--fg);
 }
 .settings-body { display: flex; flex-direction: column; gap: 0.9em; }
+.save-note { inset: auto; margin: 0; max-width: calc(100vw - 2 * var(--gutter)); color: var(--fg); }
+.save-actions { display: flex; justify-content: flex-end; gap: 2ch; margin-top: 0.7em; }
+.save-actions .btn { min-height: 24px; }
 .keys {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

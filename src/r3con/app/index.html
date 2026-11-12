@@ -33,11 +33,20 @@
     </div>
   </div>
 
+  <div class="save-note" id="save-note" popover role="dialog" aria-labelledby="save-what">
+    <p id="save-what"></p>
+    <div class="save-actions">
+      <button class="btn run-btn" id="save-confirm" type="button">save as .html</button>
+      <button class="btn" type="button" popovertarget="save-note" popovertargetaction="hide">cancel</button>
+    </div>
+  </div>
+
   <div class="frame" id="frame">
     <main class="board" aria-label="Run panel">
       <div class="tab-row">
         <div class="run-tabs" id="run-tabs" role="tablist" aria-label="tabs"></div>
         <button class="btn new-tab" id="new-tab-btn" type="button" aria-label="new tab" title="new tab">+</button>
+        <button class="btn save-tab" id="save-btn" type="button" popovertarget="save-note" hidden>save</button>
       </div>
       <div class="panel" id="panel" tabindex="-1">
         <div class="world" id="world"></div>

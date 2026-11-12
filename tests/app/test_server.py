@@ -12,6 +12,7 @@ import httpx2
 import keyring
 import litellm
 import pytest
+import yaml
 from keyring.backend import KeyringBackend
 from keyring.backends import fail
 from keyring.errors import KeyringLocked, PasswordDeleteError, PasswordSetError
@@ -29,8 +30,10 @@ from r3con.app.server import (
     MAX_RELEVANCE_ROUNDS,
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
+    REPRESENTATION_FILES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
+    UNREADABLE_RUN,
     UNREADABLE_ZIP,
     ZIP_ENCRYPTED_FLAG,
     ServerState,
@@ -39,7 +42,9 @@ from r3con.app.server import (
     listen,
     serve,
 )
+from r3con.masking import MASK
 from r3con.r3con import read_documents
+from r3con.settings import CONFIGS_DIR
 from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
 from tests.fakes import (
     GATE_TIMEOUT_SECONDS,
@@ -78,6 +83,8 @@ SECOND_KEY = "second-server-key-3456"
 # A known provider's URL, by which litellm places a bare name with that provider.
 GROQ_ENDPOINT = "https://api.groq.com/openai/v1"
 CUSTOM_HEADERS = "Authorization: Bearer custom-header-key-7890\nX-Gateway-Key: gate"
+# A header's value a config file's params may send, as an OpenAI-compatible gateway takes.
+GATE_KEY = "gateway-header-key-2468"
 STORED_OPENAI = {"provider": "openai", "key": OPENAI_KEY}
 OTHER = {"provider": "other", "endpoint": ENDPOINT, "key": OTHER_KEY}
 KEYLESS_OTHER = {"provider": "other", "endpoint": ENDPOINT}
@@ -1190,6 +1197,105 @@ def test_an_ask_over_a_run_folder_it_cannot_read_fails_saying_why_and_sends_noth
     assert not (run_dir / "asks").exists()
 
 
+def representation_of(client: TestClient, run_id: str) -> dict[str, Any]:
+    response = client.get(f"/api/runs/{run_id}/representation")
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_a_runs_representation_is_all_an_ask_reads_of_its_folder(
+    client: TestClient, llm: FakeLLM, tmp_path: Path
+):
+    files = representation_of(client, finished_run(client))
+    copy = tmp_path / "copy"
+    for path, content in files.items():
+        (copy / path).parent.mkdir(parents=True, exist_ok=True)
+        (copy / path).write_text(json.dumps(content), encoding="utf-8")
+    answer = r3con.ask(copy, ASK["question"], completion=llm)
+    assert list(files) == list(REPRESENTATION_FILES)
+    assert answer.answer == ANSWER["answer"]
+
+
+def test_a_runs_representation_leaves_out_the_manifests_paths_on_this_computer(
+    client: TestClient,
+):
+    run_id = finished_run(client)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    local = manifest.pop("sources")
+    assert local["prompts"]
+    assert representation_of(client, run_id)["manifest.json"] == manifest
+
+
+def test_a_runs_representation_names_no_server_header_or_masked_value(
+    client: TestClient, tmp_path: Path
+):
+    """A run on a stored server, under a config file where the server runs whose
+    params, as r3con's own config params may, carry another server and a header."""
+    config = yaml.safe_load((CONFIGS_DIR / "default.yaml").read_text())
+    params = {"api_base": SECOND_ENDPOINT, "extra_headers": {"X-Gateway-Key": GATE_KEY}}
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "default.yaml").write_text(
+        yaml.safe_dump({**config, "params": params})
+    )
+    client.post("/api/keys", json=OTHER)
+    run_id = finished_run(client, SERVED_OPENAI_MODEL, ENDPOINT)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    files = representation_of(client, run_id)
+    saved = json.dumps(files)
+    written = json.loads((run_dir / "manifest.json").read_text())["config"]["params"]
+    assert written["api_base"] == SECOND_ENDPOINT
+    assert files["manifest.json"]["config"]["params"] == {}
+    assert [
+        held
+        for held in (ENDPOINT, SECOND_ENDPOINT, OTHER_KEY, GATE_KEY, MASK)
+        if held in saved
+    ] == []
+
+
+def test_the_representation_of_a_run_still_running_is_refused(
+    held_llm: FakeLLM, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        response = client.get(f"/api/runs/{run_id}/representation")
+        held_llm.gate.set()
+        assert run_events(client, run_id)[-1]["type"] == "run_finished"
+    assert response.status_code == 409
+    assert "still running" in response.json()["error"]
+
+
+@pytest.mark.parametrize("path", REPRESENTATION_FILES)
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [
+        (
+            lambda file: file.write_text("{not json", encoding="utf-8"),
+            "JSONDecodeError",
+        ),
+        (Path.unlink, "FileNotFoundError"),
+    ],
+    ids=["not json", "missing"],
+)
+def test_the_representation_of_a_run_folder_with_a_file_it_cannot_read_is_refused(
+    client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    damage: Callable[[Path], object],
+    error: str,
+):
+    run_id = finished_run(client)
+    run_dir = Path(run_events(client, run_id)[0]["run_dir"])
+    damage(run_dir / path)
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        response = client.get(f"/api/runs/{run_id}/representation")
+    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert response.status_code == 409
+    assert response.json() == {"error": UNREADABLE_RUN}
+    assert logged == [f"{run_dir}: can't read it to save ({error})"]
+
+
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(
     client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1653,6 +1759,7 @@ def test_forgetting_a_server_takes_its_url(client: TestClient):
     [
         ("GET", "/api/runs/nothing/events"),
         ("POST", "/api/runs/nothing/asks"),
+        ("GET", "/api/runs/nothing/representation"),
         ("POST", "/api/runs/nothing/cancel"),
         ("GET", "/api/asks/nothing/events"),
         ("POST", "/api/asks/nothing/cancel"),

@@ -82,6 +82,13 @@ opened URL's fragment, ``#token=...``.
   ``r3con.ask`` over a run that has ended and answers ``{ask_id}``;
   ``GET /api/asks/{ask_id}/events`` streams its events until ``ask_finished`` or
   ``ask_failed``.
+- ``GET /api/runs/{run_id}/representation`` answers, for a run that has ended, what
+  ``r3con.ask`` reads of its folder, each file in ``REPRESENTATION_FILES`` by its path
+  there: what a tab saved as one file needs to ask again. Its manifest leaves out its
+  ``sources``, which are paths on this computer, and its config's ``params``, empty,
+  which a config file where the server runs may fill with a server's URL or headers.
+  Nothing else there names a run's server or key: the server passes them with each
+  call. A run folder that can't be read is refused (409).
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -241,6 +248,18 @@ CUSTOM_HEADERS_WOULD_REACH_SERVER = (
     "variable, or type the model as hosted_vllm/<its name>."
 )
 ENDINGS = frozenset({"run_finished", "run_failed", "ask_finished", "ask_failed"})
+# What r3con.ask reads of a run folder, by path there.
+REPRESENTATION_FILES = (
+    "manifest.json",
+    "ids.json",
+    "names.json",
+    "relevance/result.json",
+    "structuring/schema/result.json",
+    "structuring/parsing/result.json",
+)
+# The manifest's paths on this computer, which a saved tab would carry to whoever opens it.
+LOCAL_PATHS = "sources"
+UNREADABLE_RUN = "This run's folder can't be read, so it can't be saved."
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
@@ -742,22 +761,50 @@ async def start_run(request: Request) -> Response:
     return JSONResponse({"run_id": _start(state, "run", run)}, status_code=202)
 
 
-async def start_ask(request: Request) -> Response:
-    state = _state(request)
-    run = _job(state.jobs["run"], request.path_params["run_id"], "run")
-    body = await _read(request, AskRequest.model_validate_json)
+def _run_dir(state: ServerState, run_id: str) -> Path:
+    """The folder of the run ``run_id``, once it has ended."""
+    run = _job(state.jobs["run"], run_id, "run")
     if not _ended(run):
         raise HTTPException(409, "This run is still running; ask once it has ended.")
     started = run.events[0]
     if started["type"] != "run_started":
         raise HTTPException(409, "This run never started, so it has no folder to ask.")
+    return Path(started["run_dir"])
+
+
+async def start_ask(request: Request) -> Response:
+    state = _state(request)
+    run_dir = _run_dir(state, request.path_params["run_id"])
+    body = await _read(request, AskRequest.model_validate_json)
     ask = partial(
         r3con.ask,
-        started["run_dir"],
+        run_dir,
         body.question,
         **_model_options(state, body.model, body.endpoint),
     )
     return JSONResponse({"ask_id": _start(state, "ask", ask)}, status_code=202)
+
+
+def _representation(run_dir: Path) -> dict[str, Any]:
+    """What ``GET /api/runs/{run_id}/representation`` answers for ``run_dir``."""
+    try:
+        files = {
+            path: json.loads((run_dir / path).read_text(encoding="utf-8"))
+            for path in REPRESENTATION_FILES
+        }
+    except (OSError, ValueError) as error:
+        logger.warning("%s: can't read it to save (%s)", run_dir, type(error).__name__)
+        raise HTTPException(409, UNREADABLE_RUN) from None
+    manifest = files["manifest.json"]
+    manifest.pop(LOCAL_PATHS, None)
+    # A config file where the server runs may set params such as api_base or headers.
+    manifest["config"]["params"] = {}
+    return files
+
+
+async def representation(request: Request) -> Response:
+    run_dir = _run_dir(_state(request), request.path_params["run_id"])
+    return JSONResponse(await run_in_threadpool(_representation, run_dir))
 
 
 async def events(request: Request, *, kind: Kind) -> Response:
@@ -854,6 +901,11 @@ def create_app(
                 methods=["POST"],
             ),
             Route("/api/runs/{run_id}/asks", start_ask, methods=["POST"]),
+            Route(
+                "/api/runs/{run_id}/representation",
+                representation,
+                methods=["GET"],
+            ),
             Route("/api/asks/{job_id}/events", partial(events, kind="ask")),
             Route(
                 "/api/asks/{job_id}/cancel",
