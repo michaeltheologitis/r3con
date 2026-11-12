@@ -4,7 +4,6 @@ import asyncio
 import runpy
 import threading
 from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,20 +35,26 @@ class FakeSaveFileDialog:
 
 
 class FakeWindow:
-    """Toga's window. Its Save dialog answers with ``chooses``, as the user would."""
+    """Toga's window. Its Save dialog answers with ``chooses``, as the user would,
+    unless it never ``answers``."""
 
     chooses: Path | None = None
+    answers = True
 
     def __init__(self) -> None:
         self.size = TOGA_WINDOW_SIZE
         self.hidden = False
         self.dialogs: list[tuple[str, str, threading.Thread]] = []
+        self.opened = threading.Event()
 
     def hide(self) -> None:
         self.hidden = True
 
     async def dialog(self, dialog: FakeSaveFileDialog) -> Path | None:
         self.dialogs.append(dialog.shown)
+        self.opened.set()
+        if not self.answers:
+            await asyncio.Event().wait()
         return self.chooses
 
 
@@ -58,11 +63,13 @@ class FakeApp:
     ``startup``'s web view, reads the page there as a user would, saves the key in
     ``saving``, if any, as its settings would, and with ``saving_tab``, saves a tab
     as its page would, then quits as the app menu's Quit does, which ``on_exit``
-    allows or not. Its event loop runs while the page is read, as Toga's does."""
+    allows or not, or with ``quits_mid_save``, once the tab's Save dialog is open.
+    Its event loop runs while the page is read, as Toga's does."""
 
     app: "FakeApp"
     saving: dict[str, str] | None = None
     saving_tab = False
+    quits_mid_save = False
 
     def __init__(
         self, *, startup: Callable[..., FakeWebView], on_exit: Callable[..., bool]
@@ -80,8 +87,13 @@ class FakeApp:
         self.loop = asyncio.get_running_loop()
         self.main_thread = threading.current_thread()
         self.url = self.startup(self).url
-        await asyncio.to_thread(self.read_page)
-        self.quits = self.on_exit(self)
+        reading = asyncio.create_task(asyncio.to_thread(self.read_page))
+        if self.quits_mid_save:
+            await asyncio.to_thread(self.main_window.opened.wait, TIMEOUT_SECONDS)
+            self.quits = self.on_exit(self)
+        await reading
+        if not self.quits_mid_save:
+            self.quits = self.on_exit(self)
 
     def read_page(self) -> None:
         base_url, fragment = self.url.split("/#")
@@ -95,9 +107,12 @@ class FakeApp:
             if self.saving is not None:
                 http.post("/api/keys", json=self.saving, headers=auth)
             if self.saving_tab:
-                params = {"name": SAVED_NAME}
-                post = partial(http.post, "/api/saves", params=params, headers=auth)
-                self.saved = post(content=SAVED_TAB)
+                self.saved = http.post(
+                    "/api/saves",
+                    params={"name": SAVED_NAME},
+                    headers=auth,
+                    content=SAVED_TAB,
+                )
 
 
 @pytest.fixture
@@ -171,7 +186,8 @@ def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     (app,) = opened
     assert app.url.endswith("&save=dialog")
     assert app.saved.status_code == 204
-    assert app.main_window.dialogs == [("Save this tab", SAVED_NAME, app.main_thread)]
+    shown = [(window.SAVE_DIALOG_TITLE, SAVED_NAME, app.main_thread)]
+    assert app.main_window.dialogs == shown
     assert chosen.read_bytes() == SAVED_TAB
 
 
@@ -182,6 +198,21 @@ def test_a_save_cancelled_in_the_windows_dialog_is_answered_quietly(
     window.main()
     (app,) = opened
     assert (app.saved.status_code, len(app.main_window.dialogs)) == (204, 1)
+
+
+def test_quitting_with_a_save_dialog_open_cancels_its_save_and_stops_the_server(
+    opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(FakeApp, "saving_tab", True)
+    monkeypatch.setattr(FakeApp, "quits_mid_save", True)
+    monkeypatch.setattr(FakeWindow, "answers", False)
+    running = threading.Thread(target=window.main, daemon=True)
+    running.start()
+    running.join(TIMEOUT_SECONDS)
+    (app,) = opened
+    assert not running.is_alive()
+    assert (app.quits, app.saved.status_code) == (True, 204)
+    assert refuses(app.url)
 
 
 def test_quitting_hides_the_window_then_stops_the_server(opened: list[FakeApp]):

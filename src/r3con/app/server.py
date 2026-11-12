@@ -91,11 +91,12 @@ opened URL's fragment, ``#token=...``.
   call. A run folder that can't be read is refused (409).
 - ``POST /api/saves?name=<file name>``, with a saved tab's ``.html`` as the body, asks
   the server's ``choose_save_path`` where to save it, suggesting ``name``, and writes
-  it there, answering 204, also when nothing is chosen. ``name`` must be a file name,
-  no folder in it, ending in ``.html`` (422). A server with no ``choose_save_path``,
-  which only the Mac app's has, refuses it (404), and its page downloads the file; one
-  with it opens its page with ``save=dialog`` beside its token. A file that can't be
-  written is refused (500), the log naming the error's class.
+  it there, whole or not at all, answering 204, also when nothing is chosen. ``name``
+  must be a file name, no folder in it, ending in ``.html`` (422). Only a server with
+  a ``choose_save_path``, as the Mac app's, has it (404 otherwise), and it opens its
+  page with ``save=dialog`` beside its token: a page opened without it downloads the
+  file. A file that can't be written is refused (500), the log naming where and the
+  error's class; a file it was to replace stays as it was.
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -839,11 +840,23 @@ async def save_tab(request: Request) -> Response:
     if path is None:
         return Response(status_code=204)
     try:
-        await run_in_threadpool(path.write_bytes, body)
+        await run_in_threadpool(_write_whole, path, body)
     except OSError as error:
-        logger.warning("A saved tab isn't written (%s).", type(error).__name__)
+        logger.warning("%s: a saved tab isn't written (%s)", path, type(error).__name__)
         raise HTTPException(500, UNWRITABLE_SAVE) from None
     return Response(status_code=204)
+
+
+def _write_whole(path: Path, body: bytes) -> None:
+    """Write ``body`` at ``path`` in full or not at all, so that a file there stays as
+    it was if the write fails partway, as on a full disk."""
+    partial = path.with_name(f".{path.name}.{secrets.token_hex(ID_BYTES)}")
+    try:
+        partial.write_bytes(body)
+        partial.replace(path)
+    except OSError:
+        partial.unlink(missing_ok=True)
+        raise
 
 
 async def events(request: Request, *, kind: Kind) -> Response:

@@ -1344,7 +1344,20 @@ def test_a_save_cancelled_in_the_dialog_is_answered_and_writes_nothing(
     with saving_client(llm, logs_dir, dialog) as client:
         response = save(client)
     assert (response.status_code, dialog.shown) == (204, [SAVED_NAME])
+    # The working directory, where a write to the bare suggested name would land.
     assert list(tmp_path.iterdir()) == []
+
+
+def test_a_save_over_an_earlier_one_replaces_it(
+    llm: FakeLLM, logs_dir: Path, tmp_path: Path
+):
+    earlier = tmp_path / "chosen.html"
+    earlier.write_text("an earlier saved tab")
+    with saving_client(llm, logs_dir, FakeSaveDialog(earlier)) as client:
+        response = save(client)
+    assert response.status_code == 204
+    assert [path.name for path in tmp_path.iterdir()] == ["chosen.html"]
+    assert earlier.read_bytes() == SAVED_TAB
 
 
 @pytest.mark.parametrize(
@@ -1379,19 +1392,32 @@ def test_a_save_over_the_body_limit_is_refused_before_any_dialog(
     assert dialog.shown == []
 
 
+# Where the file can't go: a folder that isn't there, and one the file would replace,
+# which stays as it was, with nothing left beside it.
+@pytest.mark.parametrize(
+    ("chosen", "error"),
+    [("gone/chosen.html", "FileNotFoundError"), ("folder", "IsADirectoryError")],
+)
 def test_a_save_where_the_file_cannot_be_written_is_refused_and_logged(
-    llm: FakeLLM, logs_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    llm: FakeLLM,
+    logs_dir: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    chosen: str,
+    error: str,
 ):
-    dialog = FakeSaveDialog(tmp_path / "gone" / "chosen.html")
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "folder" / "kept.txt").write_text("kept")
     with (
-        saving_client(llm, logs_dir, dialog) as client,
+        saving_client(llm, logs_dir, FakeSaveDialog(tmp_path / chosen)) as client,
         caplog.at_level(logging.WARNING, logger="r3con.app"),
     ):
         response = save(client)
     logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
     assert response.status_code == 500
     assert response.json() == {"error": UNWRITABLE_SAVE}
-    assert logged == ["A saved tab isn't written (FileNotFoundError)."]
+    assert logged == [f"{tmp_path / chosen}: a saved tab isn't written ({error})"]
+    assert [path.name for path in tmp_path.rglob("*")] == ["folder", "kept.txt"]
 
 
 def test_a_server_with_no_save_dialog_refuses_a_save_for_its_page_to_download(

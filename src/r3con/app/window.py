@@ -13,6 +13,8 @@ Mac app's own: neither r3con nor its ``app`` extra installs it.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import CancelledError, Future
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -25,16 +27,22 @@ WINDOW_SIZE = (1280, 820)
 SAVE_DIALOG_TITLE = "Save this tab"
 
 
-def choose_save_path(name: str) -> Path | None:
+def choose_save_path(open_dialogs: set[Future[Path | None]], name: str) -> Path | None:
     """Where the user saves the file ``name`` suggests, in a Save dialog on the app's
-    window, or ``None`` if they cancel. The server asks off the app's main thread,
-    and waits for the dialog there."""
+    window, or ``None`` if they cancel, or the app quits first, which cancels each of
+    ``open_dialogs``. The server asks off the app's main thread, and waits for the
+    dialog there."""
     # Toga types both as maybe missing: both are there once the page can save.
     app = cast("toga.App", toga.App.app)
     window = cast("toga.Window", app.main_window)
-    return asyncio.run_coroutine_threadsafe(
-        _save_dialog(window, name), app.loop
-    ).result()
+    dialog = asyncio.run_coroutine_threadsafe(_save_dialog(window, name), app.loop)
+    open_dialogs.add(dialog)
+    try:
+        return dialog.result()
+    except CancelledError:
+        return None
+    finally:
+        open_dialogs.discard(dialog)
 
 
 async def _save_dialog(window: toga.Window, name: str) -> Path | None:
@@ -45,9 +53,9 @@ async def _save_dialog(window: toga.Window, name: str) -> Path | None:
 def main() -> None:
     """Serve the app and show its page in a window until the app quits."""
     configure_logging()
-    url, stop = serve(
-        key_service=MAC_APP_KEY_SERVICE, choose_save_path=choose_save_path
-    )
+    open_dialogs: set[Future[Path | None]] = set()
+    choose = partial(choose_save_path, open_dialogs)
+    url, stop = serve(key_service=MAC_APP_KEY_SERVICE, choose_save_path=choose)
 
     def page(app: toga.App, **kwargs: Any) -> toga.Widget:
         for window in app.windows:
@@ -58,6 +66,9 @@ def main() -> None:
         # At once: the stop waits for runs still going to end their calls in flight.
         for window in app.windows:
             window.hide()
+        # Its save would wait for the dialog forever, and the server's stop for the save.
+        for dialog in [*open_dialogs]:
+            dialog.cancel()
         return True
 
     try:
