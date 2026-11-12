@@ -66,11 +66,16 @@ jobs:
   lowest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject.toml gives litellm a higher floor on 3.15.
+        python: ["3.11", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
           enable-cache: true
           cache-suffix: lowest
       - run: uv run --resolution lowest-direct pytest
