@@ -2613,6 +2613,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rapidfuzz", specifier = ">=3.14.1" },
+    { name = "rapidfuzz", marker = "python_full_version >= '3.15'", specifier = ">=3.14.6" },
     { name = "starlette", marker = "extra == 'app'", specifier = ">=1.10" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "uvicorn", marker = "extra == 'app'", specifier = ">=0.54" },
