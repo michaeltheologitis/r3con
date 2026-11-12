@@ -1542,11 +1542,12 @@
   const LINES_SHOWN = 30000;
   // Far past WORDS_SHOWN words of prose: a file stops here first only if its text has few spaces.
   const CHARS_SHOWN = 2000000;
-  // Opened in full past its cut, a file is drawn only in the blocks of it near the view: laid out whole, 50 MB takes
-  // seconds, and is taller than a browser lays out.
+  // Opened in full, a file is drawn a block at a time near the view: laid out whole, 50 MB takes seconds.
   const BLOCK_CHARS = 10000;
-  // Under Firefox's 17.9 million px, the lowest browser limit on a box's height; past it, what is out of view is to scale.
+  const DRAWN_VIEWS = 1;
+  // Under Firefox's 17.9 million px, the lowest browser limit on a box's height, even once drifted.
   const MAX_SCROLL_PX = 15000000;
+  const MAX_DRIFT_PX = 1000000;
   const JSON_INDENT = 2;
   const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
@@ -3832,14 +3833,13 @@
     return text.length <= CHARS_SHOWN ? text.length : unsplit(text, CHARS_SHOWN);
   }
 
-  // `at`, or one before it where it would fall between a surrogate pair's halves.
+  // `at`, or one before it if it would split a surrogate pair.
   /** @param {string} text @param {number} at */
   function unsplit(text, at) {
     return String.fromCodePoint(/** @type {number} */ (text.codePointAt(at - 1))).length > 1 ? at - 1 : at;
   }
 
-  // Where each block of `text` up to `end` starts, then `end`: a block is the lines that fit in BLOCK_CHARS characters,
-  // or as many words of a longer line, or characters of one with no spaces.
+  // Where each block of `text` starts, then `end`: whole lines up to BLOCK_CHARS, else a long line's words, else its characters.
   /** @param {string} text @param {number} end */
   function blockStarts(text, end) {
     const starts = [0];
@@ -3859,19 +3859,17 @@
   }
 
   /**
-   * Draws `text` up to `end` in `pre` a block at a time, each by `block`: every block; or, given `at` or once opened, the
-   * whole text's blocks within a view's height of the view, between gaps as tall as the lines they leave out, or to scale
-   * past MAX_SCROLL_PX. `draw` draws them again; `open` turns to the whole text, keeping what is in view.
+   * Draws `text` up to `end` in `pre` in blocks, each by `block`: all of them, or, once opened or given `at`, only those of
+   * the whole text near the view, between gaps standing for the rest. `draw` draws them again; `open` opens in full.
    * @param {HTMLElement} pre @param {string} text @param {(from: number, to: number) => HTMLElement} block
    * @param {number} end @param {number | null} at a character to show, which draws the whole text near it
    */
   function textBlocks(pre, text, block, end, at) {
     let starts = blockStarts(text, end);
-    // Each block's height in px, as laid out, or estimated from the blocks laid out first.
+    // In px, as laid out, or estimated from the blocks laid out first.
     /** @type {number[]} */
     let heights = [];
     let pxPerChar = 0;
-    // The blocks drawn, from `first` up to `last`, and the gaps' heights as drawn.
     let first = 0;
     let last = starts.length - 1;
     /** @type {HTMLElement[]} */
@@ -3880,15 +3878,17 @@
     let gapBelow = 0;
     const above = h('span', { class: 'gap' });
     const below = h('span', { class: 'gap' });
+    const atBlock = at === null ? 0 : starts.findLastIndex((start) => start <= at);
     /** @param {number} i */
     const offset = (i) => heights.slice(0, i).reduce((sum, height) => sum + height, 0);
-    // The block `y` px into the text.
-    /** @param {number} y */
+    /** @param {number} y px into the text */
     const blockAt = (y) => {
       let i = 0;
       for (let bottom = heights[0]; bottom <= y && i < heights.length - 1; bottom += heights[i]) i += 1;
       return i;
     };
+    /** @param {number} y @param {number} margin */
+    const near = (y, margin) => [blockAt(y - margin), blockAt(y + pre.clientHeight + margin) + 1];
     const pad = () => parseFloat(getComputedStyle(pre).paddingTop);
     const estimate = () => (heights = starts.slice(1).map((next, i) => heights[i] ?? (next - starts[i]) * pxPerChar));
     const draw = () => {
@@ -3896,8 +3896,7 @@
       return [above, drawn, below];
     };
 
-    // Each drawn block's height as laid out, from where it starts to where the next does; the first laid out also
-    // estimate the others. Whether any changed.
+    // From where each block starts to where the next does, as inline blocks share lines. Whether any changed.
     function measure() {
       const base = above.getBoundingClientRect().bottom;
       const tops = drawn.map((el) => el.getBoundingClientRect().top);
@@ -3905,7 +3904,7 @@
       let changed = false;
       ends.forEach((bottom, i) => {
         const height = bottom - (i ? ends[i - 1] : base);
-        changed ||= !(Math.abs(height - heights[first + i]) < 0.5);
+        changed ||= Math.round(height) !== Math.round(heights[first + i]);
         heights[first + i] = height;
       });
       if (!pxPerChar) {
@@ -3915,7 +3914,7 @@
       return changed;
     }
 
-    // How far into the text the view's top is: through a gap, to its scale.
+    // In px into the text, through a gap to its scale.
     function viewTop() {
       const v = pre.scrollTop - pad();
       const [top, bottom] = [offset(first), offset(last)];
@@ -3924,7 +3923,7 @@
       return top + v - gapAbove;
     }
 
-    // Draws blocks `from` up to `to`, keeping those drawn already, and a selection in them.
+    // Blocks still near the view are kept, and so a selection in them.
     /** @param {number} from @param {number} to */
     function redraw(from, to) {
       const kept = new Map(drawn.map((el, i) => [first + i, el]));
@@ -3938,40 +3937,43 @@
       }
     }
 
-    // Draws the blocks within a view's height of `y` px into the text, and scrolls to keep `y` at the view's top, or to
-    // the bottom.
+    // The gap above keeps `y` where it is in view while near its scale: scrolling would cut a fling short in Safari.
     /** @param {number} y @param {boolean} atBottom */
     function drawAt(y, atBottom) {
-      const view = pre.clientHeight;
+      const scrolled = pre.scrollTop;
       const i = blockAt(y);
       const delta = y - offset(i);
-      redraw(blockAt(y - view), blockAt(y + 2 * view) + 1);
+      const [from, to] = near(y, pre.clientHeight * DRAWN_VIEWS);
+      redraw(from, to);
       measure();
       const total = offset(heights.length);
       const scale = Math.min(1, MAX_SCROLL_PX / total);
-      gapAbove = offset(first) * scale;
+      const kept = scrolled - pad() - (offset(i) - offset(first)) - delta;
+      const keep = !atBottom && first > 0 && kept >= 0 && Math.abs(kept - offset(first) * scale) < MAX_DRIFT_PX;
+      gapAbove = keep ? kept : offset(first) * scale;
       gapBelow = (total - offset(last)) * scale;
       above.style.height = `${gapAbove}px`;
       below.style.height = `${gapBelow}px`;
-      pre.scrollTop = atBottom ? pre.scrollHeight : pad() + gapAbove + offset(i) - offset(first) + delta;
+      if (!keep) pre.scrollTop = atBottom ? pre.scrollHeight : pad() + gapAbove + offset(i) - offset(first) + delta;
     }
 
-    // Draws the blocks near the view unless they are drawn, keeping what is in view, or the view at the bottom.
     function update() {
       const view = pre.clientHeight;
       if (!view) return;
       const settling = !pxPerChar;
       const changed = measure();
-      const atBottom = !settling && pre.scrollTop >= pre.scrollHeight - view - 1;
-      const y = atBottom ? offset(heights.length) - view : viewTop();
-      if (!changed && first <= blockAt(y - view / 2) && last > blockAt(y + (view * 3) / 2)) return;
+      // Within a pixel: scrollTop and scrollHeight are rounded apart.
+      const atBottom = !settling && pre.scrollHeight - view - pre.scrollTop <= 1;
+      // Laid out at last: at the sentence to show, which a smooth scroll begun before may not reach.
+      const y = settling ? offset(atBlock) : atBottom ? offset(heights.length) - view : viewTop();
+      const [from, to] = near(y, (view * DRAWN_VIEWS) / 2);
+      if (!changed && first <= from && last >= to) return;
       drawAt(y, atBottom);
-      // Scrolled to before its gaps were laid out.
       const flashed = settling && pre.querySelector('.flash');
-      if (flashed) scrollToMiddle(/** @type {HTMLElement} */ (flashed));
+      if (flashed) scrollToMiddle(/** @type {HTMLElement} */ (flashed), false);
     }
 
-    // From now on only the blocks near the view are drawn, each starting a line, so that none wraps by those above it.
+    // Each block starts a line, so that none wraps by the blocks drawn above it.
     function drawNear() {
       pre.classList.add('near');
       pre.addEventListener('scroll', update);
@@ -3982,6 +3984,8 @@
     function open() {
       measure();
       const y = viewTop();
+      // The last block up to the cut is longer in full.
+      heights.pop();
       starts = blockStarts(text, text.length);
       estimate();
       drawn = [];
@@ -3991,8 +3995,7 @@
     }
 
     if (at !== null) {
-      const i = starts.findLastIndex((start) => start <= at);
-      [first, last] = [Math.max(0, i - 1), Math.min(starts.length - 1, i + 2)];
+      [first, last] = [Math.max(0, atBlock - 1), Math.min(starts.length - 1, atBlock + 2)];
       drawNear();
     }
     return { draw, open };
@@ -4004,9 +4007,10 @@
    * @param {TextRange | null} at
    */
   function markedText(text, from, to, spans, title, at) {
-    const cuts = cutsOf([{ start: from, end: to }, ...spans, ...(at ? [at] : [])]).filter((cut) => cut >= from && cut <= to);
+    const inside = spans.filter((r) => r.end > from && r.start < to);
+    const cuts = cutsOf([{ start: from, end: to }, ...inside, ...(at ? [at] : [])]).filter((cut) => cut >= from && cut <= to);
     return cuts.slice(1).map((end, i) => {
-      const span = spans.find((r) => r.start <= cuts[i] && r.end >= end);
+      const span = inside.find((r) => r.start <= cuts[i] && r.end >= end);
       const flash = at && at.start <= cuts[i] && at.end >= end;
       if (!span && !flash) return text.slice(cuts[i], end);
       const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
@@ -4162,12 +4166,12 @@
 
   // Scrolls the text `el` is in, which the popup shrinks to fit, to put `el` in its middle; scrollIntoView would also
   // scroll the panel, which only the view moves.
-  /** @param {HTMLElement} el */
-  function scrollToMiddle(el) {
+  /** @param {HTMLElement} el @param {boolean} [smooth] */
+  function scrollToMiddle(el, smooth = !reduceMotion()) {
     const box = /** @type {HTMLElement} */ (el.closest('pre'));
     const r = el.getBoundingClientRect();
     const top = box.scrollTop + r.top - box.getBoundingClientRect().top - (box.clientHeight - r.height) / 2;
-    box.scrollTo({ top, behavior: reduceMotion() ? 'auto' : 'smooth' });
+    box.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
   }
 
   /** @param {TextRange | null} [at] a sentence to show, if the popup is a document's */
