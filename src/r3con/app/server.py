@@ -1163,12 +1163,15 @@ def serve(
     completion: Callable[..., Any] | None = None,
     key_service: str = APP_KEY_SERVICE,
     choose_save_path: ChooseSavePath | None = None,
+    stop_within: float | None = None,
 ) -> tuple[str, Callable[[], None]]:
     """Start the server on a thread of its own, its keys saved under ``key_service``,
     saving a tab where ``choose_save_path`` says, if given. Returns the URL that opens
     the page, with this launch's token, and a function that stops the server,
     returning once its runs and asks have ended, at most ``WORKERS_EXIT_SECONDS``
-    after its connections have closed."""
+    after its connections have closed; with ``stop_within``, after that many seconds
+    at most, leaving what is still going to the server's thread, a daemon, until the
+    process ends."""
     listener = listen(port)
     server, url = _server(listener, logs_dir, completion, key_service, choose_save_path)
     thread = threading.Thread(
@@ -1178,7 +1181,7 @@ def serve(
 
     def stop() -> None:
         server.should_exit = True
-        thread.join()
+        thread.join(stop_within)
 
     return url, stop
 
