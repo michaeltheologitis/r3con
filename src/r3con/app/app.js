@@ -1611,6 +1611,8 @@
   const MODEL_KEY = 'r3con-proto-model';
   const ROUNDS_KEY = 'r3con-proto-rounds';
   const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
+  // In sessionStorage: what r3con app opened this tab with, for a reload.
+  const LAUNCH_KEY = 'r3con-launch';
   // The side column's narrowest, where the composer and the files pane still fit, its widest as a share of the frame, and a key press's step.
   const SIDE_MIN_PX = 280;
   const SIDE_MAX_SHARE = 0.6;
@@ -1794,17 +1796,20 @@
   // A saved tab's file shows that tab, wherever it is opened.
   const savedBlock = document.getElementById(SAVED_TAB_ID);
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
-  // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
-  // once and never reaches storage.
+  // which sends nothing.
   const live = !savedBlock && ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
+  // The launch token, and save=dialog in the Mac app: off the address bar at once, kept for a reload in this tab's sessionStorage.
+  const launch = live ? takeLaunch() : new URLSearchParams();
   // The Mac app's web view has no downloads, so r3con app there opens the page with this, and saves a tab itself.
-  const saveDialog = live && new URLSearchParams(location.hash.slice(1)).get('save') === 'dialog';
-  const token = live ? takeToken() : null;
+  const saveDialog = launch.get('save') === 'dialog';
+  const token = launch.get('token');
 
-  function takeToken() {
-    const found = new URLSearchParams(location.hash.slice(1)).get('token');
-    if (found !== null) history.replaceState(null, '', `${location.pathname}${location.search}`);
-    return found;
+  function takeLaunch() {
+    const opened = new URLSearchParams(location.hash.slice(1));
+    if (!opened.has('token')) return new URLSearchParams(readStored(LAUNCH_KEY, 'sessionStorage') ?? '');
+    writeStored(LAUNCH_KEY, opened.toString(), 'sessionStorage');
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    return opened;
   }
 
   let nextUid = 0;
@@ -1973,19 +1978,19 @@
   /** @param {Event} event */
   const targetOf = (event) => /** @type {Element} */ (event.target);
 
-  /** @param {string} key */
-  function readStored(key) {
+  /** @param {string} key @param {'localStorage' | 'sessionStorage'} [area] */
+  function readStored(key, area = 'localStorage') {
     try {
-      return localStorage.getItem(key);
+      return window[area].getItem(key);
     } catch {
       return null;
     }
   }
 
-  /** @param {string} key @param {string} value */
-  function writeStored(key, value) {
+  /** @param {string} key @param {string} value @param {'localStorage' | 'sessionStorage'} [area] */
+  function writeStored(key, value, area = 'localStorage') {
     try {
-      localStorage.setItem(key, value);
+      window[area].setItem(key, value);
     } catch {
       // Storage can be blocked; the page works without it for this visit.
     }
