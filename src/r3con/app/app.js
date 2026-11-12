@@ -137,7 +137,7 @@
    * @property {Map<string, CallState>} calls each call by its node's id; a document node's is reading the file
    * @property {Map<NodeKind, number>} settled how many calls of each kind are back
    * @property {Set<number>} relevant documents with a snippet, or on an answer's trail, which have a row of their own
-   * @property {Set<number>} kept documents kept in view from before the run until their first round is back
+   * @property {Set<number>} kept documents at a long run's ends, in view from before the run until their first round is back
    * @property {Set<number>} opened documents in an opened fold
    * @property {boolean} stopped whether the run stopped before reading them all
    * @property {PanelRow[]} rows top to bottom
@@ -3229,7 +3229,7 @@
       tab.fold = null;
       return;
     }
-    const kept = new Set(range(CONTEXT_DOCS).flatMap((k) => [k, n - 1 - k]));
+    const kept = new Set(longRuns(tree).flatMap((run) => range(CONTEXT_DOCS).flatMap((k) => [run.start + k, run.end - k])));
     const index = new Map(files.map((f, d) => [docId(f), d]));
     const sets = { relevant: new Set(), kept, opened: new Set(), sourced: new Set() };
     tab.fold = { files, tree, depth, index, calls: new Map(), settled: new Map(), ...sets, stopped: false, rows: [], closedRows: 0, foldOf: [], frame: 0 };
@@ -3314,18 +3314,46 @@
     return opened;
   }
 
-  // Each run of MIN_FOLD or more quiet documents in a folder is one fold; returns how many rows opened folds added.
-  /** @param {Folding} fold @param {DocRange} docs @param {number} depth */
-  function foldRun(fold, docs, depth) {
-    /** @param {number} d */
-    const own = (d) => fold.files.length <= FOLD_FROM_DOCS || fold.relevant.has(d) || fold.kept.has(d);
-    let opened = 0;
+  // The runs of files that can fold: a folder's, between its subfolders, of more than FOLD_FROM_DOCS, or a flat list.
+  /** @param {Folder} folder @returns {DocRange[]} */
+  function longRuns(folder) {
+    const runs = folder.items.flatMap((item) => ('items' in item ? longRuns(item) : [item]));
+    return runs.filter((run) => run.end - run.start >= FOLD_FROM_DOCS);
+  }
+
+  // `docs` in runs that `test` holds for or doesn't, in order.
+  /** @param {DocRange} docs @param {(d: number) => boolean} test @returns {DocRange[]} */
+  function runsBy(docs, test) {
+    const runs = [];
     for (let d = docs.start; d <= docs.end; ) {
       let end = d;
-      while (!own(d) && end < docs.end && !own(end + 1)) end += 1;
-      if (own(d) || end - d + 1 < MIN_FOLD) fold.rows.push(...range(end - d + 1).map((k) => ({ doc: d + k, depth })));
-      else opened += addFold(fold, d, end, depth);
+      while (end < docs.end && test(end + 1) === test(d)) end += 1;
+      runs.push({ start: d, end });
       d = end + 1;
+    }
+    return runs;
+  }
+
+  // Each run of quiet documents in a folder folds, but beside folders only one of more than FOLD_FROM_DOCS, as a folder
+  // already folds the rest. Returns how many rows opened folds added.
+  /** @param {Folding} fold @param {DocRange} docs @param {number} depth */
+  function foldRun(fold, docs, depth) {
+    let opened = 0;
+    for (const run of runsBy(docs, (d) => fold.relevant.has(d))) {
+      const quiet = !fold.relevant.has(run.start);
+      if (quiet && (!fold.depth || run.end - run.start >= FOLD_FROM_DOCS)) opened += foldQuiet(fold, run, depth);
+      else fold.rows.push(...foldDocs(run).map((doc) => ({ doc, depth })));
+    }
+    return opened;
+  }
+
+  // Quiet documents fold, but for those kept in view and runs of fewer than MIN_FOLD; returns the rows folds opened.
+  /** @param {Folding} fold @param {DocRange} docs @param {number} depth */
+  function foldQuiet(fold, docs, depth) {
+    let opened = 0;
+    for (const run of runsBy(docs, (d) => fold.kept.has(d))) {
+      if (fold.kept.has(run.start) || run.end - run.start + 1 < MIN_FOLD) fold.rows.push(...foldDocs(run).map((doc) => ({ doc, depth })));
+      else opened += addFold(fold, run.start, run.end, depth);
     }
     return opened;
   }
