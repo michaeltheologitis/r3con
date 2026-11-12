@@ -3195,21 +3195,48 @@ function shownIn(selector) {
   return { meta: pre.previousElementSibling.textContent, lines, length: text.length, end: text.slice(-20), cut: cut?.textContent ?? null, scrollTop: pre.scrollTop, focused };
 }
 
+// In-page: scrolls the text in the popup or pane `selector` to its bottom, then says where the text drawn ends, whether
+// its last line is in view, and how many lines are drawn.
+async function scrolledToEnd(selector) {
+  const pre = document.querySelector(`${selector} pre`);
+  pre.scrollTop = pre.scrollHeight;
+  for (let i = 0; i < 3; i += 1) await new Promise((resolve) => requestAnimationFrame(resolve));
+  const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT);
+  const texts = [];
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) if (!node.parentElement.closest('.cut')) texts.push(node);
+  const text = texts.map((node) => node.data).join('');
+  const node = texts.at(-1);
+  const range = document.createRange();
+  range.setStart(node, Math.max(0, node.length - 3));
+  range.setEnd(node, node.length);
+  const line = range.getBoundingClientRect();
+  const box = pre.getBoundingClientRect();
+  return { end: text.slice(-20), inView: line.top >= box.top && line.bottom <= box.bottom, length: text.length };
+}
+
+// Copies what is selected in the page, and returns what the clipboard then holds.
+async function copied(page) {
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.keyboard.press('ControlOrMeta+C');
+  return page.evaluate(() => navigator.clipboard.readText());
+}
+
 // Words numbered from 1, so each says where it is.
 const numberedWords = (n) => `${Array.from({ length: n }, (_, i) => `w${i + 1}`).join(' ')}\n`;
 const docNode = (name) => `.node.doc[aria-label^="${name},"]`;
 
 // Enough words past where a popup stops short that its text, opened in full, runs on past the line that said so.
 const WORDS_PAST = 1000;
-// A 3 MB file with no spaces, as minified JSON or base64 is: one word.
+// A 3 MB file with no spaces, as minified JSON or base64 is: one word, which ends as `DENSE_END`.
 const DENSE_CHARS = 3000000;
+const DENSE_END = 'end';
 
 // A file of more words than its popup shows, one of exactly as many, and one of more characters with no spaces.
 async function popupWords() {
   await withPage('popup', { sample: false }, async (page) => {
     const long = memo('long.txt', numberedWords(WORDS_SHOWN + WORDS_PAST));
     const within = memo('within.txt', numberedWords(WORDS_SHOWN));
-    const dense = memo('dense.txt', 'x'.repeat(DENSE_CHARS));
+    const dense = memo('dense.txt', 'x'.repeat(DENSE_CHARS - DENSE_END.length) + DENSE_END);
     await page.setInputFiles('#file-input', [long, within, dense]);
     await filesCounted(page, 3);
     await page.click(docNode('long.txt'));
@@ -3217,13 +3244,20 @@ async function popupWords() {
     const stopsName = `a file of more than ${WORDS_SHOWN} words shows its ${WORDS_SHOWN}th word and not the next`;
     check('popup', stopsName, cut.end.endsWith(` w${WORDS_SHOWN}`), JSON.stringify(cut.end));
 
+    await page.$eval('#inspector pre', (pre) => getSelection().selectAllChildren(pre));
+    const all = await copied(page);
+    const copyName = 'a copy of all of a text that stops short is the text up to where it stops, without the line that says so';
+    const shownText = numberedWords(WORDS_SHOWN + WORDS_PAST).slice(0, cut.length);
+    check('popup', copyName, all === shownText, `${all.length} characters, ending ${JSON.stringify(all.slice(-20))}`);
+
     await page.$eval('#inspector pre', (el) => (el.scrollTop = el.scrollHeight));
     const scrolled = (await page.evaluate(shownIn, '#inspector')).scrollTop;
     await page.click('#inspector .cut button');
     const full = await page.evaluate(shownIn, '#inspector');
+    const end = await page.evaluate(scrolledToEnd, '#inspector');
     const fullName = 'where its text stops, a line says only open in full, which shows the rest, to its last word, at the same scroll, the focus on the text';
-    const opened = full.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
-    check('popup', fullName, cut.cut === CUT_LINE && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}`);
+    const opened = end.end.endsWith(` w${WORDS_SHOWN + WORDS_PAST}\n`) && end.inView && full.cut === null && scrolled > 0 && full.scrollTop === scrolled && full.focused;
+    check('popup', fullName, cut.cut === CUT_LINE && opened, `${cut.cut}; then ${JSON.stringify(full)}, scrolled ${scrolled}; ${JSON.stringify(end)}`);
 
     await page.keyboard.press('Escape');
     await page.click(docNode('within.txt'));
@@ -3235,11 +3269,11 @@ async function popupWords() {
     await page.click(docNode('dense.txt'));
     const denseCut = await page.evaluate(shownIn, '#inspector');
     await page.click('#inspector .cut button');
-    const denseFull = await page.evaluate(shownIn, '#inspector');
-    const denseName = `a file of ${DENSE_CHARS} characters and no spaces stops at ${CHARS_SHOWN}, then open in full, which shows the rest`;
+    const denseFull = await page.evaluate(scrolledToEnd, '#inspector');
+    const denseName = `a file of ${DENSE_CHARS} characters and no spaces stops at ${CHARS_SHOWN}, then open in full, which shows the rest, to its end`;
     const denseStops = denseCut.length === CHARS_SHOWN && denseCut.cut === CUT_LINE;
-    const denseOpened = denseFull.length === DENSE_CHARS && denseFull.cut === null;
-    check('popup', denseName, denseStops && denseOpened, `${denseCut.length}, ${denseCut.cut}; then ${denseFull.length}, ${denseFull.cut}`);
+    const denseOpened = denseFull.end.endsWith(DENSE_END) && denseFull.inView && (await page.evaluate(shownIn, '#inspector')).cut === null;
+    check('popup', denseName, denseStops && denseOpened, `${denseCut.length}, ${denseCut.cut}; then ${JSON.stringify(denseFull)}`);
 
     await page.keyboard.press('Escape');
     await page.click('#tab-files');
@@ -3252,6 +3286,75 @@ async function popupWords() {
     await page.click(docNode(recordedSample().docs[0].name));
     const { meta } = await page.evaluate(shownIn, '#inspector');
     check('popup', "a sample memo's popup still says so", meta.includes(' · sample memo'), meta);
+  });
+}
+
+// Short lines a blank line apart, enough for HUGE_CHARS characters: some 87 million px of text in a popup, far past the
+// 33.5 million px Chromium lays out.
+const HUGE_CHARS = 50_000_000;
+const HUGE_LINE = ': a short line.\n\n';
+const hugeText = () => Array.from({ length: Math.ceil(HUGE_CHARS / (HUGE_LINE.length + 7)) }, (_, i) => `L${i + 1}${HUGE_LINE}`).join('');
+// However long a text opened in full, its popup holds fewer characters of it than this: a few views' worth.
+const DRAWN_CHARS = 50_000;
+
+// In-page: the marks in view in the popup's text, as their text and whether two summaries quote them.
+function marksInView() {
+  const pre = document.querySelector('#inspector pre');
+  const box = pre.getBoundingClientRect();
+  const inView = (r) => r.bottom > box.top && r.top < box.bottom;
+  return [...pre.querySelectorAll('mark')].filter((mark) => inView(mark.getBoundingClientRect())).map((mark) => ({ text: mark.textContent, multi: mark.classList.contains('multi') }));
+}
+
+// In-page: scrolls the end of the first part of the popup's text drawn to the middle of the view, selects from that part
+// to the last one drawn then, and returns that text.
+async function acrossParts() {
+  const pre = document.querySelector('#inspector pre');
+  const top = pre.getBoundingClientRect().top;
+  pre.scrollTop += pre.querySelector(':scope > span:not(.gap)').getBoundingClientRect().bottom - top - pre.clientHeight / 2;
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const parts = [...pre.querySelectorAll(':scope > span:not(.gap, .cut)')];
+  const textIn = (part) => document.createTreeWalker(part, NodeFilter.SHOW_TEXT).nextNode();
+  const range = document.createRange();
+  range.setStart(textIn(parts[0]), 1);
+  range.setEnd(textIn(parts.at(-1)), 1);
+  getSelection().removeAllRanges();
+  getSelection().addRange(range);
+  return { parts: parts.length, text: range.toString() };
+}
+
+// The sample with 50 MB of lines before its first memo: opened in full, that memo's popup holds only the lines near the
+// view, and still reaches its end, shows a quote far into it, redraws its marks for another answer, and copies as text.
+async function popupHuge() {
+  const sample = recordedSample();
+  const asks = recordedAsks();
+  await withPage('popup', { before: serving(withSample(prefixed(hugeText()))) }, async (page) => {
+    await inspect(page, (await docIdsOf(page))[0]);
+    await page.click('#inspector .cut button');
+    const opened = (await page.evaluate(shownIn, '#inspector')).length;
+    const selected = await page.evaluate(acrossParts);
+    const across = await copied(page);
+    const acrossName = 'a copy of a selection across the parts of a text drawn near the view is that text';
+    check('popup', acrossName, selected.parts > 1 && across === selected.text, `${selected.parts} parts; ${across.length} of ${selected.text.length} characters`);
+    const end = await page.evaluate(scrolledToEnd, '#inspector');
+    const endName = `opened in full, a ${HUGE_CHARS / 1e6} MB file's last line can be scrolled into view`;
+    check('popup', endName, end.end === sample.docs[0].text.slice(-20) && end.inView, JSON.stringify(end));
+    const drawnName = `opened in full, a ${HUGE_CHARS / 1e6} MB file's popup holds only the lines near the view: fewer than ${DRAWN_CHARS} characters, where it opened and at its end`;
+    check('popup', drawnName, opened < DRAWN_CHARS && end.length < DRAWN_CHARS, `${opened} and ${end.length} characters`);
+
+    await quotesOf(page, 'r2-0');
+    await page.click('#inspector .quote >> nth=0');
+    const flash = await page.evaluate(flashed);
+    const quoteName = `a quote ${HUGE_CHARS / 1e6} MB into a file opens its popup in full there, the sentence in view, marked and flashed`;
+    const quoted = flash?.text === sample.rounds[1][0].quotes[0].text && flash.marked && flash.inView;
+    check('popup', quoteName, quoted && (await page.evaluate(shownIn, '#inspector')).cut === null, JSON.stringify(flash));
+
+    const before = { marks: await page.evaluate(marksInView), scrollTop: (await page.evaluate(shownIn, '#inspector')).scrollTop };
+    await landAsk(page, asks[2].question);
+    await becomes(page, landedNode, 'answer-1');
+    const after = { marks: await page.evaluate(marksInView), scrollTop: (await page.evaluate(shownIn, '#inspector')).scrollTop };
+    const relitName = "an answer lit while that popup is open redraws the marks in view for its trail, at the same scroll";
+    const remarked = before.marks.length > 0 && !isDeepStrictEqual(before.marks, after.marks) && after.scrollTop === before.scrollTop;
+    check('popup', relitName, remarked, JSON.stringify({ before, after }));
   });
 }
 
@@ -3285,7 +3388,7 @@ function quotesListed(docs, ids, quotes) {
 
 // The sample with `prefix` before its first memo, its quotes moved by the prefix's code points, as r3con would place them.
 const prefixed = (prefix) => (sample) => {
-  const shift = Array.from(prefix).length;
+  const shift = prefix.length - (prefix.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0);
   sample.docs[0].text = prefix + sample.docs[0].text;
   for (const summaries of sample.rounds) summaries[0].quotes = summaries[0].quotes.map((q) => ({ ...q, start: q.start + shift, end: q.end + shift }));
   return sample;
@@ -7475,7 +7578,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
+  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
