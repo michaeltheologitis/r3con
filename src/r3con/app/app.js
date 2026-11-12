@@ -1661,7 +1661,7 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
-  const NOT_TEXT = 'R3Con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+  const NOT_TEXT = 'R3Con reads text, PDF, Word (.docx) and HTML files: save as one of those, then add again.';
   const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
@@ -1678,7 +1678,7 @@
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
   const NEEDS_APP = 'PDF, Word, HTML and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
-  const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} skipped` : ''}.`;
+  const noDocuments = (skipped) => `No text, PDF, Word (.docx) or HTML files in it${skipped ? `; ${skipped} skipped` : ''}.`;
   const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
   // A refusal names this many files, then counts the rest.
   const NAMED_AT_MOST = 5;

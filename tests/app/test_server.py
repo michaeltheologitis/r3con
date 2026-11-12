@@ -346,6 +346,11 @@ def text_of(client: TestClient, path: Path) -> httpx2.Response:
     )
 
 
+def write_page(path: Path) -> None:
+    """A web page at ``path``: a heading, and a script its text leaves out."""
+    path.write_text(f"<script>var site;</script><h1>{REPORT[0]}</h1>", encoding="utf-8")
+
+
 def zipped(tmp_path: Path, entries: Mapping[str, str | bytes]) -> Path:
     path = tmp_path / ZIP_NAME
     write_zip(path, entries)
@@ -1741,36 +1746,27 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     assert read_documents(pdf) == {"memo.pdf": extracted}
 
 
-# A Word file is read by its name's suffix, in any case, even with nothing before it.
-@pytest.mark.parametrize("name", ["report.docx", "REPORT.DOCX", ".docx"])
-def test_a_word_files_text_is_extracted_as_read_documents_extracts_it(
-    client: TestClient, tmp_path: Path, name: str
+# A Word file or a web page is read by its name's suffix, in any case, even with nothing
+# before it.
+@pytest.mark.parametrize(
+    ("name", "write"),
+    [
+        ("report.docx", lambda path: write_docx(path, REPORT)),
+        ("REPORT.DOCX", lambda path: write_docx(path, REPORT)),
+        (".docx", lambda path: write_docx(path, REPORT)),
+        ("page.html", write_page),
+        ("PAGE.HTM", write_page),
+    ],
+)
+def test_a_word_files_or_web_pages_text_is_extracted_as_read_documents_extracts_it(
+    client: TestClient, tmp_path: Path, name: str, write: Callable[[Path], None]
 ):
     path = tmp_path / name
-    write_docx(path, REPORT)
+    write(path)
     response = text_of(client, path)
     [text] = read_documents(path).values()
     assert response.status_code == 200
     assert response.json() == {"text": text}
-
-
-# A web page is read by its name's suffix, in any case.
-@pytest.mark.parametrize("name", ["page.html", "PAGE.HTM"])
-def test_a_web_pages_text_is_extracted_as_markdown_as_read_documents_extracts_it(
-    client: TestClient, tmp_path: Path, name: str
-):
-    path = tmp_path / name
-    path.write_text(
-        "<script>var site;</script><h1>Incidents</h1>"
-        '<p>Halloran logged <b>7</b>; see <a href="https://example.com">the report</a>.'
-        "</p>",
-        encoding="utf-8",
-    )
-    response = text_of(client, path)
-    text = "# Incidents\n\nHalloran logged **7**; see the report."
-    assert response.status_code == 200
-    assert response.json() == {"text": text}
-    assert read_documents(path) == {name: text}
 
 
 def test_the_page_sends_the_server_each_suffix_r3con_extracts():
