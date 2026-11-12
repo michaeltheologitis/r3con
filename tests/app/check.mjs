@@ -92,6 +92,8 @@ const PROVIDER_MODEL = 'anthropic/claude-opus-5-5';
 // Enough Tab presses to reach the other model field from the picker, past the composer's buttons.
 const MAX_TABS = 5;
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
+// Where a live tab keeps what r3con app opened it with, for a reload: in its sessionStorage.
+const LAUNCH_KEY = 'r3con-launch';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 // The page's MASK before TEST_KEY's last four, the only part of it r3con app answers.
 const TEST_HINT = '••••7f3a';
@@ -818,8 +820,8 @@ function countStatusWrites() {
 
 function placesHolding(key) {
   const fields = [...document.querySelectorAll('input, textarea')].filter((el) => el.value.includes(key));
-  const holding = (store) => Object.keys(store).filter((k) => store.getItem(k).includes(key));
-  const stores = [localStorage, sessionStorage].flatMap(holding);
+  const holding = (area) => Object.keys(window[area]).filter((k) => window[area].getItem(k).includes(key)).map((k) => `${area} ${k}`);
+  const stores = ['localStorage', 'sessionStorage'].flatMap(holding);
   const markup = document.documentElement.outerHTML.includes(key) ? ['markup'] : [];
   const address = location.href.includes(key) ? ['location'] : [];
   return [...fields.map((el) => `#${el.id}`), ...stores, ...markup, ...address];
@@ -5278,8 +5280,14 @@ async function liveSession(url) {
 
     const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
     const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
-    const keptName = 'no storage, field, address, markup or console message holds the token or the key';
-    check('live', keptName, holders.length === 0 && logged === 0, [...holders, `${logged} messages`].join(', '));
+    const keptName = "no field, address, markup or console message holds the token or the key, nor any storage but the tab's sessionStorage, which keeps the token for a reload";
+    check('live', keptName, isDeepStrictEqual(holders, [`sessionStorage ${LAUNCH_KEY}`]) && logged === 0, [...holders, `${logged} messages`].join(', '));
+
+    await page.reload();
+    const reloaded = await becomes(page, (hint) => document.getElementById('state-openai').textContent === hint, REMEMBERED_HINT);
+    const reloadedAt = await page.evaluate(() => location.href);
+    const reloadName = "a reload keeps the launch token: the page still reads the server's keys, and the address still holds no token";
+    check('live', reloadName, reloaded && !reloadedAt.includes(token) && !reloadedAt.includes('#'), `${reloadedAt}; ${await page.textContent('#run-status')}`);
   });
 }
 
@@ -6789,6 +6797,13 @@ async function liveStaleToken(url) {
     const unstarted = await page.evaluate(logOf);
     const endedName = 'a run that fails before it starts ends its log on failed, not on starting, and says why below it';
     check('live', endedName, unstarted.folded === 'failed' && unstarted.mark === 'err' && isDeepStrictEqual(unstarted.after, [STALE_TOKEN]), `${unstarted.folded}; ${unstarted.after.join(' | ')}`);
+
+    // The launch's own URL in the same tab, as when pasted there, then a reload: its token replaces the one the tab kept.
+    await page.goto(url);
+    const [keys] = await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/keys'), page.reload()]);
+    const kept = await page.evaluate((key) => sessionStorage.getItem(key), LAUNCH_KEY);
+    const replacedName = "a launch's URL opened in a tab that kept another token takes its place there, and a reload then reaches r3con app";
+    check('live', replacedName, keys.status() === 200 && kept === new URL(url).hash.slice(1), `${keys.status()}; kept ${kept}`);
   });
 }
 
@@ -7292,6 +7307,8 @@ const CANCELLED_QUESTION = `${SAVED_QUESTION} (cancel the save)`;
 const NO_ROOM_QUESTION = `${SAVED_QUESTION} (no room to save)`;
 const UNWRITABLE_SAVE = "● The file couldn't be written there, so the tab isn't saved.";
 const CANCELLED_NAME = 'which-site-logged-the-most-incidents-cancel-the-save.html';
+const RELOADED_QUESTION = `${SAVED_QUESTION} (after a reload)`;
+const RELOADED_NAME = 'which-site-logged-the-most-incidents-after-a-reload.html';
 
 // Runs `question` over the sample memos and saves the tab: r3con app's answer to the save, the status line once an error
 // shows there or none has in SETTLE_TIMEOUT_MS, and what the page downloaded.
@@ -7314,6 +7331,14 @@ async function liveSaveDialog(url, server) {
     const held = existsSync(saved(SAVED_NAME)) && JSON.parse(SAVED_BLOCK.exec(readFileSync(saved(SAVED_NAME), 'utf8'))[1]);
     const savedName = "with r3con app's Save dialog, save sends the file there, under the question's name, and the page downloads nothing";
     check('live', savedName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && held?.version === SAVED_VERSION, `${answered}; ${status}; ${downloads}`);
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    // As ⌘R does in the Mac app.
+    await page.reload();
+    await addMemos(page);
+    const { answered, status, downloads } = await savedThroughDialog(page, RELOADED_QUESTION);
+    const reloadedName = "after a reload, save still goes through r3con app's Save dialog, and the page downloads nothing";
+    check('live', reloadedName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && existsSync(saved(RELOADED_NAME)), `${answered}; ${status}; ${downloads}`);
   });
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const { answered, status, downloads } = await savedThroughDialog(page, CANCELLED_QUESTION);
