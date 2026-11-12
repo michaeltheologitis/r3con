@@ -142,6 +142,7 @@ ANSWER = {
 SAVES = "/api/saves"
 MAX_SAVE_BYTES = 1_000
 SAVED_NAME = "which-site-logged-the-most-incidents.html"
+CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 REMEMBERED_OPENAI = {"source": "here", "hint": OPENAI_KEY[-4:], "remembered": True}
 UNTIL_CLOSED_OPENAI = {**REMEMBERED_OPENAI, "remembered": False}
@@ -1331,12 +1332,12 @@ def save(client: TestClient, name: str = SAVED_NAME, tab: bytes = SAVED_TAB):
 def test_a_tab_is_saved_where_the_save_dialog_chose_named_as_the_page_suggested(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
-    dialog = FakeSaveDialog(tmp_path / "chosen.html")
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
     with client_for(llm, logs_dir, dialog) as client:
         response = save(client)
     assert response.status_code == 204
     assert dialog.shown == [SAVED_NAME]
-    assert (tmp_path / "chosen.html").read_bytes() == SAVED_TAB
+    assert (tmp_path / CHOSEN_NAME).read_bytes() == SAVED_TAB
 
 
 def test_a_save_cancelled_in_the_dialog_is_answered_and_writes_nothing(
@@ -1353,12 +1354,12 @@ def test_a_save_cancelled_in_the_dialog_is_answered_and_writes_nothing(
 def test_a_save_over_an_earlier_one_replaces_it(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
-    earlier = tmp_path / "chosen.html"
+    earlier = tmp_path / CHOSEN_NAME
     earlier.write_text("an earlier saved tab")
     with client_for(llm, logs_dir, FakeSaveDialog(earlier)) as client:
         response = save(client)
     assert response.status_code == 204
-    assert [path.name for path in tmp_path.iterdir()] == ["chosen.html"]
+    assert [path.name for path in tmp_path.iterdir()] == [CHOSEN_NAME]
     assert earlier.read_bytes() == SAVED_TAB
 
 
@@ -1376,7 +1377,7 @@ def test_a_save_over_an_earlier_one_replaces_it(
 def test_a_save_not_named_as_one_html_file_is_refused_before_any_dialog(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path, name: str
 ):
-    dialog = FakeSaveDialog(tmp_path / "chosen.html")
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
     with client_for(llm, logs_dir, dialog) as client:
         response = save(client, name)
     assert response.status_code == 422
@@ -1387,18 +1388,17 @@ def test_a_save_not_named_as_one_html_file_is_refused_before_any_dialog(
 def test_a_save_over_the_body_limit_is_refused_before_any_dialog(
     llm: FakeLLM, logs_dir: Path, tmp_path: Path
 ):
-    dialog = FakeSaveDialog(tmp_path / "chosen.html")
+    dialog = FakeSaveDialog(tmp_path / CHOSEN_NAME)
     with client_for(llm, logs_dir, dialog, max_body_bytes=MAX_SAVE_BYTES) as client:
         response = save(client, tab=b"x" * (MAX_SAVE_BYTES + 1))
     assert response.status_code == 413
     assert dialog.shown == []
 
 
-# Where the file can't go: a folder that isn't there, and one the file would replace,
-# which stays as it was, with nothing left beside it.
+# "folder" stands for a file the save would replace, and must leave as it was.
 @pytest.mark.parametrize(
     ("chosen", "error"),
-    [("gone/chosen.html", "FileNotFoundError"), ("folder", "IsADirectoryError")],
+    [(f"gone/{CHOSEN_NAME}", "FileNotFoundError"), ("folder", "IsADirectoryError")],
 )
 def test_a_save_where_the_file_cannot_be_written_is_refused_and_logged(
     llm: FakeLLM,

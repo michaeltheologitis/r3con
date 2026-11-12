@@ -22,6 +22,7 @@ TOGA_WINDOW_SIZE = (640, 480)
 MAC_APP_KEY = "sk-saved-by-the-mac-app-1234"
 R3CON_APP_KEY = "sk-saved-by-r3con-app-5678"
 SAVED_NAME = "which-site-logged-the-most-incidents.html"
+CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 
 
@@ -30,9 +31,10 @@ class FakeWebView:
         self.url = url
 
 
-class FakeSaveFileDialog:
-    def __init__(self, title: str, suggested_filename: str) -> None:
-        self.shown = (title, suggested_filename, threading.current_thread())
+def fake_save_file_dialog(
+    title: str, suggested_filename: str
+) -> tuple[str, str, threading.Thread]:
+    return (title, suggested_filename, threading.current_thread())
 
 
 class FakeWindow:
@@ -51,8 +53,8 @@ class FakeWindow:
     def hide(self) -> None:
         self.hidden = True
 
-    async def dialog(self, dialog: FakeSaveFileDialog) -> Path | None:
-        self.dialogs.append(dialog.shown)
+    async def dialog(self, dialog: tuple[str, str, threading.Thread]) -> Path | None:
+        self.dialogs.append(dialog)
         self.opened.set()
         if not self.answers:
             await asyncio.Event().wait()
@@ -128,7 +130,7 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeApp]:
 
     monkeypatch.setattr(toga, "App", OpenedApp)
     monkeypatch.setattr(toga, "WebView", FakeWebView)
-    monkeypatch.setattr(toga, "SaveFileDialog", FakeSaveFileDialog)
+    monkeypatch.setattr(toga, "SaveFileDialog", fake_save_file_dialog)
     return apps
 
 
@@ -180,7 +182,7 @@ def test_the_window_opens_at_its_size(opened: list[FakeApp]):
 def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    chosen = tmp_path / "chosen.html"
+    chosen = tmp_path / CHOSEN_NAME
     monkeypatch.setattr(FakeApp, "saving_tab", True)
     monkeypatch.setattr(FakeWindow, "chooses", chosen)
     window.main()

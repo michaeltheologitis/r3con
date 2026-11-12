@@ -269,7 +269,6 @@ REPRESENTATION_FILES = (
 LOCAL_PATHS = "sources"
 UNREADABLE_RUN = "This run's folder can't be read, so it can't be saved."
 NO_SAVE_DIALOG = "This app saves a tab as a download."
-# What a page opened with this beside its token saves through the server, not as a download.
 SAVE_DIALOG = "save=dialog"
 UNWRITABLE_SAVE = "The file couldn't be written there, so the tab isn't saved."
 # A file name alone: in a suggested name, the Save dialog would open a folder in it.
@@ -850,12 +849,12 @@ async def save_tab(request: Request) -> Response:
 def _write_whole(path: Path, body: bytes) -> None:
     """Write ``body`` at ``path`` in full or not at all, so that a file there stays as
     it was if the write fails partway, as on a full disk."""
-    partial = path.with_name(f".{path.name}.{secrets.token_hex(ID_BYTES)}")
+    unfinished = path.with_name(f".{path.name}.{secrets.token_hex(ID_BYTES)}")
     try:
-        partial.write_bytes(body)
-        partial.replace(path)
+        unfinished.write_bytes(body)
+        unfinished.replace(path)
     except OSError:
-        partial.unlink(missing_ok=True)
+        unfinished.unlink(missing_ok=True)
         raise
 
 

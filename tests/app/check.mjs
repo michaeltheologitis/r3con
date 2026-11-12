@@ -7155,8 +7155,7 @@ async function liveSaved(url) {
   }
 }
 
-// What fake_server.py's Save dialog does, given --save-dialog: it saves in its logs dir's DIALOG_FOLDER under the name
-// suggested, cancels for a question that makes a name holding CANCELS_SAVE, and fails one holding NO_ROOM.
+// fake_server.py's Save dialog, given --save-dialog: it saves in DIALOG_FOLDER, cancels and fails as its questions say.
 const SAVE_DIALOG = '--save-dialog';
 const DIALOG_FOLDER = 'saved';
 const CANCELLED_QUESTION = `${SAVED_QUESTION} (cancel the save)`;
