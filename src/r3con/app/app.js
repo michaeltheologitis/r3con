@@ -190,7 +190,15 @@
    * @property {Record<string, unknown>} representation
    */
   /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals'>} SavedAnswer */
-  /** @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[] }} OpenedTab A saved tab, read. */
+  /**
+   * A saved tab, read.
+   * @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[], representation: Record<string, unknown> }} OpenedTab
+   */
+  /**
+   * What a value must be: a typeof name, a function that says, a one-item list for a list of that, or an object of
+   * those for an object with just those keys, a key ending in ? only if present.
+   * @typedef {string | ((value: any) => boolean) | Shape[] | { [key: string]: Shape }} Shape
+   */
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
@@ -1684,6 +1692,15 @@
   const SAVED_NAME = 'r3con-tab';
   const SAVED_MODE_NOTE = 'open this file in R3Con to ask more';
   const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
+  const HTML_SUFFIX = '.html';
+  // r3con app took a run's texts in one body of at most its MAX_BODY_BYTES, so no tab that ran holds more.
+  const MAX_SAVED_TEXT_BYTES = 64 * 1024 * 1024;
+  // A saved tab's block: its texts, compressed, and its run twice over, each no more than r3con app takes.
+  const MAX_BLOCK_CHARS = 4 * MAX_SAVED_TEXT_BYTES;
+  const NEWER_SAVE = 'It holds a tab saved by a newer R3Con: update R3Con to open it.';
+  const DAMAGED_SAVE = "It holds a saved tab R3Con can't read: it may have been changed since it was saved.";
+  const TOO_BIG_SAVE = 'Its saved tab holds more text than R3Con takes in a run.';
+  const CANT_IMPORT = "R3Con couldn't open the tab saved in it.";
   const CANT_SAVE = "couldn't save the tab";
   // How long a saved file's download link lasts: long enough for any browser to have read it.
   const DOWNLOAD_LINK_MS = 60_000;
@@ -2046,7 +2063,8 @@
 
   // ---------- r3con app ----------
 
-  // An error whose message is for the user: r3con app's own words, or what went wrong reaching it.
+  // An error whose message is for the user: r3con app's own words, what went wrong reaching it, or why a saved tab can't
+  // be opened.
   class ServerError extends Error {}
 
   // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
@@ -4569,6 +4587,8 @@
 
   /** @param {{ at: number, run: () => void }[]} steps */
   const runAtOnce = (steps) => steps.sort((a, b) => a.at - b.at).forEach((s) => s.run());
+  /** @param {RunTab} tab @param {Narrator} narr */
+  const playAtOnce = (tab, narr) => runAtOnce(buildTimeline(tab, narr));
 
   /** @param {RunTab} tab @param {Narrator} narr */
   function playTimeline(tab, narr) {
@@ -4735,8 +4755,8 @@
   }
 
   // Plays the shown tab's run, its document nodes starting from `at`.
-  /** @param {RunTab} tab */
-  function playRun(tab, at = docPositions(tab)) {
+  /** @param {RunTab} tab @param {Mode['play']} [play] */
+  function playRun(tab, at = docPositions(tab), play = mode.play) {
     cancelTimers(tab);
     clearPanel(tab);
     fadeFaint(tab, tab.run.docs.length);
@@ -4748,7 +4768,7 @@
     startFolding(tab);
     if (tab.fold) refold(tab, { was: at, fit: false });
     syncDocNodes(tab, { at, animate: true, replan: true });
-    mode.play(tab, narr);
+    play(tab, narr);
     updateComposer();
   }
 
@@ -5076,9 +5096,8 @@
   }
 
   // A tab's batches are read and added one after another, so that each one's lines in the files pane stand.
-  /** @param {Picked} batch @param {Tab} [tab] */
-  function addFiles(batch, tab = state.shown) {
-    tellFiles(tab, { filesError: '' });
+  /** @param {Picked} batch @param {Tab} tab */
+  function addFiles(batch, tab) {
     tab.reading += 1;
     updateHint();
     tab.adding = tab.adding
@@ -6082,7 +6101,7 @@
       input.addEventListener('change', () => {
         // Copied now: a file input's list empties once its value is reset.
         const files = /** @type {FileList} */ (input.files);
-        if (files.length) addFiles(fromFolders([...files]));
+        if (files.length) addPicked(fromFolders([...files]), state.shown);
         input.value = '';
       });
     }
@@ -6114,8 +6133,8 @@
       const tab = state.shown;
       showTab('files');
       // A tab that has run keeps its run's files, so what is dropped on it is refused unread.
-      if (tab.run) return tellFiles(tab, { filesError: notAdded(pickFiles([...e.dataTransfer.files]).map((f) => f.name), LOCKED_DROP) });
-      addFiles(await filesFromDrop(e.dataTransfer), tab);
+      const unread = { files: pickFiles([...e.dataTransfer.files]), skipped: 0, failed: [] };
+      addPicked(tab.run ? unread : await filesFromDrop(e.dataTransfer), tab);
     });
     // However a drag ends, dropped anywhere or called off, the overlay goes, whatever dragleave was missed.
     const dragEnded = () => {
@@ -6152,10 +6171,22 @@
     return url.slice(url.indexOf(',') + 1);
   }
 
-  /** @param {string} base64 */
-  function gunzipped(base64) {
+  /** @param {string} base64 @param {number} limit */
+  async function gunzipped(base64, limit) {
     const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-    return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+    const reader = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+    /** @type {Uint8Array<ArrayBuffer>[]} */
+    const chunks = [];
+    let size = 0;
+    for (let read = await reader.read(); !read.done; read = await reader.read()) {
+      size += read.value.length;
+      if (size > limit) {
+        await reader.cancel();
+        throw new ServerError(TOO_BIG_SAVE);
+      }
+      chunks.push(read.value);
+    }
+    return new Blob(chunks).text();
   }
 
   /** @param {RunTab} tab @returns {Promise<SavedTabV1>} */
@@ -6233,41 +6264,163 @@
     $('save-what').textContent = savedHolds(state.shown.files.length);
   }
 
-  // Every later version keeps a reader for each before it, so that a tab saved by any R3Con opens.
+  /** @param {unknown} value @param {Shape} shape @returns {boolean} */
+  function fits(value, shape) {
+    if (typeof shape === 'function') return shape(value);
+    if (typeof shape === 'string') return typeof value === shape && value !== null;
+    if (Array.isArray(shape)) return Array.isArray(value) && value.every((item) => fits(item, shape[0]));
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+    const object = /** @type {Record<string, unknown>} */ (value);
+    /** @param {string} key */
+    const named = (key) => key.replace(/\?$/, '');
+    const known = Object.keys(object).every((key) => Object.hasOwn(shape, key) || Object.hasOwn(shape, `${key}?`));
+    return known && Object.entries(shape).every(([key, inner]) => (Object.hasOwn(object, named(key)) ? fits(object[named(key)], inner) : key.endsWith('?')));
+  }
+
+  /** @param {Shape} shape */
+  const orNull = (shape) => (/** @type {unknown} */ value) => value === null || fits(value, shape);
+  /** @param {unknown} value */
+  const isCount = (value) => Number.isInteger(value) && /** @type {number} */ (value) >= 0;
+  /** @param {(value: unknown) => boolean} check */
+  const recordOf = (check) => (/** @type {unknown} */ value) => fits(value, 'object') && !Array.isArray(value) && Object.values(/** @type {object} */ (value)).every(check);
+  // A name as the page itself names a file or folder: no part of it . or .., and no \ or NUL.
+  /** @param {unknown} value */
+  const isPath = (value) => typeof value === 'string' && !/[\\\0]/.test(value) && value.split('/').every((part) => part && part !== '.' && part !== '..');
+  const TOTALS = { 'tokens?': orNull('number'), 'usd?': orNull('number') };
+  // r3con's quote, as an event gives it, with the trail node of the summary quoting it.
+  const QUOTE = { text: 'string', start: orNull(isCount), end: orNull(isCount), 'match?': orNull('string'), 'score?': orNull('number'), summary: 'string' };
+  /** @type {Shape} */
+  const SAVED_TAB_V1 = {
+    version: (version) => version === 1,
+    files: [{ name: isPath, size: isCount, 'folder?': isPath }],
+    texts: 'string',
+    folders: [(pair) => fits(pair, [() => true]) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
+    run: {
+      ids: ['string'],
+      rounds: [[{ summary: 'string', provenance: [isCount], quotes: [QUOTE] }]],
+      schema: orNull({ code: 'string', thought: orNull('string') }),
+      parsed: [{ parse: recordOf(Array.isArray), provenance: [isCount] }],
+      totals: orNull(TOTALS),
+      answers: [
+        {
+          question: 'string',
+          model: 'string',
+          text: 'string',
+          provenance: { summary_ids: [isCount], parse_ids: [isCount], trail: { rule: 'string', nodes: ['string'], edges: [(edge) => fits(edge, ['string']) && edge.length === 3] } },
+          'totals?': orNull(TOTALS),
+        },
+      ],
+    },
+    representation: recordOf((file) => fits(file, 'object') && !Array.isArray(file)),
+  };
+
+  // Its lists per document have one entry per file, its rounds as many as a run has, and each index is a file's.
+  /** @param {SavedTabV1} saved */
+  function consistent({ files, run }) {
+    const n = files.length;
+    const perDocument = [run.ids, run.parsed, ...run.rounds].every((list) => list.length === n);
+    const cited = run.answers.flatMap(({ provenance }) => (provenance ? [...provenance.summary_ids, ...provenance.parse_ids] : []));
+    const indices = [...run.rounds.flat().flatMap((s) => s.provenance), ...run.parsed.flatMap((p) => p.provenance), ...cited];
+    return n > 0 && perDocument && run.rounds.length >= 1 && run.rounds.length <= MAX_ROUNDS && run.answers.length > 0 && indices.every((d) => d < n);
+  }
+
+  // Outside input when imported, or opened from a file someone else saved: read only once its shape is checked, and its
+  // texts only up to what a run takes. Every later version keeps a reader for each before it.
   /** @param {string} block @returns {Promise<OpenedTab>} */
   async function readSaved(block) {
-    /** @type {SavedTabV1} */
-    const saved = JSON.parse(block);
-    if (saved?.version !== SAVED_VERSION) throw new Error(`no reader for version ${saved?.version}`);
-    const { files, texts, folders, run } = saved;
-    /** @type {string[]} */
-    const text = JSON.parse(await gunzipped(texts));
-    const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
+    if (block.length > MAX_BLOCK_CHARS) throw new ServerError(TOO_BIG_SAVE);
+    /** @type {any} */
+    let saved;
+    try {
+      saved = JSON.parse(block);
+    } catch {
+      throw new ServerError(DAMAGED_SAVE);
+    }
+    const version = saved?.version;
+    if (version !== SAVED_VERSION) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
+    if (!fits(saved, SAVED_TAB_V1) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
+    const { files, texts, folders, run, representation } = /** @type {SavedTabV1} */ (saved);
+    /** @type {unknown} */
+    const text = await gunzipped(texts, MAX_SAVED_TEXT_BYTES)
+      .then(JSON.parse)
+      .catch((error) => {
+        throw error instanceof ServerError ? error : new ServerError(DAMAGED_SAVE);
+      });
+    if (!fits(text, ['string']) || /** @type {string[]} */ (text).length !== files.length) throw new ServerError(DAMAGED_SAVE);
+    const docs = files.map((f, d) => loaded({ ...f, text: /** @type {string[]} */ (text)[d], sample: false }));
     const [own, ...asks] = run.answers;
     return {
       files: docs,
       folders: new Map(folders),
       run: { ...run, simulated: false, docs, ...withIds(run.ids), calls: null, answers: [own], lit: null },
       asks: asks.map((ask) => ({ ...ask, source: 'live' })),
+      representation,
     };
+  }
+
+  // Draws `tab` as the saved one, its run and asks at once.
+  /** @param {Tab} tab @param {OpenedTab} opened */
+  function fillTab(tab, { files, folders, run, asks }) {
+    Object.assign(tab, { files, folders });
+    tellChat(tab, `Loaded ${fileCount(files)}.`);
+    const filled = runTab(Object.assign(tab, { run, turn: addTurn(tab, run.answers[0].question) }));
+    if (tab === state.shown) renderFiles();
+    playRun(filled, docPositions(filled), playAtOnce);
+    for (const ask of asks) landAsk(filled, ask);
   }
 
   /** @param {string} block */
   async function openSaved(block) {
     try {
-      const { files, folders, run, asks } = await readSaved(block);
-      const { question } = run.answers[0];
-      const tab = runTab(state.shown);
-      Object.assign(tab, { files, folders });
-      tellChat(tab, `Loaded ${fileCount(files)}.`);
-      Object.assign(tab, { run, turn: addTurn(tab, question) });
-      renderFiles();
-      playRun(tab);
-      for (const ask of asks) landAsk(tab, ask);
-      document.title = `${question} · ${document.title}`;
+      const opened = await readSaved(block);
+      fillTab(state.shown, opened);
+      document.title = `${opened.run.answers[0].question} · ${document.title}`;
     } catch (error) {
       errorStatus(explain(error, CANT_OPEN_SAVED));
     }
+  }
+
+  // The saved tab a file's text holds, found as a browser opening the file finds it, which DOMParser does without
+  // running anything in it.
+  /** @param {string} text */
+  function savedBlockIn(text) {
+    if (!text.includes(SAVED_TAB_ID)) return null;
+    const found = new DOMParser().parseFromString(text, 'text/html').getElementById(SAVED_TAB_ID);
+    return found instanceof HTMLScriptElement && found.type === 'application/json' ? found.text : null;
+  }
+
+  // A saved tab, its run made again at r3con app, which asks over it as over any other: in the tab it was dropped or
+  // picked in, if that is empty, else in a new one.
+  /** @param {string} name @param {string} block @param {Tab} from */
+  async function importTab(name, block, from) {
+    try {
+      const opened = await readSaved(block);
+      const imported = await api('/api/imports', { method: 'POST', body: opened.representation });
+      opened.run.id = (await imported.json()).run_id;
+      const empty = !from.files.length && !from.run && !from.reading && state.tabs.includes(from);
+      const tab = empty ? from : openTab(newTab([]));
+      switchTab(tab);
+      fillTab(tab, opened);
+      showTab('chat');
+    } catch (error) {
+      addFilesError(from, notAdded([name], explain(error, CANT_IMPORT)));
+    }
+  }
+
+  // A saved tab among `batch`'s files opens as a tab of its own; the rest are `tab`'s, or once it has run, refused unread.
+  /** @param {Picked} batch @param {Tab} tab */
+  async function addPicked(batch, tab) {
+    tellFiles(tab, { filesError: '' });
+    /** @type {File[]} */
+    const rest = [];
+    for (const file of batch.files) {
+      const block = hasSuffix(file, HTML_SUFFIX) ? savedBlockIn(await readText(file)) : null;
+      if (block === null) rest.push(file);
+      else await importTab(file.name, block, tab);
+    }
+    if (tab.run) return addFilesError(tab, notAdded(rest.map((f) => f.name), LOCKED_DROP));
+    if (rest.length < batch.files.length && !rest.length && !batch.failed.length) return;
+    addFiles({ ...batch, files: rest }, tab);
   }
 
   // ---------- modes ----------
@@ -6380,7 +6533,7 @@
   }
 
   /** @type {Mode} */
-  const savedMode = { ...prototypeMode, note: SAVED_MODE_NOTE, play: (tab, narr) => runAtOnce(buildTimeline(tab, narr)) };
+  const savedMode = { ...prototypeMode, note: SAVED_MODE_NOTE };
 
   const mode = live ? liveMode : savedBlock ? savedMode : prototypeMode;
 

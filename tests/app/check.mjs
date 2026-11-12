@@ -1,14 +1,14 @@
 // Checks the run panel in src/r3con/app/ (index.html, app.css, app.js) in headless Chromium: node tests/app/check.mjs
 // The live area serves it with tests/app/fake_server.py, through uv.
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { gunzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 // An ESM import ignores NODE_PATH, where a global Playwright is found; require honours it.
 const require = createRequire(import.meta.url);
@@ -7036,7 +7036,16 @@ const SAVED_BLOCK = /<script type="application\/json" id="r3con-tab">([\s\S]*?)<
 const SAVED_ANSWER_FIELDS = ['model', 'provenance', 'question', 'text', 'totals'];
 // r3con app's REPRESENTATION_FILES: each file of a run's folder an ask reads.
 const REPRESENTATION_FILES = ['manifest.json', 'ids.json', 'names.json', 'relevance/result.json', 'structuring/schema/result.json', 'structuring/parsing/result.json'];
-const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
+const NEWER_SAVE = 'It holds a tab saved by a newer R3Con: update R3Con to open it.';
+const DAMAGED_SAVE = "It holds a saved tab R3Con can't read: it may have been changed since it was saved.";
+const TOO_BIG_SAVE = 'Its saved tab holds more text than R3Con takes in a run.';
+// r3con app's UNREADABLE_IMPORT, and the page's MAX_SAVED_TEXT_BYTES.
+const UNREADABLE_IMPORT = "Its run can't be asked again: it isn't a run this R3Con can read.";
+const MAX_SAVED_TEXT_BYTES = 64 * 1024 * 1024;
+const IMPORTED_ASK = 'Which site is quietest?';
+// A .html that names the saved block in its text, but holds none.
+const PLAIN_HTML = 'notes.html';
+const PLAIN_HTML_TEXT = '<!doctype html><title>Notes</title><p>Notes on the r3con-tab block, which this file is not.</p>\n';
 const UNREAD_VERSION = 99;
 
 // The shown tab as drawn, each node by its name, icon and whether it is lit, so that two pages compare.
@@ -7068,6 +7077,101 @@ async function answerAndFileShown(page) {
   return { lit, marks: await page.evaluate(marksIn, '#file-view') };
 }
 
+// The tab every saved-tab check saves: the sample memos and DROPPED_FOLDER, run, asked again, with a folder closed.
+async function runTabToSave(page) {
+  await page.evaluate(dropItems, { on: 'panel', items: [DROPPED_FOLDER] });
+  await filesCounted(page, SAVED_FILES);
+  await page.click('#tab-chat');
+  await send(page, SAVED_QUESTION);
+  await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+  await send(page, SAVED_ASK);
+  await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+  await pressNode(page, folderSel('q4'));
+}
+
+// Saves the shown tab, past its line, and gives the file's text.
+async function savedHtml(page) {
+  await page.click('#save-btn');
+  const [download] = await Promise.all([page.waitForEvent('download'), page.click('#save-confirm')]);
+  return readFileSync(await download.path(), 'utf8');
+}
+
+const savedBlockOf = (html) => JSON.parse(SAVED_BLOCK.exec(html)[1]);
+// `html` with its saved block changed by `change`, written back as the page writes it.
+const withBlock = (html, change) => html.replace(SAVED_BLOCK, (tag, block) => tag.replace(block, () => JSON.stringify(change(JSON.parse(block))).replaceAll('<', '\\u003c')));
+const runFolders = (server) => readdirSync(server.logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
+const tabCount = (page) => page.$$eval('.run-tab', (els) => els.length);
+
+// A saved tab's file dropped back on r3con app opens as a live tab: as it was saved, asked again over a run r3con app
+// made again from it, and saved again with its new ask.
+async function liveImport(url, server) {
+  let html;
+  let live;
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    await runTabToSave(page);
+    live = await page.evaluate(tabShown);
+    html = await savedHtml(page);
+  });
+  const runs = runFolders(server);
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = await page.evaluate(tabShown);
+    const differ = Object.keys(live).filter((key) => !isDeepStrictEqual(live[key], shown[key]));
+    const openedName = "a saved tab's file dropped on the empty first tab opens there as it was saved: its panel, folders, icons and lit trail, its run's and ask's turns, and its files";
+    const there = opened && !differ.length && (await tabCount(page)) === 1 && runFolders(server) === runs + 1;
+    check('live', openedName, there, differ.map((key) => `${key}: ${JSON.stringify(shown[key]).slice(0, DETAIL_CHARS)}`).join(' | '));
+
+    await send(page, IMPORTED_ASK);
+    const asked = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
+    const askedName = 'it is live: a new ask goes to r3con app over the run it made again from the file, and lands as the third answer';
+    check('live', askedName, asked && posts.length === 2 && posts[0] === '/api/imports' && /^\/api\/runs\/\w+\/asks$/.test(posts[1]), posts.join(' '));
+
+    const again = savedBlockOf(await savedHtml(page));
+    const resavedName = 'saved again, the file holds the asks it was saved with and the new one';
+    const questions = again.run.answers.map((answer) => answer.question);
+    check('live', resavedName, isDeepStrictEqual(questions, [SAVED_QUESTION, SAVED_ASK, IMPORTED_ASK]), JSON.stringify(questions));
+
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    const ownTab = await becomes(page, () => document.querySelectorAll('.run-tab').length === 2, undefined, LIVE_RUN_MS);
+    const ownName = 'dropped on a tab that has run, a saved tab opens in a tab of its own, shown';
+    check('live', ownName, ownTab && (await shownTab(page)) === 1 && (await becomes(page, statusMatches, LIVE_DONE.source)), await page.textContent('#run-status'));
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', { name: SAVED_NAME, mimeType: 'text/html', buffer: Buffer.from(html) });
+    const picked = (await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS)) && (await page.textContent('#files-count')) === String(SAVED_FILES);
+    check('live', 'picked with + add files, a saved tab opens as one too', picked && (await tabCount(page)) === 1, await page.textContent('#run-status'));
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[PLAIN_HTML, PLAIN_HTML_TEXT]] });
+    await filesCounted(page, 1);
+    const plain = { names: (await page.evaluate(filesPane)).names, tabs: await tabCount(page), error: await filesError(page) };
+    check('live', 'a .html without a saved tab in it, though it names the block, stays a document', isDeepStrictEqual(plain, { names: [PLAIN_HTML], tabs: 1, error: null }), JSON.stringify(plain));
+  });
+
+  const bomb = gzipSync(JSON.stringify(['x'.repeat(MAX_SAVED_TEXT_BYTES + 1)])).toString('base64');
+  const tampered = {
+    'a version this page has no reader for': [withBlock(html, (b) => ({ ...b, version: UNREAD_VERSION })), NEWER_SAVE],
+    'a block that is not JSON': [html.replace(SAVED_BLOCK, (tag, block) => tag.replace(block, '{')), DAMAGED_SAVE],
+    "a file named with ..": [withBlock(html, (b) => ({ ...b, files: [{ ...b.files[0], name: '../escape.txt' }, ...b.files.slice(1)] })), DAMAGED_SAVE],
+    "a run file named with ..": [withBlock(html, (b) => ({ ...b, representation: { ...b.representation, '../escape.json': {} } })), UNREADABLE_IMPORT],
+    'texts that unzip past what a run takes': [withBlock(html, (b) => ({ ...b, texts: bomb })), TOO_BIG_SAVE],
+  };
+  await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {
+    const runs = runFolders(server);
+    for (const [what, [file, why]] of Object.entries(tampered)) {
+      await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, file]] });
+      const said = await becomes(page, (text) => document.getElementById('files-error').textContent === text, `Not added: ${SAVED_NAME}. ${why}`, LIVE_RUN_MS);
+      const left = { tabs: await tabCount(page), files: await page.textContent('#files-count'), runs: runFolders(server) };
+      const name = `a saved tab's file with ${what} is refused in one plain line, opens no tab and writes nothing`;
+      check('live', name, said && isDeepStrictEqual(left, { tabs: 1, files: '0', runs }), `${await filesError(page)}; ${JSON.stringify(left)}`);
+    }
+  });
+}
+
 async function liveSaved(url) {
   const headers = { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' };
   for (const body of [{ provider: 'openai', key: TEST_KEY }, { provider: 'other', endpoint: TEST_ENDPOINT, key: ENVIRONMENT_KEY }]) {
@@ -7079,15 +7183,8 @@ async function liveSaved(url) {
     let live;
     let liveClicked;
     await withPage('live', { url, sample: false, memos: true }, async (page) => {
-      await page.evaluate(dropItems, { on: 'panel', items: [DROPPED_FOLDER] });
-      await filesCounted(page, SAVED_FILES);
       const before = await page.isHidden('#save-btn');
-      await page.click('#tab-chat');
-      await send(page, SAVED_QUESTION);
-      await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
-      await send(page, SAVED_ASK);
-      await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
-      await pressNode(page, folderSel('q4'));
+      await runTabToSave(page);
       const offered = (await page.isVisible('#save-btn')) && (await page.isEnabled('#save-btn'));
       check('live', "save is offered once the tab's run has landed, not before", before && offered);
       await page.click('#save-btn');
@@ -7146,8 +7243,8 @@ async function liveSaved(url) {
 
     const unread = join(dir, 'unread.html');
     writeFileSync(unread, html.replace(`{"version":${SAVED_VERSION},`, `{"version":${UNREAD_VERSION},`));
-    await withPage('live', { url: pathToFileURL(unread).href, sample: false, expectedErrors: [CANT_OPEN_SAVED] }, async (page) => {
-      const refused = await becomes(page, statusIs, `● ${CANT_OPEN_SAVED}`);
+    await withPage('live', { url: pathToFileURL(unread).href, sample: false }, async (page) => {
+      const refused = await becomes(page, statusIs, `● ${NEWER_SAVE}`);
       check('live', 'a file whose tab is of a version this page has no reader for says it could not open it', refused, await page.textContent('#run-status'));
     });
   } finally {
@@ -7243,7 +7340,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [liveSaved, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);

@@ -97,6 +97,17 @@ opened URL's fragment, ``#token=...``.
   page with ``save=dialog`` beside its token: a page opened without it downloads the
   file. A file that can't be written is refused (500), the log naming where and the
   error's class; a file it was to replace stays as it was.
+- ``POST /api/imports``, with what a saved tab's file holds of its run's folder, as
+  ``GET /api/runs/{run_id}/representation`` answers it, makes that folder again, in a
+  new folder of its own in the logs dir, and answers ``{run_id}``: a run that has
+  ended, which an ask goes over as over any other. It writes each file in
+  ``REPRESENTATION_FILES`` under its own name, never at a path from the body. The
+  body must hold each of them, a JSON object, and nothing else, a manifest whose
+  config is a run of this app's, its prompt versions named as r3con names them, and
+  no more than ``MAX_BODY_BYTES``. Of the manifest, it keeps only the question, the
+  config, without the params and overrides a file could make an ask send, and the
+  model. A body that isn't so, or a folder r3con can't ask over, is refused (422) in
+  one plain line, the log saying why, and nothing of it is left.
 - ``POST /api/runs/{run_id}/cancel`` and ``POST /api/asks/{ask_id}/cancel`` cancel that
   run or ask through r3con's ``cancel`` and answer 202 at once. From then on it sends no
   new model call; a call in flight finishes, and the stream then ends with its last
@@ -128,6 +139,7 @@ import json
 import lzma
 import os
 import secrets
+import shutil
 import signal
 import socket
 import threading
@@ -174,9 +186,11 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
+from r3con.config import PromptStage, ReasoningPath
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import one_line
-from r3con.runs import EventRecorder
+from r3con.pipeline import read_representation
+from r3con.runs import EventRecorder, new_run_folder
 from r3con.runtime.llm import quiet_litellm
 
 Provider = Literal["openai", "anthropic", "gemini"]
@@ -273,6 +287,10 @@ SAVE_DIALOG = "save=dialog"
 UNWRITABLE_SAVE = "The file couldn't be written there, so the tab isn't saved."
 # A file name alone: in a suggested name, the Save dialog would open a folder in it.
 SAVED_FILE_NAME = r"^[^/\\\x00]+\.html$"
+UNREADABLE_IMPORT = "Its run can't be asked again: it isn't a run this R3Con can read."
+# r3con's prompt versions, v1, v2 and so on: a version is a file's name, so nothing else.
+PROMPT_VERSION = r"^v\d+$"
+CONFIG_NAME = r"^[\w-]+$"
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
@@ -343,6 +361,37 @@ class DocumentQuery(BaseModel):
 class SaveQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Annotated[str, StringConstraints(pattern=SAVED_FILE_NAME)]
+
+
+class ImportedConfig(BaseModel):
+    """A saved run's config, without its params and overrides, which an ask over the
+    imported run would otherwise send."""
+
+    name: Annotated[str, StringConstraints(pattern=CONFIG_NAME)]
+    model: Text
+    relevance_rounds: Annotated[int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)]
+    reasoning: ReasoningPath
+    prompts: dict[
+        PromptStage, Annotated[str, StringConstraints(pattern=PROMPT_VERSION)]
+    ]
+
+
+class ImportedManifest(BaseModel):
+    task: str
+    config: ImportedConfig
+    litellm_model: Text
+
+
+class ImportedRun(BaseModel):
+    """What ``POST /api/imports`` takes: each file of a run's folder an ask reads."""
+
+    model_config = FORBID_EXTRA
+    manifest: ImportedManifest = Field(alias="manifest.json")
+    ids: dict[str, int] = Field(alias="ids.json")
+    names: dict[str, str] = Field(alias="names.json")
+    relevance: dict[str, Any] = Field(alias="relevance/result.json")
+    schema_proposal: dict[str, Any] = Field(alias="structuring/schema/result.json")
+    parsing: dict[str, Any] = Field(alias="structuring/parsing/result.json")
 
 
 class AskRequest(BaseModel):
@@ -793,6 +842,40 @@ def _run_dir(state: ServerState, run_id: str) -> Path:
     return Path(started["run_dir"])
 
 
+def _imported(logs_dir: Path, run: ImportedRun) -> Path:
+    """The folder ``run`` is made again in, new, in ``logs_dir``; refused if r3con
+    can't ask over it, and then removed."""
+    folder = logs_dir / new_run_folder()
+    files = run.model_dump(by_alias=True)
+    files["manifest.json"]["run_folder"] = folder.name
+    try:
+        for path in REPRESENTATION_FILES:
+            (folder / path).parent.mkdir(parents=True, exist_ok=True)
+            (folder / path).write_text(json.dumps(files[path]), encoding="utf-8")
+        read_representation(folder)
+    # r3con's reader trusts the folders r3con writes: one from a file can fail it anyhow.
+    except Exception as error:  # noqa: BLE001 — logged, by its class alone
+        shutil.rmtree(folder, ignore_errors=True)
+        logger.warning("An imported run is refused (%s).", type(error).__name__)
+        raise HTTPException(422, UNREADABLE_IMPORT) from None
+    return folder
+
+
+async def import_run(request: Request) -> Response:
+    state = _state(request)
+    try:
+        body = ImportedRun.model_validate_json(await request.body())
+    except ValidationError as error:
+        # The page says it plainly; what was wrong, never what was there, is logged.
+        logger.warning("An imported run is refused: %s", _explain(error))
+        raise HTTPException(422, UNREADABLE_IMPORT) from None
+    folder = await run_in_threadpool(_imported, state.logs_dir, body)
+    run_id = secrets.token_hex(ID_BYTES)
+    events = [{"type": "run_started", "run_dir": str(folder)}, {"type": "run_finished"}]
+    state.jobs["run"][run_id] = Job(events=events)
+    return JSONResponse({"run_id": run_id}, status_code=201)
+
+
 async def start_ask(request: Request) -> Response:
     state = _state(request)
     run_dir = _run_dir(state, request.path_params["run_id"])
@@ -946,6 +1029,7 @@ def create_app(
             Route("/api/documents/zip", document_zip, methods=["POST"]),
             Route("/api/saves", save_tab, methods=["POST"]),
             Route("/api/runs", start_run, methods=["POST"]),
+            Route("/api/imports", import_run, methods=["POST"]),
             Route("/api/runs/{job_id}/events", partial(events, kind="run")),
             Route(
                 "/api/runs/{job_id}/cancel",
