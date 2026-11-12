@@ -1,4 +1,3 @@
-import base64
 import importlib.metadata
 import json
 import logging
@@ -29,7 +28,6 @@ from r3con.r3con import ask, read_documents, run, trace, unique_names
 from tests.app.bundle_check import encrypted_pdf
 from tests.documents import (
     CORRUPT_DOCX,
-    PNG,
     paragraph,
     table,
     write_docx,
@@ -79,8 +77,19 @@ PLAIN_TEXT = b"Plain words, saved under the wrong name."
 # Curly quotes and a dash, which windows-1252 has and Latin-1 does not.
 QUOTED = "“Incidents” — 7, at Merrow’s site."
 NOT_A_WORD_FILE = "not readable as a Word file (BadZipFile)"
+Q3_ADDRESS = "https://example.com/q3"
 # Deeper than markdownify can recurse: each level takes it at least one call.
 NESTED_DEEPER_THAN_RECURSION = sys.getrecursionlimit()
+# Deeper than Python's JSON decoder goes, on every version r3con runs on.
+JSON_DEPTH = 100_000
+JSON_LD_NESTED_TOO_DEEP = (
+    f'<script type="application/ld+json">{"[" * JSON_DEPTH}{"]" * JSON_DEPTH}</script>'
+)
+# A page a script fills in: metadata, and nothing to read until the script runs.
+APP_SHELL = (
+    b'<title>Q3</title><link rel="canonical" href="https://example.com/q3">'
+    b'<body><div id="root"></div></body>'
+)
 # What Word writes beside a document someone has open: their name, padded.
 WORD_OWNER_FILE = b"\x07Michael" + bytes(154)
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -232,6 +241,16 @@ def write_files(texts: dict[str, str]) -> None:
     for name, text in texts.items():
         Path(name).parent.mkdir(parents=True, exist_ok=True)
         Path(name).write_text(text, encoding="utf-8")
+
+
+def json_ld(data: Any) -> str:
+    """``data`` as a web page's JSON-LD block."""
+    return f'<script type="application/ld+json">{json.dumps(data)}</script>'
+
+
+def meta(key: str, content: str) -> str:
+    """A web page's meta tag for the property ``key``, as OpenGraph writes one."""
+    return f'<meta property="{key}" content="{content}">'
 
 
 def write_tree(root: Path) -> None:
@@ -572,13 +591,13 @@ def test_a_table_nested_in_a_word_table_keeps_its_text(tmp_path):
     assert all(word in text for word in ["outer", "inner1", "inner2"])
 
 
-def test_a_word_files_image_leaves_none_of_its_data_in_the_text(tmp_path):
+def test_a_word_files_image_leaves_nothing_in_the_text_not_even_its_description(
+    tmp_path,
+):
     docx = tmp_path / "report.docx"
     write_docx(docx, ["Before the chart."], image=True)
     [text] = read_documents(docx).values()
-    assert text.startswith("Before the chart.")
-    assert "base64," not in text
-    assert base64.b64encode(PNG).decode() not in text
+    assert text == "Before the chart."
 
 
 @pytest.mark.parametrize(
@@ -587,8 +606,14 @@ def test_a_word_files_image_leaves_none_of_its_data_in_the_text(tmp_path):
         ("a_memo.docx", CORRUPT_DOCX, NOT_A_WORD_FILE),
         ("a_memo.docx", PLAIN_TEXT, NOT_A_WORD_FILE),
         ("a_page.html", b"<script>alert('Merrow')</script>", "no extractable text"),
+        ("a_page.html", APP_SHELL, "no extractable text"),
     ],
-    ids=["corrupt-docx", "plain-text-docx", "html-with-only-a-script"],
+    ids=[
+        "corrupt-docx",
+        "plain-text-docx",
+        "html-with-only-a-script",
+        "html-with-only-metadata",
+    ],
 )
 def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
     tmp_path, caplog, name: str, content: bytes, logged: str
@@ -625,8 +650,26 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
             "See the Q3 report.",
         ),
         (
-            '<p>Before the chart.<img src="chart.png" alt="A chart"></p>',
-            "Before the chart.",
+            '<p>Before the chart.<img src="chart.png" alt="Incidents by site"> After.</p>',
+            "Before the chart. Incidents by site After.",
+        ),
+        (
+            '<p>A chart<img src="a.png" alt=""> and<img src="b.png" alt="  "> a map.</p>',
+            "A chart and a map.",
+        ),
+        (
+            '<p><a href="https://example.com/q3"><img alt="The Q3 report"></a>.</p>',
+            "The Q3 report.",
+        ),
+        ('<a href="/"><img alt="Example"></a><h1>Q3</h1>', "Example\n\n# Q3"),
+        (
+            '<p>Q3.</p><footer><a href="/about"><img alt="About us"></a></footer>',
+            "Q3.\n\nAbout us",
+        ),
+        ('<pre>x<img alt="+">y</pre>', "```\nx+y\n```"),
+        (
+            '<p><a href="/q3.pdf"><svg><title>Download the Q3 report</title></svg></a></p>',
+            "Download the Q3 report",
         ),
         (
             (
@@ -640,10 +683,7 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
             '<?xml version="1.0"?><!DOCTYPE html><html><!-- a note --><p>Incidents: 7.',
             "Incidents: 7.",
         ),
-        (
-            "<head><title>Q3</title></head>\n<body><h1>Incidents</h1></body>",
-            "Q3\n\n# Incidents",
-        ),
+        ("<nav>Home</nav>\n<main><h1>Incidents</h1></main>", "Home\n\n# Incidents"),
         (
             "<p>Incidents: 7.<br><br><br><br>Merrow: 3.</p>",
             "Incidents: 7.  \n\nMerrow: 3.",
@@ -670,10 +710,16 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
         "list",
         "table-with-a-pipe-in-a-cell",
         "link-keeps-its-text",
-        "image-dropped",
+        "image-alt-text-kept",
+        "empty-alt-text-dropped",
+        "linked-image-alt-text-kept-url-dropped",
+        "alt-text-starting-a-block-unpadded",
+        "alt-text-ending-a-block-unpadded",
+        "alt-text-in-code-unpadded",
+        "svg-title-kept",
         "script-style-noscript-template-dropped",
         "xml-declaration-doctype-comment-dropped",
-        "head-then-body-one-blank-line-apart",
+        "nav-then-main-one-blank-line-apart",
         "line-breaks-in-a-row-one-blank-line",
         "code-keeps-its-blank-lines",
         "hidden-cookie-messages-dropped",
@@ -684,6 +730,219 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
 def test_a_web_page_is_read_as_markdown(tmp_path, html, text):
     page = tmp_path / "page.html"
     page.write_text(html, encoding="utf-8")
+    assert read_documents(page) == {"page.html": text}
+
+
+@pytest.mark.parametrize(
+    ("head", "header"),
+    [
+        (
+            [
+                json_ld(
+                    {
+                        "@type": "NewsArticle",
+                        "headline": "Q3 incidents",
+                        "author": "Ana Faguy",
+                        "datePublished": "2026-11-11T18:42:27Z",
+                        "dateModified": "2026-11-12",
+                        "url": Q3_ADDRESS,
+                    }
+                )
+            ],
+            [
+                "Title: Q3 incidents",
+                "Author: Ana Faguy",
+                "Published: 2026-11-11T18:42:27Z",
+                "Updated: 2026-11-12",
+                f"Address: {Q3_ADDRESS}",
+            ],
+        ),
+        (
+            [json_ld({"@type": "Article", "name": "Q3", "headline": "A summary"})],
+            ["Title: Q3"],
+        ),
+        (
+            [
+                json_ld(
+                    {
+                        "@type": "Article",
+                        "author": [
+                            {"@type": "Person", "name": "Ana Faguy"},
+                            "Ben Okri",
+                            {"@id": "#editor"},
+                            "HTTPS://example.com/staff/cal",
+                            "www.facebook.com/cal",
+                            {"name": "//example.com/staff/dee"},
+                        ],
+                    }
+                )
+            ],
+            ["Author: Ana Faguy, Ben Okri"],
+        ),
+        (
+            [
+                json_ld(
+                    {
+                        "@graph": [
+                            {
+                                "@type": "WebPage",
+                                "name": "Q3 - Example",
+                                "url": Q3_ADDRESS,
+                            },
+                            {"@type": "Person", "name": "Ana Faguy"},
+                            {"@type": "BlogPosting", "headline": "Q3 incidents"},
+                        ]
+                    }
+                )
+            ],
+            ["Title: Q3 incidents"],
+        ),
+        (
+            [
+                json_ld(
+                    [
+                        {"@type": "WebPage", "name": "Front page", "url": Q3_ADDRESS},
+                        {"@type": "NewsArticle", "headline": "A", "datePublished": "1"},
+                        {"@type": "NewsArticle", "headline": "B", "datePublished": "2"},
+                    ]
+                )
+            ],
+            ["Title: Front page", f"Address: {Q3_ADDRESS}"],
+        ),
+        (
+            [
+                json_ld({"@type": "Article", "headline": "Q3"}),
+                json_ld({"@type": "Article", "headline": "Q2", "datePublished": "2"}),
+                "<title>Q3 incidents</title>",
+            ],
+            ["Title: Q3 incidents"],
+        ),
+        (
+            [
+                json_ld({"@type": "JobPosting", "name": "Engineer"}),
+                "<title>Jobs</title>",
+            ],
+            ["Title: Jobs"],
+        ),
+        (
+            [
+                json_ld(
+                    [
+                        {"@type": "Person", "name": "Ana"},
+                        {"@type": ["Report"], "name": "Q3"},
+                    ]
+                )
+            ],
+            ["Title: Q3"],
+        ),
+        (
+            [
+                '<script type="application/ld+json">{"@type": "Article", "name":</script>',
+                json_ld("Q3"),
+                json_ld({"@type": "Article", "headline": ["Q3"], "author": 7}),
+                meta("og:title", "Q3 incidents"),
+            ],
+            ["Title: Q3 incidents"],
+        ),
+        (
+            [
+                JSON_LD_NESTED_TOO_DEEP,
+                "<title>Q3</title>",
+            ],
+            ["Title: Q3"],
+        ),
+        (
+            [
+                f"<template>{meta('og:title', 'Q2')}</template>",
+                '<noscript><meta name="author" content="Ana Faguy"></noscript>',
+                f'<div hidden><link rel="canonical" href="{Q3_ADDRESS}"></div>',
+                "<title>Q3</title>",
+            ],
+            ["Title: Q3"],
+        ),
+        (
+            [meta("article:author", "Ana Faguy"), meta("article:author", "Ben Okri")],
+            ["Author: Ana Faguy, Ben Okri"],
+        ),
+        (
+            [
+                meta("og:title", "Q3 incidents"),
+                meta("article:author", "Ana Faguy"),
+                meta("article:published_time", "2026-11-11"),
+                meta("article:modified_time", "2026-11-12"),
+                meta("og:url", Q3_ADDRESS),
+            ],
+            [
+                "Title: Q3 incidents",
+                "Author: Ana Faguy",
+                "Published: 2026-11-11",
+                "Updated: 2026-11-12",
+                f"Address: {Q3_ADDRESS}",
+            ],
+        ),
+        (
+            [
+                meta("article:author", "https://example.com/ana"),
+                '<meta name="author" content="Ana Faguy">',
+            ],
+            ["Author: Ana Faguy"],
+        ),
+        (
+            [
+                json_ld({"@type": "Article", "name": "Q3", "datePublished": "2026-11"}),
+                meta("og:title", "Q3 - Example"),
+                meta("article:published_time", "2026-01"),
+                "<title>Q3 | Example</title>",
+            ],
+            ["Title: Q3", "Published: 2026-11"],
+        ),
+        (
+            [meta("og:title", "Q3 - Example"), "<title>Q3 | Example</title>"],
+            ["Title: Q3 - Example"],
+        ),
+        (
+            [
+                "<title>Q3 incidents</title>",
+                f'<link rel="canonical" href="{Q3_ADDRESS}">',
+                meta("og:url", f"{Q3_ADDRESS}?ref=feed"),
+            ],
+            ["Title: Q3 incidents", f"Address: {Q3_ADDRESS}"],
+        ),
+        (
+            [
+                json_ld({"@type": "WebPage", "url": Q3_ADDRESS}),
+                f'<link rel="canonical" href="{Q3_ADDRESS}?page=1">',
+            ],
+            [f"Address: {Q3_ADDRESS}"],
+        ),
+    ],
+    ids=[
+        "json-ld-article",
+        "json-ld-name-over-headline",
+        "json-ld-author-list-names-only",
+        "json-ld-graph-every-field-from-its-one-article",
+        "json-ld-teasers-the-page-not-a-story",
+        "json-ld-two-articles-neither-taken",
+        "json-ld-job-posting-not-an-article",
+        "json-ld-list-and-type-list",
+        "bad-json-ld-skipped",
+        "json-ld-nested-too-deep-skipped",
+        "metadata-not-shown-not-read",
+        "each-article-author-meta",
+        "opengraph-and-article-meta",
+        "article-author-url-skipped-for-meta-author",
+        "json-ld-over-meta-over-title",
+        "og-title-over-title",
+        "title-once-canonical-over-og-url",
+        "json-ld-url-over-canonical",
+    ],
+)
+def test_a_web_page_starts_with_what_its_metadata_says_it_is(
+    tmp_path, head: list[str], header: list[str]
+):
+    page = tmp_path / "page.html"
+    page.write_text(f"<head>{''.join(head)}</head><body><p>Incidents: 7.</p></body>")
+    text = "\n".join(header) + "\n\nIncidents: 7." if header else "Incidents: 7."
     assert read_documents(page) == {"page.html": text}
 
 

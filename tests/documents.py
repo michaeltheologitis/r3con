@@ -32,8 +32,10 @@ PACKAGE_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 DOCUMENT_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 <Relationship Id="rIdImage" Type="{OFFICE_RELATIONSHIPS_NS}/image" Target="media/image1.png"/>
 </Relationships>"""
+# The alt text Word keeps for the image.
+IMAGE_DESCRIPTION = "A chart of incidents by site"
 IMAGE = f"""<w:p><w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/>
-<wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="{PICTURE_NS}"><pic:pic>
+<wp:docPr id="1" name="Picture 1" descr="{IMAGE_DESCRIPTION}"/><a:graphic><a:graphicData uri="{PICTURE_NS}"><pic:pic>
 <pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>
 <pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic>
 </a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"""

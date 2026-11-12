@@ -126,8 +126,9 @@ print(result)  # "Ardent Logistics missed the most delivery windows: 8 in total.
 ```
 
 `read_documents` supports PDF, Word (`.docx`), `.txt`, `.md`, `.csv`, `.json`,
-`.html`, `.htm`, and `.xml` files; Word files and web pages are read as Markdown. It
-skips hidden files and folders when reading directories or using glob patterns.
+`.html`, `.htm`, and `.xml` files; Word files and web pages are read as Markdown, a
+web page under the title, author, dates and address its metadata gives. It skips
+hidden files and folders when reading directories or using glob patterns.
 
 It returns each document's text along with its filename. If a file is inside
 a subfolder, its name includes that subfolder. For example, a file at `reports/q3/ardent.pdf` is named `q3/ardent.pdf`.

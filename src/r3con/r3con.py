@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import codecs
 import io
+import json
+import re
 import threading
 import warnings
 from collections import Counter
@@ -62,7 +64,7 @@ from typing import Any, BinaryIO
 import mammoth
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
 from bs4.dammit import EncodingDetector
-from bs4.element import PreformattedString
+from bs4.element import NavigableString, PageElement, PreformattedString, Tag
 from dotenv import find_dotenv, load_dotenv
 from markdownify import ATX, MarkdownConverter
 from pypdf import PdfReader
@@ -109,6 +111,48 @@ _DECLARED_READ_AS = {
     "utf-16-le": "utf-8",
 }
 _UNTIL_FOUND = "until-found"
+# schema.org's types for an article, and for a page, by how their names end.
+_ARTICLE_TYPES = (
+    "Article",
+    "Report",
+    "BlogPosting",
+    "SocialMediaPosting",
+    "DiscussionForumPosting",
+)
+_PAGE_TYPES = ("Page",)
+# A URL, with a scheme or without: not an author's name.
+_URL = re.compile(r"([a-z][a-z0-9+.-]*:)?//|www\.", re.IGNORECASE)
+# The elements that sit within a line of text, as an image does.
+_INLINE = frozenset(
+    {
+        "a",
+        "abbr",
+        "b",
+        "big",
+        "cite",
+        "code",
+        "del",
+        "em",
+        "font",
+        "i",
+        "ins",
+        "kbd",
+        "label",
+        "mark",
+        "picture",
+        "q",
+        "s",
+        "small",
+        "span",
+        "strong",
+        "sub",
+        "sup",
+        "time",
+        "u",
+    }
+)
+# What needs no space before it after an image's alt text.
+_NO_SPACE_BEFORE = frozenset(" \t\r\n.,;:!?)")
 # Where markdownify starts and ends a code block.
 _FENCE = "```"
 # bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
@@ -201,33 +245,190 @@ def _html_text(name: str, html: BinaryIO) -> str:
     warnings call it.
 
     It is decoded as :func:`_page_text` says, and turned into Markdown as a Word file is:
-    headings, lists and tables keep their shape. A link keeps its text, not its URL, and
-    images, scripts, styles, ``<noscript>``, ``<template>``, ``<?xml?>`` and what is
-    ``hidden`` are left out. A page nested too deep for that is read as its text alone.
-    A file that can't be read gives ``""``, and so does one with no text, which the
-    caller then drops: say so.
+    headings, lists and tables keep their shape. Scripts, styles, ``<noscript>``,
+    ``<template>``, ``<?xml?>`` and what is ``hidden`` are left out; above what is left
+    go the lines of :func:`_page_header`, which say what the page is. A link keeps its
+    text, not its URL, and an image its alt text, if it has one. A page nested too deep
+    for Markdown is read as its text alone. A file that can't be read gives ``""``, and
+    so does one with no text but its header, which the caller then drops: say so.
     """
     try:
         soup = BeautifulSoup(_page_text(html.read()), "html.parser")
-        # What a browser doesn't show: <noscript> while scripts run, <template>, what is
-        # hidden but not until found, and the <?…?>, CDATA and declarations HTML reads as
-        # comments, which markdownify keeps.
-        unseen = [
-            *soup(["noscript", "template"]),
-            *soup(hidden=_hides),
-            *soup(string=lambda text: isinstance(text, PreformattedString)),
-        ]
-        for hidden in unseen:
-            hidden.extract()
-        text = _page_markdown(name, soup)
+        for unseen in _unseen(soup):
+            unseen.extract()
+        header = _page_header(soup)
+        # The page's own <title> is in the header.
+        for title in soup(_is_page_title):
+            title.extract()
+        _images_as_text(soup)
+        body = _page_markdown(name, soup)
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as HTML (%s); skipping it", name, type(e).__name__
         )
         return ""
-    if not text.strip():
+    if not body.strip():
         _log.warning("%s: no extractable text; skipping it", name)
-    return text
+        return ""
+    return "\n\n".join(filter(None, [header, body]))
+
+
+def _unseen(soup: BeautifulSoup) -> list[PageElement]:
+    """What in ``soup`` a browser doesn't show."""
+    # HTML reads <?…?>, CDATA and declarations as comments; markdownify keeps them.
+    return [
+        *soup(["noscript", "template"]),
+        *soup(hidden=_hides),
+        *soup(string=lambda text: isinstance(text, PreformattedString)),
+    ]
+
+
+def _is_page_title(tag: Tag) -> bool:
+    """Whether ``tag`` is the page's own ``<title>``, not an SVG's, which labels it."""
+    return tag.name == "title" and tag.find_parent("svg") is None
+
+
+def _images_as_text(soup: BeautifulSoup) -> None:
+    """Put each image in ``soup`` as its alt text, or as nothing if it has none."""
+    for image in soup("img"):
+        alt = _alt_text(image)
+        if alt:
+            image.replace_with(alt)
+        else:
+            image.extract()
+
+
+def _alt_text(image: Tag) -> str:
+    """An image's alt text, or ``""``, set apart by a space from the text beside it in
+    its block, as the image's own room sets it apart, but in ``<pre>`` or ``<code>``."""
+    alt = _one_line(image.get("alt"))
+    if not alt or image.find_parent(["pre", "code"]):
+        return alt or ""
+    block = _block(image)
+    before, after = image.find_previous(string=True), image.find_next(string=True)
+    left = _beside(before, block) and not str(before)[-1:].isspace()
+    right = _beside(after, block) and str(after)[:1] not in _NO_SPACE_BEFORE
+    return f"{' ' * left}{alt}{' ' * right}"
+
+
+def _block(element: PageElement) -> Tag | None:
+    """The element that holds ``element``'s line: its nearest that isn't inline."""
+    return next((tag for tag in element.parents if tag.name not in _INLINE), None)
+
+
+def _beside(text: PageElement | None, block: Tag | None) -> bool:
+    """Whether ``text`` is text on a line of ``block``'s."""
+    return isinstance(text, NavigableString) and _block(text) is block
+
+
+def _page_header(soup: BeautifulSoup) -> str:
+    """The lines that say what a web page is: its title, author, publication and update
+    dates and address, each that it gives, as ``Title: …``.
+
+    Each is read from the page's JSON-LD (:func:`_json_ld_object`), else its meta tags
+    (OpenGraph's, ``article:*`` and ``author``), else its ``<title>``, or for its address
+    its canonical link, then ``og:url``. An author is a name, never a URL, and each of
+    several ``article:author`` tags is one.
+    """
+    described = _json_ld_object(soup)
+    metas = _metas(soup)
+    title = soup.find(_is_page_title)
+    canonical = soup.find("link", rel="canonical")
+    lines = {
+        "Title": _first(
+            _one_line(described.get("name")),
+            _one_line(described.get("headline")),
+            *metas.get("og:title", []),
+            _one_line(title.get_text()) if title else None,
+        ),
+        "Author": _first(
+            _authors(described.get("author")),
+            _authors(metas.get("article:author")),
+            _authors(metas.get("author")),
+        ),
+        "Published": _first(
+            _one_line(described.get("datePublished")),
+            *metas.get("article:published_time", []),
+        ),
+        "Updated": _first(
+            _one_line(described.get("dateModified")),
+            *metas.get("article:modified_time", []),
+        ),
+        "Address": _first(
+            _one_line(described.get("url")),
+            _one_line(canonical.get("href")) if canonical else None,
+            *metas.get("og:url", []),
+        ),
+    }
+    return "\n".join(f"{label}: {value}" for label, value in lines.items() if value)
+
+
+def _json_ld_object(soup: BeautifulSoup) -> dict[str, Any]:
+    """The one object a web page's JSON-LD describes it as: its article, if it has just
+    one, else its page, else none (``{}``), from a block's top level, a list there, or
+    its ``@graph``. A page that lists several articles, each a teaser, is not one of
+    them. A block that isn't JSON is skipped."""
+    found: list[Any] = []
+    for block in soup("script", type="application/ld+json"):
+        try:
+            data = json.loads(block.get_text())
+        except (ValueError, RecursionError):
+            continue
+        for item in _listed(data):
+            graph = item.get("@graph") if isinstance(item, dict) else None
+            found += [item, *_listed(graph)]
+    objects = [obj for obj in found if isinstance(obj, dict)]
+    articles = [obj for obj in objects if _has_type(obj, _ARTICLE_TYPES)]
+    pages = [obj for obj in objects if _has_type(obj, _PAGE_TYPES)]
+    return articles[0] if len(articles) == 1 else next(iter(pages), {})
+
+
+def _has_type(obj: dict[str, Any], kinds: tuple[str, ...]) -> bool:
+    """Whether the JSON-LD object ``obj`` has a type whose name ends as one of ``kinds``."""
+    return any(
+        isinstance(kind, str) and kind.endswith(kinds)
+        for kind in _listed(obj.get("@type"))
+    )
+
+
+def _metas(soup: BeautifulSoup) -> dict[str, list[str]]:
+    """A web page's meta tags' contents, by their property or name in lower case, in the
+    page's order."""
+    metas: dict[str, list[str]] = {}
+    for meta in soup("meta"):
+        key = meta.get("property") or meta.get("name")
+        content = _one_line(meta.get("content"))
+        if isinstance(key, str) and content:
+            metas.setdefault(key.lower(), []).append(content)
+    return metas
+
+
+def _authors(value: Any) -> str | None:
+    """The names of the authors ``value`` gives, as JSON-LD or meta tags do: a name, an
+    object with a name, or a list of those; a URL is not a name."""
+    named = [
+        _one_line(author.get("name") if isinstance(author, dict) else author)
+        for author in _listed(value)
+    ]
+    names = [name for name in named if name and not _URL.match(name)]
+    return ", ".join(names) or None
+
+
+def _listed(value: Any) -> list[Any]:
+    """``value``, if it is a list, else a list of it alone."""
+    return value if isinstance(value, list) else [value]
+
+
+def _one_line(value: Any) -> str | None:
+    """``value`` as one line, if it is text that isn't blank."""
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split()) or None
+
+
+def _first(*values: str | None) -> str | None:
+    """The first of ``values`` that is given."""
+    return next((value for value in values if value), None)
 
 
 def _hides(hidden: str | None) -> bool:
@@ -257,7 +458,7 @@ def _page_markdown(name: str, soup: BeautifulSoup) -> str:
     """``soup``'s Markdown, or, for a page nested deeper than markdownify can recurse,
     its text alone."""
     try:
-        return _Markdown(strip=["a", "img"]).convert_soup(soup)
+        return _Markdown(strip=["a"]).convert_soup(soup)
     except RecursionError:
         _log.warning("%s: nested too deep for Markdown; reading its text alone", name)
         return _one_blank_line(soup.get_text("\n"))
@@ -504,9 +705,10 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
     is logged and then dropped; OCR is outside this package. A Word file or a web page
-    is converted to Markdown, its tables included; one that can't be read, or has no
-    text, is logged and dropped. Everything else is read as UTF-8, replacing undecodable
-    bytes rather than failing: one bad byte in one document should not sink a run. Empty
+    is converted to Markdown, its tables included, a web page under the title, author,
+    dates and address its metadata gives; one that can't be read, or has no text, is
+    logged and dropped. Everything else is read as UTF-8, replacing undecodable bytes
+    rather than failing: one bad byte in one document should not sink a run. Empty
     documents are dropped — an empty document contributes nothing and costs a relevance
     call. A dropped file is not in the mapping, nor counted when names clash.
 
