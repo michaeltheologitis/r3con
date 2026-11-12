@@ -1681,10 +1681,11 @@ async function folders() {
     const archiveEnds = [['00', '01', '02'], ['09', '10', '11']].map((ends) => ends.map((i) => `  old_${i}`));
     const expected = ['reports · 5 files', 'letters · 5 files (open)', ...letters, 'archive · 12 files (open)', ...archiveEnds[0], '  6 more files', ...archiveEnds[1], 'memo'];
     const fold = await page.evaluate(foldInk);
-    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, '#world .node.fold.doc')) === 1;
+    // Archive's files follow reports' 5 and letters' 5; its fold starts after its own first few.
+    const archiveFold = nodeSel(`doc-f${5 + 5 + CONTEXT_DOCS}`);
+    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, '#world .node.fold.doc')) === 1 && (await count(page, archiveFold)) === 1;
     const scopedName = `a fold of quiet files sits on its folder's line, says "files", keeps the folder's own first and last ${CONTEXT_DOCS} in view and never reaches past the folder; a folder of ${FOLD_FROM_DOCS} files or fewer has none`;
     check('folders', scopedName, scoped && reading.length === 1, `${opened.join(' | ')}; ${reading.join(' ')}`);
-    const archiveFold = nodeSel(`doc-f${5 + 5 + CONTEXT_DOCS}`);
     await pressNode(page, archiveFold, { key: true });
     const dots = (await page.evaluate(treeGeometry, TREE_GEOMETRY)).meets;
     await pressNode(page, archiveFold, { key: true });
@@ -1824,6 +1825,26 @@ async function folders() {
     const after = await page.evaluate(treeRows, TREE_INDENT);
     const expectedAfter = rowsWith([`  ${sizes.big} files · nothing relevant`]);
     check('folders', `after a run of none relevant, ${smallName.replace(` all but its own first and last ${CONTEXT_DOCS}`, ' whole')}`, done && isDeepStrictEqual(after, expectedAfter), after.join(' | '));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    // A folder of 24 quiet files of its own, subfolders sorted among them, and one file with text, b_04.
+    const named = (prefix) => Array.from({ length: 8 }, (_, i) => [`${prefix}_0${i + 1}.txt`, prefix === 'b' && i === 3 ? 'A relevant memo.\n' : '']);
+    const sub = (name) => [name, [['x.txt', ''], ['y.txt', '']]];
+    const mixed = ['mixed', [...named('a'), sub('a_sub'), ...named('b'), sub('b_sub'), ...named('c')]];
+    await dropBatches(page, [[mixed]], 28);
+    await pressNode(page, folderSel('mixed'), { key: true });
+    const before = await page.evaluate(treeRows, TREE_INDENT);
+    const files = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i) => `  ${prefix}_0${from + i}`);
+    const expectedBefore = ['mixed · 28 files (open)', ...files('a', 1, 3), '  5 more files', '  a_sub · 2 files', '  8 more files', '  b_sub · 2 files', '  5 more files', ...files('c', 6, 8)];
+    await page.click('#tab-chat');
+    await send(page, 'Which memo is relevant?');
+    const done = await becomes(page, statusMatches, SIMULATED_DONE.source);
+    const after = (await page.evaluate(treeRows, TREE_INDENT)).map((row) => row.replace(/ \((lit|unused)\)$/, ''));
+    const quiet = (n) => `  ${n} files · nothing relevant`;
+    const expectedAfter = ['mixed · 28 files (open)', quiet(8), '  a_sub · 2 files', quiet(3), '  b_04', quiet(4), '  b_sub · 2 files', quiet(8)];
+    const name = `a folder of more than ${FOLD_FROM_DOCS} files of its own folds its quiet runs between its subfolders, keeping its own first and last ${CONTEXT_DOCS} in view before a run, and a relevant file leaves the runs either side folded`;
+    check('folders', name, done && isDeepStrictEqual(before, expectedBefore) && isDeepStrictEqual(after, expectedAfter), `${before.join(' | ')}; then ${after.join(' | ')}`);
   });
 
   await withPage('folders', { sample: false }, async (page) => {
