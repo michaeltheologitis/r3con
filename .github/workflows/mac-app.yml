@@ -207,6 +207,18 @@ jobs:
             echo "::error::The app served nothing within 60 s."
             exit 1
           fi
+          # The page stores its settings by its origin, so every launch takes the same port.
+          own=$("$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B -c '
+          import site, sys
+          sys.path.append(sys.argv[1])
+          site.addsitedir(sys.argv[2])
+          from r3con.app.window import PORT
+          print(PORT)
+          ' "$APP/Contents/Resources/app" "$APP/Contents/Resources/app_packages")
+          if [ "$port" != "$own" ]; then
+            echo "::error::The app serves on port $port, not on its own, $own."
+            exit 1
+          fi
           curl -fsS "http://127.0.0.1:$port/" | grep "<title>"
           # Only the window's page asks for /api/keys with the token. The app's stdout,
           # where uvicorn logs each request, goes to the system log.
