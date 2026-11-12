@@ -1,8 +1,10 @@
 """The Mac app's window (r3con.app.window), with Toga faked at the screen."""
 
+import asyncio
 import runpy
 import threading
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,8 @@ TIMEOUT_SECONDS = 10
 TOGA_WINDOW_SIZE = (640, 480)
 MAC_APP_KEY = "sk-saved-by-the-mac-app-1234"
 R3CON_APP_KEY = "sk-saved-by-r3con-app-5678"
+SAVED_NAME = "which-site-logged-the-most-incidents.html"
+SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 
 
 class FakeWebView:
@@ -26,33 +30,62 @@ class FakeWebView:
         self.url = url
 
 
+class FakeSaveFileDialog:
+    def __init__(self, title: str, suggested_filename: str) -> None:
+        self.shown = (title, suggested_filename, threading.current_thread())
+
+
 class FakeWindow:
+    """Toga's window. Its Save dialog answers with ``chooses``, as the user would."""
+
+    chooses: Path | None = None
+
     def __init__(self) -> None:
         self.size = TOGA_WINDOW_SIZE
         self.hidden = False
+        self.dialogs: list[tuple[str, str, threading.Thread]] = []
 
     def hide(self) -> None:
         self.hidden = True
 
+    async def dialog(self, dialog: FakeSaveFileDialog) -> Path | None:
+        self.dialogs.append(dialog.shown)
+        return self.chooses
+
 
 class FakeApp:
-    """Toga's app. Its main loop opens a window on ``startup``'s web view, reads the
-    page there as a user would, and saves the key in ``saving``, if any, as its
-    settings would, then quits as the app menu's Quit does, which ``on_exit`` allows
-    or not."""
+    """Toga's app, the running one as ``app``. Its main loop opens a window on
+    ``startup``'s web view, reads the page there as a user would, saves the key in
+    ``saving``, if any, as its settings would, and with ``saving_tab``, saves a tab
+    as its page would, then quits as the app menu's Quit does, which ``on_exit``
+    allows or not. Its event loop runs while the page is read, as Toga's does."""
 
+    app: "FakeApp"
     saving: dict[str, str] | None = None
+    saving_tab = False
 
     def __init__(
         self, *, startup: Callable[..., FakeWebView], on_exit: Callable[..., bool]
     ) -> None:
         self.startup = startup
         self.on_exit = on_exit
-        self.windows = [FakeWindow()]
+        self.main_window = FakeWindow()
+        self.windows = [self.main_window]
+        type(self).app = self
 
     def main_loop(self) -> None:
+        asyncio.run(self.run())
+
+    async def run(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.main_thread = threading.current_thread()
         self.url = self.startup(self).url
-        base_url, token = self.url.split("/#token=")
+        await asyncio.to_thread(self.read_page)
+        self.quits = self.on_exit(self)
+
+    def read_page(self) -> None:
+        base_url, fragment = self.url.split("/#")
+        token = fragment.removeprefix("token=").split("&")[0]
         auth = {"Authorization": f"Bearer {token}"}
         with httpx2.Client(
             base_url=base_url, timeout=TIMEOUT_SECONDS, trust_env=False
@@ -61,7 +94,10 @@ class FakeApp:
             self.keys = http.get("/api/keys", headers=auth)
             if self.saving is not None:
                 http.post("/api/keys", json=self.saving, headers=auth)
-        self.quits = self.on_exit(self)
+            if self.saving_tab:
+                params = {"name": SAVED_NAME}
+                post = partial(http.post, "/api/saves", params=params, headers=auth)
+                self.saved = post(content=SAVED_TAB)
 
 
 @pytest.fixture
@@ -69,12 +105,14 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeApp]:
     """The apps the window opens."""
     apps: list[FakeApp] = []
 
-    def app(**handlers: Any) -> FakeApp:
-        apps.append(FakeApp(**handlers))
-        return apps[-1]
+    class OpenedApp(FakeApp):
+        def __init__(self, **handlers: Any) -> None:
+            super().__init__(**handlers)
+            apps.append(self)
 
-    monkeypatch.setattr(toga, "App", app)
+    monkeypatch.setattr(toga, "App", OpenedApp)
     monkeypatch.setattr(toga, "WebView", FakeWebView)
+    monkeypatch.setattr(toga, "SaveFileDialog", FakeSaveFileDialog)
     return apps
 
 
@@ -121,6 +159,29 @@ def test_the_window_opens_at_its_size(opened: list[FakeApp]):
     window.main()
     (app,) = opened
     assert [shown.size for shown in app.windows] == [window.WINDOW_SIZE]
+
+
+def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
+    opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    chosen = tmp_path / "chosen.html"
+    monkeypatch.setattr(FakeApp, "saving_tab", True)
+    monkeypatch.setattr(FakeWindow, "chooses", chosen)
+    window.main()
+    (app,) = opened
+    assert app.url.endswith("&save=dialog")
+    assert app.saved.status_code == 204
+    assert app.main_window.dialogs == [("Save this tab", SAVED_NAME, app.main_thread)]
+    assert chosen.read_bytes() == SAVED_TAB
+
+
+def test_a_save_cancelled_in_the_windows_dialog_is_answered_quietly(
+    opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(FakeApp, "saving_tab", True)
+    window.main()
+    (app,) = opened
+    assert (app.saved.status_code, len(app.main_window.dialogs)) == (204, 1)
 
 
 def test_quitting_hides_the_window_then_stops_the_server(opened: list[FakeApp]):

@@ -14,7 +14,10 @@ every call wait until the server is killed. One holding ``STALLS`` makes every c
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding
 ``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
 The server keeps the keys it is given in a credential store of its own, in memory,
-never the system's.
+never the system's. With ``--save-dialog`` after LOGS_DIR, it saves a tab as the Mac
+app does, through a Save dialog, faked: it saves in LOGS_DIR's ``saved``, under the
+name it suggests, cancels for a name holding ``CANCELS_SAVE``, and picks a folder
+that isn't there for one holding ``NO_ROOM``.
 """
 
 import os
@@ -59,6 +62,10 @@ PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
+SAVE_DIALOG = "--save-dialog"
+SAVED = "saved"
+CANCELS_SAVE = "cancel-the-save"
+NO_ROOM = "no-room-to-save"
 never = threading.Event()
 
 
@@ -139,9 +146,22 @@ def scripted_model(**request: Any) -> Any:
     return mock_completion(request, content(request))
 
 
+def choose_save_path(name: str) -> Path | None:
+    if CANCELS_SAVE in name:
+        return None
+    saved = Path(sys.argv[1], SAVED)
+    saved.mkdir(exist_ok=True)
+    return (saved / NO_ROOM if NO_ROOM in name else saved) / name
+
+
 def main() -> None:
     keyring.set_keyring(FakeKeyring())
-    url, _ = serve(logs_dir=Path(sys.argv[1]), completion=scripted_model)
+    dialog = choose_save_path if SAVE_DIALOG in sys.argv[2:] else None
+    url, _ = serve(
+        logs_dir=Path(sys.argv[1]),
+        completion=scripted_model,
+        choose_save_path=dialog,
+    )
     print(url, flush=True)
     with contextlib.suppress(KeyboardInterrupt):
         never.wait()

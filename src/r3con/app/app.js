@@ -1768,6 +1768,8 @@
   // which sends nothing. The launch token lives only in this closure: it leaves the address bar at
   // once and never reaches storage.
   const live = !savedBlock && ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
+  // The Mac app's web view has no downloads, so r3con app there opens the page with this, and saves a tab itself.
+  const saveDialog = live && new URLSearchParams(location.hash.slice(1)).get('save') === 'dialog';
   const token = live ? takeToken() : null;
 
   function takeToken() {
@@ -6212,7 +6214,10 @@
     const tab = runTab(state.shown);
     $('save-note').hidePopover();
     try {
-      download(savedName(tab.run.answers[0].question), await savedPage(await savedTab(tab)));
+      const name = savedName(tab.run.answers[0].question);
+      const page = await savedPage(await savedTab(tab));
+      if (!saveDialog) download(name, page);
+      else await api(`/api/saves?name=${encodeURIComponent(name)}`, { method: 'POST', body: new Blob([page], { type: 'text/html' }) });
     } catch (error) {
       errorStatus(explain(error, CANT_SAVE));
     }
