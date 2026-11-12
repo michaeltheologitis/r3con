@@ -30,6 +30,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,6 +76,18 @@ jobs:
             release=true
           fi
           echo "release=$release" >> "$GITHUB_OUTPUT"
+      # The release commit's body is the notes; its trailers are attribution, not notes.
+      - name: Build the notes
+        id: notes
+        run: |
+          delimiter=$(openssl rand -hex 16)
+          {
+            echo "notes<<$delimiter"
+            git log -1 --format=%b "$GITHUB_SHA" |
+              sed -E '/^(Co-Authored-By|Claude-Session): /Id' |
+              git stripspace
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
       - run: uv build
       - uses: actions/upload-artifact@v7
         with:
@@ -88,6 +101,7 @@ jobs:
     uses: ./.github/workflows/mac-app.yml
     with:
       sign: ${{ needs.build.outputs.release == 'true' }}
+      notes: ${{ needs.build.outputs.notes }}
     # macos-signing's environment secrets: the caller must name them, and the called job resolves them.
     secrets:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -126,26 +140,19 @@ jobs:
         with:
           name: dist
           path: dist/
-      # The .dmg, its update feed and the release notes, which mac-app made and checked.
+      # R3Con.dmg and the update feed that pyproject.toml's SUFeedURL reads.
       - uses: actions/download-artifact@v8
         with:
           name: r3con-mac-app-signed
-          path: mac/
-      # The .dmg under the same name every release, for the README's
-      # releases/latest/download/R3Con.dmg, which the feed's download URL names too; and the
-      # feed beside it, for the app's SUFeedURL, releases/latest/download/appcast.xml.
-      # mv fails unless exactly one .dmg matches.
-      - name: Add the Mac app and its update feed
-        run: |
-          mv mac/R3Con-*.dmg dist/R3Con.dmg
-          mv mac/appcast.xml dist/appcast.xml
+          path: dist/
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
+          NOTES: ${{ needs.build.outputs.notes }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file mac/notes.md --verify-tag
+            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes "$NOTES" --verify-tag
           else
-            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes-file mac/notes.md --target "$GITHUB_SHA"
+            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes "$NOTES" --target "$GITHUB_SHA"
           fi

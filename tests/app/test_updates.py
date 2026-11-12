@@ -1,16 +1,21 @@
 """The Mac app's updates (r3con.app.updates), with Toga and the Objective-C runtime
 faked."""
 
+import base64
 import logging
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import toga
+from Crypto.Signature import eddsa
 
 from r3con.app import updates
 from tests.fakes import FakeCommand, FakeCommands, FakeObjC
 
 FRAMEWORK = "{frameworks}/Sparkle.framework"
+PYPROJECT = Path(__file__).parents[2] / "pyproject.toml"
 
 
 @pytest.fixture(autouse=True)
@@ -64,3 +69,12 @@ def test_an_app_whose_sparkle_does_not_start_runs_without_updates_and_logs_why(
     message = f"{logged.format(frameworks=objc.frameworks)}: {updates.NO_UPDATES}."
     records = [(record.levelname, record.getMessage()) for record in caplog.records]
     assert records == [("WARNING", message)]
+
+
+# The Mac app's own, which a run that isn't signed swaps for a throwaway one.
+def test_the_mac_app_trusts_an_ed25519_public_key_for_its_updates():
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    info = config["tool"]["briefcase"]["app"]["r3con"]["macOS"]["info"]
+    key = base64.b64decode(info["SUPublicEDKey"], validate=True)
+    assert len(key) == 32
+    eddsa.import_public_key(key)
