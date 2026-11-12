@@ -186,17 +186,25 @@
    * @property {{ name: string, size: number, folder?: string }[]} files
    * @property {string} texts the files' texts, a JSON list in their order, gzipped, in base64
    * @property {[string, boolean][]} folders
-   * @property {Pick<Run, 'ids' | 'rounds' | 'schema' | 'parsed' | 'totals'> & { answers: SavedAnswer[] }} run its quotes count UTF-16 code units
-   * @property {Record<string, unknown>} representation
+   * @property {Pick<Run, 'totals'> & { answers: SavedAnswer[] }} run
+   * @property {Representation} representation
+   */
+  /** @typedef {{ id: string, summary: string, quotes: Quote[], provenance: string[] }} Snippet A snippet as r3con writes it. */
+  /**
+   * What r3con app gives of a run's folder, each file by its path there, as far as the page reads it.
+   * @typedef {{ 'ids.json': Record<string, number>, 'names.json': Record<string, string>,
+   *   'relevance/result.json': { rounds: { snippets: Snippet[] }[] },
+   *   'structuring/schema/result.json': { schema_code: string, thought: string | null },
+   *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][] }
+   * }} Representation
    */
   /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals'>} SavedAnswer */
   /**
    * A saved tab, read.
-   * @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[], representation: Record<string, unknown> }} OpenedTab
+   * @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[], representation: Representation }} OpenedTab
    */
   /**
-   * What a value must be: a typeof name, a function that says, a one-item list for a list of that, or an object of
-   * those for an object with just those keys, a key ending in ? only if present.
+   * A typeof name, a check, a one-item list for a list of that, or an object of shapes, a key ending in ? optional.
    * @typedef {string | ((value: any) => boolean) | Shape[] | { [key: string]: Shape }} Shape
    */
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
@@ -1693,6 +1701,8 @@
   const SAVED_MODE_NOTE = 'open this file in R3Con to ask more';
   const CANT_OPEN_SAVED = "couldn't open the tab saved in this file";
   const HTML_SUFFIX = '.html';
+  // A shape's key for an object that may hold keys the page doesn't read.
+  const OTHER_KEYS = '...';
   // Where a saved tab's block starts: past the page's stylesheet and markup, well inside this many bytes of its file.
   const SAVED_HEAD_BYTES = 256 * 1024;
   // r3con app took a run's texts in one body of at most its MAX_BODY_BYTES, so no tab that ran holds more.
@@ -2065,8 +2075,7 @@
 
   // ---------- r3con app ----------
 
-  // An error whose message is for the user: r3con app's own words, what went wrong reaching it, or why a saved tab can't
-  // be opened.
+  // An error whose message is for the user, from r3con app, from reaching it, or from a saved tab.
   class ServerError extends Error {}
 
   // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
@@ -6210,7 +6219,7 @@
       files: files.map(({ name, size, folder }) => ({ name, size, folder })),
       texts: await gzipped(JSON.stringify(files.map((f) => f.text))),
       folders: [...tab.folders],
-      run: { ids: run.ids, rounds: run.rounds, schema: run.schema, parsed: run.parsed, totals: run.totals, answers },
+      run: { totals: run.totals, answers },
       representation,
     };
   }
@@ -6283,8 +6292,10 @@
     const object = /** @type {Record<string, unknown>} */ (value);
     /** @param {string} key */
     const named = (key) => key.replace(/\?$/, '');
-    const known = Object.keys(object).every((key) => Object.hasOwn(shape, key) || Object.hasOwn(shape, `${key}?`));
-    return known && Object.entries(shape).every(([key, inner]) => (Object.hasOwn(object, named(key)) ? fits(object[named(key)], inner) : key.endsWith('?')));
+    const known = Object.hasOwn(shape, OTHER_KEYS) || Object.keys(object).every((key) => Object.hasOwn(shape, key) || Object.hasOwn(shape, `${key}?`));
+    /** @param {[string, Shape]} entry */
+    const holds = ([key, inner]) => key === OTHER_KEYS || (Object.hasOwn(object, named(key)) ? fits(object[named(key)], inner) : key.endsWith('?'));
+    return known && Object.entries(shape).every(holds);
   }
 
   /** @param {Shape} shape */
@@ -6298,20 +6309,24 @@
   // A file's or folder's name, never one that climbs out of where it is: no .. part, no leading / and no NUL.
   /** @param {unknown} value */
   const isPath = (value) => typeof value === 'string' && value !== '' && !value.startsWith('/') && !value.includes('\0') && !value.split('/').includes('..');
+  const anything = () => true;
   const TOTALS = { 'tokens?': orNull('number'), 'usd?': orNull('number') };
-  // r3con's quote, as an event gives it, with the trail node of the summary quoting it.
-  const QUOTE = { text: 'string', start: orNull(isCount), end: orNull(isCount), 'match?': orNull('string'), 'score?': orNull('number'), summary: 'string' };
+  const SNIPPET = {
+    id: 'string',
+    summary: 'string',
+    quotes: [{ text: 'string', start: orNull(isCount), end: orNull(isCount), [OTHER_KEYS]: anything }],
+    provenance: ['string'],
+    [OTHER_KEYS]: anything,
+  };
   /** @type {Shape} */
   const SAVED_TAB_V1 = {
     version: (version) => version === 1,
     files: [{ name: isPath, size: isCount, 'folder?': isPath }],
     texts: 'string',
     folders: [(pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
+    // A file saved before the run was drawn from its representation also holds the run as drawn, which isn't read.
     run: {
-      ids: ['string'],
-      rounds: [[{ summary: 'string', provenance: [isCount], quotes: [QUOTE] }]],
-      schema: orNull({ code: 'string', thought: orNull('string') }),
-      parsed: [{ parse: recordOf(Array.isArray), provenance: [isCount] }],
+      [OTHER_KEYS]: anything,
       totals: orNull(TOTALS),
       answers: [
         {
@@ -6323,24 +6338,65 @@
         },
       ],
     },
-    representation: recordOf(isObject),
+    representation: {
+      'manifest.json': isObject,
+      'ids.json': recordOf(isCount),
+      'names.json': recordOf(isPath),
+      'relevance/result.json': { rounds: [{ snippets: [SNIPPET], [OTHER_KEYS]: anything }], [OTHER_KEYS]: anything },
+      'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
+      'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
+    },
   };
 
-  // Its lists per document have one entry per file, its rounds as many as a run has, each index is a file's, and its
-  // run is the one its representation is of, document for document.
   /** @param {SavedTabV1} saved */
-  function consistent({ files, run, representation }) {
+  function consistent({ files, run, representation: r }) {
     const n = files.length;
-    const perDocument = [run.ids, run.parsed, ...run.rounds].every((list) => list.length === n);
+    const ids = r['ids.json'];
+    const order = Object.values(ids).sort((a, b) => a - b);
+    const named = Object.keys(r['names.json']).length === n && Object.keys(ids).every((id) => Object.hasOwn(r['names.json'], id));
+    const { rounds } = r['relevance/result.json'];
+    const snippets = rounds.flatMap((round) => round.snippets).every((s) => Object.hasOwn(ids, s.id.split('.')[0]));
+    const { parsed, source_docs: sources, provenance } = r['structuring/parsing/result.json'];
+    const sourced = Object.entries(parsed).every(([field, records]) => Object.hasOwn(sources, field) && sources[field].length === records.length && sources[field].every((d) => d < n));
     const cited = run.answers.flatMap((a) => /** @type {Provenance} */ (a.provenance)).flatMap((p) => [...p.summary_ids, ...p.parse_ids]);
-    const indices = [...run.rounds.flat().flatMap((s) => s.provenance), ...run.parsed.flatMap((p) => p.provenance), ...cited];
-    const ids = /** @type {Record<string, unknown>} */ (representation['ids.json'] ?? {});
-    const sameRun = Object.keys(ids).length === n && run.ids.every((id, d) => Object.hasOwn(ids, id) && ids[id] === d);
-    return n > 0 && perDocument && run.rounds.length >= 1 && run.rounds.length <= MAX_ROUNDS && run.answers.length > 0 && indices.every((d) => d < n) && sameRun;
+    const perDocument = order.length === n && order.every((d, i) => d === i) && provenance.length === n;
+    return n > 0 && perDocument && named && snippets && sourced && rounds.length >= 1 && rounds.length <= MAX_ROUNDS && run.answers.length > 0 && cited.every((d) => d < n);
   }
 
-  // Outside input when imported, or opened from a file someone else saved: read only once its shape is checked, and its
-  // texts only up to what a run takes. Every later version keeps a reader for each before it.
+  // Drawn from its representation alone, as a live run is from its events, so that what shows is what an ask reads.
+  /** @param {Representation} r @param {LoadedFile[]} docs @param {Answer} own @param {Totals | null} totals @returns {Run} */
+  function runOf(r, docs, own, totals) {
+    const ids = Object.keys(r['ids.json']).sort((a, b) => r['ids.json'][a] - r['ids.json'][b]);
+    const indexed = withIds(ids);
+    /** @param {Snippet[]} snippets @param {number} round @returns {Summary[]} */
+    const summaries = (snippets, round) =>
+      docs.map((doc, d) => {
+        const parts = snippets.filter((s) => s.id.split('.')[0] === ids[d]);
+        return {
+          summary: parts.map((s) => s.summary).filter(Boolean).join('\n\n'),
+          provenance: [...new Set(parts.flatMap((s) => docIndices(indexed, s.provenance)))],
+          quotes: parts.flatMap((s) => quotesInUnits(doc.text, s.quotes).map((q) => ({ ...q, summary: summaryNode(round, s.id) }))),
+        };
+      });
+    const { parsed, source_docs: sources, provenance } = r['structuring/parsing/result.json'];
+    /** @param {number} d */
+    const parseOf = (d) => Object.fromEntries(Object.entries(parsed).map(([field, records]) => [field, records.filter((_, i) => sources[field][i] === d)]));
+    const schema = r['structuring/schema/result.json'];
+    return {
+      simulated: false,
+      docs,
+      ...indexed,
+      rounds: r['relevance/result.json'].rounds.map(({ snippets }, k) => summaries(snippets, k + 1)),
+      schema: { code: schema.schema_code, thought: schema.thought ?? '' },
+      parsed: docs.map((_, d) => ({ parse: parseOf(d), provenance: docIndices(indexed, provenance[d]) })),
+      answers: [own],
+      calls: null,
+      totals,
+      lit: null,
+    };
+  }
+
+  // Outside input, maybe someone else's; every later version keeps a reader for each before it.
   /** @param {string} block @returns {Promise<OpenedTab>} */
   async function readSaved(block) {
     if (block.length > MAX_BLOCK_CHARS) throw new ServerError(TOO_BIG_SAVE);
@@ -6362,18 +6418,19 @@
         throw error instanceof ServerError ? error : new ServerError(DAMAGED_SAVE);
       });
     if (!fits(text, ['string']) || text.length !== files.length) throw new ServerError(DAMAGED_SAVE);
-    const docs = files.map((f, d) => loaded({ ...f, text: text[d], sample: false }));
+    const names = representation['names.json'];
+    const ids = Object.keys(representation['ids.json']).sort((a, b) => representation['ids.json'][a] - representation['ids.json'][b]);
+    const docs = files.map(({ size, folder }, d) => loaded({ name: names[ids[d]], size, folder, text: text[d], sample: false }));
     const [own, ...asks] = run.answers;
     return {
       files: docs,
       folders: new Map(folders),
-      run: { ...run, simulated: false, docs, ...withIds(run.ids), calls: null, answers: [own], lit: null },
+      run: runOf(representation, docs, own, run.totals),
       asks: asks.map((ask) => ({ ...ask, source: 'live' })),
       representation,
     };
   }
 
-  // Draws `tab` as the saved one, its run and asks at once.
   /** @param {Tab} tab @param {OpenedTab} opened */
   function fillTab(tab, { files, folders, run, asks }) {
     Object.assign(tab, { files, folders });
@@ -6395,8 +6452,7 @@
     }
   }
 
-  // The saved tab a .html file holds, for r3con app to open, found as a browser opening the file finds it, which
-  // DOMParser does without running anything in it.
+  // DOMParser reads the block as a browser opening the file would, without running the file.
   /** @param {File} file @returns {Promise<string | null>} */
   async function savedBlockOf(file) {
     if (!live || !hasSuffix(file, HTML_SUFFIX)) return null;
@@ -6405,8 +6461,7 @@
     return found instanceof HTMLScriptElement && found.type === 'application/json' ? found.text : null;
   }
 
-  // A saved tab, its run made again at r3con app, which asks over it as over any other: in the tab it was dropped or
-  // picked in, if it may `fill` that and it is empty, with nothing else coming, else in a new one.
+  // A saved tab never mixes with other files: it fills `from` only if it came alone and `from` is empty.
   /** @param {string} name @param {string} block @param {Tab} from @param {boolean} fill */
   async function importTab(name, block, from, fill) {
     try {

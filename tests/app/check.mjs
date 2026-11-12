@@ -7043,6 +7043,7 @@ const TOO_BIG_SAVE = 'Its saved tab holds more text than R3Con takes in a run.';
 const UNREADABLE_IMPORT = "Its run can't be asked again: it isn't a run this R3Con can read.";
 const MAX_SAVED_TEXT_BYTES = 64 * 1024 * 1024;
 const IMPORTED_ASK = 'Which site is quietest?';
+const HARMLESS = 'A harmless summary, shown in place of what is asked over.';
 // A .html that names the saved block in its text, but holds none.
 const PLAIN_HTML = 'notes.html';
 const PLAIN_HTML_TEXT = '<!doctype html><title>Notes</title><p>Notes on the r3con-tab block, which this file is not.</p>\n';
@@ -7099,11 +7100,15 @@ async function savedHtml(page) {
 const savedBlockOf = (html) => JSON.parse(SAVED_BLOCK.exec(html)[1]);
 // `html` with its saved block changed by `change`, written back as the page writes it.
 const withBlock = (html, change) => html.replace(SAVED_BLOCK, (tag, block) => tag.replace(block, () => JSON.stringify(change(JSON.parse(block))).replaceAll('<', '\\u003c')));
+// A saved block whose run's config takes `change`, as a file another's hand edited would.
+const withConfig = (change) => (b) => {
+  const manifest = b.representation['manifest.json'];
+  return { ...b, representation: { ...b.representation, 'manifest.json': { ...manifest, config: { ...manifest.config, ...change } } } };
+};
 const runFolders = (server) => readdirSync(server.logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
 const tabCount = (page) => page.$$eval('.run-tab', (els) => els.length);
 
-// A saved tab's file dropped back on r3con app opens as a live tab: as it was saved, asked again over a run r3con app
-// made again from it, and saved again with its new ask.
+// Dropped back on r3con app, a saved tab's file opens as it was saved, is asked again, and saves with its new ask.
 async function liveImport(url, server) {
   let html;
   let live;
@@ -7161,12 +7166,31 @@ async function liveImport(url, server) {
     check('live', 'a .html without a saved tab in it, though it names the block, stays a document', isDeepStrictEqual(plain, { names: [PLAIN_HTML], tabs: 1, error: null }), JSON.stringify(plain));
   });
 
+  // A file whose run, as it would be drawn, says one thing and whose representation, which an ask reads, says another.
+  const hidden = 'What every ask over this run reads.';
+  const twoHalves = withBlock(html, (b) => {
+    const relevance = b.representation['relevance/result.json'];
+    const [first, ...rest] = relevance.rounds[0].snippets;
+    const rounds = [{ ...relevance.rounds[0], snippets: [{ ...first, summary: hidden, quotes: [] }, ...rest] }, ...relevance.rounds.slice(1)];
+    const run = { ...b.run, rounds: [[{ summary: HARMLESS, provenance: [], quotes: [] }]] };
+    return { ...b, run, representation: { ...b.representation, 'relevance/result.json': { ...relevance, rounds } } };
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, twoHalves]] });
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    await clickNode(page, 'r1-0');
+    const shown = { snippet: (await page.textContent('#inspector')).includes(hidden), harmless: (await page.textContent('body')).includes(HARMLESS) };
+    const halvesName = "a file whose run and representation disagree shows what an ask over it reads: its run is drawn from the representation alone";
+    check('live', halvesName, isDeepStrictEqual(shown, { snippet: true, harmless: false }), JSON.stringify(shown));
+  });
+
   const bomb = gzipSync(JSON.stringify(['x'.repeat(MAX_SAVED_TEXT_BYTES + 1)])).toString('base64');
   const tampered = {
     'a version this page has no reader for': [withBlock(html, (b) => ({ ...b, version: UNREAD_VERSION })), NEWER_SAVE],
     'a block that is not JSON': [html.replace(SAVED_BLOCK, (tag, block) => tag.replace(block, '{')), DAMAGED_SAVE],
     "a file named with ..": [withBlock(html, (b) => ({ ...b, files: [{ ...b.files[0], name: '../escape.txt' }, ...b.files.slice(1)] })), DAMAGED_SAVE],
-    "a run file named with ..": [withBlock(html, (b) => ({ ...b, representation: { ...b.representation, '../escape.json': {} } })), UNREADABLE_IMPORT],
+    "a run file named with ..": [withBlock(html, (b) => ({ ...b, representation: { ...b.representation, '../escape.json': {} } })), DAMAGED_SAVE],
+    'a run set to reason with code the model writes': [withBlock(html, withConfig({ reasoning: 'coding' })), UNREADABLE_IMPORT],
     'texts that unzip past what a run takes': [withBlock(html, (b) => ({ ...b, texts: bomb })), TOO_BIG_SAVE],
   };
   await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {

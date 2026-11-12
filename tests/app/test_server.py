@@ -24,6 +24,7 @@ from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
     DEFAULT_RELEVANCE_ROUNDS,
+    DIRECT_ONLY,
     ENCRYPTED_ZIP,
     KEYLESS_SERVER_KEY,
     MAC_APP_KEY_SERVICE,
@@ -31,6 +32,7 @@ from r3con.app.server import (
     MAX_ZIP_BYTES,
     MAX_ZIP_ENTRIES,
     NO_SAVE_DIALOG,
+    NOT_ONE_INDEX_EACH,
     REPRESENTATION_FILES,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
@@ -1337,38 +1339,49 @@ def test_an_imported_run_keeps_no_param_override_or_other_field_of_its_manifest(
     assert transport(llm)[sent:] == [{"api_key": OPENAI_KEY}]
 
 
-def damaged(
-    change: Callable[[dict[str, Any]], object],
-) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    def damage(files: dict[str, Any]) -> dict[str, Any]:
-        change(files)
-        return files
-
-    return damage
+def renamed_first_id(files: dict[str, Any]) -> None:
+    for name in ("ids.json", "names.json"):
+        files[name]["renamed"] = files[name].pop(next(iter(files[name])))
 
 
 @pytest.mark.parametrize(
-    ("damage", "why"),
+    ("damage", "logged"),
     [
-        (damaged(lambda f: f.update({"../escape.json": {}})), "Extra inputs"),
-        (damaged(lambda f: f.pop("ids.json")), "ids.json: Field required"),
-        (damaged(lambda f: f.update({"ids.json": []})), "Input should be an object"),
+        (lambda f: f.update({"../escape.json": {}}), "Extra inputs"),
+        (lambda f: f.pop("ids.json"), "ids.json: Field required"),
+        (lambda f: f.update({"ids.json": []}), "Input should be an object"),
         (
-            damaged(
-                lambda f: f["manifest.json"]["config"]["prompts"].update(
-                    {"reasoning/direct": "../../../escape"}
-                )
+            lambda f: f["manifest.json"]["config"]["prompts"].update(
+                {"reasoning/direct": "../../../escape"}
             ),
             "String should match pattern",
         ),
         (
-            damaged(lambda f: f["manifest.json"]["config"].update({"name": "../x"})),
+            lambda f: f["manifest.json"]["config"].update({"name": "../x"}),
             "String should match pattern",
         ),
+        (lambda f: f["manifest.json"]["config"].update({"seed": 7}), "Extra inputs"),
         (
-            damaged(lambda f: f["manifest.json"]["config"].update({"seed": 7})),
-            "Extra inputs",
+            lambda f: f["manifest.json"]["config"].update({"reasoning": "coding"}),
+            DIRECT_ONLY,
         ),
+        (
+            lambda f: f["ids.json"].update({next(iter(f["ids.json"])): -1}),
+            NOT_ONE_INDEX_EACH,
+        ),
+        (
+            lambda f: f["ids.json"].update(dict.fromkeys(list(f["ids.json"])[:2], 0)),
+            NOT_ONE_INDEX_EACH,
+        ),
+        (lambda f: f["names.json"].update({"extra": "x.txt"}), NOT_ONE_INDEX_EACH),
+        (lambda f: f["relevance/result.json"].pop("rounds"), "refused (ValueError)"),
+        (
+            lambda f: f["manifest.json"]["config"]["prompts"].update(
+                {"reasoning/direct": "v999"}
+            ),
+            "refused (FileNotFoundError)",
+        ),
+        (renamed_first_id, "refused (ValueError)"),
     ],
     ids=[
         "path",
@@ -1377,59 +1390,46 @@ def damaged(
         "prompt-path",
         "config-path",
         "config-field",
+        "coding",
+        "negative-index",
+        "repeated-index",
+        "names-differ",
+        "no-rounds",
+        "no-such-prompt",
+        "unknown-snippet-id",
     ],
 )
-def test_an_import_not_shaped_as_a_runs_files_is_refused_plainly_and_writes_nothing(
+def test_an_import_not_a_run_r3con_can_ask_is_refused_plainly_and_writes_nothing(
     client: TestClient,
     logs_dir: Path,
     caplog: pytest.LogCaptureFixture,
-    damage: Callable[[dict[str, Any]], dict[str, Any]],
-    why: str,
+    damage: Callable[[dict[str, Any]], object],
+    logged: str,
 ):
     saved = representation_of(client, finished_run(client))
     before = run_folders(logs_dir)
+    damage(saved)
     with caplog.at_level(logging.WARNING, logger="r3con.app"):
-        response = client.post(IMPORTS, json=damage(saved))
-    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+        response = client.post(IMPORTS, json=saved)
+    said = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
     assert (response.status_code, response.json()) == (
         422,
         {"error": UNREADABLE_IMPORT},
     )
-    assert len(logged) == 1 and why in logged[0]
+    assert len(said) == 1 and logged in said[0]
     assert run_folders(logs_dir) == before
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [
-        damaged(lambda f: f.update({"ids.json": {"not-an-id": 0}})),
-        damaged(lambda f: f.update({"ids.json": {"x": 99}})),
-        damaged(lambda f: f["relevance/result.json"].pop("rounds")),
-        damaged(
-            lambda f: f["manifest.json"]["config"]["prompts"].update(
-                {"reasoning/direct": "v999"}
-            )
-        ),
-    ],
-    ids=["unknown-id", "index-out-of-range", "no-rounds", "no-such-prompt"],
-)
-def test_an_import_r3con_cannot_ask_over_is_refused_logged_and_leaves_nothing(
-    client: TestClient,
-    logs_dir: Path,
-    caplog: pytest.LogCaptureFixture,
-    damage: Callable[[dict[str, Any]], dict[str, Any]],
+def test_a_refused_imports_log_line_keeps_a_key_from_the_file_on_one_line(
+    client: TestClient, caplog: pytest.LogCaptureFixture
 ):
     saved = representation_of(client, finished_run(client))
-    before = run_folders(logs_dir)
+    saved["ids.json"] = {"x\nFAKE warning line": "no"}
     with caplog.at_level(logging.WARNING, logger="r3con.app"):
-        response = client.post(IMPORTS, json=damage(saved))
-    logged = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
-    assert (response.status_code, response.json()) == (
-        422,
-        {"error": UNREADABLE_IMPORT},
-    )
-    assert len(logged) == 1 and logged[0].startswith("An imported run is refused")
-    assert run_folders(logs_dir) == before
+        client.post(IMPORTS, json=saved)
+    said = [r.getMessage() for r in caplog.records if r.name == "r3con.app"]
+    assert len(said) == 1 and "\n" not in said[0]
+    assert "x\\nFAKE warning line" in said[0]
 
 
 def test_an_import_whose_folder_cannot_be_written_is_refused_and_logged(

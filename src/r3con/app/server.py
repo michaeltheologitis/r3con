@@ -175,6 +175,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic_core import PydanticCustomError
 from starlette.applications import Starlette
@@ -293,9 +294,12 @@ UNWRITABLE_IMPORT = "Its run can't be made again here: R3Con couldn't write its 
 # r3con's prompt versions, v1, v2 and so on: a version is a file's name, so nothing else.
 PROMPT_VERSION = r"^v\d+$"
 CONFIG_NAME = r"^[\w-]+$"
-# What an imported run's config leaves out: params an ask would send, a server's URL or a
-# header among them, and the overrides that may hold them.
+# What an ask would send of an imported run's config: a server's URL or headers, say.
 UNIMPORTED = {"params", "overrides"}
+DIRECT_ONLY = "an imported run is asked directly, never with code the model writes"
+NOT_ONE_INDEX_EACH = (
+    "must give each document one index, 0 to n - 1, and names.json a name"
+)
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
@@ -381,6 +385,14 @@ class ImportedConfig(RunConfig):
         PromptStage, Annotated[str, StringConstraints(pattern=PROMPT_VERSION)]
     ] = Field(default_factory=dict)
 
+    # A file would otherwise have each ask run the coding agent, steered by its text.
+    @field_validator("reasoning")
+    @classmethod
+    def _direct(cls, reasoning: str) -> str:
+        if reasoning != "direct":
+            raise PydanticCustomError("reasoning", DIRECT_ONLY)
+        return reasoning
+
 
 class ImportedManifest(BaseModel):
     r3con_version: str | None = None
@@ -399,6 +411,13 @@ class ImportedRun(BaseModel):
     relevance: dict[str, Any] = Field(alias="relevance/result.json")
     schema_proposal: dict[str, Any] = Field(alias="structuring/schema/result.json")
     parsing: dict[str, Any] = Field(alias="structuring/parsing/result.json")
+
+    @model_validator(mode="after")
+    def _one_index_each(self) -> ImportedRun:
+        indices = sorted(self.ids.values()) == list(range(len(self.ids)))
+        if not indices or self.names.keys() != self.ids.keys():
+            raise PydanticCustomError("ids", NOT_ONE_INDEX_EACH)
+        return self
 
 
 class AskRequest(BaseModel):
@@ -880,8 +899,8 @@ async def import_run(request: Request) -> Response:
     try:
         body = ImportedRun.model_validate_json(await request.body())
     except ValidationError as error:
-        # The page says it plainly; what was wrong, never what was there, is logged.
-        logger.warning("An imported run is refused: %s", _explain(error))
+        # A field's place may name a key from the file: %r keeps it on one line.
+        logger.warning("An imported run is refused: %r", _explain(error))
         raise HTTPException(422, UNREADABLE_IMPORT) from None
     folder = await run_in_threadpool(_imported, state.logs_dir, body)
     run_id = secrets.token_hex(ID_BYTES)
