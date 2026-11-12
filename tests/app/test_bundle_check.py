@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import threading
 from collections.abc import Iterator
@@ -5,7 +6,16 @@ from pathlib import Path
 
 import pytest
 
-from tests.app.bundle_check import built_by, keychain, pinned, round_trip
+from r3con.app import serve
+from tests.app.bundle_check import (
+    ENCRYPTED_PDF_TEXT,
+    built_by,
+    encrypted_pdf_text,
+    keychain,
+    loads,
+    pinned,
+    round_trip,
+)
 from tests.fakes import FakeKeyring
 
 # As `uv export` writes uv.lock's pins, with markers this Python always or never meets.
@@ -163,3 +173,32 @@ def test_round_trip_gives_up_on_a_store_that_does_not_answer(
     monkeypatch.setattr("tests.app.bundle_check.KEYCHAIN_SECONDS", 0.1)
     with pytest.raises(SystemExit, match="did not answer within 0.1 s"):
         round_trip(stalled)
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_encrypted_pdf_text_is_what_the_served_app_reads_from_an_aes_256_pdf(
+    tmp_path: Path,
+):
+    url, stop = serve(logs_dir=tmp_path)
+    base_url, token = url.split("/#token=")
+    try:
+        assert encrypted_pdf_text(base_url, token) == ENCRYPTED_PDF_TEXT
+    finally:
+        stop()
+
+
+def origin(module: str) -> Path:
+    spec = importlib.util.find_spec(module)
+    assert spec and spec.origin
+    return Path(spec.origin)
+
+
+# pycryptodome's compiled files are plain libraries it loads with ctypes: none imports.
+def test_loads_imports_a_python_extension_but_only_loads_a_plain_library(
+    tmp_path: Path,
+):
+    loads("Crypto.Cipher._raw_aes", origin("Crypto.Cipher._raw_aes"), tmp_path)
+    extension = "pydantic_core._pydantic_core"
+    with pytest.raises(SystemExit, match=f"{extension} is imported from"):
+        loads(extension, origin(extension), tmp_path)

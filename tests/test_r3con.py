@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -24,6 +26,7 @@ from r3con import Answer, RunConfig
 from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES, REASONING_PATHS, load_config
 from r3con.r3con import ask, read_documents, run, trace, unique_names
+from tests.app.bundle_check import encrypted_pdf
 from tests.documents import (
     CORRUPT_DOCX,
     PNG,
@@ -464,6 +467,32 @@ def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
     assert list(documents) == ["a_memo.pdf", "d_plain.txt"]
     assert "Incidents this quarter: 7." in documents["a_memo.pdf"]
     assert documents["d_plain.txt"] == "a plain memo"
+
+
+# pypdf picks its AES library on import: cryptography if it imports, else pycryptodome.
+READ_DOCUMENTS_WITHOUT = """
+import json, sys
+sys.modules.update(dict.fromkeys(sys.argv[2:]))
+from r3con import read_documents
+print(json.dumps(read_documents(sys.argv[1])))
+"""
+
+
+@pytest.mark.parametrize(
+    "blocked", [[], ["cryptography"]], ids=["as_installed", "without_cryptography"]
+)
+def test_an_aes_256_pdf_with_an_empty_password_is_read_with_either_aes_library(
+    tmp_path, blocked
+):
+    pdf = tmp_path / "ordinance.pdf"
+    pdf.write_bytes(encrypted_pdf("Incidents this quarter: 7."))
+    read = subprocess.run(
+        [sys.executable, "-c", READ_DOCUMENTS_WITHOUT, str(pdf), *blocked],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(read.stdout) == {"ordinance.pdf": "Incidents this quarter: 7."}
 
 
 def test_a_word_files_paragraphs_and_tables_come_out_in_order_as_markdown(tmp_path):

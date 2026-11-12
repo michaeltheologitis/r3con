@@ -7,22 +7,28 @@ It puts the app's code and packages on the path as the app's launcher does, and 
 that the packages there but the project are exactly the ones CONSTRAINTS, the build's
 `uv export` of uv.lock, pins for this Python, at its versions, and that the project was
 built by the backend BUILD_CONSTRAINTS pins. Then it imports, each from inside APP,
-r3con and the packages a bundle most likely lacks, and every compiled module under its
-packages, so that one built for another platform fails here. It checks that keyring,
+r3con and the packages a bundle most likely lacks, and loads every compiled file under
+its packages, importing those that are Python extensions, so that one built for another
+platform fails here. It checks that keyring,
 where the app keeps its keys, finds the macOS Keychain, and saves, reads back and
 deletes a throwaway item there, giving up after ``KEYCHAIN_SECONDS``, since a Keychain
 dialog would wait for a click no one makes. Then it serves the app as the window does:
-the page, and the API with this launch's token, must answer, and once the server has
-stopped, nothing must.
+the page, and the API with this launch's token, must answer, a PDF encrypted as signed
+ones often are must read back as its text, which pypdf does only with an AES library
+(here pycryptodome: cryptography is Linux-only), and once the server has stopped,
+nothing must.
 """
 
+import ctypes
 import importlib.metadata
+import json
 import secrets
 import site
 import sys
 import tempfile
 import threading
 from email.parser import HeaderParser
+from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.error import URLError
@@ -54,6 +60,8 @@ THROWAWAY_SERVICE = "r3con-bundle-check"
 # Built from the checkout, so not among uv.lock's exported pins: its backend is.
 PROJECT = "r3context"
 BACKEND = "uv-build"
+# What encrypted_pdf's PDF says, which the server must read back from it.
+ENCRYPTED_PDF_TEXT = "Read through AES-256."
 
 
 def imported(name: str, resources: Path) -> Path:
@@ -64,12 +72,23 @@ def imported(name: str, resources: Path) -> Path:
     return where
 
 
-def compiled(packages: Path) -> list[str]:
-    """The module of each compiled file under ``packages``."""
-    return sorted(
-        ".".join(path.relative_to(packages).with_name(path.name.split(".")[0]).parts)
-        for path in packages.rglob("*.so")
-    )
+def compiled(packages: Path) -> dict[str, Path]:
+    """Each compiled file under ``packages``, by the module it would be."""
+    return {
+        ".".join(
+            path.relative_to(packages).with_name(path.name.split(".")[0]).parts
+        ): path
+        for path in sorted(packages.rglob("*.so"))
+    }
+
+
+def loads(name: str, path: Path, resources: Path) -> None:
+    """Load compiled file ``path``, as fails for one built for another platform, and
+    import it as module ``name`` if it is a Python extension. Others, such as
+    pycryptodome's, are plain libraries their package loads with ctypes."""
+    library = ctypes.CDLL(str(path))
+    if hasattr(library, f"PyInit_{name.rpartition('.')[2]}"):
+        imported(name, resources)
 
 
 def locked(constraints: Path) -> "dict[str, SpecifierSet]":
@@ -164,6 +183,50 @@ def round_trip(store: "KeyringBackend") -> None:
         sys.exit("a throwaway item was not saved, read back as saved, and deleted")
 
 
+def encrypted_pdf(text: str) -> bytes:
+    """A one-page PDF that says ``text``, encrypted as signed and permission-locked PDFs
+    often are: with AES-256, an empty password to open it and a random one to change
+    it. pypdf writes and reads it only with cryptography or pycryptodome."""
+    # The bundle's own pypdf, on the path once main has added app_packages.
+    from pypdf import PdfWriter
+    from pypdf.generic import ContentStream, DictionaryObject, NameObject
+
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    writer = PdfWriter()
+    page = writer.add_blank_page(300, 200)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})}
+    )
+    contents = ContentStream(None, writer)
+    contents.set_data(f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET".encode())
+    page.replace_contents(contents)
+    writer.encrypt("", secrets.token_urlsafe(16), algorithm="AES-256")
+    pdf = BytesIO()
+    writer.write(pdf)
+    return pdf.getvalue()
+
+
+def encrypted_pdf_text(base_url: str, token: str) -> str:
+    """The text the server at ``base_url`` reads from :func:`encrypted_pdf`'s PDF, sent
+    as the window's page sends a PDF, which must be what it says."""
+    request = Request(
+        f"{base_url}/api/documents/text?name=encrypted.pdf",
+        data=encrypted_pdf(ENCRYPTED_PDF_TEXT),
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    with urlopen(request, timeout=TIMEOUT_SECONDS) as answer:
+        text = json.load(answer)["text"]
+    if text != ENCRYPTED_PDF_TEXT:
+        sys.exit(f"an AES-256 PDF reads as {text!r}, not {ENCRYPTED_PDF_TEXT!r}")
+    return text
+
+
 def answers(url: str) -> bool:
     try:
         urlopen(url, timeout=TIMEOUT_SECONDS).close()
@@ -184,9 +247,9 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     for name in BUNDLED:
         print(f"{name}: {imported(name, resources).relative_to(app)}")
     modules = compiled(packages)
-    for name in modules:
-        imported(name, resources)
-    print(f"{len(modules)} compiled modules under app_packages: each imports")
+    for name, path in modules.items():
+        loads(name, path, resources)
+    print(f"{len(modules)} compiled files under app_packages: each loads or imports")
     store = keychain()
     print(f"keyring finds {type(store).__module__}.{type(store).__qualname__}")
     round_trip(store)
@@ -207,12 +270,14 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
             page_status, page = answer.status, answer.read().decode()
         with urlopen(keys, timeout=TIMEOUT_SECONDS) as answer:
             keys_status, keys_body = answer.status, answer.read().decode()
+        pdf_text = encrypted_pdf_text(base_url, token)
     finally:
         stop()
     if "<title>" not in page:
         sys.exit("GET / did not answer with the page")
     print(f"GET / {page_status}")
     print(f"GET /api/keys {keys_status} {keys_body}")
+    print(f"POST /api/documents/text: an AES-256 PDF reads as {pdf_text!r}")
     if answers(f"{base_url}/"):
         sys.exit("the server still answers after its stop")
     print("stopped: nothing answers")
