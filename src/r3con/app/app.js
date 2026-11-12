@@ -3229,7 +3229,7 @@
       tab.fold = null;
       return;
     }
-    const kept = new Set(range(CONTEXT_DOCS).flatMap((k) => [k, n - 1 - k]));
+    const kept = new Set(keptIn(tree));
     const index = new Map(files.map((f, d) => [docId(f), d]));
     const sets = { relevant: new Set(), kept, opened: new Set(), sourced: new Set() };
     tab.fold = { files, tree, depth, index, calls: new Map(), settled: new Map(), ...sets, stopped: false, rows: [], closedRows: 0, foldOf: [], frame: 0 };
@@ -3299,10 +3299,11 @@
   /** @param {Tab} tab @param {Folder} folder @param {number} depth */
   function foldFolder(tab, folder, depth) {
     const fold = foldingOf(tab);
+    const folds = foldsFiles(folder);
     let opened = 0;
     for (const item of folder.items) {
       if (!('items' in item)) {
-        opened += foldRun(fold, item, depth);
+        opened += foldRun(fold, item, depth, folds);
         continue;
       }
       /** @type {FoldRow} */
@@ -3314,11 +3315,25 @@
     return opened;
   }
 
+  /** @param {Folder} folder */
+  const filesIn = (folder) => folder.items.flatMap((item) => ('items' in item ? [] : foldDocs(item)));
+  // Only a folder of more than FOLD_FROM_DOCS files of its own folds them, as a smaller one is folded by its chevron.
+  /** @param {Folder} folder */
+  const foldsFiles = (folder) => filesIn(folder).length > FOLD_FROM_DOCS;
+
+  // A folder that folds keeps its own ends in view before a run, as a diff keeps context, not the tab's ends.
+  /** @param {Folder} folder @returns {number[]} */
+  function keptIn(folder) {
+    const files = filesIn(folder);
+    const ends = foldsFiles(folder) ? [...files.slice(0, CONTEXT_DOCS), ...files.slice(-CONTEXT_DOCS)] : [];
+    return [...ends, ...folder.items.flatMap((item) => ('items' in item ? keptIn(item) : []))];
+  }
+
   // Each run of MIN_FOLD or more quiet documents in a folder is one fold; returns how many rows opened folds added.
-  /** @param {Folding} fold @param {DocRange} docs @param {number} depth */
-  function foldRun(fold, docs, depth) {
+  /** @param {Folding} fold @param {DocRange} docs @param {number} depth @param {boolean} folds */
+  function foldRun(fold, docs, depth, folds) {
     /** @param {number} d */
-    const own = (d) => fold.files.length <= FOLD_FROM_DOCS || fold.relevant.has(d) || fold.kept.has(d);
+    const own = (d) => !folds || fold.relevant.has(d) || fold.kept.has(d);
     let opened = 0;
     for (let d = docs.start; d <= docs.end; ) {
       let end = d;
