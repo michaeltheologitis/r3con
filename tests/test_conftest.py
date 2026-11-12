@@ -61,6 +61,21 @@ def test_blocked():
 def test_allows_sockets():
     pass
 """
+# A root conftest's fixture that app/'s overrides, as tests/app's does _isolated.
+ROOT_CONFTEST = """\
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolation():
+    return "root"
+"""
+APP_CONFTEST = ROOT_CONFTEST.replace('"root"', '"app"')
+ROOT_TEST = """\
+def test_gets_the_roots_isolation(isolation):
+    assert isolation == "root"
+"""
+APP_TEST = ROOT_TEST.replace("root", "app")
 
 # pytest-socket warns as it refuses a socket.
 pytestmark = pytest.mark.filterwarnings("ignore:A test tried to use socket")
@@ -130,3 +145,28 @@ def test_sockets_stay_blocked_between_tests_and_once_the_session_ends(
         "as the session finishes: refused",
         "once the session is over: refused",
     ]
+
+
+def test_a_folders_conftest_overrides_the_roots_fixture_when_the_folder_comes_up_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    (tmp_path / "conftest.py").write_text(ROOT_CONFTEST)
+    (tmp_path / "test_between.py").write_text(ROOT_TEST)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "conftest.py").write_text(APP_CONFTEST)
+    (app / "test_first.py").write_text(APP_TEST)
+    (app / "test_last.py").write_text(APP_TEST)
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    # app/ again after another folder's file: pytest 9.1 lost app/'s override there.
+    paths = ["app/test_first.py", "test_between.py", "app/test_last.py"]
+    session = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *paths],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=SESSION_TIMEOUT_SECONDS,
+        check=False,
+    )
+    assert session.stdout.splitlines()[-1].startswith("3 passed"), session.stdout

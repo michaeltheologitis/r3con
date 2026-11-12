@@ -66,7 +66,8 @@ dev = [
     "ipykernel>=6.29",
     "pip>=24.0",
     "pyright>=1.1.414",
-    "pytest>=9.0",
+    # 9.1 drops a folder's conftest fixtures when the folder comes up twice (pytest#14635).
+    "pytest>=9.2",
     "pytest-cov>=7.0",
     "pytest-httpserver>=1.1",
     "pytest-socket>=0.8",
