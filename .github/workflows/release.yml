@@ -95,6 +95,7 @@ jobs:
       APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
       APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
       APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
 
   publish:
     if: needs.build.outputs.release == 'true'
@@ -125,26 +126,26 @@ jobs:
         with:
           name: dist
           path: dist/
+      # The .dmg, its update feed and the release notes, which mac-app made and checked.
       - uses: actions/download-artifact@v8
         with:
           name: r3con-mac-app-signed
-          path: dist/
-      # The same name every release, for the README's releases/latest/download/R3Con.dmg; mv fails unless exactly one matches.
-      - name: Name the .dmg R3Con.dmg
-        run: mv dist/R3Con-*.dmg dist/R3Con.dmg
-      # The release commit's body is the notes; its trailers are attribution, not notes.
-      - name: Build the notes
+          path: mac/
+      # The .dmg under the same name every release, for the README's
+      # releases/latest/download/R3Con.dmg, which the feed's download URL names too; and the
+      # feed beside it, for the app's SUFeedURL, releases/latest/download/appcast.xml.
+      # mv fails unless exactly one .dmg matches.
+      - name: Add the Mac app and its update feed
         run: |
-          git log -1 --format=%b "$GITHUB_SHA" |
-            sed -E '/^(Co-Authored-By|Claude-Session): /Id' |
-            git stripspace > notes.md
+          mv mac/R3Con-*.dmg dist/R3Con.dmg
+          mv mac/appcast.xml dist/appcast.xml
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file notes.md --verify-tag
+            gh release create "$GITHUB_REF_NAME" dist/* --title "r3context $VERSION" --notes-file mac/notes.md --verify-tag
           else
-            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes-file notes.md --target "$GITHUB_SHA"
+            gh release create "v$VERSION" dist/* --title "r3context $VERSION" --notes-file mac/notes.md --target "$GITHUB_SHA"
           fi

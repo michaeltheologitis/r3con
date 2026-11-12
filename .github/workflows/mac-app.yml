@@ -10,6 +10,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "tests/app/bundle_check.py"
+      - "tests/app/feed_check.py"
       - ".github/briefcase/**"
       - ".github/actions/sparkle/**"
       - ".github/workflows/mac-app.yml"
@@ -30,6 +31,7 @@ on:
       APP_STORE_CONNECT_KEY: {required: false}
       APP_STORE_CONNECT_KEY_ID: {required: false}
       APP_STORE_CONNECT_ISSUER_ID: {required: false}
+      SPARKLE_PRIVATE_KEY: {required: false}
 
 permissions:
   contents: read
@@ -87,8 +89,10 @@ jobs:
       # Its CFBundleVersion, which Sparkle compares with the feed's to find a newer
       # release, is the project's version, not Briefcase's default, 1.
       - name: Build the app
+        id: build
         run: |
           version=$(uv version --short)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
           "$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --config "build='$version'" --no-input
       - uses: ./.github/actions/sparkle
         id: sparkle
@@ -102,6 +106,25 @@ jobs:
           rm -r "$framework/XPCServices" "$framework/Versions/B/XPCServices"
           cp "$SPARKLE/LICENSE" "$framework/Versions/B/Resources/LICENSE"
           ditto "$framework" "$(echo build/r3con/macos/app/*.app)/Contents/Frameworks/Sparkle.framework"
+      # Before the app is signed. A run that isn't signed has no update key, so its app
+      # trusts a throwaway one instead, made with the bundle's pycryptodome and kept in a
+      # file, never shown, to sign its update feed as SPARKLE_PRIVATE_KEY signs a release's.
+      - name: Make a throwaway update key for the app
+        if: ${{ !inputs.sign }}
+        run: |
+          app=$(echo build/r3con/macos/app/*.app)
+          umask 077
+          public=$("$app/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B -c '
+          import site, sys
+          from base64 import b64encode
+          from pathlib import Path
+          site.addsitedir(sys.argv[1])
+          from Crypto.PublicKey import ECC
+          key = ECC.generate(curve="Ed25519")
+          Path(sys.argv[2]).write_text(b64encode(key.seed).decode())
+          print(b64encode(key.public_key().export_key(format="raw")).decode())
+          ' "$app/Contents/Resources/app_packages" "$RUNNER_TEMP/update-key")
+          plutil -replace SUPublicEDKey -string "$public" "$app/Contents/Info.plist"
       # After the build, so that the key is absent while pip and the build backend run.
       - name: Import the Developer ID certificate into a keychain of its own
         if: inputs.sign
@@ -171,6 +194,49 @@ jobs:
           if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
           fi
+      # The release commit's body is the notes, and on a pull request its head commit's;
+      # its trailers are attribution, not notes.
+      - name: Write the release notes
+        env:
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git cat-file -e "$COMMIT" 2> /dev/null || git fetch --quiet --depth=1 origin "$COMMIT"
+          git log -1 --format=%b "$COMMIT" |
+            awk 'tolower($0) !~ /^(co-authored-by|claude-session): /' |
+            git stripspace > dist/notes.md
+      # The feed the app's SUFeedURL reads, which a release attaches as appcast.xml, made by
+      # Sparkle's generate_appcast from the final .dmg alone, so with no delta updates. The
+      # app asks for a signed feed, so it signs the feed, with the .dmg's EdDSA signature,
+      # version and notes in it; nothing may edit it after. The key goes in on stdin.
+      - name: Make the update feed
+        id: feed
+        env:
+          SPARKLE: ${{ steps.sparkle.outputs.path }}
+          SIGNED: ${{ inputs.sign }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          DOWNLOADS: https://github.com/${{ github.repository }}/releases/download/v${{ steps.build.outputs.version }}/
+        run: |
+          if [ "$SIGNED" = true ]; then
+            key=$SPARKLE_PRIVATE_KEY
+          else
+            key=$(cat "$RUNNER_TEMP/update-key")
+            rm "$RUNNER_TEMP/update-key"
+            echo "::add-mask::$key"
+          fi
+          if [ -z "$key" ]; then
+            echo "::error::No update key: macos-signing has no SPARKLE_PRIVATE_KEY."
+            exit 1
+          fi
+          feed="$RUNNER_TEMP/feed"
+          mkdir "$feed"
+          # Named as the release names it, R3Con.dmg, which the feed's download URL ends with.
+          cp dist/*.dmg "$feed/R3Con.dmg"
+          cp dist/notes.md "$feed/R3Con.md"
+          printf '%s\n' "$key" | "$SPARKLE/bin/generate_appcast" --ed-key-file - --download-url-prefix "$DOWNLOADS" --embed-release-notes "$feed"
+          # As the app reads it: Sparkle's own check of the feed's signature.
+          printf '%s\n' "$key" | "$SPARKLE/bin/sign_update" --verify --ed-key-file - "$feed/appcast.xml"
+          cp "$feed/appcast.xml" dist/appcast.xml
+          echo "url=${DOWNLOADS}R3Con.dmg" >> "$GITHUB_OUTPUT"
       # As a user would: out of the .dmg, into a folder they can write to.
       - name: Install the app from its .dmg
         run: |
@@ -201,6 +267,11 @@ jobs:
       - name: Check the bundle with its own Python
         timeout-minutes: 10
         run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/bundle_check.py "$APP" "$CONSTRAINTS" "$BUILD_CONSTRAINTS"'
+      # Against the key the app trusts, and the .dmg a release attaches.
+      - name: Check the update feed with the app's own Python
+        env:
+          URL: ${{ steps.feed.outputs.url }}
+        run: '"$APP/Contents/Frameworks/Python.framework/Versions/3.14/bin/python3" -I -B tests/app/feed_check.py "$APP" dist/appcast.xml "$(echo dist/*.dmg)" "$URL" dist/notes.md'
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
@@ -322,7 +393,11 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.sign && 'r3con-mac-app-signed' || 'r3con-mac-app' }}
-          path: dist/*.dmg
+          # What a release attaches, and the notes it shows.
+          path: |
+            dist/*.dmg
+            dist/appcast.xml
+            dist/notes.md
           if-no-files-found: error
           retention-days: 14
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
