@@ -48,8 +48,10 @@ self-hosted endpoint.
 
 from __future__ import annotations
 
+import codecs
 import io
 import threading
+import warnings
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from fnmatch import fnmatch
@@ -58,6 +60,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 import mammoth
+from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
+from bs4.dammit import EncodingDetector
+from bs4.element import PreformattedString
 from dotenv import find_dotenv, load_dotenv
 from markdownify import ATX, MarkdownConverter
 from pypdf import PdfReader
@@ -93,6 +98,23 @@ _GLOB_WILDCARDS = frozenset("*?[")
 _RECURSIVE_WILDCARD = "**"
 # The number unique_names gives a name's second document.
 _FIRST_REPEAT = 2
+# How a browser reads a page that declares these (WHATWG's Encoding standard): Latin-1
+# and ASCII as windows-1252, and UTF-16, which a declaration read as ASCII can't be, as
+# UTF-8.
+_DECLARED_READ_AS = {
+    "ascii": "cp1252",
+    "iso8859-1": "cp1252",
+    "utf-16": "utf-8",
+    "utf-16-be": "utf-8",
+    "utf-16-le": "utf-8",
+}
+_UNTIL_FOUND = "until-found"
+# Where markdownify starts and ends a code block.
+_FENCE = "```"
+# bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
+# URL or a path isn't one; a web page is read as HTML either way.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+warnings.filterwarnings("ignore", category=MarkupResemblesLocatorWarning)
 
 
 def _read_one(path: Path) -> str:
@@ -161,13 +183,7 @@ def _docx_text(name: str, docx: BinaryIO) -> str:
     try:
         # An image converter that makes no element, so no image's bytes are read.
         converted = mammoth.convert_to_html(docx, convert_image=lambda image: [])
-        text = _CellPipesEscaped(
-            heading_style=ATX,
-            table_infer_header=True,
-            escape_asterisks=False,
-            escape_underscores=False,
-            escape_misc=False,
-        ).convert(converted.value)
+        text = _Markdown().convert(converted.value)
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as a Word file (%s); skipping it", name, type(e).__name__
@@ -180,8 +196,103 @@ def _docx_text(name: str, docx: BinaryIO) -> str:
     return text
 
 
-class _CellPipesEscaped(MarkdownConverter):
-    """markdownify, with a ``|`` in a table's cell escaped, so it can't split the cell."""
+def _html_text(name: str, html: BinaryIO) -> str:
+    """A web page's text as Markdown, from a stream of its bytes; ``name`` is what the
+    warnings call it.
+
+    It is decoded as :func:`_page_text` says, and turned into Markdown as a Word file is:
+    headings, lists and tables keep their shape. A link keeps its text, not its URL, and
+    images, scripts, styles, ``<noscript>``, ``<template>``, ``<?xml?>`` and what is
+    ``hidden`` are left out. A page nested too deep for that is read as its text alone.
+    A file that can't be read gives ``""``, and so does one with no text, which the
+    caller then drops: say so.
+    """
+    try:
+        soup = BeautifulSoup(_page_text(html.read()), "html.parser")
+        # What a browser doesn't show: <noscript> while scripts run, <template>, what is
+        # hidden but not until found, and the <?…?>, CDATA and declarations HTML reads as
+        # comments, which markdownify keeps.
+        unseen = [
+            *soup(["noscript", "template"]),
+            *soup(hidden=_hides),
+            *soup(string=lambda text: isinstance(text, PreformattedString)),
+        ]
+        for hidden in unseen:
+            hidden.extract()
+        text = _page_markdown(name, soup)
+    except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
+        _log.warning(
+            "%s: not readable as HTML (%s); skipping it", name, type(e).__name__
+        )
+        return ""
+    if not text.strip():
+        _log.warning("%s: no extractable text; skipping it", name)
+    return text
+
+
+def _hides(hidden: str | None) -> bool:
+    """Whether a ``hidden`` attribute of this value hides its tag from a reader: any value
+    but ``until-found``, whose text the browser's find in page reveals."""
+    return hidden is not None and hidden.lower() != _UNTIL_FOUND
+
+
+def _page_text(page: bytes) -> str:
+    """A web page's bytes as text, decoded by its byte-order mark, else by the charset it
+    declares, read as a browser reads it (:data:`_DECLARED_READ_AS`), else as UTF-8, as
+    is a page that declares a charset Python doesn't know. A byte that doesn't decode
+    becomes U+FFFD. Nothing is guessed: a guess turns a short page into mojibake."""
+    page, marked = EncodingDetector.strip_byte_order_mark(page)
+    if marked:
+        return page.decode(marked, "replace")
+    declared = EncodingDetector.find_declared_encoding(page, is_html=True) or "utf-8"
+    try:
+        codec = codecs.lookup(declared).name
+        return page.decode(_DECLARED_READ_AS.get(codec, codec), "replace")
+    # A name Python doesn't know or can't look up, or one of a codec that isn't for text.
+    except (LookupError, ValueError):
+        return page.decode("utf-8", "replace")
+
+
+def _page_markdown(name: str, soup: BeautifulSoup) -> str:
+    """``soup``'s Markdown, or, for a page nested deeper than markdownify can recurse,
+    its text alone."""
+    try:
+        return _Markdown(strip=["a", "img"]).convert_soup(soup)
+    except RecursionError:
+        _log.warning("%s: nested too deep for Markdown; reading its text alone", name)
+        return _one_blank_line(soup.get_text("\n"))
+
+
+def _one_blank_line(markdown: str) -> str:
+    """``markdown`` with each run of blank or whitespace-only lines outside a fenced code
+    block made one blank line."""
+    lines: list[str] = []
+    fenced = False
+    for line in markdown.split("\n"):
+        if line.lstrip().startswith(_FENCE):
+            fenced = not fenced
+        blank = not fenced and not line.strip()
+        if blank and lines and not lines[-1]:
+            continue
+        lines.append("" if blank else line)
+    return "\n".join(lines)
+
+
+class _Markdown(MarkdownConverter):
+    """r3con's Markdown, of a Word file or a web page: ATX headings, a table's first row
+    its header, a ``|`` in a table's cell escaped so it can't split the cell, and no more
+    than one blank line in a row outside fenced code."""
+
+    class Options:
+        heading_style = ATX
+        table_infer_header = True
+        # The text kept as written, so the answer's quotes match it.
+        escape_asterisks = False
+        escape_underscores = False
+        escape_misc = False
+
+    def convert_soup(self, soup: Any) -> str:
+        return _one_blank_line(super().convert_soup(soup))
 
     # markdownify's stub leaves out the convert_* hooks its README says to override.
     def convert_td(self, el: Any, text: str, parent_tags: set[str]) -> str:
@@ -196,6 +307,8 @@ class _CellPipesEscaped(MarkdownConverter):
 _EXTRACTORS: dict[str, Callable[[str, BinaryIO], str]] = {
     ".pdf": _pdf_text,
     ".docx": _docx_text,
+    ".html": _html_text,
+    ".htm": _html_text,
 }
 
 # Which files a folder walk picks up. A walk that swallowed binaries would produce
@@ -214,7 +327,6 @@ TEXT_SUFFIXES: frozenset[str] = frozenset(
         ".tsv",
         ".yaml",
         ".yml",
-        ".html",
         ".xml",
         *_EXTRACTORS,
     }
@@ -376,26 +488,27 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
     (``a/notes.txt (2)``, :func:`unique_names`). A byte of a file's name that is not
     UTF-8 is named U+FFFD (``caf\ufffd.txt``).
 
-    A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish files,
-    PDFs and Word files (``.docx``). An explicit path or a glob reads **whatever you
-    name**, so that a ``.log``, a ``.py`` or an extensionless file is yours to pass; the
-    flip side is that a glob aimed at binaries will happily turn them into garbage
-    documents. A walk and a glob both skip Office's lock files (``~$report.docx``). A
-    walk skips anything hidden or under ``__MACOSX`` below the folder you named; a glob
-    follows the shell, where a wildcard matches no hidden name but a name in the pattern
-    that starts with a dot does (``"d/.*"``, ``"**/.env"``). Both read only files that
-    resolve inside the folder you named, or the glob's part before its first wildcard: a
-    file that a link or a ``..`` takes outside it is logged and skipped, so a folder you
-    received can't point r3con at files elsewhere. What you name, a file or that folder,
-    is taken as named, even if hidden or a link.
+    A directory walk picks up only the suffixes in :data:`TEXT_SUFFIXES` — text-ish
+    files, PDFs, Word files (``.docx``) and web pages (``.html``, ``.htm``). An explicit
+    path or a glob reads **whatever you name**, so that a ``.log``, a ``.py`` or an
+    extensionless file is yours to pass; the flip side is that a glob aimed at binaries
+    will happily turn them into garbage documents. A walk and a glob both skip Office's
+    lock files (``~$report.docx``). A walk skips anything hidden or under ``__MACOSX``
+    below the folder you named; a glob follows the shell, where a wildcard matches no
+    hidden name but a name in the pattern that starts with a dot does (``"d/.*"``,
+    ``"**/.env"``). Both read only files that resolve inside the folder you named, or
+    the glob's part before its first wildcard: a file that a link or a ``..`` takes
+    outside it is logged and skipped, so a folder you received can't point r3con at
+    files elsewhere. What you name, a file or that folder, is taken as named, even if
+    hidden or a link.
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
-    is logged and then dropped; OCR is outside this package. A Word file is converted to
-    Markdown, its tables included; one that can't be read, or has no text, is logged and
-    dropped. Everything else is read as UTF-8, replacing undecodable bytes rather than
-    failing: one bad byte in one document should not sink a run. Empty documents are
-    dropped — an empty document contributes nothing and costs a relevance call. A
-    dropped file is not in the mapping, nor counted when names clash.
+    is logged and then dropped; OCR is outside this package. A Word file or a web page
+    is converted to Markdown, its tables included; one that can't be read, or has no
+    text, is logged and dropped. Everything else is read as UTF-8, replacing undecodable
+    bytes rather than failing: one bad byte in one document should not sink a run. Empty
+    documents are dropped — an empty document contributes nothing and costs a relevance
+    call. A dropped file is not in the mapping, nor counted when names clash.
 
     The mapping holds the documents in the order read, and that order is preserved end
     to end (it is what ``Document N`` refers to in the structuring prompts, and

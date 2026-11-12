@@ -1555,7 +1555,7 @@
   // Where macOS's Finder puts each file's metadata in a zip it makes.
   const MACOS_METADATA_FOLDER = '__MACOSX';
   // What r3con app extracts the text of: r3con's own list, which tests/app/test_server.py holds this to.
-  const EXTRACTED_SUFFIXES = ['.pdf', '.docx'];
+  const EXTRACTED_SUFFIXES = ['.pdf', '.docx', '.html', '.htm'];
   const DOC_MARKS = {
     text: 'M10.75 13h7.5M10.75 17.25h10.25M10.75 21.5h7.5',
     pdf: 'M10 21V15h1.08a1.62 1.62 0 0 1 0 3.24H10M14.65 15h.6a2.1 2.1 0 0 1 2.1 2.1v1.8a2.1 2.1 0 0 1-2.1 2.1H14.65zM22 15H19.3v6M19.3 17.88h2.2',
@@ -1583,6 +1583,7 @@
     '.yaml': 'yml',
     '.yml': 'yml',
     '.html': 'markup',
+    '.htm': 'markup',
     '.xml': 'markup',
   };
   const FOLDER_SUFFIXES = Object.keys(SUFFIX_TYPES);
@@ -1660,7 +1661,7 @@
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
   const LOST_CONNECTION = 'lost the connection to r3con app';
-  const NOT_TEXT = 'R3Con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
+  const NOT_TEXT = 'R3Con reads text, PDF, Word (.docx) and HTML files: save as one of those, then add again.';
   const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
@@ -1675,9 +1676,9 @@
   const REMEMBERED = 'remembered';
   const UNTIL_CLOSED = 'until the app closes';
   const PROTOTYPE_MODE_NOTE = 'prototype · replays one recorded run';
-  const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
+  const NEEDS_APP = 'PDF, Word, HTML and zip files need r3con app; this prototype reads only text files.';
   /** @param {number} skipped */
-  const noDocuments = (skipped) => `No text, PDF or Word (.docx) files in it${skipped ? `; ${skipped} skipped` : ''}.`;
+  const noDocuments = (skipped) => `No text, PDF, Word (.docx) or HTML files in it${skipped ? `; ${skipped} skipped` : ''}.`;
   const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
   // A refusal names this many files, then counts the rest.
   const NAMED_AT_MOST = 5;

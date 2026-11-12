@@ -105,7 +105,7 @@ REPORT = [
     "Merrow's count is provisional.",
 ]
 DOCUMENT_TEXT = "/api/documents/text"
-UNEXTRACTED = "name: must end in one of .pdf, .docx"
+UNEXTRACTED = "name: must end in one of .pdf, .docx, .html, .htm"
 DOCUMENT_ZIP = "/api/documents/zip"
 ZIP_NAME = "memos.zip"
 MEMO = "A memo.\n"
@@ -344,6 +344,11 @@ def text_of(client: TestClient, path: Path) -> httpx2.Response:
     return client.post(
         DOCUMENT_TEXT, params={"name": path.name}, content=path.read_bytes()
     )
+
+
+def write_page(path: Path) -> None:
+    """A web page at ``path``: a heading, and a script its text leaves out."""
+    path.write_text(f"<script>var site;</script><h1>{REPORT[0]}</h1>", encoding="utf-8")
 
 
 def zipped(tmp_path: Path, entries: Mapping[str, str | bytes]) -> Path:
@@ -1741,13 +1746,23 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     assert read_documents(pdf) == {"memo.pdf": extracted}
 
 
-# A Word file is read by its name's suffix, in any case, even with nothing before it.
-@pytest.mark.parametrize("name", ["report.docx", "REPORT.DOCX", ".docx"])
-def test_a_word_files_text_is_extracted_as_read_documents_extracts_it(
-    client: TestClient, tmp_path: Path, name: str
+# A Word file or a web page is read by its name's suffix, in any case, even with nothing
+# before it.
+@pytest.mark.parametrize(
+    ("name", "write"),
+    [
+        ("report.docx", lambda path: write_docx(path, REPORT)),
+        ("REPORT.DOCX", lambda path: write_docx(path, REPORT)),
+        (".docx", lambda path: write_docx(path, REPORT)),
+        ("page.html", write_page),
+        ("PAGE.HTM", write_page),
+    ],
+)
+def test_a_word_files_or_web_pages_text_is_extracted_as_read_documents_extracts_it(
+    client: TestClient, tmp_path: Path, name: str, write: Callable[[Path], None]
 ):
     path = tmp_path / name
-    write_docx(path, REPORT)
+    write(path)
     response = text_of(client, path)
     [text] = read_documents(path).values()
     assert response.status_code == 200
@@ -1787,8 +1802,19 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
             write_docx,
             "memo.docx: no extractable text; skipping it",
         ),
+        (
+            "memo.html",
+            lambda path: path.write_bytes(b"<script>var site;</script>"),
+            "memo.html: no extractable text; skipping it",
+        ),
     ],
-    ids=["scanned-pdf", "corrupt-pdf", "corrupt-docx", "empty-docx"],
+    ids=[
+        "scanned-pdf",
+        "corrupt-pdf",
+        "corrupt-docx",
+        "empty-docx",
+        "script-only-html",
+    ],
 )
 def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
     client: TestClient,
@@ -1819,7 +1845,7 @@ def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_
         ({"name": "memo.txt"}, UNEXTRACTED),
         ({"name": "memo.doc"}, UNEXTRACTED),
         ({"name": "memo"}, UNEXTRACTED),
-        ({"name": "memo.html"}, UNEXTRACTED),
+        ({"name": "memo.xml"}, UNEXTRACTED),
     ],
 )
 def test_a_document_without_a_valid_name_is_refused_with_what_is_wrong(

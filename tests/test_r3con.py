@@ -76,6 +76,11 @@ NESTED_TABLE = (
     f"<w:tc>{table([['inner1', 'inner2']])}{paragraph('')}</w:tc></w:tr></w:tbl>"
 )
 PLAIN_TEXT = b"Plain words, saved under the wrong name."
+# Curly quotes and a dash, which windows-1252 has and Latin-1 does not.
+QUOTED = "“Incidents” — 7, at Merrow’s site."
+NOT_A_WORD_FILE = "not readable as a Word file (BadZipFile)"
+# Deeper than markdownify can recurse: each level takes it at least one call.
+NESTED_DEEPER_THAN_RECURSION = sys.getrecursionlimit()
 # What Word writes beside a document someone has open: their name, padded.
 WORD_OWNER_FILE = b"\x07Michael" + bytes(154)
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -577,20 +582,202 @@ def test_a_word_files_image_leaves_none_of_its_data_in_the_text(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "content", [CORRUPT_DOCX, PLAIN_TEXT], ids=["corrupt", "plain-text"]
+    ("name", "content", "logged"),
+    [
+        ("a_memo.docx", CORRUPT_DOCX, NOT_A_WORD_FILE),
+        ("a_memo.docx", PLAIN_TEXT, NOT_A_WORD_FILE),
+        ("a_page.html", b"<script>alert('Merrow')</script>", "no extractable text"),
+    ],
+    ids=["corrupt-docx", "plain-text-docx", "html-with-only-a-script"],
 )
-def test_a_word_file_that_cannot_be_read_is_logged_and_dropped_not_read_as_text(
-    tmp_path, caplog, content: bytes
+def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
+    tmp_path, caplog, name: str, content: bytes, logged: str
 ):
-    unreadable = tmp_path / "a_memo.docx"
+    unreadable = tmp_path / name
     unreadable.write_bytes(content)
     (tmp_path / "b_plain.txt").write_text("a plain memo", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         documents = read_documents(tmp_path)
     assert documents == {"b_plain.txt": "a plain memo"}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
-        f"{unreadable}: not readable as a Word file (BadZipFile); skipping it"
+        f"{unreadable}: {logged}; skipping it"
     ]
+
+
+@pytest.mark.parametrize(
+    ("html", "text"),
+    [
+        ("<h1>Incidents</h1><h2>By site</h2>", "# Incidents\n\n## By site"),
+        (
+            "<p>Revenue was <b>12 million</b> in Q3.</p>",
+            "Revenue was **12 million** in Q3.",
+        ),
+        ("<ul><li>Halloran</li><li>Merrow</li></ul>", "* Halloran\n* Merrow"),
+        (
+            (
+                "<table><tr><th>Name|Alias</th><th>Value</th></tr>"
+                "<tr><td>a|b</td><td>7</td></tr></table>"
+            ),
+            "| Name\\|Alias | Value |\n| --- | --- |\n| a\\|b | 7 |",
+        ),
+        (
+            '<p>See <a href="https://example.com/q3">the Q3 report</a>.</p>',
+            "See the Q3 report.",
+        ),
+        (
+            '<p>Before the chart.<img src="chart.png" alt="A chart"></p>',
+            "Before the chart.",
+        ),
+        (
+            (
+                "<script>var site = 'Merrow';</script><style>p { color: red }</style>"
+                "<noscript>Turn on JavaScript.</noscript>"
+                "<template><p>Later.</p></template><p>Incidents: 7.</p>"
+            ),
+            "Incidents: 7.",
+        ),
+        (
+            '<?xml version="1.0"?><!DOCTYPE html><html><!-- a note --><p>Incidents: 7.',
+            "Incidents: 7.",
+        ),
+        (
+            "<head><title>Q3</title></head>\n<body><h1>Incidents</h1></body>",
+            "Q3\n\n# Incidents",
+        ),
+        (
+            "<p>Incidents: 7.<br><br><br><br>Merrow: 3.</p>",
+            "Incidents: 7.  \n\nMerrow: 3.",
+        ),
+        (
+            "<pre>def a():\n    pass\n\n\ndef b():\n    pass</pre>",
+            "```\ndef a():\n    pass\n\n\ndef b():\n    pass\n```",
+        ),
+        (
+            (
+                "<div><p>We use some essential cookies.</p>"
+                "<p hidden>You have accepted additional cookies.</p>"
+                '<p hidden="">You have rejected additional cookies.</p></div>'
+                "<p>Incidents: 7.</p>"
+            ),
+            "We use some essential cookies.\n\nIncidents: 7.",
+        ),
+        ('<div hidden="until-found"><p>Incidents: 7.</p></div>', "Incidents: 7."),
+        ("<p><site-name>Merrow</site-name>: <o:p>7</o:p></p>", "Merrow: 7"),
+    ],
+    ids=[
+        "headings",
+        "bold",
+        "list",
+        "table-with-a-pipe-in-a-cell",
+        "link-keeps-its-text",
+        "image-dropped",
+        "script-style-noscript-template-dropped",
+        "xml-declaration-doctype-comment-dropped",
+        "head-then-body-one-blank-line-apart",
+        "line-breaks-in-a-row-one-blank-line",
+        "code-keeps-its-blank-lines",
+        "hidden-cookie-messages-dropped",
+        "hidden-until-found-kept",
+        "unknown-tags-keep-their-text",
+    ],
+)
+def test_a_web_page_is_read_as_markdown(tmp_path, html, text):
+    page = tmp_path / "page.html"
+    page.write_text(html, encoding="utf-8")
+    assert read_documents(page) == {"page.html": text}
+
+
+@pytest.mark.parametrize(
+    ("page", "text"),
+    [
+        (f'<meta charset="windows-1252"><p>{QUOTED}'.encode("cp1252"), QUOTED),
+        (
+            '<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">'
+            f"<p>{QUOTED}".encode("cp1252"),
+            QUOTED,
+        ),
+        (
+            f'<?xml version="1.0" encoding="windows-1252"?><html><p>{QUOTED}'.encode(
+                "cp1252"
+            ),
+            QUOTED,
+        ),
+        (b'<meta charset="iso-8859-1"><p>\x93Fines\x94 \x97 \x8012.', "“Fines” — €12."),
+        (b'<meta charset="us-ascii"><p>Merrow\x92s caf\xe9.', "Merrow’s café."),
+        (b'<meta charset="iso-8859-15"><p>Fines: \xa47,500.', "Fines: €7,500."),
+        (b'<meta charset="utf-16"><p>Caf\xc3\xa9.', "Café."),
+        (
+            b'<meta charset="no-such-charset"><p>Merrow\x92s caf\xe9.',
+            "Merrow\ufffds caf\ufffd.",
+        ),
+        (
+            b"<p>Caf\xc3\xa9 at Merrow\xe2\x80\x99s site, 7 \xff.",
+            "Café at Merrow’s site, 7 \ufffd.",
+        ),
+        (b'\xef\xbb\xbf<meta charset="windows-1252"><p>Caf\xc3\xa9.', "Café."),
+        ("<p>Merrow’s café.".encode("utf-16"), "Merrow’s café."),
+    ],
+    ids=[
+        "windows-1252",
+        "windows-1252-by-http-equiv",
+        "windows-1252-by-xml-declaration",
+        "latin-1-read-as-windows-1252",
+        "ascii-read-as-windows-1252",
+        "latin-9",
+        "utf-16-declared-in-ascii-read-as-utf-8",
+        "unknown-charset-read-as-utf-8",
+        "none-declared-read-as-utf-8-a-bad-byte-replaced",
+        "byte-order-mark-over-declaration",
+        "utf-16-by-byte-order-mark",
+    ],
+)
+def test_a_web_page_is_decoded_by_its_byte_order_mark_else_its_charset_else_as_utf_8(
+    tmp_path, page: bytes, text: str
+):
+    path = tmp_path / "page.html"
+    path.write_bytes(page)
+    assert read_documents(path) == {"page.html": text}
+
+
+def test_a_walk_reads_html_and_htm_pages_as_markdown_and_xml_as_written(tmp_path):
+    (tmp_path / "a_page.htm").write_text("<h1>Incidents</h1>", encoding="utf-8")
+    (tmp_path / "b_page.HTML").write_text("<p><b>7</b> in Q3.</p>", encoding="utf-8")
+    (tmp_path / "c_feed.xml").write_text("<count>7</count>", encoding="utf-8")
+    assert read_documents(tmp_path) == {
+        "a_page.htm": "# Incidents",
+        "b_page.HTML": "**7** in Q3.",
+        "c_feed.xml": "<count>7</count>",
+    }
+
+
+def test_a_page_nested_too_deep_for_markdown_is_read_as_its_text_with_a_warning(
+    tmp_path, caplog
+):
+    page = tmp_path / "page.html"
+    page.write_text("<div>" * NESTED_DEEPER_THAN_RECURSION + "<p>Incidents: 7.</p>")
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        assert read_documents(page) == {"page.html": "Incidents: 7."}
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{page}: nested too deep for Markdown; reading its text alone"
+    ]
+
+
+def test_reading_an_xhtml_page_or_one_that_reads_like_a_url_prints_no_warning(
+    tmp_path,
+):
+    (tmp_path / "a_page.html").write_text('<?xml version="1.0"?><p>Incidents: 7.</p>')
+    (tmp_path / "b_link.html").write_text("https://example.com/incidents")
+    read = subprocess.run(
+        [sys.executable, "-c", READ_DOCUMENTS_WITHOUT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(read.stdout) == {
+        "a_page.html": "Incidents: 7.",
+        "b_link.html": "https://example.com/incidents",
+    }
+    assert read.stderr == ""
 
 
 def test_a_file_that_cannot_be_opened_is_logged_and_skipped(tmp_path, caplog):

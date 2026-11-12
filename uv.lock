@@ -2558,6 +2558,7 @@ name = "r3context"
 version = "0.6.21"
 source = { editable = "." }
 dependencies = [
+    { name = "beautifulsoup4" },
     { name = "jinja2" },
     { name = "litellm" },
     { name = "mammoth" },
@@ -2601,6 +2602,7 @@ mac-app = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beautifulsoup4", specifier = ">=4.11" },
     { name = "jinja2", specifier = ">=3.1.0" },
     { name = "keyring", marker = "extra == 'app'", specifier = ">=25" },
     { name = "litellm", specifier = ">=1.103,<2" },
