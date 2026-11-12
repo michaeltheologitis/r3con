@@ -15,9 +15,16 @@ import httpx2
 import pytest
 import toga
 
-from r3con.app import window
+from r3con.app import updates, window
 from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen, serve
-from tests.fakes import GATE_TIMEOUT_SECONDS, FakeKeyring, FakeLLM
+from tests.fakes import (
+    GATE_TIMEOUT_SECONDS,
+    FakeCommand,
+    FakeCommands,
+    FakeKeyring,
+    FakeLLM,
+    FakeObjC,
+)
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
 TIMEOUT_SECONDS = 10
@@ -108,6 +115,7 @@ class FakeApp:
         self.on_exit = on_exit
         self.main_window = FakeWindow()
         self.windows = [self.main_window]
+        self.commands = FakeCommands()
         self._impl = FakeBackend()
         type(self).app = self
 
@@ -156,8 +164,8 @@ class FakeApp:
 
 
 @pytest.fixture
-def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeApp]:
-    """The apps the window opens."""
+def opened(monkeypatch: pytest.MonkeyPatch, objc: FakeObjC) -> list[FakeApp]:
+    """The apps the window opens, in a Mac app without Sparkle."""
     apps: list[FakeApp] = []
 
     class OpenedApp(FakeApp):
@@ -168,6 +176,7 @@ def opened(monkeypatch: pytest.MonkeyPatch) -> list[FakeApp]:
     monkeypatch.setattr(toga, "App", OpenedApp)
     monkeypatch.setattr(toga, "WebView", FakeWebView)
     monkeypatch.setattr(toga, "SaveFileDialog", fake_save_file_dialog)
+    monkeypatch.setattr(toga, "Command", FakeCommand)
     return apps
 
 
@@ -249,6 +258,15 @@ def test_the_mac_app_keeps_its_keys_under_its_bundle_id_never_r3con_apps(
         (MAC_APP_KEY_SERVICE, "anthropic"): MAC_APP_KEY,
         (APP_KEY_SERVICE, "gemini"): R3CON_APP_KEY,
     }
+
+
+def test_a_mac_app_with_sparkle_checks_for_updates_from_its_app_menu(
+    opened: list[FakeApp], objc: FakeObjC
+):
+    (objc.frameworks / updates.SPARKLE).mkdir(parents=True)
+    window.main()
+    (app,) = opened
+    assert [command.text for command in app.commands] == [updates.CHECK_FOR_UPDATES]
 
 
 def test_the_window_opens_at_its_size(opened: list[FakeApp]):

@@ -11,6 +11,7 @@ on:
       - "uv.lock"
       - "tests/app/bundle_check.py"
       - ".github/briefcase/**"
+      - ".github/actions/sparkle/**"
       - ".github/workflows/mac-app.yml"
   workflow_dispatch:
     inputs:
@@ -83,8 +84,24 @@ jobs:
       # package's minimum macOS, 11.0), so that pip picks the wheels Briefcase's would.
       - name: Download the bundle's wheels, by uv.lock's hashes
         run: '"$RUNNER_TEMP/briefcase/bin/python" -m pip download --require-hashes --only-binary :all: --no-deps --platform macosx_11_0_arm64 --dest "$WHEELS" -r "$CONSTRAINTS" -r "$BUILD_CONSTRAINTS"'
+      # Its CFBundleVersion, which Sparkle compares with the feed's to find a newer
+      # release, is the project's version, not Briefcase's default, 1.
       - name: Build the app
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --no-input'
+        run: |
+          version=$(uv version --short)
+          "$RUNNER_TEMP/briefcase/bin/briefcase" build macOS app --config "build='$version'" --no-input
+      - uses: ./.github/actions/sparkle
+        id: sparkle
+      # Before the app is signed. It isn't sandboxed, so it enables none of Sparkle's XPC
+      # services, which Sparkle's docs then let it drop. Sparkle's licence goes with it.
+      - name: Add Sparkle to the app
+        env:
+          SPARKLE: ${{ steps.sparkle.outputs.path }}
+        run: |
+          framework="$SPARKLE/Sparkle.framework"
+          rm -r "$framework/XPCServices" "$framework/Versions/B/XPCServices"
+          cp "$SPARKLE/LICENSE" "$framework/Versions/B/Resources/LICENSE"
+          ditto "$framework" "$(echo build/r3con/macos/app/*.app)/Contents/Frameworks/Sparkle.framework"
       # After the build, so that the key is absent while pip and the build backend run.
       - name: Import the Developer ID certificate into a keychain of its own
         if: inputs.sign
@@ -114,15 +131,16 @@ jobs:
           fi
           echo "sha1=$(echo "$identity" | awk '{print $2}')" >> "$GITHUB_OUTPUT"
           echo "name=$(echo "$identity" | sed -E 's/^[^"]*"(.*)"$/\1/')" >> "$GITHUB_OUTPUT"
+      # sign_sparkle.py signs Sparkle's code as Sparkle's docs do, and the rest as Briefcase does.
       - name: Package the app and its .dmg
         if: ${{ !inputs.sign }}
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --adhoc-sign --no-input'
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -I .github/briefcase/sign_sparkle.py package macOS app --adhoc-sign --no-input'
       # Signed, the app is stapled before it is packed, so that it keeps a ticket out of the .dmg.
       - name: Sign the app and zip it
         if: inputs.sign
         env:
           IDENTITY: ${{ steps.identity.outputs.sha1 }}
-        run: '"$RUNNER_TEMP/briefcase/bin/briefcase" package macOS app --packaging-format zip --identity "$IDENTITY" --no-notarize --no-input'
+        run: '"$RUNNER_TEMP/briefcase/bin/python" -I .github/briefcase/sign_sparkle.py package macOS app --packaging-format zip --identity "$IDENTITY" --no-notarize --no-input'
       - name: Notarize the app and staple its ticket
         if: inputs.sign
         id: notarize-app
@@ -171,6 +189,10 @@ jobs:
       - name: Check the app's signature
         run: |
           codesign --display --verbose=2 "$APP" 2>&1 | grep -E '^(Authority|Signature|Timestamp|TeamIdentifier)=|flags=' | tee "$RUNNER_TEMP/codesign.txt"
+          sparkle="$APP/Contents/Frameworks/Sparkle.framework"
+          for code in "$sparkle/Versions/B/Autoupdate" "$sparkle/Versions/B/Updater.app" "$sparkle"; do
+            codesign --display --verbose=2 "$code" 2>&1 | grep -E '^(Identifier|Authority|Signature|Timestamp)=|flags=' | tee -a "$RUNNER_TEMP/codesign.txt"
+          done
           codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee -a "$RUNNER_TEMP/codesign.txt"
       - name: Check that Gatekeeper accepts the app and the .dmg as notarized
         if: inputs.sign
@@ -193,9 +215,10 @@ jobs:
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
+      # At INFO, so that the log shows Sparkle loaded.
       - name: Open the app's window
         run: |
-          "$APP/Contents/MacOS/R3Con" &
+          R3CON_LOG_LEVEL=INFO "$APP/Contents/MacOS/R3Con" &
           pid=$!
           port=
           for _ in $(seq 60); do
@@ -233,6 +256,12 @@ jobs:
             exit 1
           fi
           echo "$keys"
+          # Sparkle logs a fatal error when its updater can't start, after r3con loads it.
+          launched=$(log show --last 2m --style compact --predicate 'process == "R3Con"')
+          if ! grep -F 'Sparkle.framework loaded' <<< "$launched" || grep -F 'Fatal updater error' <<< "$launched"; then
+            echo "::error::The app didn't start Sparkle's updater."
+            exit 1
+          fi
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           # Quit as the Dock's Quit or a logout asks: the app must stop its server before it ends.
           gone() { case "$(ps -o stat= -p "$pid")" in "" | Z*) return 0 ;; *) return 1 ;; esac; }
@@ -282,7 +311,8 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| Bundle identifier | \`$(plutil -extract CFBundleIdentifier raw "$plist")\` |"
-            echo "| Version | $(plutil -extract CFBundleShortVersionString raw "$plist") |"
+            echo "| Version | $(plutil -extract CFBundleShortVersionString raw "$plist") ($(plutil -extract CFBundleVersion raw "$plist")) |"
+            echo "| Sparkle | $(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Frameworks/Sparkle.framework/Resources/Info.plist") |"
             echo "| Architectures (pydantic_core) | $(lipo -archs "$compiled") |"
             echo "| \`$(basename "$APP")\` | $(du -sh "$APP" | cut -f1) |"
             echo "| \`$(basename "$dmg")\` | $(du -h "$dmg" | cut -f1) |"

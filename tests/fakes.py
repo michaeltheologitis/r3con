@@ -6,6 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Literal
 
 import litellm
@@ -449,3 +450,79 @@ class FileKeyring(KeyringBackend):
         stored = self._stored()
         stored.setdefault(service, {})[username] = password
         Path(os.environ[KEYRING_FILE]).write_text(json.dumps(stored))
+
+
+class FakeCommand:
+    """Toga's command, which keeps what it is made with: ``action`` is its handler."""
+
+    def __init__(
+        self, action: Callable[..., None], text: str, **placement: Any
+    ) -> None:
+        self.action = action
+        self.text = text
+        self.placement = placement
+
+
+class FakeCommands(list[FakeCommand]):
+    """Toga's set of an app's commands, which its menus show."""
+
+    def add(self, *commands: FakeCommand) -> None:
+        self.extend(commands)
+
+
+class FakeUpdaterController:
+    """Sparkle's SPUStandardUpdaterController: whether it is made to start its updater,
+    and how many checks for updates it is asked for."""
+
+    def __init__(self) -> None:
+        self.starts_updater: bool | None = None
+        self.checks = 0
+
+    def initWithStartingUpdater(
+        self, start: bool, *, updaterDelegate: object, userDriverDelegate: object
+    ) -> "FakeUpdaterController":
+        self.starts_updater = start
+        return self
+
+    def checkForUpdates(self, sender: object) -> None:
+        self.checks += 1
+
+
+class FakeObjC:
+    """rubicon.objc's ``ObjCClass``, as the Mac app's Objective-C runtime answers it.
+    The main bundle's private Frameworks folder is ``frameworks``. NSBundle finds a
+    bundle at a path only where there is a folder, and loads it unless ``loads`` is
+    False, which makes Sparkle's updater controller found; each one made is in
+    ``controllers``."""
+
+    def __init__(self, frameworks: Path) -> None:
+        self.frameworks = frameworks
+        self.loads = True
+        self.controllers: list[FakeUpdaterController] = []
+        main_bundle = SimpleNamespace(privateFrameworksPath=str(frameworks))
+        self.classes: dict[str, SimpleNamespace] = {
+            "NSBundle": SimpleNamespace(
+                mainBundle=main_bundle, bundleWithPath=self._bundle_with_path
+            )
+        }
+
+    def ObjCClass(self, name: str) -> SimpleNamespace:
+        try:
+            return self.classes[name]
+        except KeyError:
+            # As rubicon raises for a class the runtime does not have.
+            raise NameError(f"ObjC Class '{name}' couldn't be found.") from None
+
+    def _bundle_with_path(self, path: str) -> SimpleNamespace | None:
+        return SimpleNamespace(load=self._load) if Path(path).is_dir() else None
+
+    def _load(self) -> bool:
+        if self.loads:
+            controller = SimpleNamespace(alloc=self._alloc)
+            self.classes["SPUStandardUpdaterController"] = controller
+        return self.loads
+
+    def _alloc(self) -> FakeUpdaterController:
+        controller = FakeUpdaterController()
+        self.controllers.append(controller)
+        return controller

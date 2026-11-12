@@ -1,0 +1,26 @@
+name: Sparkle
+description: >-
+  Download Sparkle's release, check it against the checksum pinned here, and unpack it:
+  Sparkle.framework, which the Mac app bundles, and bin/, whose sign_update and
+  generate_appcast sign its updates and their feed.
+outputs:
+  path:
+    description: The unpacked release.
+    value: ${{ steps.unpack.outputs.path }}
+runs:
+  using: composite
+  steps:
+    - id: unpack
+      shell: bash
+      env:
+        VERSION: "2.10.1"
+        # The release's Sparkle-2.10.1.tar.xz.
+        SHA256: 1a856d2a9edb8e628de88121d7be04cf0e2167f8641650b78fca00b14244cf27
+      run: |
+        archive="$RUNNER_TEMP/Sparkle-$VERSION.tar.xz"
+        path="$RUNNER_TEMP/Sparkle-$VERSION"
+        curl -fsSL --retry 3 -o "$archive" "https://github.com/sparkle-project/Sparkle/releases/download/$VERSION/Sparkle-$VERSION.tar.xz"
+        echo "$SHA256  $archive" | shasum -a 256 -c -
+        mkdir "$path"
+        tar -xJf "$archive" -C "$path"
+        echo "path=$path" >> "$GITHUB_OUTPUT"

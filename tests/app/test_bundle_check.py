@@ -1,4 +1,6 @@
+import base64
 import importlib.util
+import plistlib
 import re
 import threading
 from collections.abc import Iterator
@@ -6,17 +8,22 @@ from pathlib import Path
 
 import pytest
 
-from r3con.app import serve
+from r3con.app import serve, updates
 from tests.app.bundle_check import (
     ENCRYPTED_PDF_TEXT,
+    Signature,
     built_by,
     encrypted_pdf_text,
     keychain,
     loads,
     pinned,
     round_trip,
+    signature,
+    sparkle_loads,
+    unlike_sparkles_docs,
+    update_feed,
 )
-from tests.fakes import FakeKeyring
+from tests.fakes import FakeKeyring, FakeObjC
 
 # As `uv export` writes uv.lock's pins, with markers this Python always or never meets.
 CONSTRAINTS = """\
@@ -202,3 +209,134 @@ def test_loads_imports_a_python_extension_but_only_loads_a_plain_library(
     extension = "pydantic_core._pydantic_core"
     with pytest.raises(SystemExit, match=f"{extension} is imported from"):
         loads(extension, origin(extension), tmp_path)
+
+
+FEED = (
+    "https://github.com/michaeltheologitis/r3con/releases/latest/download/appcast.xml"
+)
+# As Sparkle's generate_keys prints a public key: 32 bytes in base64.
+PUBLIC_KEY = base64.b64encode(bytes(range(32))).decode()
+UPDATES_INFO = {
+    "SUFeedURL": FEED,
+    "SUPublicEDKey": PUBLIC_KEY,
+    "CFBundleShortVersionString": "0.6.20",
+    "CFBundleVersion": "0.6.20",
+}
+# As `codesign --display --verbose=2` describes a signature, on its stderr.
+SIGNED_BY_DEVELOPER_ID = """\
+Executable=/Applications/R3Con.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
+Identifier=org.sparkle-project.Sparkle.Autoupdate
+Format=Mach-O universal (x86_64 arm64)
+CodeDirectory v=20500 size=6214 flags=0x10000(runtime) hashes=183+7 location=embedded
+Signature size=9045
+Authority=Developer ID Application: An Example (TEAM123456)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Nov 12, 2026 at 10:21:43
+Info.plist=not bound
+TeamIdentifier=TEAM123456
+Runtime Version=14.0.0
+Sealed Resources=none
+Internal requirements count=1 size=224
+"""
+SIGNED_AD_HOC = """\
+Executable=/Applications/R3Con.app/Contents/MacOS/R3Con
+Identifier=io.github.michaeltheologitis.r3con
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=1301 flags=0x2(adhoc) hashes=30+7 location=embedded
+Signature=adhoc
+Info.plist entries=21
+TeamIdentifier=not set
+Sealed Resources version=2 rules=13 files=2410
+Internal requirements count=0 size=12
+"""
+AS_THE_DOCS_SIGN = Signature(frozenset({"runtime"}), "TEAM123456", True)
+ENTITLEMENTS = plistlib.dumps(
+    {"com.apple.security.cs.disable-library-validation": True}
+)
+
+
+def test_update_feed_is_the_https_feed_of_an_app_with_a_key_and_its_version():
+    assert update_feed(UPDATES_INFO) == FEED
+
+
+@pytest.mark.parametrize(
+    ("changed", "problem"),
+    [
+        ({"SUFeedURL": "http://example.com/appcast.xml"}, "not an https URL"),
+        ({"SUPublicEDKey": base64.b64encode(bytes(16)).decode()}, "not a base64"),
+        ({"SUPublicEDKey": "not base64!"}, "not a base64"),
+        ({"SUPublicEDKey": ""}, "not a base64"),
+        ({"CFBundleVersion": "1"}, "CFBundleVersion is '1', not the app's version"),
+    ],
+    ids=["http feed", "short key", "not base64", "no key", "briefcase's build"],
+)
+def test_update_feed_exits_on_settings_sparkle_could_not_update_by(
+    changed: dict[str, str], problem: str
+):
+    with pytest.raises(SystemExit, match=re.escape(problem)):
+        update_feed(UPDATES_INFO | changed)
+
+
+@pytest.mark.parametrize(
+    ("described", "signed"),
+    [
+        (SIGNED_BY_DEVELOPER_ID, AS_THE_DOCS_SIGN),
+        (SIGNED_AD_HOC, Signature(frozenset({"adhoc"}), "not set", False)),
+    ],
+    ids=["developer id", "ad hoc"],
+)
+def test_signature_reads_flags_team_and_timestamp_from_codesigns_description(
+    described: str, signed: Signature
+):
+    assert signature(described) == signed
+
+
+def test_sparkles_code_signed_as_its_docs_do_with_the_apps_team_is_fine():
+    assert unlike_sparkles_docs(AS_THE_DOCS_SIGN, "", AS_THE_DOCS_SIGN) == []
+
+
+@pytest.mark.parametrize(
+    ("code", "entitlements", "problem"),
+    [
+        (AS_THE_DOCS_SIGN._replace(flags=frozenset()), "", "no hardened runtime"),
+        (
+            AS_THE_DOCS_SIGN,
+            ENTITLEMENTS.decode(),
+            "entitlements com.apple.security.cs.disable-library-validation",
+        ),
+        (
+            AS_THE_DOCS_SIGN._replace(team="OTHER12345"),
+            "",
+            "team OTHER12345, not the app's, TEAM123456",
+        ),
+        (AS_THE_DOCS_SIGN._replace(timestamped=False), "", "no timestamp"),
+    ],
+    ids=["no runtime", "the app's entitlements", "another team", "no timestamp"],
+)
+def test_unlike_sparkles_docs_names_how_its_code_is_signed_otherwise(
+    code: Signature, entitlements: str, problem: str
+):
+    assert unlike_sparkles_docs(code, entitlements, AS_THE_DOCS_SIGN) == [problem]
+
+
+def sparkle_framework(folder: Path, version: str = "2.10.1") -> Path:
+    """A Sparkle.framework in ``folder``, of ``version``, as far as its Info.plist."""
+    framework = folder / updates.SPARKLE
+    (framework / "Resources").mkdir(parents=True)
+    info = {"CFBundleShortVersionString": version}
+    (framework / "Resources" / "Info.plist").write_bytes(plistlib.dumps(info))
+    return framework
+
+
+def test_sparkle_loads_with_the_updater_controller_and_names_its_version(
+    objc: FakeObjC,
+):
+    assert sparkle_loads(sparkle_framework(objc.frameworks)) == "2.10.1"
+
+
+def test_sparkle_loads_exits_on_a_framework_that_does_not_load(objc: FakeObjC):
+    objc.loads = False
+    framework = sparkle_framework(objc.frameworks)
+    with pytest.raises(SystemExit, match=f"{re.escape(str(framework))} does not load"):
+        sparkle_loads(framework)

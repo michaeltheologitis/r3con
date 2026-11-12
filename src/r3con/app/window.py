@@ -12,8 +12,9 @@ app's menu or in the Dock, or logging out hides it, then stops the server as
 ``serve``'s stop does, for up to ``QUIT_SECONDS``, and ends the process: a model call
 still in flight is cut off, and its run folder left without ``run_failed``. If Toga
 can't start the app, the server stops before the error goes on. Its web view has no
-downloads, so a tab is saved through a Save dialog on the window. Toga is the Mac
-app's own: neither r3con nor its ``app`` extra installs it.
+downloads, so a tab is saved through a Save dialog on the window. It updates itself
+through Sparkle (:mod:`r3con.app.updates`). Toga is the Mac app's own: neither r3con
+nor its ``app`` extra installs it.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from typing import Any, NoReturn, cast
 
 import toga
 
+from r3con.app import updates
 from r3con.app.server import MAC_APP_KEY_SERVICE, serve
 from r3con.logging_setup import configure_logging, get_logger
 
@@ -84,6 +86,7 @@ def main() -> None:
     def page(app: toga.App, **kwargs: Any) -> toga.Widget:
         for window in app.windows:
             window.size = WINDOW_SIZE
+        updates.start(app)
         return toga.WebView(url=url)
 
     def hide(app: toga.App, **kwargs: Any) -> bool:
