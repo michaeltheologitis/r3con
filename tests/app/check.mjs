@@ -321,7 +321,7 @@ const WRITE_DOCUMENTS =
 const OLE2_START = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0x00, 0x00];
 const NOT_TEXT = 'R3Con reads text, PDF and Word (.docx) files: save as one of those, then add again.';
 const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
-const NEEDS_APP = 'PDF, Word and zip files need r3con app; this prototype reads only text files.';
+const NEEDS_APP = 'PDF, Word, HTML and zip files need r3con app; this prototype reads only text files.';
 const UNREADABLE_ZIP = "Couldn't unzip it: it's corrupt, or not a zip.";
 const NO_DOCUMENTS = 'No text, PDF or Word (.docx) files in it';
 const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
@@ -2178,16 +2178,17 @@ const oldWord = () => ({ name: 'old.doc', mimeType: 'application/msword', buffer
 const oldPowerPoint = () => ({ name: 'old.ppt', mimeType: 'application/vnd.ms-powerpoint', buffer: Buffer.from(OLE2_START) });
 const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? null : el.textContent));
 
-// The prototype has no r3con app to extract a PDF's or a Word file's text.
+// The prototype has no r3con app to extract a PDF's, a Word file's or a web page's text.
 async function filesNotText() {
   await withPage('files', { sample: false }, async (page) => {
     await page.click('#tab-files');
-    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], oldWord(), memo('notes.log', 'A log line.\n')]);
+    const webPage = memo('page.html', '<p>An HTML note.</p>\n');
+    await page.setInputFiles('#file-input', [documents['01_memo.pdf'], documents['report.docx'], documents['memos.zip'], webPage, oldWord(), memo('notes.log', 'A log line.\n')]);
     await removeButton(page, 'notes.log').waitFor();
     const listed = await removeNames(page);
     const error = await filesError(page);
-    const expected = `Not added: 01_memo.pdf, memos.zip, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
-    const name = 'the prototype refuses a PDF, a .docx and a zip, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
+    const expected = `Not added: 01_memo.pdf, memos.zip, page.html, report.docx. ${NEEDS_APP} Not added: old.doc. ${OLD_WORD}`;
+    const name = 'the prototype refuses a PDF, a .docx, an .html and a zip, saying they need r3con app, and an old .doc, saying to save it as .docx, PDF or text, and adds a .log';
     const added = isDeepStrictEqual(listed, ['remove notes.log']);
     check('files', name, added && error === expected, `${listed.join(', ')}; ${error}`);
   });
@@ -6428,6 +6429,43 @@ async function liveWord(url) {
   });
 }
 
+// A web page, and the Markdown r3con makes of it: its script left out, its link's text kept without the URL.
+const HTML_PAGE =
+  '<!doctype html><script>var site = "Merrow";</script>' +
+  '<p>Halloran logged <b>7</b> incidents, as <a href="https://example.com/q3">the Q3 report</a> says.</p>' +
+  '<table><tr><th>Site</th><th>Incidents</th></tr><tr><td>Halloran</td><td>7</td></tr></table>\n';
+const HTML_FIRST_LINE = 'Halloran logged **7** incidents, as the Q3 report says.';
+const HTML_TEXT = `${HTML_FIRST_LINE}\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |`;
+
+async function liveHtml(url) {
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
+    const posts = postsOf(page);
+    await page.evaluate(dropItems, { on: 'panel', items: [['report.html', HTML_PAGE], ['blank.htm', '<script>var site;</script>\n']] });
+    const one = await becomes(page, () => document.querySelectorAll('.node.doc').length === 1);
+    await page.click('#tab-files');
+    const listed = await removeNames(page);
+    const error = await filesError(page);
+    const sentToApp = isDeepStrictEqual(posts, Array(2).fill('/api/documents/text'));
+    const blankRefused = error === `Not added: blank.htm. ${NO_TEXT}` && isDeepStrictEqual(listed, ['remove report.html']);
+    const blankName = 'each .html and .htm page dropped goes to r3con app for its text, and one with none is refused as it is added, named, saying why';
+    check('live', blankName, one && sentToApp && blankRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
+
+    const shown = await openFileView(page, 'report.html');
+    const extracted = isDeepStrictEqual(shown, { meta: fmtSize(Buffer.byteLength(HTML_PAGE)), text: HTML_TEXT });
+    check('live', "the files tab shows a web page as Markdown, its script left out, its link's URL gone, its table kept, and its file's size", extracted, JSON.stringify(shown));
+
+    await page.click('#tab-chat');
+    const started = runPosted(page);
+    await page.click('#run-btn');
+    const sent = (await started)?.postDataJSON().documents;
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    check('live', "a run is sent the web page's Markdown", done && isDeepStrictEqual(sent, [HTML_TEXT]), JSON.stringify(sent));
+    const { marks } = await answerAndFileShown(page);
+    const marked = marks?.marks.map((mark) => mark.text);
+    check('live', "the answer's quote from the web page is highlighted in its Markdown in the files tab", isDeepStrictEqual(marked, [HTML_FIRST_LINE]), JSON.stringify(marked));
+  });
+}
+
 // The approved icon for each suffix r3con reads, kept apart from the page's SUFFIX_TYPES so that a changed one fails.
 const DOC_TYPES = {
   '.txt': 'text',
@@ -6443,6 +6481,7 @@ const DOC_TYPES = {
   '.yaml': 'yml',
   '.yml': 'yml',
   '.html': 'markup',
+  '.htm': 'markup',
   '.xml': 'markup',
 };
 // A document named for each suffix, one in capitals, and two that get the text icon: one of another suffix, one of none.
@@ -6506,7 +6545,7 @@ async function liveNotText(url) {
       oldPowerPoint(),
       binary,
       memo('notes.log', 'A log line.\n'),
-      memo('page.html', '<p>An HTML note.</p>\n'),
+      memo('feed.xml', '<note>An XML note.</note>\n'),
       memo('README', 'An extensionless note.\n'),
       utf16('utf16_bom.txt', 'A Notepad note.\n', UTF16LE_BOM),
       utf16('utf16_no_bom.txt', 'No byte-order mark.\n'),
@@ -6520,15 +6559,15 @@ async function liveNotText(url) {
     const error = await filesError(page);
     const refused =
       error === `Not added: data.bin, ff_fe.bin, old.ppt, utf16_no_bom.txt, utf32.txt. ${NOT_TEXT} Not added: old.doc. ${OLD_WORD}` &&
-      isDeepStrictEqual(listed, ['remove README', 'remove notes.log', 'remove page.html', 'remove utf16_bom.txt']);
+      isDeepStrictEqual(listed, ['remove README', 'remove feed.xml', 'remove notes.log', 'remove utf16_bom.txt']);
     const name =
-      'an old .doc and .ppt, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an .html, an extensionless file and UTF-16 with a byte-order mark are added as text';
+      'an old .doc and .ppt, a file with a NUL byte, UTF-16 without a byte-order mark, UTF-32, and binary that starts like UTF-16 are refused, named, with what to do, and nothing is sent; a .log, an .xml, an extensionless file and UTF-16 with a byte-order mark are added as text';
     check('live', name, four && refused && posts.length === 0, `${listed.join(', ')}; ${error}; ${posts.length} posts`);
     await page.click('#tab-chat');
     const started = runPosted(page);
     await page.click('#run-btn');
     const sent = (await started)?.postDataJSON().documents;
-    const texts = ['An extensionless note.\n', 'A log line.\n', '<p>An HTML note.</p>\n', 'A Notepad note.\n'];
+    const texts = ['An extensionless note.\n', '<note>An XML note.</note>\n', 'A log line.\n', 'A Notepad note.\n'];
     check('live', 'a run is sent only the text files, the UTF-16 one decoded', isDeepStrictEqual(sent, texts), JSON.stringify(sent));
   });
 }
@@ -7217,6 +7256,7 @@ const HARMLESS = 'A harmless summary, shown in place of what is asked over.';
 // A .html that names the saved block in its text, but holds none.
 const PLAIN_HTML = 'notes.html';
 const PLAIN_HTML_TEXT = '<!doctype html><title>Notes</title><p>Notes on the r3con-tab block, which this file is not.</p>\n';
+const PLAIN_HTML_MARKDOWN = 'Notes\n\nNotes on the r3con-tab block, which this file is not.';
 const UNREAD_VERSION = 99;
 
 // The shown tab as drawn, each node by its name, icon and whether it is lit, so that two pages compare.
@@ -7333,7 +7373,10 @@ async function liveImport(url, server) {
     await page.evaluate(dropItems, { on: 'panel', items: [[PLAIN_HTML, PLAIN_HTML_TEXT]] });
     await filesCounted(page, 1);
     const plain = { names: (await page.evaluate(filesPane)).names, tabs: await tabCount(page), error: await filesError(page) };
-    check('live', 'a .html without a saved tab in it, though it names the block, stays a document', isDeepStrictEqual(plain, { names: [PLAIN_HTML], tabs: 1, error: null }), JSON.stringify(plain));
+    await page.click('#tab-files');
+    plain.text = (await openFileView(page, PLAIN_HTML)).text;
+    const plainName = 'a .html without a saved tab in it, though it names the block, stays a document, read as Markdown';
+    check('live', plainName, isDeepStrictEqual(plain, { names: [PLAIN_HTML], tabs: 1, error: null, text: PLAIN_HTML_MARKDOWN }), JSON.stringify(plain));
   });
 
   // A file whose run, as it would be drawn, says one thing and whose representation, which an ask reads, says another.
@@ -7506,17 +7549,16 @@ async function liveSaveDialog(url, server) {
   });
 }
 
-// The prototype sends nothing, so a saved tab's file is one of its text files there.
+// The prototype sends nothing, so a saved tab's file is a web page there, which it has no r3con app to read.
 async function prototypeImports() {
   const html = '<!doctype html><title>A saved tab</title><script type="application/json" id="r3con-tab">{"version":1}</script>\n';
   await withPage('saved', { sample: false }, async (page) => {
     const calls = [];
     page.on('request', (request) => request.url().includes('/api/') && calls.push(request.url()));
     await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
-    // Files added over the sample memos take their place.
-    await filesCounted(page, 1);
-    const names = (await page.evaluate(filesPane)).names;
-    check('saved', "in the prototype, a saved tab's file is a document like any other, and nothing is sent", !calls.length && isDeepStrictEqual(names, [SAVED_NAME]) && (await tabCount(page)) === 1, `${names}; ${calls.join(' ')}`);
+    const refused = await becomes(page, (expected) => document.getElementById('files-error').textContent === expected, `Not added: ${SAVED_NAME}. ${NEEDS_APP}`);
+    const name = "in the prototype, a saved tab's file is refused as any web page is, saying it needs r3con app, and nothing is sent";
+    check('saved', name, refused && !calls.length && (await tabCount(page)) === 1, `${await filesError(page)}; ${calls.join(' ')}`);
   });
 }
 
@@ -7549,6 +7591,7 @@ async function live() {
     await liveUnreadable(url);
     await livePdf(url);
     await liveWord(url);
+    await liveHtml(url);
     await liveIcons(url);
     await liveBatches(url);
     await liveNotText(url);

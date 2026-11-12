@@ -105,7 +105,7 @@ REPORT = [
     "Merrow's count is provisional.",
 ]
 DOCUMENT_TEXT = "/api/documents/text"
-UNEXTRACTED = "name: must end in one of .pdf, .docx"
+UNEXTRACTED = "name: must end in one of .pdf, .docx, .html, .htm"
 DOCUMENT_ZIP = "/api/documents/zip"
 ZIP_NAME = "memos.zip"
 MEMO = "A memo.\n"
@@ -1754,6 +1754,25 @@ def test_a_word_files_text_is_extracted_as_read_documents_extracts_it(
     assert response.json() == {"text": text}
 
 
+# A web page is read by its name's suffix, in any case.
+@pytest.mark.parametrize("name", ["page.html", "PAGE.HTM"])
+def test_a_web_pages_text_is_extracted_as_markdown_as_read_documents_extracts_it(
+    client: TestClient, tmp_path: Path, name: str
+):
+    path = tmp_path / name
+    path.write_text(
+        "<script>var site;</script><h1>Incidents</h1>"
+        '<p>Halloran logged <b>7</b>; see <a href="https://example.com">the report</a>.'
+        "</p>",
+        encoding="utf-8",
+    )
+    response = text_of(client, path)
+    text = "# Incidents\n\nHalloran logged **7**; see the report."
+    assert response.status_code == 200
+    assert response.json() == {"text": text}
+    assert read_documents(path) == {name: text}
+
+
 def test_the_page_sends_the_server_each_suffix_r3con_extracts():
     script = (APP_DIR / "app.js").read_text(encoding="utf-8")
     listed = re.search(r"const EXTRACTED_SUFFIXES = \[(.*?)\];", script)
@@ -1787,8 +1806,19 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
             write_docx,
             "memo.docx: no extractable text; skipping it",
         ),
+        (
+            "memo.html",
+            lambda path: path.write_bytes(b"<script>var site;</script>"),
+            "memo.html: no extractable text; skipping it",
+        ),
     ],
-    ids=["scanned-pdf", "corrupt-pdf", "corrupt-docx", "empty-docx"],
+    ids=[
+        "scanned-pdf",
+        "corrupt-pdf",
+        "corrupt-docx",
+        "empty-docx",
+        "script-only-html",
+    ],
 )
 def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
     client: TestClient,
@@ -1819,7 +1849,7 @@ def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_
         ({"name": "memo.txt"}, UNEXTRACTED),
         ({"name": "memo.doc"}, UNEXTRACTED),
         ({"name": "memo"}, UNEXTRACTED),
-        ({"name": "memo.html"}, UNEXTRACTED),
+        ({"name": "memo.xml"}, UNEXTRACTED),
     ],
 )
 def test_a_document_without_a_valid_name_is_refused_with_what_is_wrong(

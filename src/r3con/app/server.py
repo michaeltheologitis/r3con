@@ -54,11 +54,13 @@ a reload reads.
   what it writes to the logs dir and in what it logs (:mod:`r3con.masking`), the
   environment's keys too; the server's own log line of a failure goes through the same
   masking.
-- ``POST /api/documents/text?name=<file name>``, with a PDF's or a Word file's bytes as
-  the body, chosen by the name's ``.pdf`` or ``.docx`` (422 for any other), answers
-  ``{text}``: its text as ``r3con.read_documents`` extracts it, which is ``""`` for a
+- ``POST /api/documents/text?name=<file name>``, with a PDF's, a Word file's or a web
+  page's bytes as the body, chosen by the name's ``.pdf``, ``.docx``, ``.html`` or
+  ``.htm`` (422 for any other), answers ``{text}``: its text as
+  ``r3con.read_documents`` extracts it, a web page's as Markdown, which is ``""`` for a
   scan, a file with no text or one that can't be read, as the server's log then says.
-  The page sends each PDF and Word file it is given here, and reads other files itself.
+  The page sends each PDF, Word file and web page it is given here, and reads other
+  files itself.
 - ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body,
   answers ``{files: [{name, size, text}], skipped}``. Its documents are the entries
   ``r3con.read_documents``' folder walk would read, judged by their paths below the

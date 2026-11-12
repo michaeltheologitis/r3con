@@ -76,6 +76,8 @@ NESTED_TABLE = (
     f"<w:tc>{table([['inner1', 'inner2']])}{paragraph('')}</w:tc></w:tr></w:tbl>"
 )
 PLAIN_TEXT = b"Plain words, saved under the wrong name."
+# Curly quotes and a dash, which windows-1252 has and Latin-1 does not.
+QUOTED = "“Incidents” — 7, at Merrow’s site."
 # What Word writes beside a document someone has open: their name, padded.
 WORD_OWNER_FILE = b"\x07Michael" + bytes(154)
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -590,6 +592,120 @@ def test_a_word_file_that_cannot_be_read_is_logged_and_dropped_not_read_as_text(
     assert documents == {"b_plain.txt": "a plain memo"}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         f"{unreadable}: not readable as a Word file (BadZipFile); skipping it"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("html", "text"),
+    [
+        ("<h1>Incidents</h1><h2>By site</h2>", "# Incidents\n\n## By site"),
+        (
+            "<p>Revenue was <b>12 million</b> in Q3.</p>",
+            "Revenue was **12 million** in Q3.",
+        ),
+        ("<ul><li>Halloran</li><li>Merrow</li></ul>", "* Halloran\n* Merrow"),
+        (
+            (
+                "<table><tr><th>Name|Alias</th><th>Value</th></tr>"
+                "<tr><td>a|b</td><td>7</td></tr></table>"
+            ),
+            "| Name\\|Alias | Value |\n| --- | --- |\n| a\\|b | 7 |",
+        ),
+        (
+            '<p>See <a href="https://example.com/q3">the Q3 report</a>.</p>',
+            "See the Q3 report.",
+        ),
+        (
+            '<p>Before the chart.<img src="chart.png" alt="A chart"></p>',
+            "Before the chart.",
+        ),
+        (
+            (
+                "<script>var site = 'Merrow';</script><style>p { color: red }</style>"
+                "<noscript>Turn on JavaScript.</noscript>"
+                "<template><p>Later.</p></template><p>Incidents: 7.</p>"
+            ),
+            "Incidents: 7.",
+        ),
+        (
+            '<?xml version="1.0"?><!DOCTYPE html><html><!-- a note --><p>Incidents: 7.',
+            "Incidents: 7.",
+        ),
+        ("<title>Q3</title><h1>Incidents</h1>", "Q3\n\n# Incidents"),
+        ("<p><site-name>Merrow</site-name>: <o:p>7</o:p></p>", "Merrow: 7"),
+    ],
+    ids=[
+        "headings",
+        "bold",
+        "list",
+        "table-with-a-pipe-in-a-cell",
+        "link-keeps-its-text",
+        "image-dropped",
+        "script-style-noscript-template-dropped",
+        "xml-declaration-doctype-comment-dropped",
+        "blank-lines-collapsed",
+        "unknown-tags-keep-their-text",
+    ],
+)
+def test_a_web_page_is_read_as_markdown(tmp_path, html, text):
+    page = tmp_path / "page.html"
+    page.write_text(html, encoding="utf-8")
+    assert read_documents(page) == {"page.html": text}
+
+
+@pytest.mark.parametrize(
+    ("declared", "charset", "text"),
+    [
+        ('<meta charset="windows-1252">', "cp1252", QUOTED),
+        (
+            '<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">',
+            "cp1252",
+            QUOTED,
+        ),
+        # Undeclared, these bytes are guessed to be another charset.
+        ('<meta charset="iso-8859-15">', "iso-8859-15", "Fines: €7,500, or £7,000."),
+    ],
+    ids=["windows-1252", "windows-1252-http-equiv", "latin-9-a-guess-misreads"],
+)
+def test_a_web_page_is_decoded_by_the_charset_it_declares(
+    tmp_path, declared: str, charset: str, text: str
+):
+    page = tmp_path / "page.html"
+    page.write_bytes(f"<head>{declared}</head><p>{text}</p>".encode(charset))
+    assert read_documents(page) == {"page.html": text}
+
+
+def test_a_walk_reads_html_and_htm_pages_as_markdown_and_xml_as_written(tmp_path):
+    (tmp_path / "a_page.htm").write_text("<h1>Incidents</h1>", encoding="utf-8")
+    (tmp_path / "b_page.HTML").write_text("<p><b>7</b> in Q3.</p>", encoding="utf-8")
+    (tmp_path / "c_feed.xml").write_text("<count>7</count>", encoding="utf-8")
+    assert read_documents(tmp_path) == {
+        "a_page.htm": "# Incidents",
+        "b_page.HTML": "**7** in Q3.",
+        "c_feed.xml": "<count>7</count>",
+    }
+
+
+@pytest.mark.parametrize(
+    ("content", "logged"),
+    [
+        (b"", "no extractable text; skipping it"),
+        (b"<script>alert('Merrow')</script>", "no extractable text; skipping it"),
+        (b"<div>" * 5000, "not readable as HTML (RecursionError); skipping it"),
+    ],
+    ids=["empty", "only-a-script", "nested-too-deep"],
+)
+def test_a_web_page_with_no_text_or_that_cannot_be_read_is_logged_and_dropped(
+    tmp_path, caplog, content: bytes, logged: str
+):
+    page = tmp_path / "a_page.html"
+    page.write_bytes(content)
+    (tmp_path / "b_plain.txt").write_text("a plain memo", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents(tmp_path)
+    assert documents == {"b_plain.txt": "a plain memo"}
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{page}: {logged}"
     ]
 
 
