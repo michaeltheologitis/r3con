@@ -92,6 +92,8 @@ const PROVIDER_MODEL = 'anthropic/claude-opus-5-5';
 // Enough Tab presses to reach the other model field from the picker, past the composer's buttons.
 const MAX_TABS = 5;
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
+// Where a live tab keeps what r3con app opened it with, for a reload: in its sessionStorage.
+const LAUNCH_KEY = 'r3con-launch';
 const TEST_KEY = 'sk-check-not-a-real-key-7f3a';
 // The page's MASK before TEST_KEY's last four, the only part of it r3con app answers.
 const TEST_HINT = '••••7f3a';
@@ -818,8 +820,8 @@ function countStatusWrites() {
 
 function placesHolding(key) {
   const fields = [...document.querySelectorAll('input, textarea')].filter((el) => el.value.includes(key));
-  const holding = (store) => Object.keys(store).filter((k) => store.getItem(k).includes(key));
-  const stores = [localStorage, sessionStorage].flatMap(holding);
+  const holding = (area) => Object.keys(window[area]).filter((k) => window[area].getItem(k).includes(key)).map((k) => `${area} ${k}`);
+  const stores = ['localStorage', 'sessionStorage'].flatMap(holding);
   const markup = document.documentElement.outerHTML.includes(key) ? ['markup'] : [];
   const address = location.href.includes(key) ? ['location'] : [];
   return [...fields.map((el) => `#${el.id}`), ...stores, ...markup, ...address];
@@ -1675,23 +1677,27 @@ async function folders() {
     const reading = (await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id))).filter((id) => !id.startsWith('doc-g'));
 
     await pressNode(page, folderSel('letters'));
-    await pressNode(page, folderSel('archive'));
+    await pressNode(page, folderSel('archive'), { key: true });
     const opened = await page.evaluate(treeRows, TREE_INDENT);
-    const expected = ['reports · 5 files', 'letters · 5 files (open)', '  5 more files', 'archive · 12 files (open)', '  10 more files', '  old_10', '  old_11', 'memo'];
+    const letters = Array.from({ length: 5 }, (_, i) => `  letter_${i}`);
+    const archiveEnds = [['00', '01', '02'], ['09', '10', '11']].map((ends) => ends.map((i) => `  old_${i}`));
+    const expected = ['reports · 5 files', 'letters · 5 files (open)', ...letters, 'archive · 12 files (open)', ...archiveEnds[0], '  6 more files', ...archiveEnds[1], 'memo'];
     const fold = await page.evaluate(foldInk);
-    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, nodeSel('doc-f5'))) === 1 && (await count(page, nodeSel('doc-f10'))) === 1;
-    const scopedName = `a fold of files with nothing relevant sits on its folder's line and never reaches past the folder: two open folders' ${FOLD_FROM_DOCS + 5} quiet files fold as two, saying "files"`;
+    // Archive's files follow reports' 5 and letters' 5; its fold starts after its own first few.
+    const archiveFold = nodeSel(`doc-f${5 + 5 + CONTEXT_DOCS}`);
+    const scoped = isDeepStrictEqual(opened, expected) && (await count(page, '#world .node.fold.doc')) === 1 && (await count(page, archiveFold)) === 1;
+    const scopedName = `a fold of quiet files sits on its folder's line, says "files", keeps the folder's own first and last ${CONTEXT_DOCS} in view and never reaches past the folder; a folder of ${FOLD_FROM_DOCS} files or fewer has none`;
     check('folders', scopedName, scoped && reading.length === 1, `${opened.join(' | ')}; ${reading.join(' ')}`);
-    await pressNode(page, nodeSel('doc-f10'));
+    await pressNode(page, archiveFold, { key: true });
     const dots = (await page.evaluate(treeGeometry, TREE_GEOMETRY)).meets;
-    await pressNode(page, nodeSel('doc-f10'));
-    // Letters' fold; archive's, opened, its 10 files and the 2 kept in view.
-    const rows = 1 + 1 + 10 + 2;
+    await pressNode(page, archiveFold, { key: true });
+    // Letters' 5 files, archive's 12, and its opened fold's own row.
+    const rows = 5 + 12 + 1;
     check('folders', "a fold's tick meets its dots as a file's meets its page, at their middle, a few pixels short, the fold closed or open", dots.length === rows && dots.every(meets), JSON.stringify(dots));
     check('folders', "a fold in a folder is grey, as a loose file's is: its count and dots in the dim colour", fold && fold.count.color === fold.dim && fold.dots === fold.dim, JSON.stringify(fold));
 
     // Opened, then closed again: the user's say holds once an answer lands.
-    await pressNode(page, folderSel('letters'));
+    await pressNode(page, folderSel('letters'), { key: true });
     await page.click('#tab-chat');
     await send(page, 'Which site logged the most incidents?');
     await becomes(page, statusMatches, SIMULATED_DONE.source);
@@ -1786,6 +1792,54 @@ async function folders() {
     const [r1, r2] = ['r1', 'r2'].map((kind) => `${kind}-${id.slice('doc-'.length)}`);
     const name = "a closed folder's lines stay as the run drew them once the panel folds again, among them a line from its one relevant file's snippet to the next round in it";
     check('folders', name, drawn.lines.includes(`${r1}>${r2}`) && isDeepStrictEqual(redrawn, drawn), JSON.stringify({ drawn, redrawn }));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    // Quiet folders of 4, 5, 7 and 10 files at the tab's start, middle and end, loose files between, and one of 12.
+    const sizes = { four: 4, five: 5, seven: 7, big: 12, ten: 10 };
+    const stems = (name) => Array.from({ length: sizes[name] }, (_, i) => `${name}_${String(i + 1).padStart(2, '0')}`);
+    const quietFolder = (name) => [name, stems(name).map((stem) => [`${stem}.txt`, ''])];
+    const loose = ['loose_1.txt', 'loose_2.txt', 'loose_3.txt'].map((name) => [name, '']);
+    const [four, ...others] = Object.keys(sizes).map((name) => [quietFolder(name)]);
+    const total = Object.values(sizes).reduce((a, b) => a + b, loose.length);
+    await dropBatches(page, [four, loose, ...others], total);
+    // From the keyboard, as each opened folder pushes the next out of view.
+    for (const name of Object.keys(sizes)) await pressNode(page, folderSel(name), { key: true });
+    const filesOf = (name) => stems(name).map((stem) => `  ${stem}`);
+    const opened = (name, rows = filesOf(name)) => [`${name} · ${sizes[name]} files (open)`, ...rows];
+    const big = filesOf('big');
+    /** @param {string[]} fold the rows of the folder of 12 */
+    const rowsWith = (fold) => [...opened('four'), 'loose_1', 'loose_2', 'loose_3', ...opened('five'), ...opened('seven'), ...opened('big', fold), ...opened('ten')];
+    const before = await page.evaluate(treeRows, TREE_INDENT);
+    const expectedBefore = rowsWith([...big.slice(0, CONTEXT_DOCS), `  ${sizes.big - 2 * CONTEXT_DOCS} more files`, ...big.slice(-CONTEXT_DOCS)]);
+    const small = `in a tab of ${total} files, an opened folder of ${FOLD_FROM_DOCS} files or fewer shows them all, wherever it sits, as do loose files beside folders`;
+    check('folders', `before a run, ${small}; one of ${sizes.big} folds all but its own first and last ${CONTEXT_DOCS}`, isDeepStrictEqual(before, expectedBefore), before.join(' | '));
+    await page.click('#tab-chat');
+    await send(page, 'Which memo is relevant?');
+    const done = await becomes(page, statusMatches, SIMULATED_DONE.source);
+    const after = await page.evaluate(treeRows, TREE_INDENT);
+    const expectedAfter = rowsWith([`  ${sizes.big} files · nothing relevant`]);
+    check('folders', `after a run with nothing relevant, ${small}; one of ${sizes.big} folds whole`, done && isDeepStrictEqual(after, expectedAfter), after.join(' | '));
+  });
+
+  await withPage('folders', { sample: false }, async (page) => {
+    // A folder of 24 quiet files of its own, subfolders sorted among them, and one file with text, b_04.
+    const named = (prefix) => Array.from({ length: 8 }, (_, i) => [`${prefix}_0${i + 1}.txt`, prefix === 'b' && i === 3 ? 'A relevant memo.\n' : '']);
+    const sub = (name) => [name, [['x.txt', ''], ['y.txt', '']]];
+    const mixed = ['mixed', [...named('a'), sub('a_sub'), ...named('b'), sub('b_sub'), ...named('c')]];
+    await dropBatches(page, [[mixed]], 28);
+    await pressNode(page, folderSel('mixed'), { key: true });
+    const before = await page.evaluate(treeRows, TREE_INDENT);
+    const files = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i) => `  ${prefix}_0${from + i}`);
+    const expectedBefore = ['mixed · 28 files (open)', ...files('a', 1, 3), '  5 more files', '  a_sub · 2 files', '  8 more files', '  b_sub · 2 files', '  5 more files', ...files('c', 6, 8)];
+    await page.click('#tab-chat');
+    await send(page, 'Which memo is relevant?');
+    const done = await becomes(page, statusMatches, SIMULATED_DONE.source);
+    const after = (await page.evaluate(treeRows, TREE_INDENT)).map((row) => row.replace(/ \((lit|unused)\)$/, ''));
+    const quiet = (n) => `  ${n} files · nothing relevant`;
+    const expectedAfter = ['mixed · 28 files (open)', quiet(8), '  a_sub · 2 files', quiet(3), '  b_04', quiet(4), '  b_sub · 2 files', quiet(8)];
+    const name = `a folder of more than ${FOLD_FROM_DOCS} files of its own folds its quiet runs between its subfolders, keeping its own first and last ${CONTEXT_DOCS} in view before a run, and a relevant file leaves the runs either side folded`;
+    check('folders', name, done && isDeepStrictEqual(before, expectedBefore) && isDeepStrictEqual(after, expectedAfter), `${before.join(' | ')}; then ${after.join(' | ')}`);
   });
 
   await withPage('folders', { sample: false }, async (page) => {
@@ -5278,8 +5332,14 @@ async function liveSession(url) {
 
     const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
     const logged = messages.filter((m) => m.text.includes(token) || m.text.includes(TEST_KEY)).length;
-    const keptName = 'no storage, field, address, markup or console message holds the token or the key';
-    check('live', keptName, holders.length === 0 && logged === 0, [...holders, `${logged} messages`].join(', '));
+    const keptName = "no field, address, markup or console message holds the token or the key, nor any storage but the tab's sessionStorage, which keeps the token for a reload";
+    check('live', keptName, isDeepStrictEqual(holders, [`sessionStorage ${LAUNCH_KEY}`]) && logged === 0, [...holders, `${logged} messages`].join(', '));
+
+    await page.reload();
+    const reloaded = await becomes(page, (hint) => document.getElementById('state-openai').textContent === hint, REMEMBERED_HINT);
+    const reloadedAt = await page.evaluate(() => location.href);
+    const reloadName = "a reload keeps the launch token: the page still reads the server's keys, and the address still holds no token";
+    check('live', reloadName, reloaded && !reloadedAt.includes(token) && !reloadedAt.includes('#'), `${reloadedAt}; ${await page.textContent('#run-status')}`);
   });
 }
 
@@ -6789,6 +6849,13 @@ async function liveStaleToken(url) {
     const unstarted = await page.evaluate(logOf);
     const endedName = 'a run that fails before it starts ends its log on failed, not on starting, and says why below it';
     check('live', endedName, unstarted.folded === 'failed' && unstarted.mark === 'err' && isDeepStrictEqual(unstarted.after, [STALE_TOKEN]), `${unstarted.folded}; ${unstarted.after.join(' | ')}`);
+
+    // The launch's own URL in the same tab, as when pasted there, then a reload: its token replaces the one the tab kept.
+    await page.goto(url);
+    const [keys] = await Promise.all([page.waitForResponse((r) => new URL(r.url()).pathname === '/api/keys'), page.reload()]);
+    const kept = await page.evaluate((key) => sessionStorage.getItem(key), LAUNCH_KEY);
+    const replacedName = "a launch's URL opened in a tab that kept another token takes its place there, and a reload then reaches r3con app";
+    check('live', replacedName, keys.status() === 200 && kept === new URL(url).hash.slice(1), `${keys.status()}; kept ${kept}`);
   });
 }
 
@@ -7292,6 +7359,8 @@ const CANCELLED_QUESTION = `${SAVED_QUESTION} (cancel the save)`;
 const NO_ROOM_QUESTION = `${SAVED_QUESTION} (no room to save)`;
 const UNWRITABLE_SAVE = "● The file couldn't be written there, so the tab isn't saved.";
 const CANCELLED_NAME = 'which-site-logged-the-most-incidents-cancel-the-save.html';
+const RELOADED_QUESTION = `${SAVED_QUESTION} (after a reload)`;
+const RELOADED_NAME = 'which-site-logged-the-most-incidents-after-a-reload.html';
 
 // Runs `question` over the sample memos and saves the tab: r3con app's answer to the save, the status line once an error
 // shows there or none has in SETTLE_TIMEOUT_MS, and what the page downloaded.
@@ -7314,6 +7383,14 @@ async function liveSaveDialog(url, server) {
     const held = existsSync(saved(SAVED_NAME)) && JSON.parse(SAVED_BLOCK.exec(readFileSync(saved(SAVED_NAME), 'utf8'))[1]);
     const savedName = "with r3con app's Save dialog, save sends the file there, under the question's name, and the page downloads nothing";
     check('live', savedName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && held?.version === SAVED_VERSION, `${answered}; ${status}; ${downloads}`);
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    // As ⌘R does in the Mac app.
+    await page.reload();
+    await addMemos(page);
+    const { answered, status, downloads } = await savedThroughDialog(page, RELOADED_QUESTION);
+    const reloadedName = "after a reload, save still goes through r3con app's Save dialog, and the page downloads nothing";
+    check('live', reloadedName, answered === 204 && LIVE_DONE.test(status) && !downloads.length && existsSync(saved(RELOADED_NAME)), `${answered}; ${status}; ${downloads}`);
   });
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const { answered, status, downloads } = await savedThroughDialog(page, CANCELLED_QUESTION);

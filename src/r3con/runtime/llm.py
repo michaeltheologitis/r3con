@@ -100,7 +100,15 @@ from pydantic import BaseModel, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import is_credential_name, is_path, one_line, plain, register_key
+from r3con.masking import (
+    is_credential_name,
+    is_path,
+    json_object,
+    one_line,
+    plain,
+    private_key_lines,
+    register_key,
+)
 
 if TYPE_CHECKING:
     from r3con.runs import StageRun
@@ -516,13 +524,17 @@ def register_credentials(
     (:func:`r3con.masking.is_credential_name`), ``api_key`` and ``metadata``'s
     ``langfuse_secret_key`` among them, all of a dict's (``vertex_credentials``), but a
     path that exists (:func:`r3con.masking.is_path`); in a URL, its password, or its
-    user name when it has none, and every value in its query but a public one
-    (:func:`_url_secrets`); and the token alone of a ``<scheme> <token>`` one
-    (``Bearer``, ``Basic``). The keys of a dict under a key that JSON Schema names
-    fields or patterns with (:data:`_SCHEMA_NAMES`) are not parameters' names, by that
-    key's name alone, whether or not the dict is a schema. When ``completion`` is a
-    ``litellm.Router``'s, the same of each of its deployments' ``litellm_params``,
-    where the Router has already read an ``os.environ/NAME`` from the environment."""
+    user name when it has none, each host's of a multi-host DSN, and every value in
+    its query but a public one (:func:`_url_secrets`); within a JSON object written
+    as a string (:func:`r3con.masking.json_object`) as within the dict it holds, such
+    as SAP AI Core's service key in ``api_key``; each line of a PEM private key's body
+    in any string (:func:`r3con.masking.private_key_lines`); and the token alone of a
+    ``<scheme> <token>`` one (``Bearer``, ``Basic``). The keys of a dict under a key
+    that JSON Schema names fields or patterns with (:data:`_SCHEMA_NAMES`) are not
+    parameters' names, by that key's name alone, whether or not the dict is a schema.
+    When ``completion`` is a ``litellm.Router``'s, the same of each of its
+    deployments' ``litellm_params``, where the Router has already read an
+    ``os.environ/NAME`` from the environment."""
     sent = {name: value for name, value in params.items() if name != _DOCUMENTS}
     for value in _credentials(plain(sent)):
         register_key(value)
@@ -558,13 +570,16 @@ def _credentials(data: Any, name: str = "", *, secret: bool = False) -> Iterator
         yield str(data)
     if isinstance(data, str):
         yield from _url_secrets(data)
+        yield from private_key_lines(data)
+        yield from _credentials(json_object(data), name, secret=secret)
 
 
 def _url_secrets(text: str) -> list[str]:
     """When ``text`` is a URL with a host, its password, or its user name when it has
-    none (``https://<token>@host``, which httpx sends as Basic auth), and the value of
-    each query parameter but a public one (:data:`_PUBLIC_QUERY_NAMES`, in any case),
-    each as written and percent-decoded."""
+    none (``https://<token>@host``, which httpx sends as Basic auth), each host's of a
+    multi-host DSN (``postgres://u:K1@h1,v:K2@h2/db``), and the value of each query
+    parameter but a public one (:data:`_PUBLIC_QUERY_NAMES`, in any case), each as
+    written and percent-decoded."""
     try:
         url = urlsplit(text)
     except ValueError:
@@ -575,8 +590,23 @@ def _url_secrets(text: str) -> list[str]:
     values = [
         value for name, _, value in pairs if name.lower() not in _PUBLIC_QUERY_NAMES
     ]
-    written = [url.password or url.username or "", *values]
+    infos = (info.partition(":") for info in _user_infos(url.netloc))
+    written = [*(password or user for user, _, password in infos), *values]
     return [*written, *map(unquote, written)]
+
+
+def _user_infos(netloc: str) -> list[str]:
+    """The user's info before each host in ``netloc``. In a multi-host DSN
+    (``u:K1@h1,v:K2@h2``), where each "@" but the last has a host and then a comma
+    after it, that is the text before the first "@" and after each such comma; else,
+    as :func:`urllib.parse.urlsplit` reads it, the text before the last "@". So a
+    comma or an "@" in a password stays its own."""
+    if "@" not in netloc:
+        return []
+    first, *between, _ = netloc.split("@")
+    if between and all("," in piece for piece in between):
+        return [first, *(piece.partition(",")[2] for piece in between)]
+    return [netloc.rpartition("@")[0]]
 
 
 def count_tokens(text: str) -> int:

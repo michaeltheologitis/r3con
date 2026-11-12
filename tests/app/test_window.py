@@ -9,14 +9,14 @@ from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 import httpx2
 import pytest
 import toga
 
 from r3con.app import window
-from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, serve
+from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen, serve
 from tests.fakes import GATE_TIMEOUT_SECONDS, FakeKeyring, FakeLLM
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
@@ -184,6 +184,15 @@ def exits(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[int]]:
             running.join()
 
 
+@pytest.fixture(autouse=True)
+def own_port(monkeypatch: pytest.MonkeyPatch) -> int:
+    """The window's port, one free when the test starts, never the Mac app's own."""
+    with listen(0) as probe:
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(window, "PORT", port)
+    return port
+
+
 def refuses(url: str) -> bool:
     try:
         httpx2.get(url, timeout=TIMEOUT_SECONDS, trust_env=False)
@@ -200,6 +209,25 @@ def test_the_window_opens_the_page_this_launch_serves_with_its_token(
     assert app.page.status_code == 200
     assert "<title>" in app.page.text
     assert app.keys.status_code == 200
+
+
+def test_every_launch_serves_on_the_windows_port_so_the_page_keeps_its_settings(
+    opened: list[FakeApp], own_port: int
+):
+    window.main()
+    window.main()
+    assert [urlsplit(app.url).port for app in opened] == [own_port, own_port]
+    assert [app.keys.status_code for app in opened] == [200, 200]
+
+
+def test_a_launch_whose_port_another_program_has_serves_on_a_free_one(
+    opened: list[FakeApp], own_port: int
+):
+    with listen(own_port):
+        window.main()
+    (app,) = opened
+    assert urlsplit(app.url).port != own_port
+    assert (app.page.status_code, app.keys.status_code) == (200, 200)
 
 
 def test_the_mac_app_keeps_its_keys_under_its_bundle_id_never_r3con_apps(

@@ -5,7 +5,8 @@ at ``/app.css`` and ``/app.js``, and a JSON API under ``/api/``. A request must 
 this server in ``Host``, and in ``Origin`` when it sends one (403 otherwise). Every
 request but those for the page and its two files must carry the launch's token as
 ``Authorization: Bearer <token>`` (401 otherwise); the page gets the token from the
-opened URL's fragment, ``#token=...``.
+opened URL's fragment, ``#token=...``, and keeps it in the tab's sessionStorage, which
+a reload reads.
 
 - ``GET /api/keys``: each provider's key, as ``null`` when it has none, ``{source:
   "here", hint, remembered}`` when it is stored here, or ``{source: "environment",
