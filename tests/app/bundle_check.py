@@ -7,8 +7,9 @@ It puts the app's code and packages on the path as the app's launcher does, and 
 that the packages there but the project are exactly the ones CONSTRAINTS, the build's
 `uv export` of uv.lock, pins for this Python, at its versions, and that the project was
 built by the backend BUILD_CONSTRAINTS pins. Then it imports, each from inside APP,
-r3con and the packages a bundle most likely lacks, and every compiled module under its
-packages, so that one built for another platform fails here. It checks that keyring,
+r3con and the packages a bundle most likely lacks, and loads every compiled file under
+its packages, importing those that are Python extensions, so that one built for another
+platform fails here. It checks that keyring,
 where the app keeps its keys, finds the macOS Keychain, and saves, reads back and
 deletes a throwaway item there, giving up after ``KEYCHAIN_SECONDS``, since a Keychain
 dialog would wait for a click no one makes. Then it serves the app as the window does:
@@ -18,6 +19,7 @@ ones often are must read back as its text, which pypdf does only with an AES lib
 nothing must.
 """
 
+import ctypes
 import importlib.metadata
 import json
 import secrets
@@ -70,12 +72,23 @@ def imported(name: str, resources: Path) -> Path:
     return where
 
 
-def compiled(packages: Path) -> list[str]:
-    """The module of each compiled file under ``packages``."""
-    return sorted(
-        ".".join(path.relative_to(packages).with_name(path.name.split(".")[0]).parts)
-        for path in packages.rglob("*.so")
-    )
+def compiled(packages: Path) -> dict[str, Path]:
+    """Each compiled file under ``packages``, by the module it would be."""
+    return {
+        ".".join(
+            path.relative_to(packages).with_name(path.name.split(".")[0]).parts
+        ): path
+        for path in sorted(packages.rglob("*.so"))
+    }
+
+
+def loads(name: str, path: Path, resources: Path) -> None:
+    """Load compiled file ``path``, as fails for one built for another platform, and
+    import it as module ``name`` if it is a Python extension. Others, such as
+    pycryptodome's, are plain libraries their package loads with ctypes."""
+    library = ctypes.CDLL(str(path))
+    if hasattr(library, f"PyInit_{name.rpartition('.')[2]}"):
+        imported(name, resources)
 
 
 def locked(constraints: Path) -> "dict[str, SpecifierSet]":
@@ -234,9 +247,9 @@ def main(app: Path, constraints: Path, build_constraints: Path) -> None:
     for name in BUNDLED:
         print(f"{name}: {imported(name, resources).relative_to(app)}")
     modules = compiled(packages)
-    for name in modules:
-        imported(name, resources)
-    print(f"{len(modules)} compiled modules under app_packages: each imports")
+    for name, path in modules.items():
+        loads(name, path, resources)
+    print(f"{len(modules)} compiled files under app_packages: each loads or imports")
     store = keychain()
     print(f"keyring finds {type(store).__module__}.{type(store).__qualname__}")
     round_trip(store)

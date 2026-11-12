@@ -1,3 +1,4 @@
+import importlib.util
 import re
 import threading
 from collections.abc import Iterator
@@ -11,6 +12,7 @@ from tests.app.bundle_check import (
     built_by,
     encrypted_pdf_text,
     keychain,
+    loads,
     pinned,
     round_trip,
 )
@@ -184,3 +186,19 @@ def test_encrypted_pdf_text_is_what_the_served_app_reads_from_an_aes_256_pdf(
         assert encrypted_pdf_text(base_url, token) == ENCRYPTED_PDF_TEXT
     finally:
         stop()
+
+
+def origin(module: str) -> Path:
+    spec = importlib.util.find_spec(module)
+    assert spec and spec.origin
+    return Path(spec.origin)
+
+
+# pycryptodome's compiled files are plain libraries it loads with ctypes: none imports.
+def test_loads_imports_a_python_extension_but_only_loads_a_plain_library(
+    tmp_path: Path,
+):
+    loads("Crypto.Cipher._raw_aes", origin("Crypto.Cipher._raw_aes"), tmp_path)
+    extension = "pydantic_core._pydantic_core"
+    with pytest.raises(SystemExit, match=f"{extension} is imported from"):
+        loads(extension, origin(extension), tmp_path)
