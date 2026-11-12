@@ -7,20 +7,23 @@ all; when ``PORT`` can't be had, as when another program has it, on a free port,
 the log then names. The window opens on the port its server holds, so such a program
 can't pose as R3Con's server: it costs that launch the settings stored on ``PORT``.
 Its keys are under its own service in the Keychain, ``MAC_APP_KEY_SERVICE``, and it
-shows the page in a Toga window of ``WINDOW_SIZE``. Closing the window, or Quit in the
-app's menu, hides it, then stops the server as ``serve``'s stop does, before the app
-exits; if Toga can't start the app, the server stops before the error goes on. Its web
-view has no downloads, so a tab is saved through a Save dialog on the window. Toga is
-the Mac app's own: neither r3con nor its ``app`` extra installs it.
+shows the page in a Toga window of ``WINDOW_SIZE``. Closing the window, Quit in the
+app's menu or in the Dock, or logging out hides it, then stops the server as
+``serve``'s stop does, for up to ``QUIT_SECONDS``, and ends the process: a model call
+still in flight is cut off, and its run folder left without ``run_failed``. If Toga
+can't start the app, the server stops before the error goes on. Its web view has no
+downloads, so a tab is saved through a Save dialog on the window. Toga is the Mac
+app's own: neither r3con nor its ``app`` extra installs it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from concurrent.futures import CancelledError, Future
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import toga
 
@@ -31,6 +34,8 @@ WINDOW_SIZE = (1280, 820)
 # Below macOS's ephemeral ports, 49152 and up; a new one would lose the page's settings.
 PORT = 47313
 SAVE_DIALOG_TITLE = "Save this tab"
+# Enough for a run between model calls to stop and write its folder, and still prompt.
+QUIT_SECONDS = 2
 
 logger = get_logger("app")
 
@@ -59,11 +64,17 @@ async def _save_dialog(window: toga.Window, name: str) -> Path | None:
 
 
 def main() -> None:
-    """Serve the app and show its page in a window until the app quits."""
+    """Serve the app and show its page in a window until the app quits, then end the
+    process."""
     configure_logging()
     open_dialogs: set[Future[Path | None]] = set()
     choose = partial(choose_save_path, open_dialogs)
-    serving = partial(serve, key_service=MAC_APP_KEY_SERVICE, choose_save_path=choose)
+    serving = partial(
+        serve,
+        key_service=MAC_APP_KEY_SERVICE,
+        choose_save_path=choose,
+        stop_within=QUIT_SECONDS,
+    )
     try:
         url, stop = serving(port=PORT)
     except OSError as error:
@@ -76,7 +87,7 @@ def main() -> None:
         return toga.WebView(url=url)
 
     def hide(app: toga.App, **kwargs: Any) -> bool:
-        # At once: the stop waits for runs still going to end their calls in flight.
+        # At once: the stop takes up to QUIT_SECONDS.
         for window in app.windows:
             window.hide()
         # Its save would wait for the dialog forever, and the server's stop for the save.
@@ -84,7 +95,18 @@ def main() -> None:
             dialog.cancel()
         return True
 
+    def end(app: toga.App, sender: Any) -> NoReturn:
+        # AppKit asks on a Dock Quit or a logout; Toga lets it end the app unstopped.
+        hide(app)
+        stop()
+        os._exit(0)
+
     try:
-        toga.App(startup=page, on_exit=hide).main_loop()
+        app = toga.App(startup=page, on_exit=hide)
+        # Toga 0.5.7's private hook, which uv.lock pins: a newer Toga may move it.
+        app._impl.cocoa_applicationShouldTerminate = partial(end, app)
+        app.main_loop()
     finally:
         stop()
+    # Python's exit would join r3con's document threads, so wait for their calls.
+    os._exit(0)

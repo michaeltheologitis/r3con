@@ -234,8 +234,33 @@ jobs:
           fi
           echo "$keys"
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
-          kill "$pid"
+          # Quit as the Dock's Quit or a logout asks: the app must stop its server before it ends.
+          gone() { case "$(ps -o stat= -p "$pid")" in "" | Z*) return 0 ;; *) return 1 ;; esac; }
+          started=$(date +%s)
+          osascript -l JavaScript -e "ObjC.import('AppKit'); \$.NSRunningApplication.runningApplicationWithProcessIdentifier($pid).terminate" > "$RUNNER_TEMP/quit.txt" 2>&1 &
+          for _ in $(seq 20); do
+            gone && break
+            sleep 1
+          done
+          echo "Asked to quit ($(cat "$RUNNER_TEMP/quit.txt")); gone after $(( $(date +%s) - started )) s"
+          if ! gone; then
+            echo "::error::The app didn't end within 20 s of a quit."
+            kill "$pid"
+            exit 1
+          fi
           wait "$pid" || true
+          # uvicorn's last line once its shutdown is done; the log store can lag behind.
+          stopped=
+          for _ in $(seq 15); do
+            stopped=$(log show --last 5m --style compact --predicate 'process == "R3Con"' | grep -F 'Finished server process' || true)
+            [ -n "$stopped" ] && break
+            sleep 2
+          done
+          if [ -z "$stopped" ]; then
+            echo "::error::The app ended on a quit without stopping its server."
+            exit 1
+          fi
+          echo "$stopped"
       # An app that writes into its own bundle breaks its signature.
       - name: Check that running the app left its signature intact
         run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
