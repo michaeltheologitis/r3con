@@ -49,10 +49,10 @@ are:
   object is read as its fields, at any depth, each held to the same rule by its own
   name: SAP AI Core's ``AICORE_SERVICE_KEY`` and Cloud Foundry's ``VCAP_SERVICES``,
   where litellm finds its ``clientsecret``, are not masked whole, but that field is;
-- each line of the body of a PEM private key, at least :data:`_MIN_MASKED_KEY_CHARS`
-  long, in a known key or in any environment value or field, whatever its name and
-  despite its whitespace, its line breaks real or written ``\\n``, as litellm reads
-  SAP's ``AICORE_KEY_STR``: so the key is masked however an error lays it out.
+- each line of the body of a PEM private key (:func:`private_key_lines`), whatever
+  holds it and despite its whitespace: any environment value or field, as SAP's
+  ``AICORE_KEY_STR`` does, and, registered, any parameter a request sends but the
+  documents. So the key is masked however an error lays it out.
 
 A key shorter than :data:`_MIN_MASKED_KEY_CHARS` is a placeholder, such as vLLM's
 ``EMPTY``, and is left alone. A secret in a URL's path, as some hosted MCP servers
@@ -104,7 +104,7 @@ _CREDENTIAL_NAME = re.compile(
 )
 # A PEM private key's body, between its label lines.
 _PRIVATE_KEY = re.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----(.*?)-----END ", re.DOTALL)
-_PEM_LINE_BREAK = re.compile(r"\s+|\\n")
+_PEM_LINE_BREAK = re.compile(r"\s+|\\[rn]")
 # A name's words, whatever its case: snake_case, kebab-case, camelCase, SCREAMING_CASE.
 _NAME_WORDS = re.compile("[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
 # Whole words only: "auth" begins "author" and "authority", which name no credential.
@@ -127,12 +127,11 @@ _lock = threading.Lock()
 
 
 def register_key(key: str | None) -> None:
-    """Have :func:`masked` mask ``key``, and each line of a PEM private key's body in
-    it, from now on, for as long as the process runs, unless ``key`` is shorter than
-    :data:`_MIN_MASKED_KEY_CHARS`."""
+    """Have :func:`masked` mask ``key`` from now on, for as long as the process runs,
+    unless it is shorter than :data:`_MIN_MASKED_KEY_CHARS`."""
     if key and len(key) >= _MIN_MASKED_KEY_CHARS:
         with _lock:
-            _registered.update([key, *_private_key_lines(key)])
+            _registered.add(key)
 
 
 def is_credential_name(name: str) -> bool:
@@ -185,6 +184,15 @@ def json_object(text: str) -> dict[str, Any]:
         return json.loads(text)
     except ValueError:
         return {}
+
+
+def private_key_lines(text: str) -> list[str]:
+    """Each line of the body of each PEM private key in ``text``, its line breaks real
+    or written ``\\n`` or ``\\r\\n``, as litellm reads SAP's ``AICORE_KEY_STR``, but a
+    line shorter than :data:`_MIN_MASKED_KEY_CHARS`."""
+    bodies = (match[1] for match in _PRIVATE_KEY.finditer(text))
+    lines = (line for body in bodies for line in _PEM_LINE_BREAK.split(body))
+    return [line for line in lines if len(line) >= _MIN_MASKED_KEY_CHARS]
 
 
 def plain(data: Any) -> Any:
@@ -274,14 +282,8 @@ def _secrets(name: str, value: Any) -> Iterator[str]:
     elif isinstance(value, str):
         if _is_secret(name, value):
             yield value
-        yield from _private_key_lines(value)
+        yield from private_key_lines(value)
         yield from _secrets(name, json_object(value))
-
-
-def _private_key_lines(text: str) -> list[str]:
-    bodies = (match[1] for match in _PRIVATE_KEY.finditer(text))
-    lines = (line for body in bodies for line in _PEM_LINE_BREAK.split(body))
-    return [line for line in lines if len(line) >= _MIN_MASKED_KEY_CHARS]
 
 
 def _is_secret(name: str, value: str) -> bool:

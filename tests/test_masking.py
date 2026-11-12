@@ -180,6 +180,10 @@ PRIVATE_KEYS = {
         "AICORE_KEY_STR",
         PRIVATE_KEY.replace("\n", "\\n"),
     ),
+    "sap-key-string-with-escaped-windows-line-breaks": (
+        "AICORE_KEY_STR",
+        PRIVATE_KEY.replace("\n", "\\r\\n"),
+    ),
     "oci-key": ("OCI_KEY", PRIVATE_KEY),
     "sap-x509-service-key": (
         "AICORE_SERVICE_KEY",

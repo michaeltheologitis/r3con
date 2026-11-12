@@ -1223,6 +1223,18 @@ SENT_CREDENTIALS = {
         {"api_base": f"https://reader:{PLAIN_KEY},2026@llm.example.com/v1"},
         f"{PLAIN_KEY},2026",
     ),
+    "url-password-holding-an-at-and-a-comma": (
+        {"api_base": f"https://reader:{PLAIN_KEY},2026@q3@llm.example.com/v1"},
+        f"{PLAIN_KEY},2026@q3",
+    ),
+    "first-hosts-password-holding-a-comma": (
+        {"api_base": f"postgres://u:{PLAIN_KEY},2026@db1,v:pw-0123456789@db2/memos"},
+        f"{PLAIN_KEY},2026",
+    ),
+    "second-hosts-password-holding-a-comma": (
+        {"api_base": f"postgres://u:pw-0123456789@db1,v:{PLAIN_KEY},2026@db2/memos"},
+        f"{PLAIN_KEY},2026",
+    ),
     "url-code": ({"api_base": f"{SERVER}?code={PLAIN_KEY}"}, PLAIN_KEY),
     "url-sig": ({"api_base": f"{SERVER}?sv=2026-01-01&sig={PLAIN_KEY}"}, PLAIN_KEY),
     "url-signature": ({"api_base": f"{SERVER}?signature={PLAIN_KEY}"}, PLAIN_KEY),
@@ -1260,6 +1272,10 @@ SENT_CREDENTIALS = {
         PLAIN_KEY,
     ),
     "private-key-line": ({"oci_key": PRIVATE_KEY}, PLAIN_KEY),
+    "private-key-line-under-any-name": (
+        {"extra_body": {"signing": PRIVATE_KEY}},
+        PLAIN_KEY,
+    ),
     "header-named-like-request-data": ({"headers": {"metadata": PLAIN_KEY}}, PLAIN_KEY),
     "callback-key-in-metadata": (
         {"metadata": {"langfuse_secret_key": PLAIN_KEY}},

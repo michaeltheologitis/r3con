@@ -106,6 +106,7 @@ from r3con.masking import (
     json_object,
     one_line,
     plain,
+    private_key_lines,
     register_key,
 )
 
@@ -526,7 +527,8 @@ def register_credentials(
     user name when it has none, each host's of a multi-host DSN, and every value in
     its query but a public one (:func:`_url_secrets`); within a JSON object written
     as a string (:func:`r3con.masking.json_object`) as within the dict it holds, such
-    as SAP AI Core's service key in ``api_key``; and the token alone of a
+    as SAP AI Core's service key in ``api_key``; each line of a PEM private key's body
+    in any string (:func:`r3con.masking.private_key_lines`); and the token alone of a
     ``<scheme> <token>`` one (``Bearer``, ``Basic``). The keys of a dict under a key
     that JSON Schema names fields or patterns with (:data:`_SCHEMA_NAMES`) are not
     parameters' names, by that key's name alone, whether or not the dict is a schema.
@@ -568,6 +570,7 @@ def _credentials(data: Any, name: str = "", *, secret: bool = False) -> Iterator
         yield str(data)
     if isinstance(data, str):
         yield from _url_secrets(data)
+        yield from private_key_lines(data)
         yield from _credentials(json_object(data), name, secret=secret)
 
 
@@ -583,15 +586,27 @@ def _url_secrets(text: str) -> list[str]:
         return []
     if not url.netloc:
         return []
-    # With one "@", a comma is the password's own: RFC 3986 lets a user's info hold one.
-    hosts = url.netloc.split(",") if url.netloc.count("@") > 1 else [url.netloc]
-    users = [url._replace(netloc=host) for host in hosts]
     pairs = (pair.partition("=") for pair in url.query.split("&"))
     values = [
         value for name, _, value in pairs if name.lower() not in _PUBLIC_QUERY_NAMES
     ]
-    written = [*(user.password or user.username or "" for user in users), *values]
+    infos = (info.partition(":") for info in _user_infos(url.netloc))
+    written = [*(password or user for user, _, password in infos), *values]
     return [*written, *map(unquote, written)]
+
+
+def _user_infos(netloc: str) -> list[str]:
+    """The user's info before each host in ``netloc``. In a multi-host DSN
+    (``u:K1@h1,v:K2@h2``), where each "@" but the last has a host and then a comma
+    after it, that is the text before the first "@" and after each such comma; else,
+    as :func:`urllib.parse.urlsplit` reads it, the text before the last "@". So a
+    comma or an "@" in a password stays its own."""
+    if "@" not in netloc:
+        return []
+    first, *between, _ = netloc.split("@")
+    if between and all("," in piece for piece in between):
+        return [first, *(piece.partition(",")[2] for piece in between)]
+    return [netloc.rpartition("@")[0]]
 
 
 def count_tokens(text: str) -> int:
