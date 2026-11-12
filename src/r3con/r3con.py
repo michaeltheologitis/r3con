@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import codecs
 import io
+import json
 import threading
 import warnings
 from collections import Counter
@@ -109,6 +110,13 @@ _DECLARED_READ_AS = {
     "utf-16-le": "utf-8",
 }
 _UNTIL_FOUND = "until-found"
+# The schema.org types a page's JSON-LD describes it as, by how their names end: an
+# article (Article, NewsArticle, BlogPosting, Report…) before a page (WebPage, FAQPage…).
+_ARTICLE_TYPES = ("Article", "Posting", "Report")
+_PAGE_TYPES = ("Page",)
+_URL_STARTS = ("http://", "https://")
+# What, starting the text after an image's alt text, needs no space before it.
+_APART_ALREADY = frozenset(" \t\r\n.,;:!?)")
 # Where markdownify starts and ends a code block.
 _FENCE = "```"
 # bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
@@ -201,25 +209,18 @@ def _html_text(name: str, html: BinaryIO) -> str:
     warnings call it.
 
     It is decoded as :func:`_page_text` says, and turned into Markdown as a Word file is:
-    headings, lists and tables keep their shape. A link keeps its text, not its URL, and
-    images, scripts, styles, ``<noscript>``, ``<template>``, ``<?xml?>`` and what is
-    ``hidden`` are left out. A page nested too deep for that is read as its text alone.
-    A file that can't be read gives ``""``, and so does one with no text, which the
-    caller then drops: say so.
+    headings, lists and tables keep their shape. Above it go the lines of
+    :func:`_page_header`, which say what the page is. A link keeps its text, not its
+    URL, and an image its alt text, if it has one. Scripts, styles, ``<noscript>``,
+    ``<template>``, ``<?xml?>`` and what is ``hidden`` are left out. A page nested too
+    deep for that is read as its text alone. A file that can't be read gives ``""``, and
+    so does one with no text, which the caller then drops: say so.
     """
     try:
         soup = BeautifulSoup(_page_text(html.read()), "html.parser")
-        # What a browser doesn't show: <noscript> while scripts run, <template>, what is
-        # hidden but not until found, and the <?…?>, CDATA and declarations HTML reads as
-        # comments, which markdownify keeps.
-        unseen = [
-            *soup(["noscript", "template"]),
-            *soup(hidden=_hides),
-            *soup(string=lambda text: isinstance(text, PreformattedString)),
-        ]
-        for hidden in unseen:
-            hidden.extract()
-        text = _page_markdown(name, soup)
+        header = _page_header(soup)
+        _keep_what_is_shown(soup)
+        text = "\n\n".join(filter(None, [header, _page_markdown(name, soup)]))
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as HTML (%s); skipping it", name, type(e).__name__
@@ -228,6 +229,143 @@ def _html_text(name: str, html: BinaryIO) -> str:
     if not text.strip():
         _log.warning("%s: no extractable text; skipping it", name)
     return text
+
+
+def _keep_what_is_shown(soup: BeautifulSoup) -> None:
+    """Leave in ``soup`` only what a browser shows, with each image as its alt text, or
+    nothing if it has none."""
+    # What a browser doesn't show: <noscript> while scripts run, <template>, the page's
+    # <title>, which the header holds, and an SVG's, which is a tooltip; what is hidden
+    # but not until found, and the <?…?>, CDATA and declarations HTML reads as
+    # comments, which markdownify keeps.
+    unseen = [
+        *soup(["noscript", "template", "title"]),
+        *soup(hidden=_hides),
+        *soup(string=lambda text: isinstance(text, PreformattedString)),
+    ]
+    for hidden in unseen:
+        hidden.extract()
+    for image in soup("img"):
+        alt = _text(image.get("alt"))
+        if not alt:
+            image.extract()
+            continue
+        before, after = image.find_previous(string=True), image.find_next(string=True)
+        image.replace_with(_set_apart(before, alt, after))
+
+
+def _page_header(soup: BeautifulSoup) -> str:
+    """The lines that say what a web page is: its title, author, publication and update
+    dates and address, each that it gives, as ``Title: …``.
+
+    Each is read from the page's JSON-LD (:func:`_described`), else its meta tags
+    (OpenGraph's, ``article:*`` and ``author``), else its ``<title>``, or for its address
+    its canonical link, then ``og:url``. An author is a name, never a URL.
+    """
+    described = _described(soup)
+    metas = _metas(soup)
+    title = soup.find(lambda tag: tag.name == "title" and not tag.find_parent("svg"))
+    canonical = soup.find("link", rel="canonical")
+    lines = {
+        "Title": _first(
+            *(_text(obj.get(key)) for obj in described for key in ("name", "headline")),
+            metas.get("og:title"),
+            _text(title.get_text()) if title else None,
+        ),
+        "Author": _first(
+            *(_authors(obj.get("author")) for obj in described),
+            _authors(metas.get("article:author")),
+            _authors(metas.get("author")),
+        ),
+        "Published": _first(
+            *(_text(obj.get("datePublished")) for obj in described),
+            metas.get("article:published_time"),
+        ),
+        "Updated": _first(
+            *(_text(obj.get("dateModified")) for obj in described),
+            metas.get("article:modified_time"),
+        ),
+        "Address": _first(
+            *(_text(obj.get("url")) for obj in described),
+            _text(canonical.get("href")) if canonical else None,
+            metas.get("og:url"),
+        ),
+    }
+    return "\n".join(f"{label}: {value}" for label, value in lines.items() if value)
+
+
+def _described(soup: BeautifulSoup) -> list[dict[str, Any]]:
+    """The objects a web page's JSON-LD describes it as: each article, then each page
+    (:data:`_ARTICLE_TYPES`, :data:`_PAGE_TYPES`), in the page's order, from a block's
+    top level, a list there, or its ``@graph``. A block that isn't JSON is skipped."""
+    found: list[dict[str, Any]] = []
+    for block in soup("script", type="application/ld+json"):
+        try:
+            data = json.loads(block.get_text())
+        except (ValueError, RecursionError):
+            continue
+        for item in data if isinstance(data, list) else [data]:
+            graph = item.get("@graph") if isinstance(item, dict) else None
+            found += [item, *(graph if isinstance(graph, list) else [graph])]
+    objects = [obj for obj in found if isinstance(obj, dict)]
+    return [
+        obj
+        for kinds in (_ARTICLE_TYPES, _PAGE_TYPES)
+        for obj in objects
+        if _is(obj, kinds)
+    ]
+
+
+def _is(obj: dict[str, Any], kinds: tuple[str, ...]) -> bool:
+    """Whether the JSON-LD object ``obj`` has a type whose name ends as one of ``kinds``."""
+    types = obj.get("@type")
+    return any(
+        isinstance(kind, str) and kind.endswith(kinds)
+        for kind in (types if isinstance(types, list) else [types])
+    )
+
+
+def _metas(soup: BeautifulSoup) -> dict[str, str]:
+    """A web page's meta tags' contents, by their property or name, in lower case: the
+    first of each."""
+    metas: dict[str, str] = {}
+    for meta in soup("meta"):
+        key = meta.get("property") or meta.get("name")
+        content = _text(meta.get("content"))
+        if isinstance(key, str) and content:
+            metas.setdefault(key.lower(), content)
+    return metas
+
+
+def _authors(value: Any) -> str | None:
+    """The names of the authors ``value`` gives, as JSON-LD or a meta tag does: a name,
+    an object with a name, or a list of those; a URL is not a name."""
+    named = [
+        _text(author.get("name") if isinstance(author, dict) else author)
+        for author in (value if isinstance(value, list) else [value])
+    ]
+    names = [name for name in named if name and not name.startswith(_URL_STARTS)]
+    return ", ".join(names) or None
+
+
+def _text(value: Any) -> str | None:
+    """``value`` as one line, if it is text that isn't blank."""
+    if not isinstance(value, str):
+        return None
+    return " ".join(value.split()) or None
+
+
+def _set_apart(before: Any, alt: str, after: Any) -> str:
+    """An image's ``alt`` text, with a space on each side where the text read before or
+    after the image doesn't already set it apart, as the image's own room does."""
+    left = "" if isinstance(before, str) and before[-1:].isspace() else " "
+    right = "" if isinstance(after, str) and after[:1] in _APART_ALREADY else " "
+    return f"{left}{alt}{right}"
+
+
+def _first(*values: str | None) -> str | None:
+    """The first of ``values`` that is given."""
+    return next((value for value in values if value), None)
 
 
 def _hides(hidden: str | None) -> bool:
@@ -257,7 +395,7 @@ def _page_markdown(name: str, soup: BeautifulSoup) -> str:
     """``soup``'s Markdown, or, for a page nested deeper than markdownify can recurse,
     its text alone."""
     try:
-        return _Markdown(strip=["a", "img"]).convert_soup(soup)
+        return _Markdown(strip=["a"]).convert_soup(soup)
     except RecursionError:
         _log.warning("%s: nested too deep for Markdown; reading its text alone", name)
         return _one_blank_line(soup.get_text("\n"))
@@ -504,9 +642,10 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
     is logged and then dropped; OCR is outside this package. A Word file or a web page
-    is converted to Markdown, its tables included; one that can't be read, or has no
-    text, is logged and dropped. Everything else is read as UTF-8, replacing undecodable
-    bytes rather than failing: one bad byte in one document should not sink a run. Empty
+    is converted to Markdown, its tables included, a web page under the title, author,
+    dates and address its metadata gives; one that can't be read, or has no text, is
+    logged and dropped. Everything else is read as UTF-8, replacing undecodable bytes
+    rather than failing: one bad byte in one document should not sink a run. Empty
     documents are dropped — an empty document contributes nothing and costs a relevance
     call. A dropped file is not in the mapping, nor counted when names clash.
 
