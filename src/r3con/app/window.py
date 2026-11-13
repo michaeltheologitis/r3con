@@ -29,15 +29,13 @@ from typing import Any, NoReturn, cast
 import toga
 
 from r3con.app import updates
-from r3con.app.server import MAC_APP_KEY_SERVICE, serve
+from r3con.app.server import MAC_APP_KEY_SERVICE, QUIT_SECONDS, serve
 from r3con.logging_setup import configure_logging, get_logger
 
 WINDOW_SIZE = (1280, 820)
 # Below macOS's ephemeral ports, 49152 and up; a new one would lose the page's settings.
 PORT = 47313
 SAVE_DIALOG_TITLE = "Save this tab"
-# Enough for a run between model calls to stop and write its folder, and still prompt.
-QUIT_SECONDS = 2
 
 logger = get_logger("app")
 
