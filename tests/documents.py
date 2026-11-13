@@ -3,7 +3,7 @@ import io
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from pypdf import PdfWriter
 
@@ -35,13 +35,8 @@ PACKAGE_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 DOCUMENT_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 <Relationship Id="rIdImage" Type="{OFFICE_RELATIONSHIPS_NS}/image" Target="media/image1.png"/>
 </Relationships>"""
-# The alt text Word keeps for the image.
-IMAGE_DESCRIPTION = "A chart of incidents by site"
-IMAGE = f"""<w:p><w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/>
-<wp:docPr id="1" name="Picture 1" descr="{IMAGE_DESCRIPTION}"/><a:graphic><a:graphicData uri="{PICTURE_NS}"><pic:pic>
-<pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>
-<pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic>
-</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"""
+# A run holding a line break, Word's Shift+Enter.
+LINE_BREAK = "<w:r><w:br/></w:r>"
 
 
 def write_pdf(
@@ -108,8 +103,24 @@ def _cmap(to_unicode: dict[str, str]) -> str:
     )
 
 
+def text_run(text: str) -> str:
+    """A run of this text, for a paragraph of several runs."""
+    return f'<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r>'
+
+
 def paragraph(text: str) -> str:
-    return f'<w:p><w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+    return f"<w:p>{text_run(text)}</w:p>"
+
+
+def picture(description: str | None) -> str:
+    """A run holding :data:`PNG` as a picture, with this description, Word's alt text,
+    if given."""
+    descr = "" if description is None else f" descr={quoteattr(description)}"
+    return f"""<w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/>
+<wp:docPr id="1" name="Picture 1"{descr}/><a:graphic><a:graphicData uri="{PICTURE_NS}"><pic:pic>
+<pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>
+<pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill><pic:spPr/></pic:pic>
+</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"""
 
 
 def table(rows: Sequence[Sequence[str]], *, header: bool = False) -> str:
@@ -126,13 +137,14 @@ def write_docx(
     blocks: Sequence[str | Sequence[Sequence[str]]] = (),
     *,
     xml: str = "",
-    image: bool = False,
+    picture_bytes: bool = True,
 ) -> None:
     """A Word file, written as the few parts a reader needs. Its body is ``blocks`` in
     order, a string a paragraph and rows of cells' text a table, then ``xml``, more of
-    the body as WordprocessingML, then :data:`PNG` if ``image``."""
+    the body as WordprocessingML. Each :func:`picture` shows :data:`PNG`, but without
+    ``picture_bytes``, which leaves it out of the file."""
     body = "".join(paragraph(b) if isinstance(b, str) else table(b) for b in blocks)
-    body += xml + (IMAGE if image else "")
+    body += xml
     namespaces = (
         f'xmlns:w="{WORD_NS}" xmlns:r="{OFFICE_RELATIONSHIPS_NS}" '
         f'xmlns:wp="{WORD_DRAWING_NS}" xmlns:a="{DRAWING_NS}" xmlns:pic="{PICTURE_NS}"'
@@ -144,8 +156,8 @@ def write_docx(
             "word/document.xml",
             f"<w:document {namespaces}><w:body>{body}</w:body></w:document>",
         )
-        if image:
-            docx.writestr("word/_rels/document.xml.rels", DOCUMENT_RELS)
+        docx.writestr("word/_rels/document.xml.rels", DOCUMENT_RELS)
+        if picture_bytes:
             docx.writestr("word/media/image1.png", PNG)
 
 
