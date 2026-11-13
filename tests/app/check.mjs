@@ -231,6 +231,10 @@ const MAX_ROUNDS = 4;
 const FEWER_ROUNDS = 1;
 const MORE_ROUNDS = 3;
 const OTHER_ROUNDS = [FEWER_ROUNDS, MORE_ROUNDS, MAX_ROUNDS];
+// r3con's PRUNED_AFTER_ROUND: a document whose summaries in it are all empty is read in no later round, nor parsed.
+const PRUNED_AFTER_ROUND = 2;
+// The kinds of node of `rounds` relevance rounds, r1 on.
+const roundKinds = (rounds) => Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
 // Besides its rounds' nodes, a run draws a document and a parse per document, then one structure and one answer.
 const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
@@ -1279,7 +1283,7 @@ function columnsDrawn() {
 // Whether `columns`, as columnsDrawn gives them, are a whole run of `rounds` rounds: the documents', each round's in
 // turn, the structure's, the parses' and the answers', each kind of node in a column of its own.
 function runOfRounds(columns, rounds) {
-  const kinds = ['doc', ...Array.from({ length: rounds }, (_, k) => `r${k + 1}`), 'schema', 'parsed', 'answer'];
+  const kinds = ['doc', ...roundKinds(rounds), 'schema', 'parsed', 'answer'];
   return isDeepStrictEqual(columns.map(([kind]) => kind), kinds) && columns.every(([, xs]) => xs.length === 1);
 }
 
@@ -5678,7 +5682,7 @@ async function liveParts(url) {
 
 // A memo whose every line fake_server.py's model skips, so its summary is empty in every round and r3con prunes it.
 const quietMemo = () => memo('06_quiet_memo.txt', `${QUIET} The canteen's menu for the week.\n${QUIET} Nothing else to report.\n`);
-const PRUNED_LINE = `1 document with nothing relevant in round ${ROUNDS} · not read further, nor parsed`;
+const PRUNED_LINE = `1 document with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`;
 
 // In-page: each node but the documents', by id, those that came back empty marked so.
 function stageNodes() {
@@ -5686,35 +5690,36 @@ function stageNodes() {
   return ids.map((el) => `${el.dataset.id}${el.classList.contains('void') ? ' · empty' : ''}`).sort();
 }
 
-// A run of MORE_ROUNDS rounds over the sample memos and a quiet one, which r3con prunes after round 2: the quiet memo's
-// path ends at its empty round-2 node in the live run, after an ask over it, and in the tab saved and opened again.
+// A run of MAX_ROUNDS rounds over the sample memos and a quiet one, which r3con prunes after PRUNED_AFTER_ROUND: the
+// quiet memo's path ends at its empty node of that round in the live run, after an ask over it, and in the tab saved
+// and opened again.
 async function livePruned(url) {
   const quiet = SAMPLE_DOCS;
-  const kinds = Array.from({ length: MORE_ROUNDS }, (_, k) => `r${k + 1}`);
-  const paths = (nodes) => Array.from({ length: SAMPLE_DOCS + 1 }, (_, d) => [...kinds, 'parsed'].filter((kind) => nodes.some((id) => id.split(' ')[0] === `${kind}-${d}`)));
-  const whole = [...kinds, 'parsed'];
-  const endsAtRound2 = (nodes) => isDeepStrictEqual(paths(nodes), [...Array(SAMPLE_DOCS).fill(whole), ['r1', 'r2']]) && nodes.includes(`r2-${quiet} · empty`);
+  const whole = [...roundKinds(MAX_ROUNDS), 'parsed'];
+  const paths = (nodes) => Array.from({ length: SAMPLE_DOCS + 1 }, (_, d) => whole.filter((kind) => nodes.some((id) => id.split(' ')[0] === `${kind}-${d}`)));
+  const expected = [...Array(SAMPLE_DOCS).fill(whole), roundKinds(PRUNED_AFTER_ROUND)];
+  const endsAtRound2 = (nodes) => isDeepStrictEqual(paths(nodes), expected) && nodes.includes(`r${PRUNED_AFTER_ROUND}-${quiet} · empty`);
   let html;
   let asked;
   const before = (page) => page.addInitScript(recordEvents);
   await withPage('live', { url, sample: false, question: true, before }, async (page) => {
     await page.setInputFiles('#file-input', [...sampleMemos(), quietMemo()]);
     await filesCounted(page, SAMPLE_DOCS + 1);
-    await pickRounds(page, MORE_ROUNDS);
+    await pickRounds(page, MAX_ROUNDS);
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const events = await page.evaluate(() => window.events);
     const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
     const pruned = events.filter((e) => e.type === 'documents_pruned').map((e) => e.doc_ids);
     const ran = await page.evaluate(stageNodes);
-    const endsName = `a memo with nothing relevant in round ${ROUNDS}, which r3con's event names pruned, ends its path at its empty round-${ROUNDS} node: no later round's node nor a parse node, while the others run on`;
+    const endsName = `a memo with nothing relevant in round ${PRUNED_AFTER_ROUND}, which r3con's event names pruned, ends its path at its empty round-${PRUNED_AFTER_ROUND} node: no later round's node nor a parse node, while the others run on`;
     check('live', endsName, done && isDeepStrictEqual(pruned, [[ids[quiet]]]) && endsAtRound2(ran), `${JSON.stringify(pruned)}; ${JSON.stringify(paths(ran))}`);
 
     await page.focus('.log-toggle');
     await page.keyboard.press('Enter');
     const steps = Object.fromEntries((await page.evaluate(logOf)).steps.map(({ step, nested }) => [step, nested]));
-    const logged = steps[`round ${ROUNDS} · extracting relevance`]?.at(-1) === PRUNED_LINE && steps[`round ${MORE_ROUNDS} · extracting relevance`]?.length === SAMPLE_DOCS && steps[`parsing ${SAMPLE_DOCS} documents`]?.length === SAMPLE_DOCS;
-    check('live', `its log says so after round ${ROUNDS}, and the later round and the parsing each count only the other ${SAMPLE_DOCS} memos`, logged, JSON.stringify(Object.keys(steps)));
+    const logged = steps[`round ${PRUNED_AFTER_ROUND} · extracting relevance`]?.at(-1) === PRUNED_LINE && roundKinds(MAX_ROUNDS).slice(PRUNED_AFTER_ROUND).every((kind) => steps[`round ${kind.slice(1)} · extracting relevance`]?.length === SAMPLE_DOCS) && steps[`parsing ${SAMPLE_DOCS} documents`]?.length === SAMPLE_DOCS;
+    check('live', `its log says so after round ${PRUNED_AFTER_ROUND}, and each later round and the parsing count only the other ${SAMPLE_DOCS} memos`, logged, JSON.stringify(Object.keys(steps)));
 
     await send(page, SAVED_ASK);
     const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
@@ -5758,8 +5763,8 @@ const FAINT_RUNS = [
   { docs: 120, relevant: [5, 30, 31, 110] },
 ];
 const UNFOLDED_RUN = { docs: 8, relevant: [1, 3, 4, 6] };
-// Its quiet memos would parse to records, as a real model's may, but with nothing relevant in round 2 r3con prunes them
-// unparsed: only a snippet, or the answer's trail, brings one out.
+// Its quiet memos parse to records, as a real model's may: only a snippet, or the answer's trail, brings one out. It runs
+// FEWER_ROUNDS, one, so that r3con prunes none of them.
 const PARSED_RUN = { docs: 150, relevant: [25, 75, 76, 125], parsed: true };
 const LONG_TASK_MS = 200;
 
@@ -5927,6 +5932,7 @@ async function liveFoldsParsed(url) {
     const memos = foldMemos(PARSED_RUN);
     await page.setInputFiles('#file-input', memos);
     await filesCounted(page, memos.length);
+    await pickRounds(page, FEWER_ROUNDS);
     await page.evaluate(() => (window.longTasks = []));
     await send(page, 'Which sites logged an equipment incident?');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
@@ -5934,11 +5940,11 @@ async function liveFoldsParsed(url) {
     const longest = Math.max(0, ...(await page.evaluate(() => window.longTasks)));
     // Every memo with a row of its own has a snippet, or a node on the answer's trail.
     const lit = await litNodes(page);
-    const rowNodes = (d) => [fileNode(d), ...Array.from({ length: ROUNDS }, (_, k) => `r${k + 1}-${d}`), `parsed-${d}`];
+    const rowNodes = (d) => [fileNode(d), ...roundKinds(FEWER_ROUNDS).map((kind) => `${kind}-${d}`), `parsed-${d}`];
     const own = (await docIdsOf(page)).filter((id) => !id.startsWith('doc-f')).map((id) => Number(id.slice('doc-'.length)) - SAMPLE_DOCS);
     const outside = own.filter((d) => !PARSED_RUN.relevant.includes(d) && !rowNodes(d).some((id) => lit.includes(id))).map((d) => foldStem(PARSED_RUN, d));
     const folds = await count(page, '.node.fold.doc');
-    const name = `a run of ${PARSED_RUN.docs} memos whose quiet ones would parse to records, but are pruned, keeps those folded, but for the trail's, with no task over ${LONG_TASK_MS} ms`;
+    const name = `a run of ${PARSED_RUN.docs} memos whose quiet ones parse to records keeps those folded, but for the trail's, with no task over ${LONG_TASK_MS} ms`;
     check('live', name, done && longest <= LONG_TASK_MS && folds > 0 && outside.length === 0, `longest task ${Math.round(longest)} ms; ${folds} folds; ${own.length} own rows; ${outside.length} out without a snippet: ${outside.slice(0, 5).join(' ')}`);
   });
 }
@@ -6109,7 +6115,7 @@ async function liveRoundsOf(url, rounds) {
     });
     const view = await transform(page);
     const run = `a run of ${rounds} round${rounds === 1 ? '' : 's'}`;
-    const kinds = Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
+    const kinds = roundKinds(rounds);
     const final = kinds.at(-1);
     const kindOf = (id) => id.split('-')[0];
     const roundOf = (id) => Number(kindOf(id).slice(1));
