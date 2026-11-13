@@ -8,6 +8,9 @@ from xml.sax.saxutils import escape, quoteattr
 from pypdf import PdfWriter
 
 CORRUPT_DOCX = b"PK\x03\x04 truncated garbage"
+# A trailer's entry that encrypts a PDF for some recipients' certificates, which pypdf
+# can't undo.
+CERTIFICATE_ENCRYPTION = "/Encrypt<</Filter/Adobe.PubSec/V 4>>"
 # A 1x1 PNG.
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -46,12 +49,14 @@ def write_pdf(
     to_unicode: dict[str, str] | None = None,
     padding: int = 0,
     password: str | None = None,
+    trailer: str = "",
 ) -> None:
     """A minimal valid PDF (correct xref offsets and %%EOF), with or without a text
     layer: generated, so the fixture stays readable. ``to_unicode`` gives its font a
     ToUnicode CMap, from characters of ``text`` to the UTF-16BE hex each one stands
     for; ``padding`` adds a stream of that many bytes that no page uses; ``password``
-    encrypts it, with AES-256, to open only with that password."""
+    encrypts it, with AES-256, to open only with that password; ``trailer`` adds these
+    entries to its trailer."""
     objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>"]
     if text:
         cmap = "/ToUnicode 6 0 R" if to_unicode else ""
@@ -77,7 +82,7 @@ def write_pdf(
     out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
     for o in offsets:
         out += f"{o:010d} 00000 n \n".encode()
-    out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R>>\n".encode()
+    out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R{trailer}>>\n".encode()
     out += f"startxref\n{xref}\n%%EOF\n".encode()
     if password is None:
         path.write_bytes(bytes(out))

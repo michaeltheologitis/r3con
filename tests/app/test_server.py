@@ -6,7 +6,7 @@ import socket
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 import httpx2
 import keyring
@@ -52,7 +52,13 @@ from r3con.app.server import (
 from r3con.masking import MASK
 from r3con.r3con import read_documents
 from r3con.settings import CONFIGS_DIR
-from tests.documents import CORRUPT_DOCX, write_docx, write_pdf, write_zip
+from tests.documents import (
+    CERTIFICATE_ENCRYPTION,
+    CORRUPT_DOCX,
+    write_docx,
+    write_pdf,
+    write_zip,
+)
 from tests.fakes import (
     GATE_TIMEOUT_SECONDS,
     SCHEMA_REPLY,
@@ -1776,7 +1782,14 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
     assert re.findall(r"'([^']+)'", listed[1]) == list(r3con._EXTRACTORS)
 
 
-# A PDF's reason says why it has no text; a Word file or a web page gives none.
+def test_the_page_has_a_line_for_each_reason_a_pdf_has_no_text():
+    script = (APP_DIR / "app.js").read_text(encoding="utf-8")
+    table = re.search(r"const PDF_NO_TEXT = \{(.*?)\};", script, re.DOTALL)
+    assert table is not None
+    lines = re.findall(r"^\s*(\w+):", table[1], re.MULTILINE)
+    assert lines == list(get_args(r3con._PdfNoText))
+
+
 @pytest.mark.parametrize(
     ("name", "write", "logged", "reason"),
     [
@@ -1784,7 +1797,7 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
             "memo.pdf",
             write_pdf,
             (
-                "memo.pdf: no extractable text — a scanned PDF needs OCR first; "
+                "memo.pdf: no extractable text — likely a scan, which needs OCR first; "
                 "skipping it"
             ),
             "no_text",
@@ -1792,7 +1805,13 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
         (
             "memo.pdf",
             lambda path: write_pdf(path, PDF_TEXT, password="secret"),
-            "memo.pdf: password-protected; skipping it",
+            "memo.pdf: password-protected (FileNotDecryptedError); skipping it",
+            "password",
+        ),
+        (
+            "memo.pdf",
+            lambda path: write_pdf(path, PDF_TEXT, trailer=CERTIFICATE_ENCRYPTION),
+            "memo.pdf: password-protected (NotImplementedError); skipping it",
             "password",
         ),
         (
@@ -1823,6 +1842,7 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
     ids=[
         "scanned-pdf",
         "password-pdf",
+        "certificate-pdf",
         "corrupt-pdf",
         "corrupt-docx",
         "empty-docx",

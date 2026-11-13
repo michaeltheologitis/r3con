@@ -487,16 +487,27 @@ def test_a_directory_is_read_recursively_in_path_order_skipping_binaries_and_bla
     ]
 
 
-def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
+def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped_saying_why(
+    tmp_path, caplog
+):
     write_pdf(tmp_path / "a_memo.pdf", "Incidents this quarter: 7.")
     write_pdf(tmp_path / "b_scanned.pdf")
     (tmp_path / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
     write_pdf(tmp_path / "c_locked.pdf", "A locked memo.", password="secret")
     (tmp_path / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
-    documents = read_documents(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="r3con.documents"):
+        documents = read_documents(tmp_path)
     assert list(documents) == ["a_memo.pdf", "d_plain.txt"]
     assert "Incidents this quarter: 7." in documents["a_memo.pdf"]
     assert documents["d_plain.txt"] == "a plain memo"
+    said = {
+        "b_scanned.pdf": "no extractable text — likely a scan, which needs OCR first",
+        "c_corrupt.pdf": "not readable as a PDF (PdfStreamError)",
+        "c_locked.pdf": "password-protected (FileNotDecryptedError)",
+    }
+    assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
+        f"{tmp_path / name}: {why}; skipping it" for name, why in said.items()
+    ]
 
 
 # pypdf picks its AES library on import: cryptography if it imports, else pycryptodome.

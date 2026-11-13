@@ -60,9 +60,9 @@ a reload reads.
   ``r3con.read_documents`` extracts it, which is ``""`` for a scan, a file with no text
   or one that can't be read, as the server's log then says; and, for a PDF with no
   text, why: ``"no_text"`` if no page has any (a scan, likely), ``"password"`` if it
-  opens only with a password, or ``"unreadable"`` if pypdf can't read it. ``reason`` is
-  ``null`` otherwise. The page sends each such file it is given here, and reads other
-  files itself.
+  is encrypted and won't open, as with a password, or ``"unreadable"`` if pypdf can't
+  read it. ``reason`` is ``null`` otherwise. The page sends each such file it is given
+  here, and reads other files itself.
 - ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body,
   answers ``{files: [{name, size, text, reason}], skipped}``. Its documents are the
   entries ``r3con.read_documents``' folder walk would read, judged by their paths below
@@ -759,7 +759,7 @@ async def forget_key(request: Request) -> Response:
 def _document(name: str, file: BinaryIO) -> dict[str, Any]:
     """``{text, reason}`` of the file called ``name``: its text as r3con reads it, and,
     for a PDF, why it has none (``r3con._pdf_read``), else ``None``."""
-    if not name.lower().endswith(r3con._PDF_SUFFIX):
+    if r3con._extractor(name) is not r3con._pdf_text:
         return {"text": r3con._read_stream(name, file), "reason": None}
     text, reason = r3con._pdf_read(name, file)
     return {"text": text, "reason": reason}

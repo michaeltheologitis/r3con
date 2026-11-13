@@ -18,7 +18,7 @@
   /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
   /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
-  /** @typedef {{ text: string, reason: 'no_text' | 'password' | 'unreadable' | null }} Extracted A file's text from r3con app, and why a PDF has none. */
+  /** @typedef {{ text: string, reason: keyof typeof PDF_NO_TEXT | null }} Extracted A file's text from r3con app, and why a PDF has none. */
   /** @typedef {{ name: string, size: number } & FileRead} DocumentRead */
   /**
    * A file's documents, many for a zip, and how many files it left out by their suffix.
@@ -1690,7 +1690,7 @@
     unreadable: 'Not a readable PDF: it may be damaged.',
   };
   /** @param {Extracted['reason']} reason */
-  const noTextWhy = (reason) => (reason ? PDF_NO_TEXT[reason] : NO_TEXT);
+  const noTextWhy = (reason) => (reason && PDF_NO_TEXT[reason]) ?? NO_TEXT;
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
   const DROP_FILES = 'drop files and folders here';
