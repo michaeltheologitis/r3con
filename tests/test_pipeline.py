@@ -1,6 +1,5 @@
 import ast
 import datetime
-import hashlib
 import json
 import logging
 import random
@@ -24,10 +23,8 @@ from r3con.config import (
 )
 from r3con.pipeline import run_pipeline
 from r3con.runs import TaskLogger
-from r3con.splitting import Splits
 from r3con.stages.structuring.parsing import SchemaError
 from tests.fakes import (
-    PARSE_HEADING,
     TWO_LINE_MEMOS,
     citable_lists,
     citing,
@@ -146,20 +143,6 @@ def memos_with(registry: str) -> list[str]:
     documents = read_documents(MEMOS)
     documents["04_contractor_registry.txt"] = registry
     return list(documents.values())
-
-
-def answered_parts(logger, folder: str, call: str, n: int) -> list[list[tuple]]:
-    """Each of ``n`` documents' ``call`` calls that answered, as ``folder``'s
-    ``calls.json`` records them, in part order: each call's kind and the part it read."""
-    calls = sorted(read_json(logger, f"{folder}/calls"), key=lambda c: c["chunk"] or 0)
-    return [
-        [
-            (c["kind"], PARSE_HEADING.sub("", c["prompt"][1]["content"]))
-            for c in calls
-            if c["doc"] == i and c["error"] is None and c["kind"].startswith(f"{call}-")
-        ]
-        for i in range(n)
-    ]
 
 
 def summary_headings(llm) -> list[str]:
@@ -831,34 +814,20 @@ def test_a_failing_stage_leaves_its_calls_and_traceback_and_names_the_run_folder
     assert all((logger.dir / name / "result.json").is_file() for name in earlier)
 
 
-def test_each_documents_fingerprint_is_on_disk_before_the_first_request_and_after_a_failure(
+def test_documents_json_is_on_disk_before_the_first_request_and_after_a_failure(
     answering_llm, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
-    documents = {"halloran.txt": "Halloran memo", "merrow.txt": "Merrow memo · café"}
-    at_first_request = []
+    on_disk_at_first_request = []
 
     def down(request):
-        at_first_request.append(read_json(logger, "documents"))
+        on_disk_at_first_request.append((logger.dir / "documents.json").is_file())
         raise provider_down()
 
     with pytest.raises(litellm.APIConnectionError):
-        answer(answering_llm.answers(relevance=down), logger, documents=documents)
-    ids = read_json(logger, "ids")
-    fingerprints = read_json(logger, "documents")
-    assert list(fingerprints) == list(ids)
-    assert (
-        fingerprints
-        == at_first_request[0]
-        == {
-            id_: {
-                "name": name,
-                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "chars": len(text),
-            }
-            for id_, (name, text) in zip(ids, documents.items(), strict=True)
-        }
-    )
+        answer(answering_llm.answers(relevance=down), logger)
+    assert on_disk_at_first_request[0]
+    assert list(read_json(logger, "documents")) == list(read_json(logger, "ids"))
 
 
 def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(
@@ -1108,33 +1077,6 @@ def test_a_later_stage_splits_further_without_renumbering(
     ]
     assert len(llm.requests_for("relevance")) == (12 if measured else 13)
     assert result.source_docs == {"rows": [0, 1, 2, 3, 3, 3, 3, 4]}
-
-
-@pytest.mark.parametrize("cause", ["estimate", "refusal"])
-def test_splits_restored_from_a_runs_splits_json_read_the_parts_the_run_read(
-    answering_llm, grown_registry, window, tmp_path, cause
-):
-    llm, model = {
-        "estimate": (answering_llm, window(5_000)),
-        "refusal": (answering_llm.refuses_over(18_000), QWEN),
-    }[cause]
-    documents = memos_with(grown_registry(40_000))
-    logger = TaskLogger("run", root=tmp_path)
-    answer(llm, logger, documents=documents, model=model)
-    record = read_json(logger, "splits")
-    again = TaskLogger("again", root=tmp_path)
-    splits = Splits.restored(documents, record, task_logger=again)
-    for call, folder in [
-        ("relevance-r2", "relevance"),
-        ("parse", "structuring/parsing"),
-    ]:
-        read = [
-            splits.read_in_parts(i, call=call, rest="", send=lambda p, k: (k, p))
-            for i in range(len(documents))
-        ]
-        assert read == answered_parts(logger, folder, call, len(documents))
-    assert [kind for kind, _ in read[3]] == [f"parse-d3c{k}" for k in range(4)]
-    assert read_json(again, "splits") == record
 
 
 @pytest.mark.parametrize(

@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from pathlib import Path
 
 import litellm
@@ -202,6 +201,39 @@ def test_a_document_once_split_starts_the_next_call_from_its_parts(logger):
     assert record(logger)["documents"]["0"]["parts"] == {"parse": 4, "relevance-r2": 4}
 
 
+@pytest.mark.parametrize("cause", ["estimate", "refusal"])
+def test_splits_restored_from_their_record_read_the_same_parts_and_write_it_again(
+    window, logger, tmp_path, cause
+):
+    model, limit = {
+        "estimate": (window(500), None),
+        "refusal": (QWEN, len(PARAGRAPHS) // 3),
+    }[cause]
+    documents = [PARAGRAPHS, LOPSIDED]
+    splits = Splits(documents, model=model, task_logger=logger)
+    first = Provider(limit)
+    splits.read_in_parts(0, call="parse", rest=REST, send=first)
+    again = TaskLogger("again", root=tmp_path)
+    restored = Splits.restored(documents, record(logger), task_logger=again)
+    assert record(again) == record(logger)
+    assert [restored.parts(i) for i in (0, 1)] == [splits.parts(i) for i in (0, 1)]
+    provider = Provider()
+    restored.read_in_parts(0, call="parse", rest=REST, send=provider)
+    assert provider.kinds == first.kinds[-len(splits.parts(0)) :]
+    assert len(provider.kinds) > 1
+
+
+def test_restored_splits_keep_the_window_their_record_gives_without_a_lookup(
+    window, logger, caplog
+):
+    read(PARAGRAPHS, Provider(), model=window(500), task_logger=logger)
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="r3con")
+    restored = Splits.restored([PARAGRAPHS], {**record(logger), "model": QWEN})
+    assert (restored.max_input_tokens, restored.line) == (500, 425)
+    assert caplog.text == ""
+
+
 @pytest.mark.parametrize(
     ("doc", "cuts"),
     [
@@ -209,19 +241,34 @@ def test_a_document_once_split_starts_the_next_call_from_its_parts(logger):
         ("0", [0, 1_000]),
         ("0", [len(PARAGRAPHS)]),
         ("1", [1_000]),
+        ("0", [2.5]),
+        ("0", ["1000"]),
+        ("x", [1_000]),
+        ("01", [1_000]),
     ],
-    ids=["out-of-order", "at-the-start", "at-the-end", "no-such-document"],
+    ids=[
+        "out-of-order",
+        "at-the-start",
+        "at-the-end",
+        "no-such-document",
+        "a-float",
+        "a-string",
+        "not-an-index",
+        "not-as-written",
+    ],
 )
-def test_restoring_a_record_that_does_not_cut_inside_the_documents_is_refused(
+def test_restoring_a_record_that_does_not_fit_the_documents_fails_at_once_in_one_line(
     logger, doc, cuts
 ):
     read(PARAGRAPHS, Provider(limit=len(PARAGRAPHS) // 3), task_logger=logger)
     saved = record(logger)
     saved["documents"] = {doc: {**saved["documents"]["0"], "cuts": cuts}}
-    with pytest.raises(
-        ValueError, match=re.escape(f"cuts documents[{doc}] at {cuts}.")
-    ):
+    with pytest.raises(ValueError) as refused:
         Splits.restored([PARAGRAPHS], saved)
+    assert str(refused.value).startswith(
+        "splits.json does not fit these 1 document(s): "
+    )
+    assert "\n" not in str(refused.value)
 
 
 def test_over_the_line_a_document_is_split_before_anything_is_sent(window, logger):

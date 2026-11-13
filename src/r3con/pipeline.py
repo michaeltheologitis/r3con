@@ -465,9 +465,7 @@ def run_pipeline(
         )
         task_logger.write_json("ids", {id_: i for i, id_ in enumerate(document_ids)})
         task_logger.write_json("names", names)
-        task_logger.write_json(
-            "documents", fingerprints(document_ids, document_names, texts)
-        )
+        task_logger.write_json("documents", fingerprints(document_ids, texts))
 
     # Where each document is cut into parts, shared by every stage that reads one.
     splits = Splits(

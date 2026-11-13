@@ -15,6 +15,7 @@ from r3con.pipeline import run_pipeline
 from r3con.runs import (
     StageRun,
     TaskLogger,
+    fingerprints,
     new_run_folder,
     normalize_model_name,
     write_manifest,
@@ -49,6 +50,15 @@ SCHEMA = {
             "description": "How many tokens the memo spends",
         },
     },
+}
+# Texts and the SHA-256 of their UTF-8 bytes, as sha256sum gives it.
+FINGERPRINTED = {
+    "Halloran memo": "df64b9ac9984a7c355d77857db4f84ea0f8e3e8efdee95e2993a52347c554ea5",
+    "Merrow memo · café": "872e3e95b4ce367bc4dae4bd12ffe0dbfb5afd15217e1ba728c1ae1fa906a379",
+    # Half a surrogate pair, passed through as its three bytes, ED A0 80.
+    "Calder memo, half a pair: \ud800": (
+        "387608192a392fe5a3d3253a6c9cc8d2f1b41f1d84e50d10162c56e729a9ad52"
+    ),
 }
 TOOLS = [{"type": "function", "function": {"name": "sign_in", "parameters": SCHEMA}}]
 # A field of a schema, which the rows below name like a credential.
@@ -691,6 +701,12 @@ def test_the_manifest_records_the_settings_it_is_given(logger):
     write_manifest(logger, task="q", config=config(), n_docs=1)
     recorded = json.loads((logger.dir / "manifest.json").read_text())["settings"]
     assert recorded == settings_snapshot()
+
+
+def test_a_fingerprint_is_the_sha256_of_a_texts_utf8_bytes_by_its_id_in_order():
+    ids = ["c3", "a1", "b2"]
+    fingerprinted = fingerprints(ids, list(FINGERPRINTED))
+    assert list(fingerprinted.items()) == list(zip(ids, FINGERPRINTED.values()))
 
 
 def test_the_manifest_is_written_before_the_first_stage_fails(llm, logger):
