@@ -3116,11 +3116,16 @@
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
   function countSentences(tab, node, sentences) {
+    showPill(node, sentences);
+    node.el.setAttribute('aria-label', ariaName(tab, node, sentences));
+  }
+
+  /** @param {PanelNode} node @param {number} sentences */
+  function showPill(node, sentences) {
     const pill = /** @type {HTMLElement} */ (node.el.querySelector('.pill'));
     pill.hidden = !sentences;
     pill.textContent = String(sentences);
     pill.title = plural(sentences, 'highlighted sentence');
-    node.el.setAttribute('aria-label', ariaName(tab, node, sentences));
   }
 
   /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
@@ -3446,6 +3451,7 @@
       h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
       h('span', { class: 'label name' }),
       h('span', { class: 'label' }),
+      head && row.folder ? h('span', { class: 'pill', hidden: true }) : null,
     );
     /** @type {PanelNode} */
     const node = { id, kind, file: null, x: pos.x, y: pos.y, el, fold: row };
@@ -3495,17 +3501,20 @@
     const onTrail = new Set(head ? [...(trail?.nodes ?? [])].map((id) => docOf(tab, id)) : []);
     const sources = foldDocs(folder).filter((d) => onTrail.has(d)).length;
     const counted = !open && sources > 0 && plural(sources, 'source');
+    // Only a closed folder counts its documents' sentences, at any depth in it: an open one's documents show their own.
+    const sentences = counted ? foldDocs(folder).reduce((sum, d) => sum + (trail?.quoted[d].sentences.length ?? 0), 0) : 0;
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
     name.textContent = `${shortLabel(folder.name)} · ${files}`;
     sub.textContent = counted || (isRound(node.kind) ? roundName(node.kind) : '');
     sub.hidden = !sub.textContent;
     sub.classList.toggle('sources', Boolean(counted));
     const stopped = node.el.classList.contains('failed') && 'stopped';
-    node.el.setAttribute('aria-label', [`${folder.name} folder`, files, columnName(node.kind), open ? 'open' : 'closed', counted, stopped].filter(Boolean).join(', '));
+    node.el.setAttribute('aria-label', [`${folder.name} folder`, files, columnName(node.kind), open ? 'open' : 'closed', counted, sentences && plural(sentences, 'highlighted sentence'), stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(open));
     node.el.title = `${open ? 'close' : 'open'} ${folder.name}`;
     node.el.classList.toggle('open', open);
     if (!head) return;
+    showPill(node, sentences);
     node.el.classList.toggle('on-path', Boolean(counted));
     node.el.classList.toggle('unused', Boolean(trail) && !sources);
   }
