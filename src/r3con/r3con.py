@@ -71,6 +71,7 @@ from r3con.pipeline import (
     names_and_texts,
     read_answer,
     read_representation,
+    read_resume,
     resume_pipeline,
     run_pipeline,
 )
@@ -383,10 +384,11 @@ def resume(
         any request. Anything the stages raise, as for :func:`run`.
     """
     load_dotenv(find_dotenv(usecwd=True))
+    resumable = read_resume(
+        Path(run_dir), documents, params=params, completion=completion
+    )
     return resume_pipeline(
-        Path(run_dir),
-        documents,
-        params=params,
+        resumable,
         api_base=api_base,
         api_key=api_key,
         completion=completion,

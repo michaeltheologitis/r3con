@@ -1,6 +1,8 @@
 import contextlib
 import json
 import re
+import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -25,11 +27,23 @@ from r3con.app.server import (
 from r3con.cli import build_parser, main
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.documents import read_documents
-from tests.fakes import KEYRING_FILE, a_parse_citation_short, in_json
+from r3con.runs import run_lock
+from tests.fakes import (
+    ANSWERING,
+    KEYRING_FILE,
+    a_parse_citation_short,
+    bad_key,
+    failing_once,
+    in_json,
+    predating_resume,
+    reading,
+    reading_moved_prompts,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 MEMOS = REPO / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
+RIVERSIDE = "MEMO — Riverside site, Q3 operations review"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 GATEWAY = "https://gateway.example"
@@ -344,10 +358,13 @@ def test_a_config_naming_a_reasoning_path_r3con_does_not_have_exits_2_in_one_lin
     assert scripted.requests == []
 
 
-def test_an_interrupt_exits_130(scripted, capsys):
+def test_an_interrupt_exits_130_and_says_how_to_carry_on(scripted, capsys):
     scripted.replies(KeyboardInterrupt())
-    assert r3con("run", "Who?", str(MEMOS / "01_northgate.txt")) == 130
-    assert capsys.readouterr().err.endswith("r3con: interrupted.\n")
+    source = str(MEMOS / "01_northgate.txt")
+    assert r3con("run", "Who?", source) == 130
+    err = capsys.readouterr().err
+    run_dir = path_after("artifacts: ", err)
+    assert err.endswith(f"r3con: interrupted.\n{carrying_on(run_dir, source)}\n")
 
 
 def test_no_artifacts_writes_no_run_folder(answering, tmp_path, capsys):
@@ -404,12 +421,15 @@ def test_doc_workers_bounds_how_many_documents_are_read_at_once(answering, worke
     ],
     ids=["flag-below-one", "variable-below-one", "variable-not-int", "bad-level"],
 )
+@pytest.mark.parametrize(
+    "command", [["run", "Who?"], ["resume", "./no-run"]], ids=["run", "resume"]
+)
 def test_a_bad_setting_exits_2_naming_it_before_any_document_is_read(
-    scripted, tmp_path, capsys, monkeypatch, argv, env, stderr
+    scripted, tmp_path, capsys, monkeypatch, command, argv, env, stderr
 ):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    assert r3con("run", "Who?", "./missing", *argv) == 2
+    assert r3con(*command, "./missing", *argv) == 2
     assert capsys.readouterr().err == stderr
     assert scripted.requests == []
     assert list(tmp_path.iterdir()) == []
@@ -675,3 +695,187 @@ def test_ctrl_c_quits_the_app_within_its_bound_though_a_model_call_never_returns
     assert exit_code == FORCED_EXIT_CODE
     assert out.endswith(f"{CUT_OFF}\n")
     assert [shown for shown in CRASH_SIGNS if shown in err] == []
+
+
+# --- resume ---
+
+
+def stopped_run(llm, capsys, *argv: str) -> tuple[Path, str]:
+    """The folder of an ``r3con run`` over the memos, with ``argv``, that ``llm``
+    fails in Riverside's parse, and what it said on stderr."""
+    llm.answers(parsing=failing_once(reading(RIVERSIDE), ANSWERING["parsing"]))
+    assert r3con("run", "Who?", str(MEMOS), *argv) == 1
+    err = capsys.readouterr().err
+    return path_after("artifacts: ", err), err
+
+
+def carrying_on(run_dir: Path, *sources: str, options: tuple = ()) -> str:
+    """The line that says how to carry on the run in ``run_dir``."""
+    command = shlex.join(["r3con", "resume", str(run_dir), *sources, *options])
+    return f"r3con: to carry on: {command}"
+
+
+def test_a_stopped_run_says_how_to_carry_on_and_the_command_pasted_finishes_it(
+    answering, tmp_path, capsys
+):
+    sources = tmp_path / "q3 memos"
+    shutil.copytree(MEMOS, sources)
+    logs = tmp_path / "run logs"
+    answering.answers(parsing=failing_once(reading(RIVERSIDE), ANSWERING["parsing"]))
+    assert r3con("run", "Who?", str(sources), "--logs-dir", str(logs)) == 1
+    err = capsys.readouterr().err
+    run_dir = path_after("artifacts: ", err)
+    assert err.splitlines()[-1] == carrying_on(run_dir, str(sources))
+    pasted = shlex.split(err.splitlines()[-1].removeprefix("r3con: to carry on: "))
+    sent = len(answering.requests)
+    assert r3con(*pasted[1:]) == 0
+    out, err = capsys.readouterr()
+    assert out == f"{ANSWER}\n"
+    assert path_after("artifacts: ", err) == run_dir.resolve()
+    # Riverside's parse and reasoning.
+    assert len(answering.requests) - sent == 2
+
+
+def test_the_command_to_carry_on_keeps_its_options_and_names_but_hides_the_key(
+    answering, capsys
+):
+    options = ("--base-url", GATEWAY, "--doc-workers", "2")
+    run_dir, err = stopped_run(answering, capsys, *options, "--api-key", KEY)
+    assert err.splitlines()[-1] == (
+        f"{carrying_on(run_dir, str(MEMOS), options=options)} (and your --api-key)"
+    )
+    assert KEY not in err
+
+
+def test_no_artifacts_has_no_run_to_carry_on(answering, capsys):
+    answering.answers(parsing=failing_once(reading(RIVERSIDE), ANSWERING["parsing"]))
+    assert r3con("run", "Who?", str(MEMOS), "--no-artifacts") == 1
+    assert "to carry on" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("stopping", "code", "said"),
+    [
+        (bad_key(), 1, "r3con: AuthenticationError: "),
+        (KeyboardInterrupt(), 130, "r3con: interrupted.\n"),
+    ],
+    ids=["failed", "interrupted"],
+)
+def test_a_stopped_resume_says_how_to_carry_on_again(
+    answering, capsys, stopping, code, said
+):
+    run_dir, _ = stopped_run(answering, capsys)
+    answering.answers(reasoning=stopping)
+    assert r3con("resume", str(run_dir), str(MEMOS)) == code
+    err = capsys.readouterr().err
+    assert said in err
+    assert err.endswith(f"{carrying_on(run_dir.resolve(), str(MEMOS))}\n")
+
+
+def test_a_value_error_on_the_way_is_a_failure_not_a_refusal(answering, capsys):
+    answering.answers(
+        relevance=failing_once(reading(RIVERSIDE), ANSWERING["relevance"])
+    )
+    assert r3con("run", "Who?", str(MEMOS)) == 1
+    run_dir = path_after("artifacts: ", capsys.readouterr().err)
+    answering.answers(schema="Thought: none.\n<schema>\nnot a schema\n</schema>")
+    assert r3con("resume", str(run_dir), str(MEMOS)) == 1
+    err = capsys.readouterr().err
+    assert "r3con: SchemaError: propose_schema exhausted" in err
+    assert err.endswith(f"{carrying_on(run_dir.resolve(), str(MEMOS))}\n")
+
+
+def resumed_to_the_end(run_dir: Path) -> None:
+    assert r3con("resume", str(run_dir), str(MEMOS)) == 0
+
+
+@pytest.mark.parametrize(
+    ("change", "sources", "said"),
+    [
+        (
+            resumed_to_the_end,
+            [str(MEMOS)],
+            "this run finished; ask it a new question instead (r3con ask, or r3con.ask).",
+        ),
+        (predating_resume, [str(MEMOS)], "this run predates resume"),
+        (
+            lambda run_dir: None,
+            [str(MEMOS / "01_northgate.txt")],
+            "these are not the run's documents: missing 02_eastfield.txt, ",
+        ),
+        (
+            lambda run_dir: saving_params(run_dir, MASKED_HEADER),
+            [str(MEMOS)],
+            (
+                "pass --api-key or --base-url in place of a masked `api_key` or "
+                "`api_base`; any other masked param can be passed again only through "
+                "r3con.resume's `params`. Masked params: `extra_headers.Authorization`."
+            ),
+        ),
+        (
+            reading_moved_prompts,
+            [str(MEMOS)],
+            "the run's prompts resolve to other files than it read",
+        ),
+    ],
+    ids=["finished", "predates-resume", "other-documents", "masked", "prompts-moved"],
+)
+def test_a_resume_it_cannot_carry_on_exits_2_in_one_line(
+    answering, capsys, change, sources, said
+):
+    run_dir, _ = stopped_run(answering, capsys)
+    change(run_dir)
+    capsys.readouterr()
+    sent = len(answering.requests)
+    assert r3con("resume", str(run_dir), *sources) == 2
+    out, err = capsys.readouterr()
+    assert (out, err.count("\n")) == ("", 1)
+    assert err.startswith("r3con: ")
+    assert said in err
+    assert len(answering.requests) == sent
+
+
+def test_a_resume_of_a_run_still_going_exits_2_in_one_line(answering, capsys):
+    run_dir, _ = stopped_run(answering, capsys)
+    with run_lock(run_dir):
+        assert r3con("resume", str(run_dir), str(MEMOS)) == 2
+    err = capsys.readouterr().err
+    assert err.endswith(
+        f"r3con: {run_dir.resolve()}: a run or resume is going in it; carry it on "
+        "once that one has stopped.\n"
+    )
+
+
+def test_a_mistyped_run_folder_is_refused_before_any_document_is_read(
+    scripted, tmp_path, capsys
+):
+    typo = tmp_path / "logs" / "2026111"
+    assert r3con("resume", str(typo), str(tmp_path / "no documents here")) == 2
+    assert capsys.readouterr().err == (
+        f"r3con: {typo} is not a run folder: it has no manifest.json.\n"
+    )
+    assert scripted.requests == []
+
+
+def test_a_resume_given_an_asks_folder_carries_on_the_run_it_asked_over(
+    answering, capsys
+):
+    answering.answers(
+        reasoning=failing_once(lambda request: True, ANSWERING["reasoning"])
+    )
+    assert r3con("run", "Who?", str(MEMOS)) == 1
+    run_dir = path_after("artifacts: ", capsys.readouterr().err).resolve()
+    assert r3con("ask", str(run_dir), "Who else?") == 0
+    asked = path_after("artifacts: ", capsys.readouterr().err)
+    answering.answers(reasoning=bad_key())
+    assert r3con("resume", str(asked), str(MEMOS)) == 1
+    err = capsys.readouterr().err
+    assert path_after("artifacts: ", err) == run_dir
+    assert err.endswith(f"{carrying_on(run_dir, str(MEMOS))}\n")
+
+
+def test_a_resume_over_a_masked_api_key_sends_the_one_given(answering, capsys):
+    run_dir, _ = stopped_run(answering, capsys)
+    saving_params(run_dir, {"api_key": "REDACTED"})
+    assert r3con("resume", str(run_dir), str(MEMOS), "--api-key", KEY) == 0
+    assert answering.requests[-1]["api_key"] == KEY

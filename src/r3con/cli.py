@@ -1,6 +1,7 @@
 """The ``r3con`` command line: run the pipeline over a folder of documents.
 
     r3con run "Which supplier missed the most delivery windows?" ./reports
+    r3con resume ./logs/<run> ./reports
     r3con ask ./logs/<run> "Which supplier delivered on time most often?"
     r3con app
 
@@ -8,7 +9,10 @@ Everything the pipeline did is left in a run folder under ``./logs`` — the rel
 snippets, the proposed schema, the parse, and the reasoning transcript — because the
 answer alone rarely tells you whether to trust it.
 
-``r3con ask`` reruns only reasoning over a finished run's folder (:func:`r3con.ask`).
+``r3con resume`` carries on a run that failed or was stopped, in its folder, over the
+same sources (:func:`r3con.resume`); a run that fails or is interrupted says so, with
+the command to paste. ``r3con ask`` reruns only reasoning over a finished run's folder
+(:func:`r3con.ask`).
 ``r3con app`` serves the app's page on 127.0.0.1 (:mod:`r3con.app`), when the ``app``
 extra is installed.
 """
@@ -17,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -31,10 +37,13 @@ from r3con.pipeline import (
     ask_config,
     ask_pipeline,
     read_representation,
+    read_resume,
     refuse_masked,
+    resumable_folder,
+    resume_pipeline,
     run_pipeline,
 )
-from r3con.runs import TaskLogger, new_run_folder
+from r3con.runs import RunFolderBusy, TaskLogger, new_run_folder
 from r3con.runtime.llm import register_credentials
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
@@ -50,6 +59,15 @@ MASKED_PARAM_ADVICE = (
     "pass --api-key or --base-url in place of a masked `api_key` or `api_base`, or ask "
     "with another --model, which sends none of the run's params"
 )
+# How a resume refused for a masked param gets past it here, where it takes no params.
+RESUME_MASKED_ADVICE = (
+    "pass --api-key or --base-url in place of a masked `api_key` or `api_base`; any "
+    "other masked param can be passed again only through r3con.resume's `params`"
+)
+EXIT_REFUSED = 2
+EXIT_FAILED = 1
+# 128 + SIGINT, as shells report Ctrl-C.
+EXIT_INTERRUPTED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,10 +96,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stream per-stage progress to stderr.",
     )
+    workers = argparse.ArgumentParser(add_help=False)
+    workers.add_argument(
+        "--doc-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max documents processed concurrently within the run (default: 16, or "
+        "R3CON_DOC_WORKERS). Each document is one LLM call per relevance round "
+        "and one for parsing, so this is your main lever on endpoint load.",
+    )
 
     run_cmd = sub.add_parser(
         "run",
-        parents=[common],
+        parents=[common, workers],
         help="Answer a question over a collection of documents.",
         description=(
             "Answer a question over a collection of documents. Sources may be "
@@ -129,15 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # --- runtime ---
     run_cmd.add_argument(
-        "--doc-workers",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Max documents processed concurrently within the run (default: 16, or "
-        "R3CON_DOC_WORKERS). Each document is one LLM call per relevance round "
-        "and one for parsing, so this is your main lever on endpoint load.",
-    )
-    run_cmd.add_argument(
         "--logs-dir",
         default=None,
         metavar="DIR",
@@ -147,6 +166,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-artifacts",
         action="store_true",
         help="Don't write a run folder. You lose the record of what the run did.",
+    )
+
+    resume_cmd = sub.add_parser(
+        "resume",
+        parents=[common, workers],
+        help="Carry on a run that failed or was stopped.",
+        description=(
+            "Carry on a run that failed or was stopped, in its own folder and under its "
+            "own settings: what it finished is reused, and only the rest is computed. "
+            "It needs the run's documents, the same sources in the same order."
+        ),
+    )
+    resume_cmd.add_argument("run_dir", metavar="RUN_DIR", help="The run's folder.")
+    resume_cmd.add_argument(
+        "documents",
+        nargs="+",
+        metavar="SOURCE",
+        help="The sources the run was given: directories, globs, or files.",
     )
 
     ask_cmd = sub.add_parser(
@@ -209,18 +246,11 @@ def _run(args: argparse.Namespace) -> int:
             relevance_rounds=args.relevance_rounds,
             reasoning=args.reasoning,
         )
-        if args.doc_workers is not None:
-            check_cap("doc_workers", args.doc_workers, name="--doc-workers")
-            # The stages read this through settings.active_doc_workers() at call time.
-            os.environ["R3CON_DOC_WORKERS"] = str(args.doc_workers)
-        settings_snapshot()
-        documents = read_documents(args.documents)
+        _use_settings(args)
+        documents = _read_sources(args.documents)
     except (FileNotFoundError, ValueError) as e:
         _error(str(e))
-        return 2
-    if not documents:
-        _error("no documents to read (every source was empty).")
-        return 2
+        return EXIT_REFUSED
 
     task_logger = None
     if not args.no_artifacts:
@@ -244,10 +274,93 @@ def _run(args: argparse.Namespace) -> int:
             api_base=args.base_url,
             api_key=args.api_key,
         )
+    except KeyboardInterrupt:
+        code = _interrupted()
     except Exception as e:  # noqa: BLE001 — a CLI reports, it doesn't traceback at the user
-        return _failed(e)
-    print(result.answer)
-    return 0
+        code = _failed(e)
+    else:
+        print(result.answer)
+        return 0
+    if task_logger is not None:
+        _carry_on(task_logger.dir, args)
+    return code
+
+
+def _resume(args: argparse.Namespace) -> int:
+    try:
+        configure_logging("INFO" if args.verbose else None)
+        _use_settings(args)
+        # The folder first: a mistyped one is refused before any document is read.
+        run_dir = resumable_folder(Path(args.run_dir))
+        resumable = read_resume(run_dir, _read_sources(args.documents))
+        refuse_masked(
+            resumable.config.params,
+            api_base=args.base_url,
+            api_key=args.api_key,
+            advice=RESUME_MASKED_ADVICE,
+        )
+    except (FileNotFoundError, ValueError) as e:
+        _error(str(e))
+        return EXIT_REFUSED
+
+    print(f"{len(resumable.texts)} document(s) · resuming the run", file=sys.stderr)
+    print(f"artifacts: {resumable.run_dir}", file=sys.stderr)
+    try:
+        result = resume_pipeline(
+            resumable, api_base=args.base_url, api_key=args.api_key
+        )
+    except RunFolderBusy as e:
+        _error(str(e))
+        return EXIT_REFUSED
+    except KeyboardInterrupt:
+        code = _interrupted()
+    except Exception as e:  # noqa: BLE001 — a CLI reports, it doesn't traceback at the user
+        code = _failed(e)
+    else:
+        print(result.answer)
+        return 0
+    _carry_on(resumable.run_dir, args)
+    return code
+
+
+def _use_settings(args: argparse.Namespace) -> None:
+    """Check the runtime settings, ``--doc-workers`` in force."""
+    if args.doc_workers is not None:
+        check_cap("doc_workers", args.doc_workers, name="--doc-workers")
+        # The stages read this through settings.active_doc_workers() at call time.
+        os.environ["R3CON_DOC_WORKERS"] = str(args.doc_workers)
+    settings_snapshot()
+
+
+def _read_sources(sources: Sequence[str]) -> dict[str, str]:
+    """The documents ``sources`` name (:func:`r3con.read_documents`).
+
+    Raises:
+        FileNotFoundError: if a source names nothing.
+        ValueError: if every source is empty.
+    """
+    documents = read_documents(sources)
+    if not documents:
+        raise ValueError("no documents to read (every source was empty).")
+    return documents
+
+
+def _carry_on(run_dir: Path, args: argparse.Namespace) -> None:
+    """Say how to carry on the run in ``run_dir`` once it stopped, if a resume can
+    (:func:`r3con.pipeline.resumable_folder`): ``r3con resume`` over the same sources,
+    ``--base-url`` and ``--doc-workers``, quoted so that the line pastes, an
+    ``--api-key`` named but never shown."""
+    try:
+        resumable_folder(run_dir)
+    except (FileNotFoundError, ValueError):
+        return
+    command = ["r3con", "resume", str(run_dir), *args.documents]
+    if args.base_url:
+        command += ["--base-url", args.base_url]
+    if args.doc_workers is not None:
+        command += ["--doc-workers", str(args.doc_workers)]
+    key = " (and your --api-key)" if args.api_key else ""
+    _error(f"to carry on: {shlex.join(command)}{key}")
 
 
 def _ask(args: argparse.Namespace) -> int:
@@ -264,7 +377,7 @@ def _ask(args: argparse.Namespace) -> int:
         )
     except (FileNotFoundError, ValueError) as e:
         _error(str(e))
-        return 2
+        return EXIT_REFUSED
     task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     print(f"artifacts: {task_logger.dir}", file=sys.stderr)
     try:
@@ -290,22 +403,27 @@ def _app(args: argparse.Namespace) -> int:
         if (missing.name or "").partition(".")[0] not in APP_PACKAGES:
             raise
         _error(APP_EXTRA_HINT)
-        return 1
+        return EXIT_FAILED
     try:
         listener = server.listen(args.port)
     except (OSError, OverflowError) as error:
         _error(f"can't listen on port {args.port}: {error}")
-        return 2
+        return EXIT_REFUSED
     logs_dir = args.logs_dir or os.environ.get("R3CON_LOGS_DIR") or server.LOGS_DIR
     server.launch(listener, logs_dir=Path(logs_dir), browser=not args.no_browser)
     return 0
+
+
+def _interrupted() -> int:
+    print("\nr3con: interrupted.", file=sys.stderr)
+    return EXIT_INTERRUPTED
 
 
 def _failed(error: Exception) -> int:
     """Report ``error`` and its notes, such as where its artifacts are."""
     notes = getattr(error, "__notes__", ())
     _error("\n".join([f"{type(error).__name__}: {error}", *notes]))
-    return 1
+    return EXIT_FAILED
 
 
 def _error(text: str) -> None:
@@ -319,12 +437,11 @@ def main(argv: list[str] | None = None) -> int:
     # directory rather than from this file, which lives in site-packages.
     load_dotenv(find_dotenv(usecwd=True))
     args = build_parser().parse_args(argv)
-    command = {"run": _run, "ask": _ask, "app": _app}[args.command]
+    command = {"run": _run, "resume": _resume, "ask": _ask, "app": _app}[args.command]
     try:
         return command(args)
     except KeyboardInterrupt:
-        print("\nr3con: interrupted.", file=sys.stderr)
-        return 130
+        return _interrupted()
 
 
 if __name__ == "__main__":

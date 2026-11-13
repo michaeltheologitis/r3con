@@ -39,8 +39,11 @@ from tests.fakes import (
     first_line,
     in_json,
     is_later_round,
+    predating_resume,
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
+    reading,
+    reading_moved_prompts,
     snippets_without_quotes,
     stage_of,
     without_trail,
@@ -1490,14 +1493,6 @@ def one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
 
 
-def reading(line: str, *, later_round: bool = False):
-    """Whether a request reads the document whose first line is ``line``, in a later
-    relevance round only with ``later_round``."""
-    return lambda request: (
-        first_line(request) == line and (is_later_round(request) or not later_round)
-    )
-
-
 def failed_run(llm, tmp_path: Path, documents=MEMOS_BY_NAME, **options) -> Path:
     """The folder of a run over ``documents`` that ``llm`` fails."""
     with pytest.raises(litellm.AuthenticationError):
@@ -2010,20 +2005,6 @@ def test_a_resume_runs_under_the_runs_own_reasoning_turns_and_records_its_settin
     assert (used["reasoning_max_turns"], used["doc_workers"]) == (7, 3)
 
 
-def predating_resume(run_dir: Path) -> None:
-    (run_dir / "documents.json").unlink()
-
-
-def reading_moved_prompts(run_dir: Path) -> None:
-    """A ``./prompts`` overlay of the parsing prompt the run read, which shadows it."""
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    stage = "structuring/parsing"
-    read = Path(manifest["sources"]["prompts"][stage])
-    overlay = Path("prompts") / stage / read.name
-    overlay.parent.mkdir(parents=True)
-    overlay.write_text(read.read_text())
-
-
 def with_a_margin_out_of_range(run_dir: Path) -> None:
     manifest = json.loads((run_dir / "manifest.json").read_text())
     manifest["settings"]["window_margin_percent"] = 150
@@ -2075,8 +2056,8 @@ def test_a_finished_run_is_not_resumed_but_asked(answering_llm, tmp_path):
     with pytest.raises(ValueError) as refused:
         resume(answer.run_dir, MEMOS_BY_NAME, completion=answering_llm)
     assert str(refused.value) == (
-        f"{answer.run_dir}: this run finished; ask it a new question with r3con.ask "
-        "instead."
+        f"{answer.run_dir}: this run finished; ask it a new question instead (r3con "
+        "ask, or r3con.ask)."
     )
 
 

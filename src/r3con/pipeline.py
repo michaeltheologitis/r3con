@@ -43,7 +43,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NamedTuple, TypeVar
 
 from pydantic import BaseModel, StrictInt, ValidationError
 
@@ -757,24 +757,30 @@ def _build_and_answer(
     )
 
 
-def resume_pipeline(
-    run_dir: Path,
-    documents: Mapping[str, str] | Sequence[str],
-    *,
-    params: Mapping[str, Any] | None = None,
-    api_base: str | None = None,
-    api_key: str | None = None,
-    completion: Callable[..., Any] | None = None,
-    on_event: Callable[[dict[str, Any]], None] | None = None,
-    cancel: threading.Event | None = None,
-) -> Answer:
-    """Carry on the run in ``run_dir`` over its ``documents``, as :func:`r3con.resume`
-    says, reusing what :func:`_read_saved` reads back, and holding the folder
-    (:func:`r3con.runs.run_lock`) while it reads and writes there. It runs under the
-    settings the run recorded where they shape what it computes, the reasoning turns
-    and the window's margin, and under the current ones for concurrency and resends.
+class Resumable(NamedTuple):
+    """A run :func:`read_resume` found it can carry on, and what it runs with: its
+    folder, resolved; its question; its documents' texts, and their names by id, in
+    document order; its config, with any params given; the settings it runs under; and
+    where it cuts each document."""
+
+    run_dir: Path
+    task: str
+    texts: list[str]
+    names: dict[str, str]
+    config: RunConfig
+    caps: dict[str, int]
+    splits: Splits
+
+
+def resumable_folder(run_dir: Path) -> Path:
+    """``run_dir`` resolved, a run folder a resume can carry on, as far as the folder
+    alone tells; an ask's folder stands for its run's.
+
+    Raises:
+        FileNotFoundError: if it is not a run folder, or it predates resume: it has no
+            ``documents.json`` to check documents against.
+        ValueError: if the run finished.
     """
-    document_names, texts = names_and_texts(documents)
     run_dir = _run_of(run_dir)
     _refuse_finished(run_dir)
     if not (run_dir / "documents.json").is_file():
@@ -782,6 +788,29 @@ def resume_pipeline(
             f"{run_dir}: this run predates resume: it has no documents.json to check "
             "the documents against."
         )
+    return run_dir
+
+
+def read_resume(
+    run_dir: Path,
+    documents: Mapping[str, str] | Sequence[str],
+    *,
+    params: Mapping[str, Any] | None = None,
+    completion: Callable[..., Any] | None = None,
+) -> Resumable:
+    """The run in ``run_dir`` that a resume over ``documents`` carries on, as
+    :func:`r3con.resume` says, once every check it makes before writing or sending
+    anything passes (:func:`resumable_folder` first): the documents, ``params`` and
+    prompt files are the run's, and the settings it runs under, the run's recorded
+    reasoning turns and window margin with the current ones for concurrency and
+    resends, are in range. ``completion`` is the one the resume sends with, whose
+    credentials ``params`` may hold.
+
+    Raises:
+        FileNotFoundError, ValueError: as :func:`r3con.resume` says.
+    """
+    document_names, texts = names_and_texts(documents)
+    run_dir = resumable_folder(run_dir)
     with _readable(run_dir):
         manifest = _read_json(run_dir / "manifest.json")
         task, read_prompts = manifest["task"], manifest["sources"]["prompts"]
@@ -793,13 +822,7 @@ def resume_pipeline(
         run_documents = {name: digests[id_] for id_, name in names.items()}
     _refuse_other_documents(run_dir, run_documents, fingerprints(document_names, texts))
     if params is not None:
-        register_credentials(params, completion)
-        if masked_values(params) != config.params:
-            raise ValueError(
-                f"{run_dir}: these params are not the run's: resume runs with its own, "
-                "and takes them only for the real value of each credential its "
-                f"manifest saved as {MASK}."
-            )
+        _refuse_other_params(run_dir, params, config.params, completion)
         config = config.model_copy(update={"params": dict(params)})
     with _readable(run_dir):
         recorded = run_dir / "splits.json"
@@ -814,6 +837,29 @@ def resume_pipeline(
         **settings_snapshot(reasoning_max_turns=turns),
         "window_margin_percent": splits.margin_percent,
     }
+    return Resumable(run_dir, task, texts, names, config, caps, splits)
+
+
+def resume_pipeline(
+    resumable: Resumable,
+    *,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
+) -> Answer:
+    """Carry on ``resumable``, the run :func:`read_resume` read, as :func:`r3con.resume`
+    says, reusing what :func:`_read_saved` reads back, and holding the folder
+    (:func:`r3con.runs.run_lock`) while it reads and writes there.
+
+    Raises:
+        ValueError: if a param it would send holds the mask (:func:`refuse_masked`), or
+            the run finished while it waited to hold its folder.
+        RunFolderBusy: if another run or resume holds its folder.
+        Anything the stages raise, as :func:`run_pipeline` says.
+    """
+    config, splits = resumable.config, resumable.splits
     refuse_masked(config.params, api_base=api_base, api_key=api_key)
     llm_kwargs = _llm_kwargs(
         config.params,
@@ -822,20 +868,21 @@ def resume_pipeline(
         completion=completion,
         cancel=cancel,
     )
+    run_dir = resumable.run_dir
     with run_lock(run_dir):
-        # It may have finished while this resume waited to hold its folder.
         _refuse_finished(run_dir)
+        document_ids = list(resumable.names)
         with _readable(run_dir):
-            saved = _read_saved(run_dir, list(names), config.relevance_rounds, splits)
+            saved = _read_saved(run_dir, document_ids, config.relevance_rounds, splits)
         task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
-        reopen_for_resume(task_logger, caps)
+        reopen_for_resume(task_logger, resumable.caps)
         splits.log_to(task_logger)
         return _build_and_answer(
-            task=task,
-            texts=texts,
-            names=names,
+            task=resumable.task,
+            texts=resumable.texts,
+            names=resumable.names,
             config=config,
-            caps=caps,
+            caps=resumable.caps,
             llm_kwargs=llm_kwargs,
             splits=splits,
             task_logger=task_logger,
@@ -854,8 +901,29 @@ def _refuse_finished(run_dir: Path) -> None:
     """
     if (run_dir / "reasoning" / "result.json").is_file():
         raise ValueError(
-            f"{run_dir}: this run finished; ask it a new question with r3con.ask "
-            "instead."
+            f"{run_dir}: this run finished; ask it a new question instead (r3con ask, "
+            "or r3con.ask)."
+        )
+
+
+def _refuse_other_params(
+    run_dir: Path,
+    given: Mapping[str, Any],
+    saved: Mapping[str, Any],
+    completion: Callable[..., Any] | None,
+) -> None:
+    """Refuse ``given`` params unless, their credentials registered for masking, they
+    mask to ``saved``, the run's as its manifest holds them.
+
+    Raises:
+        ValueError: if they don't.
+    """
+    register_credentials(given, completion)
+    if masked_values(given) != saved:
+        raise ValueError(
+            f"{run_dir}: these params are not the run's: resume runs with its own, and "
+            "takes them only for the real value of each credential its manifest saved "
+            f"as {MASK}."
         )
 
 
