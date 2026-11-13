@@ -55,7 +55,7 @@ import re
 import threading
 import warnings
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from fnmatch import fnmatch
 from itertools import count, takewhile
 from pathlib import Path
@@ -153,6 +153,12 @@ _INLINE = frozenset(
 )
 # What needs no space before it after an image's alt text.
 _NO_SPACE_BEFORE = frozenset(" \t\r\n.,;:!?)")
+# What Office writes, in any case, into alt text it made up: a guess, not the author's.
+_OFFICE_ALT_TEXT_MARKERS = (
+    "Description automatically generated",
+    "Description generated with",
+    "AI-generated content may be incorrect",
+)
 # Where markdownify starts and ends a code block.
 _FENCE = "```"
 # bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
@@ -220,14 +226,18 @@ def _docx_text(name: str, docx: BinaryIO) -> str:
     mammoth turns its body into HTML, and markdownify that into Markdown: headings,
     lists and tables keep their shape, a table's first row is its header, and a tracked
     insertion stays while a deletion goes. The text is kept as written, its ``_`` and
-    ``*`` unescaped, but for a ``|`` in a table's cell. Images are left out. A file that
-    can't be read gives ``""``, and so does one with no text, which the caller then
-    drops: say so.
+    ``*`` unescaped, but for a ``|`` in a table's cell. A picture is its description,
+    Word's alt text, put where it was as a web page's image is (:func:`_images_as_text`).
+    A file that can't be read gives ``""``, and so does one with no text, which the
+    caller then drops: say so.
     """
     try:
-        # An image converter that makes no element, so no image's bytes are read.
-        converted = mammoth.convert_to_html(docx, convert_image=lambda image: [])
-        text = _Markdown().convert(converted.value)
+        # An <img> with only its alt text, and no src, so no picture's bytes are read.
+        no_src = mammoth.images.img_element(lambda picture: {})
+        converted = mammoth.convert_to_html(docx, convert_image=no_src)
+        soup = BeautifulSoup(converted.value, "html.parser")
+        _images_as_text(soup)
+        text = _Markdown().convert_soup(soup)
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as a Word file (%s); skipping it", name, type(e).__name__
@@ -289,7 +299,8 @@ def _is_page_title(tag: Tag) -> bool:
 
 
 def _images_as_text(soup: BeautifulSoup) -> None:
-    """Put each image in ``soup`` as its alt text, or as nothing if it has none."""
+    """Put each image in ``soup`` as its alt text, or as nothing if it has none or
+    Office made it up (:data:`_OFFICE_ALT_TEXT_MARKERS`)."""
     for image in soup("img"):
         alt = _alt_text(image)
         if alt:
@@ -299,16 +310,36 @@ def _images_as_text(soup: BeautifulSoup) -> None:
 
 
 def _alt_text(image: Tag) -> str:
-    """An image's alt text, or ``""``, set apart by a space from the text beside it in
-    its block, as the image's own room sets it apart, but in ``<pre>`` or ``<code>``."""
+    """An image's alt text, or ``""`` for one Office made up, set apart by a space from
+    the text beside it on its line, as the image's own room sets it apart, but in
+    ``<pre>`` or ``<code>``."""
     alt = _one_line(image.get("alt"))
-    if not alt or image.find_parent(["pre", "code"]):
-        return alt or ""
+    if not alt or _office_made_up(alt):
+        return ""
+    if image.find_parent(["pre", "code"]):
+        return alt
     block = _block(image)
-    before, after = image.find_previous(string=True), image.find_next(string=True)
+    before = _text_or_break(image.previous_elements)
+    after = _text_or_break(image.next_elements)
     left = _beside(before, block) and not str(before)[-1:].isspace()
     right = _beside(after, block) and str(after)[:1] not in _NO_SPACE_BEFORE
     return f"{' ' * left}{alt}{' ' * right}"
+
+
+def _office_made_up(alt: str) -> bool:
+    """Whether Office made up the alt text ``alt``, by its markers in any case."""
+    folded = alt.casefold()
+    return any(marker.casefold() in folded for marker in _OFFICE_ALT_TEXT_MARKERS)
+
+
+def _text_or_break(elements: Iterator[PageElement]) -> PageElement | None:
+    """The first of ``elements`` that is text or a line break, which ends a line."""
+    for element in elements:
+        if isinstance(element, NavigableString):
+            return element
+        if isinstance(element, Tag) and element.name == "br":
+            return element
+    return None
 
 
 def _block(element: PageElement) -> Tag | None:
