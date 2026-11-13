@@ -1799,6 +1799,30 @@ def test_a_run_from_before_pruning_resumes_parsing_every_document(
     assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
 
 
+def test_a_run_from_before_pruning_stopped_in_round_3_resumes_pruning_nothing(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    failing = failing_once(
+        reading_in_round("Calder memo", 3),
+        silent_when(reading_in_round("Dunmore memo", 2)),
+    )
+    llm = answering_llm.answers(relevance=failing)
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
+    events = [e for e in events_in(run_dir) if e["type"] != "documents_pruned"]
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    seen = []
+    answer, requests = resumed(llm, run_dir, on_event=seen.append)
+    assert requests == [
+        *[("relevance", line) for line in LAST_THREE],
+        ("schema", None),
+        *[("parsing", line) for line in MEMOS_BY_NAME.values()],
+        ("reasoning", None),
+    ]
+    assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
+    written = [e["type"] for e in events_in(run_dir)]
+    assert "documents_pruned" not in [e["type"] for e in seen] + written
+
+
 def test_a_resume_after_round_2_replays_its_pruning_once_before_the_later_rounds(
     answering_llm, one_worker, events_in, tmp_path
 ):

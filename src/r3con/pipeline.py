@@ -439,10 +439,13 @@ def run_pipeline(
       ``quotes`` as the snippet record holds them, and the ids of the previous round's
       snippets it used, ``provenance``. A part refused as too long and cut further is
       no event.
-    - ``documents_pruned``, once round 2 is in, when ``rounds`` is 2 or more:
-      ``doc_ids``, the documents relevance pruned
+    - ``documents_pruned``, from a run that prunes, one of 2 or more ``rounds``, once
+      its round 2 is in: ``doc_ids``, the documents relevance pruned
       (:attr:`~r3con.stages.relevance.RelevantContext.pruned`), in document order,
-      which get no later ``relevance_*`` event and no ``parsing_*`` one.
+      possibly none, which get no later ``relevance_*`` event and no ``parsing_*``
+      one. A resume replays the one its run recorded, and emits one only when it reads
+      round 2 itself; a run from before pruning recorded none, and its resume prunes
+      nothing.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
@@ -673,10 +676,7 @@ def _build_and_answer(
         )
 
     # --- Stage 2b: structuring — parse every document but the pruned, in parallel. ---
-    _log.info(
-        "stage 2/3 · structuring · parsing %d doc(s)",
-        len(texts) - len(relevance.pruned),
-    )
+    _log.info("stage 2/3 · structuring · parsing")
     extraction = saved.extraction
     if extraction is None:
         with _recorded_stage(

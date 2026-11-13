@@ -21,13 +21,13 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
   the whole history. The reply adds ``provenance_ids``, the ids of the shown snippets
   it used. With nothing to show, the first-round prompt is used instead.
 
-A document whose round-2 snippet is empty, every part's, whitespace counting as
-empty, is **pruned** (:attr:`RelevantContext.pruned`): no later round reads it, its
-snippet there empty, and parsing does not parse it
-(:mod:`r3con.stages.structuring.parsing`). An empty round-1 snippet alone prunes
-nothing, since round 2 may bring the document back once the others are known; with
-fewer than two rounds nothing is pruned. The other documents' round-2 snippets may
-still cite its round-1 snippet, so the answer's trail can reach it through them.
+A document whose round-2 snippet is empty, every part's, is **pruned**
+(:attr:`RelevantContext.pruned`): no later round reads it, its snippet there empty, and
+parsing does not parse it (:mod:`r3con.stages.structuring.parsing`). An empty round-1
+snippet alone prunes nothing, since round 2 may bring the document back once the
+others are known; with fewer than two rounds nothing is pruned. The other documents'
+round-2 snippets may still cite its round-1 snippet, so the answer's trail can reach it
+through them.
 
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
@@ -140,11 +140,9 @@ class RelevantContext:
 
 def _pruned(round_2: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
     """The documents ``round_2``'s snippets prune, by index: those whose snippet there is
-    empty, every part's, whitespace counting as empty."""
+    empty, every part's."""
     return frozenset(
-        d
-        for d, parts in enumerate(round_2)
-        if not any(part.summary.strip() for part in parts)
+        d for d, parts in enumerate(round_2) if not any(r.summary for r in parts)
     )
 
 
@@ -429,8 +427,9 @@ def surface_relevance(
 
     ``emit`` reports ``relevance_started`` before each document is read in a round, and
     ``relevance_finished`` for each of its final parts once it is read; once round 2 is
-    in, ``documents_pruned`` (:func:`r3con.pipeline.run_pipeline` lists their fields).
-    It is called from worker threads.
+    in, ``documents_pruned``, unless ``pruned`` is given
+    (:func:`r3con.pipeline.run_pipeline` lists their fields). It is called from worker
+    threads. With no documents or rounds, it reports nothing.
 
     ``saved`` holds snippets an earlier attempt at the run read, by round and document
     index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
