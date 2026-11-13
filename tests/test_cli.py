@@ -60,7 +60,7 @@ NEVER_ANSWERED_RUN = {
 }
 CUT_OFF = "r3con app: quitting, cutting off 1 run(s) or ask(s) still going"
 # What uvicorn prints as its grace runs out on an open stream, which reads as a crash.
-CRASH_SIGNS = ("Traceback", "CancelledError", "Cancel 1 running task")
+CRASH_SIGNS = ("Traceback", "CancelledError", "timeout graceful shutdown exceeded")
 # Room past QUIT_SECONDS for a slow runner, and far short of the old 60 s wait.
 QUIT_BOUND_SECONDS = QUIT_SECONDS + 3
 NO_APP_EXTRA = (
