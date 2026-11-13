@@ -55,8 +55,8 @@ a reload reads.
   environment's keys too; the server's own log line of a failure goes through the same
   masking.
 - ``POST /api/documents/text?name=<file name>``, with the bytes of a file whose name
-  ends in a suffix in ``r3con._EXTRACTORS`` as the body (422 for any other), a PDF, a
-  Word file or a web page, answers ``{text, reason}``: its text as
+  ends in a suffix in ``r3con.documents._EXTRACTORS`` as the body (422 for any
+  other), a PDF, a Word file or a web page, answers ``{text, reason}``: its text as
   ``r3con.read_documents`` extracts it, which is ``""`` for a scan, a file with no text
   or one that can't be read, as the server's log then says; and, for a PDF with no
   text, why: ``"no_text"`` if no page has any (a scan, likely), ``"password"`` if it
@@ -79,7 +79,7 @@ a reload reads.
   [name, ...], relevance_rounds?}``) starts ``r3con.run`` and answers ``{run_id}``;
   ``GET /api/runs/{run_id}/events`` streams its events as ``text/event-stream``, from
   the first, until ``run_finished`` or ``run_failed``. ``names``, one per document, are
-  the documents' names, a name given again numbered (``r3con.unique_names``:
+  the documents' names, a name given again numbered (``r3con.documents.unique_names``:
   ``notes.txt (2)``); without them, r3con names the documents by index.
   ``relevance_rounds``, from 1 to ``MAX_RELEVANCE_ROUNDS``, is how many relevance
   rounds the run builds its representation over, ``DEFAULT_RELEVANCE_ROUNDS`` if not
@@ -200,6 +200,17 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from r3con import r3con
 from r3con.config import DEFAULT_CONFIG, PromptStage, RunConfig
+from r3con.documents import (
+    _EXTRACTORS,
+    _MACOS_METADATA_FOLDER,
+    _extractor,
+    _left_out_unsaid,
+    _pdf_read,
+    _pdf_text,
+    _read_stream,
+    _walk_reads,
+    unique_names,
+)
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import one_line
 from r3con.pipeline import read_representation
@@ -770,17 +781,17 @@ async def forget_key(request: Request) -> Response:
 
 def _document(name: str, file: BinaryIO) -> dict[str, Any]:
     """``{text, reason}`` of the file called ``name``: its text as r3con reads it, and,
-    for a PDF, why it has none (``r3con._pdf_read``), else ``None``."""
-    if r3con._extractor(name) is not r3con._pdf_text:
-        return {"text": r3con._read_stream(name, file), "reason": None}
-    text, reason = r3con._pdf_read(name, file)
+    for a PDF, why it has none (``r3con.documents._pdf_read``), else ``None``."""
+    if _extractor(name) is not _pdf_text:
+        return {"text": _read_stream(name, file), "reason": None}
+    text, reason = _pdf_read(name, file)
     return {"text": text, "reason": reason}
 
 
 async def document_text(request: Request) -> Response:
     query = _valid(DocumentQuery.model_validate, dict(request.query_params))
-    if r3con._extractor(query.name) is None:
-        suffixes = ", ".join(r3con._EXTRACTORS)
+    if _extractor(query.name) is None:
+        suffixes = ", ".join(_EXTRACTORS)
         raise HTTPException(422, f"name: must end in one of {suffixes}")
     file = io.BytesIO(await request.body())
     # Extracting is CPU-bound: on the event loop, it would hold up every other request.
@@ -790,7 +801,7 @@ async def document_text(request: Request) -> Response:
 def _below_shared_folder(paths: list[list[str]]) -> list[list[str]]:
     """``paths``, each as its parts, less the one folder at the top that all but those
     under ``__MACOSX`` share, if they do."""
-    tops = {parts[0] for parts in paths if parts[0] != r3con._MACOS_METADATA_FOLDER}
+    tops = {parts[0] for parts in paths if parts[0] != _MACOS_METADATA_FOLDER}
     if len(tops) != 1 or any(len(parts) == 1 for parts in paths):
         return paths
     [top] = tops
@@ -820,10 +831,10 @@ def _unzipped(name: str, body: bytes) -> dict[str, Any]:
         kept = [
             (parts, entry)
             for parts, entry in zip(paths, files, strict=True)
-            if not r3con._left_out_unsaid(parts)
+            if not _left_out_unsaid(parts)
         ]
         documents = sorted(
-            ((parts, entry) for parts, entry in kept if r3con._walk_reads(parts[-1])),
+            ((parts, entry) for parts, entry in kept if _walk_reads(parts[-1])),
             key=lambda document: document[0],
         )
         unzipped = _read_entries(archive, name, documents)
@@ -865,7 +876,7 @@ def _named(body: RunRequest) -> dict[str, str] | list[str]:
     """The run's documents, by the names the page gave them, if it did."""
     if body.names is None:
         return body.documents
-    return dict(zip(r3con.unique_names(body.names), body.documents, strict=True))
+    return dict(zip(unique_names(body.names), body.documents, strict=True))
 
 
 async def start_run(request: Request) -> Response:

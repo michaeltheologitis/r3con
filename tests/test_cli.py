@@ -24,7 +24,7 @@ from r3con.app.server import (
 )
 from r3con.cli import build_parser, main
 from r3con.config import PROMPT_STAGES, load_config
-from r3con.r3con import read_documents
+from r3con.documents import read_documents
 from tests.fakes import KEYRING_FILE, a_parse_citation_short, in_json
 
 REPO = Path(__file__).resolve().parents[1]

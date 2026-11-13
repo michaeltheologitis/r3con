@@ -180,3 +180,12 @@ WRITERS: dict[str, Callable[..., None]] = {
     ".docx": write_docx,
     ".zip": write_zip,
 }
+
+
+def write_tree(root: Path) -> None:
+    (root / "nested").mkdir(parents=True)
+    (root / "a.md").write_text("alpha document", encoding="utf-8")
+    (root / "b.txt").write_text("beta document", encoding="utf-8")
+    (root / "nested" / "c.md").write_text("gamma document", encoding="utf-8")
+    (root / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n not text")
+    (root / "empty.txt").write_text("   \n", encoding="utf-8")

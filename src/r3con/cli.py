@@ -23,6 +23,7 @@ from pathlib import Path
 from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import REASONING_PATHS, available_configs, load_config
+from r3con.documents import read_documents
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import masked, masked_values
 from r3con.pipeline import (
@@ -33,7 +34,6 @@ from r3con.pipeline import (
     refuse_masked,
     run_pipeline,
 )
-from r3con.r3con import read_documents
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.runtime.llm import register_credentials
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
