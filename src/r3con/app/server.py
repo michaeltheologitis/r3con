@@ -125,14 +125,16 @@ a reload reads.
 The server stops in one place, its shutdown, whether ``serve``'s ``stop``, Ctrl-C or
 SIGTERM asks it to. As the shutdown begins, it refuses a new run or ask (503) and
 cancels every one still going, before it waits for open connections such as the page's
-event stream. Once they have closed, it waits for those runs and asks to end, so each
-finishes its call in flight and writes its run folder, with ``run_failed`` in its
-``events.jsonl``; a page whose stream has already closed does not see it. The whole
-shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app`` ``QUIT_SECONDS``,
-after which ``r3con app`` ends the process, saying so if a run or ask is still going:
-a call in flight is cut off, and its run folder left without ``run_failed``. A second
-Ctrl-C ends that wait at once, and ``r3con app`` quits there and then, leaving those
-runs and asks as they are.
+event stream. A stream whose run or ask has not ended ``STREAMS_CLOSE_SECONDS`` into the
+shutdown then ends, without its last event, before uvicorn's grace for open connections
+runs out and cuts it off. Once they have closed, it waits for those runs and asks to
+end, so each finishes its call in flight and writes its run folder, with ``run_failed``
+in its ``events.jsonl``; a page whose stream has already closed does not see it. The
+whole shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app``
+``QUIT_SECONDS``, after which ``r3con app`` ends the process, saying so if a run or ask
+is still going: a call in flight is cut off, and its run folder left without
+``run_failed``. A second Ctrl-C ends that wait at once, and ``r3con app`` quits there
+and then, leaving those runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -157,7 +159,7 @@ import time
 import webbrowser
 import zipfile
 import zlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -242,7 +244,10 @@ UNREADABLE_ZIP = "it's corrupt, or not a zip"
 ENCRYPTED_ZIP = "it's encrypted"
 TOO_MANY_ENTRIES = f"it holds more than {MAX_ZIP_ENTRIES:,} entries"
 TOO_MANY_BYTES = f"its documents unzip to more than {MAX_ZIP_MEGABYTES} MB"
-SHUTDOWN_GRACE_SECONDS = 1
+# uvicorn's wait for open connections before it cancels them; within QUIT_SECONDS.
+SHUTDOWN_GRACE_SECONDS = 1.5
+# Well inside that grace, so that an open stream ends before uvicorn cancels it.
+STREAMS_CLOSE_SECONDS = 0.5
 WORKERS_EXIT_SECONDS = 60
 # Enough for a run between model calls to stop and write its folder, and still prompt.
 QUIT_SECONDS = 2
@@ -498,6 +503,8 @@ class ServerState:
     )
     workers: list[threading.Thread] = field(default_factory=list)
     stopping: bool = False
+    # Set partway into the shutdown: every stream then ends, its job ended or not.
+    streams_closed: bool = False
     choose_save_path: ChooseSavePath | None = None
 
 
@@ -698,7 +705,7 @@ def _start(state: ServerState, kind: Kind, call: Callable[..., Any]) -> str:
     return job_id
 
 
-async def _stream(job: Job) -> AsyncIterator[str]:
+async def _stream(job: Job, state: ServerState) -> AsyncIterator[str]:
     sent = 0
     while True:
         # Taken before draining, so that an event added after the drain still wakes us.
@@ -706,7 +713,7 @@ async def _stream(job: Job) -> AsyncIterator[str]:
         while sent < len(job.events):
             yield f"data: {json.dumps(job.events[sent])}\n\n"
             sent += 1
-        if _ended(job):
+        if _ended(job) or state.streams_closed:
             return
         await wake.wait()
 
@@ -993,8 +1000,9 @@ def _write_whole(path: Path, body: bytes) -> None:
 
 
 async def events(request: Request, *, kind: Kind) -> Response:
-    job = _job(_state(request).jobs[kind], request.path_params["job_id"], kind)
-    return StreamingResponse(_stream(job), media_type="text/event-stream")
+    state = _state(request)
+    job = _job(state.jobs[kind], request.path_params["job_id"], kind)
+    return StreamingResponse(_stream(job, state), media_type="text/event-stream")
 
 
 async def cancel(request: Request, *, kind: Kind) -> Response:
@@ -1002,10 +1010,20 @@ async def cancel(request: Request, *, kind: Kind) -> Response:
     return Response(status_code=202)
 
 
-def _cancel_jobs(state: ServerState) -> None:
+def _every_job(state: ServerState) -> Iterator[Job]:
     for jobs in state.jobs.values():
-        for job in jobs.values():
-            job.cancel.set()
+        yield from jobs.values()
+
+
+def _cancel_jobs(state: ServerState) -> None:
+    for job in _every_job(state):
+        job.cancel.set()
+
+
+def _close_streams(state: ServerState) -> None:
+    state.streams_closed = True
+    for job in _every_job(state):
+        job.wake.set()
 
 
 async def _error(request: Request, error: Exception) -> Response:
@@ -1124,7 +1142,11 @@ class _Server(uvicorn.Server):
         # One step on the loop, where every request is handled: no job starts after.
         state.stopping = True
         _cancel_jobs(state)
+        loop = asyncio.get_running_loop()
+        closing = loop.call_later(STREAMS_CLOSE_SECONDS, _close_streams, state)
         await super().shutdown(sockets)
+        # Not after uvicorn's wait, which a second Ctrl-C can end before it is due.
+        closing.cancel()
         workers = [worker for worker in state.workers if worker.is_alive()]
         while (
             any(worker.is_alive() for worker in workers)
@@ -1166,7 +1188,11 @@ def _server(
         choose_save_path=choose_save_path,
     )
     app = create_app(token=token, port=port, state=state)
-    config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
+    config = uvicorn.Config(
+        app,
+        # Typed int upstream; only asyncio.wait_for reads it, so a float works.
+        timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS,  # pyright: ignore[reportArgumentType]
+    )
     saves = "" if choose_save_path is None else f"&{SAVE_DIALOG}"
     url = f"http://{HOST}:{port}/#token={token}{saves}"
     return _Server(config, state, stop_within), url

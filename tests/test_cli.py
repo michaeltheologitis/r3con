@@ -59,6 +59,8 @@ NEVER_ANSWERED_RUN = {
     "documents": ["A memo.", "Another memo."],
 }
 CUT_OFF = "r3con app: quitting, cutting off 1 run(s) or ask(s) still going"
+# What uvicorn prints as its grace runs out on an open stream, which reads as a crash.
+CRASH_SIGNS = ("Traceback", "CancelledError", "timeout graceful shutdown exceeded")
 # Room past QUIT_SECONDS for a slow runner, and far short of the old 60 s wait.
 QUIT_BOUND_SECONDS = QUIT_SECONDS + 3
 NO_APP_EXTRA = (
@@ -669,6 +671,7 @@ def test_ctrl_c_quits_the_app_within_its_bound_though_a_model_call_never_returns
             assert next(lines).startswith("data: ")
             assert MODEL_CALLED in iter(app.stdout.readline, "")
             exit_code = ctrl_c(app)
-        out, _ = app.communicate()
+        out, err = app.communicate()
     assert exit_code == FORCED_EXIT_CODE
     assert out.endswith(f"{CUT_OFF}\n")
+    assert [shown for shown in CRASH_SIGNS if shown in err] == []
