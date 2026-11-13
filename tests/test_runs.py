@@ -1,3 +1,4 @@
+import errno
 import importlib.metadata
 import json
 import threading
@@ -15,12 +16,12 @@ from r3con.pipeline import run_pipeline
 from r3con.runs import (
     StageRun,
     TaskLogger,
+    call_totals,
     fingerprints,
     new_run_folder,
     normalize_model_name,
     reopen_for_resume,
     run_lock,
-    step_totals,
     write_manifest,
 )
 from r3con.runtime.llm import register_credentials
@@ -476,7 +477,8 @@ def test_a_resumed_stage_run_writes_its_earlier_calls_back_first_and_counts_them
     rewritten = json.loads((earlier.dir / "calls.json").read_text())
     assert rewritten[:2] == calls
     assert [call["output"] for call in rewritten[2:]] == ["B"]
-    assert resumed.compute_totals() == step_totals([*earlier.steps, *resumed.steps])
+    steps = [*earlier.steps, *resumed.steps]
+    assert resumed.compute_totals() == call_totals(map(vars, steps))
     assert flushed_transcript(resumed)["messages"][-1]["content"] == "B"
     assert (
         StageRun(stage="reasoning", task_logger=logger).compute_totals()["n_steps"] == 0
@@ -493,6 +495,42 @@ def test_a_resumed_stage_run_starts_afresh_from_a_calls_json_it_cannot_read(
     assert "calls.json can't be read" in caplog.text
 
 
+def test_a_json_file_is_written_whole_or_left_as_it_was(logger, monkeypatch):
+    logger.write_json("relevance/result", {"rounds": [1]})
+
+    def killed(source, target):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("r3con.runs.os.replace", killed)
+    with pytest.raises(KeyboardInterrupt):
+        logger.write_json("relevance/result", {"rounds": [1, 2]})
+    folder = logger.dir / "relevance"
+    assert json.loads((folder / "result.json").read_text()) == {"rounds": [1]}
+    assert [path.name for path in folder.iterdir()] == ["result.json"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [NotImplementedError("flock"), OSError(errno.ENOSYS, "Function not implemented")],
+    ids=["filelock-without-a-fallback", "the-file-system"],
+)
+def test_a_folder_on_a_file_system_without_locks_is_written_unlocked_with_a_warning(
+    logger, monkeypatch, caplog, error
+):
+    class Unlockable:
+        def __init__(self, path, timeout):
+            pass
+
+        def acquire(self):
+            raise error
+
+    monkeypatch.setattr("r3con.runs.FileLock", Unlockable)
+    with run_lock(logger.dir):
+        logger.write_json("manifest", {})
+    assert "can't be locked" in caplog.text
+    assert (logger.dir / "manifest.json").is_file()
+
+
 def test_a_run_folder_is_held_by_one_run_or_resume_at_a_time(logger):
     held = pytest.raises(RuntimeError, match="a run or resume is going in it;")
     with run_lock(logger.dir), held, run_lock(logger.dir):
@@ -504,12 +542,14 @@ def test_a_run_folder_is_held_by_one_run_or_resume_at_a_time(logger):
 def test_reopening_a_folder_for_a_resume_records_it_and_ends_a_line_cut_short(logger):
     write_manifest(logger, task="Who?", config=config(), n_docs=1)
     (logger.dir / "events.jsonl").write_text('{"type": "run_started"}\n{"type": "rel')
-    reopen_for_resume(logger)
-    reopen_for_resume(logger)
+    reopen_for_resume(logger, settings_snapshot())
+    reopen_for_resume(logger, {**settings_snapshot(), "doc_workers": 2})
     manifest = json.loads((logger.dir / "manifest.json").read_text())
-    assert [resume["r3con_version"] for resume in manifest["resumes"]] == [
-        importlib.metadata.version("r3context")
-    ] * 2
+    version = importlib.metadata.version("r3context")
+    assert [
+        (resume["r3con_version"], resume["settings"]["doc_workers"])
+        for resume in manifest["resumes"]
+    ] == [(version, settings_snapshot()["doc_workers"]), (version, 2)]
     assert (logger.dir / "events.jsonl").read_text().endswith('{"type": "rel\n')
 
 

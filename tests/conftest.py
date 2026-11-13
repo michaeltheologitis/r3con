@@ -339,9 +339,10 @@ def parse_shown() -> Callable[[dict[str, str]], Any]:
 
 
 def recorded_events(folder: Path) -> list[dict[str, Any]]:
-    """The events in ``folder``'s ``events.jsonl``, in order."""
-    lines = (folder / "events.jsonl").read_text().splitlines()
-    return [json.loads(line) for line in lines]
+    """The events in ``folder``'s ``events.jsonl``, in order: one a line, a line ended
+    by "\n" alone, as an event's text may hold other line separators."""
+    lines = (folder / "events.jsonl").read_text().split("\n")
+    return [json.loads(line) for line in lines if line]
 
 
 @pytest.fixture
@@ -411,6 +412,8 @@ def _isolated(
 ) -> None:
     if not any(request.node.get_closest_marker(m) for m in ("live", "allow_hosts")):
         monkeypatch.setattr(litellm, "completion", FakeLLM())
+    # Each test is a process of its own to a provider that signs in on its first call.
+    monkeypatch.setattr("r3con.runtime.llm._signed_in", set())
     if not request.node.get_closest_marker("live"):
         request.getfixturevalue("waits")
 

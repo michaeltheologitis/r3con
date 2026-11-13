@@ -33,12 +33,11 @@ the document it is reading.
 
 Round k reads the *frozen* round-(k-1) set, so within a round the per-document calls
 are independent and fan out in parallel (bounded by
-:func:`r3con.settings.active_doc_workers`). For a model whose provider signs in on its
-first call (:func:`r3con.runtime.llm.signs_in_on_first_call`), each round reads its
-first document alone before the others, the first not saved when a resume carries the
-run on, as a resumed round may make the first call. Downstream stages consume the
-**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept for
-inspection and for the answer's trail back through them (:mod:`r3con.provenance`).
+:func:`r3con.settings.active_doc_workers`); a provider that signs in on its first
+call gets one call at a time until one has signed in (:mod:`r3con.runtime.llm`).
+Downstream stages consume the **final-round** snippets (``RelevantContext.snippets``);
+earlier rounds are kept for inspection and for the answer's trail back through them
+(:mod:`r3con.provenance`).
 """
 
 from __future__ import annotations
@@ -58,7 +57,6 @@ from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
-from r3con.runtime.llm import signs_in_on_first_call
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
 from r3con.stages.citing import (
@@ -431,7 +429,6 @@ def surface_relevance(
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
-    signs_in = signs_in_on_first_call(model, llm_kwargs)
 
     def run_round(
         prev: list[list[SnippetRecord]], round_idx: int
@@ -486,13 +483,7 @@ def surface_relevance(
             _report_snippets(emit, round_idx, document_ids[i], records)
             return records
 
-        unsaved = (i for i in range(len(documents)) if (round_idx, i) not in saved)
-        result = parallel_map(
-            one,
-            documents,
-            max_workers=max_workers,
-            alone=next(unsaved, None) if signs_in else None,
-        )
+        result = parallel_map(one, documents, max_workers=max_workers)
         n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))
         _log.info(
             "round %d/%d done · %d/%d doc(s) had a relevant snippet",

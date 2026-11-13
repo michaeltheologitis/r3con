@@ -770,14 +770,13 @@ def resume_pipeline(
 ) -> Answer:
     """Carry on the run in ``run_dir`` over its ``documents``, as :func:`r3con.resume`
     says, reusing what :func:`_read_saved` reads back, and holding the folder
-    (:func:`r3con.runs.run_lock`) while it reads and writes there."""
+    (:func:`r3con.runs.run_lock`) while it reads and writes there. It runs under the
+    settings the run recorded where they shape what it computes, the reasoning turns
+    and the window's margin, and under the current ones for concurrency and resends.
+    """
     document_names, texts = names_and_texts(documents)
     run_dir = _run_of(run_dir)
-    if (run_dir / "reasoning" / "result.json").is_file():
-        raise ValueError(
-            f"{run_dir}: this run finished; ask it a new question with r3con.ask "
-            "instead."
-        )
+    _refuse_finished(run_dir)
     if not (run_dir / "documents.json").is_file():
         raise FileNotFoundError(
             f"{run_dir}: this run predates resume: it has no documents.json to check "
@@ -787,6 +786,7 @@ def resume_pipeline(
         manifest = _read_json(run_dir / "manifest.json")
         task, read_prompts = manifest["task"], manifest["sources"]["prompts"]
         margin = manifest["settings"]["window_margin_percent"]
+        turns = manifest["settings"]["reasoning_max_turns"]
         config = _run_config(manifest)
         names = _names(run_dir, _read_json(run_dir / "ids.json"))
         digests = _read_json(run_dir / "documents.json")
@@ -810,7 +810,10 @@ def resume_pipeline(
         )
     check_prompts(config)
     _refuse_moved_prompts(run_dir, config.prompts, read_prompts)
-    caps = settings_snapshot()
+    caps = {
+        **settings_snapshot(reasoning_max_turns=turns),
+        "window_margin_percent": splits.margin_percent,
+    }
     refuse_masked(config.params, api_base=api_base, api_key=api_key)
     llm_kwargs = _llm_kwargs(
         config.params,
@@ -820,10 +823,12 @@ def resume_pipeline(
         cancel=cancel,
     )
     with run_lock(run_dir):
+        # It may have finished while this resume waited to hold its folder.
+        _refuse_finished(run_dir)
         with _readable(run_dir):
             saved = _read_saved(run_dir, list(names), config.relevance_rounds, splits)
         task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
-        reopen_for_resume(task_logger)
+        reopen_for_resume(task_logger, caps)
         splits.log_to(task_logger)
         return _build_and_answer(
             task=task,
@@ -838,6 +843,19 @@ def resume_pipeline(
             cancel=cancel,
             reasoning_timeout_s=DEFAULT_EXEC_TIMEOUT_S,
             saved=saved,
+        )
+
+
+def _refuse_finished(run_dir: Path) -> None:
+    """Refuse to resume the run in ``run_dir`` once it has finished.
+
+    Raises:
+        ValueError: if its reasoning finished.
+    """
+    if (run_dir / "reasoning" / "result.json").is_file():
+        raise ValueError(
+            f"{run_dir}: this run finished; ask it a new question with r3con.ask "
+            "instead."
         )
 
 
@@ -1051,8 +1069,9 @@ def _saved_snippets(
     """Each document's snippet in each round that ``events`` hold whole, by round and
     document index, with the positions of the events that reported its parts: each of
     the parts that round read it in, as ``splits`` records them; and kept only while
-    every earlier round's snippets are all there, since a round reads the one before.
-    Also how many of those events or snippets it leaves out."""
+    every earlier round's snippets are all there, since a round reads the one before,
+    and only when written after them. Also how many of those events or snippets it
+    leaves out."""
     read, unusable = _validated(
         events, "relevance_finished", _SnippetEvent, document_ids
     )
@@ -1069,12 +1088,18 @@ def _saved_snippets(
                 [_snippet(id_, event) for id_, (_, event) in zip(ids, reported)],
                 [at for at, _ in reported],
             )
-    complete = 0
-    while complete < rounds and all(
-        (complete + 1, doc) in whole for doc in range(len(document_ids))
-    ):
-        complete += 1
-    kept = {key: snippet for key, snippet in whole.items() if key[0] <= complete + 1}
+    # A round's snippets hold only while the round before is whole, and only those
+    # written after it: an earlier attempt's were read over a round since redone.
+    kept: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]] = {}
+    latest = -1
+    for k in range(1, rounds + 1):
+        this = {
+            key: g for key, g in whole.items() if key[0] == k and min(g[1]) > latest
+        }
+        kept.update(this)
+        if len(this) < len(document_ids):
+            break
+        latest = max(at for _, ats in this.values() for at in ats)
     return kept, unusable + len(found) - len(kept)
 
 

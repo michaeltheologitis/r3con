@@ -20,7 +20,7 @@ Layout per ``logs/<run-folder>/``:
   knobs), and ``created``, when it was written. Written first, so a crashed task is
   still discoverable. The run label is **not** stored — it is recomputed from the
   ``config`` block (:meth:`r3con.config.RunConfig.label`). Each resume of the run
-  (:func:`r3con.resume`) adds ``{time, r3con_version}`` to its ``resumes``.
+  (:func:`r3con.resume`) adds ``{time, r3con_version, settings}`` to its ``resumes``.
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
 - ``names.json`` — each document's id mapped to its name
@@ -150,6 +150,7 @@ import logging
 import os
 import re
 import secrets
+import tempfile
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -239,9 +240,9 @@ class TaskLogger:
         path = self._path(name, "json")
         # ensure_ascii=False keeps non-ASCII (e.g. CJK) readable in the logs rather than
         # as \uXXXX escapes; the explicit utf-8 write makes that safe on any host locale.
-        path.write_text(
+        _write_whole(
+            path,
             json.dumps(_jsonable(data), indent=2, default=repr, ensure_ascii=False),
-            encoding="utf-8",
         )
         return path
 
@@ -254,6 +255,20 @@ class TaskLogger:
         path = self._path(name, "txt")
         path.write_text(text, encoding="utf-8")
         return path
+
+
+def _write_whole(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` whole or not at all: into a file beside it, then
+    moved over it, so that a kill while it writes leaves the earlier file, which a
+    resume reads, rather than one cut short."""
+    fd, part = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(text)
+        os.replace(part, path)
+    except BaseException:
+        Path(part).unlink(missing_ok=True)
+        raise
 
 
 def no_events(event_type: str, /, **fields: Any) -> None:
@@ -339,7 +354,10 @@ def read_events(folder: Path) -> tuple[list[dict[str, Any]], int]:
     if not path.is_file():
         return [], 0
     events, unreadable = [], 0
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    # "\n" alone ends a line: an event's text may hold other separators, written raw.
+    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
+        if not line:
+            continue
         try:
             event = json.loads(line)
         except ValueError:
@@ -355,7 +373,8 @@ def read_events(folder: Path) -> tuple[list[dict[str, Any]], int]:
 def run_lock(folder: Path) -> Iterator[None]:
     """Hold run folder ``folder`` for one run or resume at a time while it writes there:
     a lock on the folder's ``run.lock`` (:class:`filelock.FileLock`), taken without
-    waiting, which the OS lifts however the process ends, a kill included.
+    waiting, which the OS lifts however the process ends, a kill included. Where the
+    file system can't lock, it warns and goes on without.
 
     Raises:
         RuntimeError: in one line, if another run or resume holds it.
@@ -367,6 +386,15 @@ def run_lock(folder: Path) -> Iterator[None]:
             f"{folder}: a run or resume is going in it; carry it on once that one has "
             "stopped."
         ) from None
+    except (NotImplementedError, OSError) as error:
+        _log.warning(
+            "%s can't be locked (%s), as on a file system without locks: going on "
+            "without holding it",
+            folder,
+            type(error).__name__,
+        )
+        yield
+        return
     with held:
         yield
 
@@ -435,12 +463,12 @@ def write_manifest(
     return task_logger.write_json("manifest", manifest)
 
 
-def reopen_for_resume(task_logger: TaskLogger) -> None:
+def reopen_for_resume(task_logger: TaskLogger, settings: Mapping[str, int]) -> None:
     """Ready the run folder ``task_logger`` writes to for a resume
     (:func:`r3con.resume`): its ``manifest.json`` adds the resume to its ``resumes``,
-    with when it started and under which r3con, and its ``events.jsonl`` ends its last
-    line, should a kill have cut that line short, so that the resume's events start on
-    lines of their own."""
+    with when it started, under which r3con and the ``settings`` it runs under, and its
+    ``events.jsonl`` ends its last line, should a kill have cut that line short, so that
+    the resume's events start on lines of their own."""
     from r3con import __version__
 
     manifest_file = task_logger.dir / "manifest.json"
@@ -448,6 +476,7 @@ def reopen_for_resume(task_logger: TaskLogger) -> None:
     resumed = {
         "time": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
         "r3con_version": __version__,
+        "settings": dict(settings),
     }
     manifest["resumes"] = [*manifest.get("resumes", []), resumed]
     task_logger.write_json("manifest", manifest)
@@ -512,17 +541,12 @@ class StepRecord:
     error: str | None = None
 
 
-def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
-    """The count of ``steps`` that answered, leaving out those that raised an error
-    (``calls.json`` lists them), the summed tokens of ``steps`` (``None`` when none
-    counted any), and their ``usd``: the sum of theirs, or ``None`` when litellm could
-    not price one of them."""
-    return call_totals(map(vars, steps))
-
-
 def call_totals(calls: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """:func:`step_totals` of ``calls``, each with a step's ``tokens``, ``usd`` and
-    ``error``, as ``calls.json`` holds them."""
+    """The count of ``calls`` that answered, leaving out those that raised an error
+    (``calls.json`` lists them), their summed ``tokens`` (``None`` when none counted
+    any), and their ``usd``: the sum of theirs, or ``None`` when litellm could not price
+    one of them. Each call has a step's ``tokens``, ``usd`` and ``error``, as a
+    :class:`StepRecord` or ``calls.json`` holds them."""
     prompt = completion = total = n_steps = 0
     any_tokens, costs = False, []
     for call in calls:
@@ -660,14 +684,11 @@ class StageRun:
                 }
             )
         path = self.dir / "calls.json"
-        path.write_text(
-            json.dumps(calls, indent=2, default=str, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _write_whole(path, json.dumps(calls, indent=2, default=str, ensure_ascii=False))
         return path
 
     def compute_totals(self) -> dict[str, Any]:
-        """The stage's :func:`step_totals`, an earlier attempt's calls counted in, for
+        """The stage's :func:`call_totals`, an earlier attempt's calls counted in, for
         its ``result.json``."""
         return call_totals([*self._earlier, *map(vars, self.steps)])
 

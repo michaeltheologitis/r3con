@@ -56,7 +56,6 @@ from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import Emit, StageRun, no_events
-from r3con.runtime.llm import signs_in_on_first_call
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
     InterpreterError,
@@ -442,10 +441,7 @@ def parse_documents(
 
     ``saved`` holds parses an earlier attempt at the run made, each with the ids it
     used, by document index (:func:`r3con.pipeline.resume_pipeline`): such a document is
-    not parsed again, and reports nothing. For a model whose provider signs in on its
-    first call (:func:`r3con.runtime.llm.signs_in_on_first_call`), the first document
-    not saved is parsed alone before the others, as a resumed parse may make the run's
-    first call.
+    not parsed again, and reports nothing.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per document, or ``max_attempts``
@@ -508,9 +504,7 @@ def parse_documents(
         )
         return merged, provenance
 
-    unsaved = (i for i in range(len(documents)) if i not in saved)
-    alone = next(unsaved, None) if signs_in_on_first_call(model, llm_kwargs) else None
-    per_doc = parallel_map(one, documents, max_workers=max_workers, alone=alone)
+    per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(
         [(i, parse) for i, (parse, _) in enumerate(per_doc)], parse_cls
     )

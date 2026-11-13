@@ -118,6 +118,10 @@ if TYPE_CHECKING:
 
 _log = get_logger("llm")
 _quiet_lock = threading.RLock()
+# The providers that sign in on their first call whose first call in this process has
+# answered, and the lock a call to one that has not waits on (:func:`_one_sign_in`).
+_signed_in: set[str] = set()
+_sign_in_lock = threading.Lock()
 
 _CALLER_RETRY_SETTINGS = frozenset({"num_retries", "max_retries", "retry_policy"})
 # litellm writes into these: a reply's hidden_params, its timing, a Router's deployment.
@@ -366,10 +370,11 @@ def litellm_chat_completion_full(
             )
 
     try:
-        if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
-            response = _resend_temporary_errors(request, resends, cancel)
-        else:
-            response = (completion or litellm.completion)(**request)
+        with _one_sign_in(model, request):
+            if completion is None and _CALLER_RETRY_SETTINGS.isdisjoint(request):
+                response = _resend_temporary_errors(request, resends, cancel)
+            else:
+                response = (completion or litellm.completion)(**request)
     except Exception as error:
         record(response={}, usd=0.0, error=one_line(error))
         raise
@@ -515,14 +520,32 @@ def send_until_valid(
     return send(text, max_attempts)
 
 
-def signs_in_on_first_call(model: str, llm_kwargs: Mapping[str, Any]) -> bool:
-    """Whether ``model``'s provider signs in on its first call, litellm's
-    ``github_copilot`` and ``chatgpt``, named by the model's prefix or by the
-    ``custom_llm_provider`` among ``llm_kwargs``: concurrent first calls would each
-    start their own device sign-in, printing a code apiece and then waiting minutes on
-    the codes nobody enters, while a call after one has signed in reuses its token."""
-    provider = llm_kwargs.get("custom_llm_provider")
-    return declared_authenticating_provider(model, provider) is not None
+@contextlib.contextmanager
+def _one_sign_in(model: str, request: Mapping[str, Any]) -> Iterator[None]:
+    """Hold a call to a provider that signs in on its first call, litellm's
+    ``github_copilot`` and ``chatgpt``, named by the model's prefix or by the request's
+    ``custom_llm_provider``, while another such call is under way, until one has
+    answered in this process: concurrent first calls would each start their own device
+    sign-in, printing a code apiece and then waiting minutes on the codes nobody enters,
+    while a call after one has signed in reuses its token. Any other call goes at
+    once."""
+    provider = declared_authenticating_provider(
+        model, request.get("custom_llm_provider")
+    )
+    if provider is None or provider in _signed_in:
+        yield
+        return
+    _sign_in_lock.acquire()
+    if provider in _signed_in:
+        # The call held before this one signed in: this one goes at once.
+        _sign_in_lock.release()
+        yield
+        return
+    try:
+        yield
+        _signed_in.add(provider)
+    finally:
+        _sign_in_lock.release()
 
 
 def register_credentials(

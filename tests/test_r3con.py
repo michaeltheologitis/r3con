@@ -1,3 +1,4 @@
+import errno
 import importlib.metadata
 import json
 import logging
@@ -12,6 +13,7 @@ from typing import Any
 
 import litellm
 import pytest
+from filelock import FileLock
 from litellm.llms.github_copilot.authenticator import (
     Authenticator as CopilotAuthenticator,
 )
@@ -1698,6 +1700,52 @@ def test_a_killed_run_resumes_from_its_events_and_reads_a_line_cut_short_again(
     assert "1 line(s) of events.jsonl don't parse" in caplog.text
 
 
+def test_a_snippet_holding_other_line_separators_is_reused(
+    answering_llm, one_worker, tmp_path
+):
+    def notes(request):
+        """Halloran's note holds a line separator and a next-line character."""
+        line = first_line(request)
+        across = ",\u2028across\x85lines" if line == "Halloran memo" else ""
+        return f"Notes on {line}{across}."
+
+    failing = failing_once(reading("Calder memo", later_round=True), notes)
+    run_dir = failed_run(answering_llm.answers(relevance=failing), tmp_path)
+    _, requests = resumed(answering_llm, run_dir)
+    assert [r for r in requests if r[0] == "relevance"] == [
+        ("relevance", line) for line in LAST_THREE
+    ]
+
+
+def test_a_snippet_read_over_a_round_redone_since_is_read_again(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    llm = answering_llm.answers(
+        relevance=failing_once(
+            reading("Calder memo", later_round=True), ANSWERING["relevance"]
+        )
+    )
+    run_dir = failed_run(llm, tmp_path)
+    # Easton's round-1 line is lost: a resume reads it again, and round 2 over it,
+    # until it fails at Merrow, after Halloran.
+    events = events_in(run_dir)
+    del events[line_of(events, "relevance_finished", 4, round=1)]
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    llm.answers(
+        relevance=failing_once(
+            reading("Merrow memo", later_round=True), ANSWERING["relevance"]
+        )
+    )
+    with pytest.raises(litellm.AuthenticationError):
+        resume(run_dir, MEMOS_BY_NAME, completion=llm)
+    llm.answers(relevance=ANSWERING["relevance"])
+    _, requests = resumed(llm, run_dir)
+    # Merrow's first round-2 snippet was read over the Easton since redone.
+    assert [r for r in requests if r[0] == "relevance"] == [
+        ("relevance", line) for line in ["Merrow memo", *LAST_THREE]
+    ]
+
+
 def test_a_document_read_in_parts_resumes_in_the_same_parts_with_the_same_ids(
     answering_llm, one_worker, grown_registry, tmp_path
 ):
@@ -1823,6 +1871,7 @@ def test_a_resume_on_a_model_that_signs_in_starts_one_sign_in(
     # A new process: no token yet, and the documents read at once.
     sign_ins.clear()
     cached.clear()
+    monkeypatch.setattr("r3con.runtime.llm._signed_in", set())
     monkeypatch.delenv("R3CON_DOC_WORKERS")
     resume(run_dir, MEMOS_BY_NAME, completion=llm)
     assert len(sign_ins) == 1
@@ -1848,6 +1897,47 @@ def test_a_run_still_going_in_its_folder_is_not_resumed(answering_llm, tmp_path)
             "one has stopped."
         )
     ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [NotImplementedError("flock"), OSError(errno.ENOSYS, "Function not implemented")],
+    ids=["filelock-without-a-fallback", "the-file-system"],
+)
+def test_a_run_on_a_file_system_without_locks_goes_on_with_a_warning(
+    answering_llm, tmp_path, monkeypatch, caplog, error
+):
+    class Unlockable:
+        def __init__(self, path, timeout):
+            pass
+
+        def acquire(self):
+            raise error
+
+    monkeypatch.setattr("r3con.runs.FileLock", Unlockable)
+    answer = finished_run(answering_llm, tmp_path, MEMOS_BY_NAME)
+    assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
+    assert "can't be locked" in caplog.text
+
+
+def test_a_run_that_finished_while_its_resume_waited_is_not_resumed(
+    answering_llm, tmp_path, monkeypatch
+):
+    run_dir = failed_run(answering_llm.answers(reasoning=bad_key()), tmp_path)
+    sent = len(answering_llm.requests)
+
+    class FinishingFirst(FileLock):
+        """The run's own lock, held until the run finished."""
+
+        def acquire(self, *args, **kwargs):
+            shutil.copy(run_dir / "manifest.json", run_dir / "reasoning/result.json")
+            return super().acquire(*args, **kwargs)
+
+    monkeypatch.setattr("r3con.runs.FileLock", FinishingFirst)
+    with pytest.raises(ValueError, match="this run finished"):
+        resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
+    assert answering_llm.requests[sent:] == []
+    assert "resumes" not in json.loads((run_dir / "manifest.json").read_text())
 
 
 def test_a_lock_a_process_left_behind_does_not_stop_a_resume(answering_llm, tmp_path):
@@ -1904,6 +1994,20 @@ def test_a_resume_lists_a_few_of_many_changed_documents_and_counts_the_rest(
         resume(
             run_dir, [f"Memo {i}, revised" for i in range(6)], completion=answering_llm
         )
+
+
+def test_a_resume_runs_under_the_runs_own_reasoning_turns_and_records_its_settings(
+    answering_llm, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(r3con.settings, "REASONING_MAX_TURNS", 7)
+    run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
+    monkeypatch.undo()
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "3")
+    answering_llm.answers(parsing=ANSWERING["parsing"])
+    resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
+    [resumed_at] = json.loads((run_dir / "manifest.json").read_text())["resumes"]
+    used = resumed_at["settings"]
+    assert (used["reasoning_max_turns"], used["doc_workers"]) == (7, 3)
 
 
 def predating_resume(run_dir: Path) -> None:
