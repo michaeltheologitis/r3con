@@ -21,12 +21,13 @@ raises ``litellm.ContextWindowExceededError`` with a note naming the document.
 
 from __future__ import annotations
 
+import copy
 import functools
 import itertools
 import json
 import re
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn, TypeVar
 
 import litellm
@@ -98,6 +99,37 @@ class Splits:
             "line": self.line,
             "documents": {},
         }
+
+    @classmethod
+    def restored(
+        cls,
+        documents: Sequence[str],
+        record: Mapping[str, Any],
+        *,
+        task_logger: TaskLogger | None = None,
+    ) -> Splits:
+        """The splits of the run whose ``splits.json`` holds ``record``, over its
+        ``documents``: the window, margin and line it recorded, whatever litellm's map
+        says now, and each document cut where the run left it, so that reading goes on
+        from the parts the run ended with. With a ``task_logger``, each later split or
+        stop is added to that record.
+
+        Raises:
+            ValueError: if ``record`` cuts a document that is not in ``documents``, or
+                cuts one other than in order and strictly inside it.
+        """
+        splits = cls(
+            documents,
+            model=record["model"],
+            margin_percent=record["margin_percent"],
+            task_logger=task_logger,
+        )
+        splits.max_input_tokens = record["max_input_tokens"]
+        splits.line = record["line"]
+        for doc, entry in record["documents"].items():
+            splits._cuts[int(doc)] = _fitting(documents, doc, entry["cuts"])
+        splits._record = copy.deepcopy(dict(record))
+        return splits
 
     def parts(self, doc: int) -> list[str]:
         """``documents[doc]`` cut at its cuts so far: ``[documents[doc]]`` until it is
@@ -385,6 +417,23 @@ def halve(text: str) -> int:
         if cuts:
             return min(cuts, key=lambda cut: (abs(cut - middle), cut))
     return middle
+
+
+def _fitting(documents: Sequence[str], doc: str, cuts: list[int]) -> list[int]:
+    """``cuts``, recorded for ``documents[doc]``, when they fall in order strictly
+    inside it.
+
+    Raises:
+        ValueError: otherwise, or when there is no ``documents[doc]``.
+    """
+    i = int(doc)
+    bounds = [0, *cuts, len(documents[i])] if 0 <= i < len(documents) else []
+    if not bounds or any(a >= b for a, b in itertools.pairwise(bounds)):
+        raise ValueError(
+            f"splits.json does not fit these {len(documents)} document(s): it cuts "
+            f"documents[{doc}] at {cuts}."
+        )
+    return list(cuts)
 
 
 def _max_input_tokens(model: str) -> int | None:

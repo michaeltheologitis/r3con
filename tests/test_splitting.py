@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from pathlib import Path
 
 import litellm
@@ -199,6 +200,28 @@ def test_a_document_once_split_starts_the_next_call_from_its_parts(logger):
     assert provider.kinds == [f"relevance-r2-d0c{k}" for k in range(4)]
     assert len(results) == 4
     assert record(logger)["documents"]["0"]["parts"] == {"parse": 4, "relevance-r2": 4}
+
+
+@pytest.mark.parametrize(
+    ("doc", "cuts"),
+    [
+        ("0", [2_000, 1_000]),
+        ("0", [0, 1_000]),
+        ("0", [len(PARAGRAPHS)]),
+        ("1", [1_000]),
+    ],
+    ids=["out-of-order", "at-the-start", "at-the-end", "no-such-document"],
+)
+def test_restoring_a_record_that_does_not_cut_inside_the_documents_is_refused(
+    logger, doc, cuts
+):
+    read(PARAGRAPHS, Provider(limit=len(PARAGRAPHS) // 3), task_logger=logger)
+    saved = record(logger)
+    saved["documents"] = {doc: {**saved["documents"]["0"], "cuts": cuts}}
+    with pytest.raises(
+        ValueError, match=re.escape(f"cuts documents[{doc}] at {cuts}.")
+    ):
+        Splits.restored([PARAGRAPHS], saved)
 
 
 def test_over_the_line_a_document_is_split_before_anything_is_sent(window, logger):
