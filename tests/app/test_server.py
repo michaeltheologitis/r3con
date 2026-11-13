@@ -49,8 +49,8 @@ from r3con.app.server import (
     listen,
     serve,
 )
+from r3con.documents import _EXTRACTORS, TEXT_SUFFIXES, _PdfNoText, read_documents
 from r3con.masking import MASK
-from r3con.r3con import read_documents
 from r3con.settings import CONFIGS_DIR
 from tests.documents import (
     CERTIFICATE_ENCRYPTION,
@@ -1778,7 +1778,7 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
     script = (APP_DIR / "app.js").read_text(encoding="utf-8")
     listed = re.search(r"const EXTRACTED_SUFFIXES = \[(.*?)\];", script)
     assert listed is not None
-    assert re.findall(r"'([^']+)'", listed[1]) == list(r3con._EXTRACTORS)
+    assert re.findall(r"'([^']+)'", listed[1]) == list(_EXTRACTORS)
 
 
 def test_the_page_has_a_line_for_each_reason_a_pdf_has_no_text():
@@ -1786,7 +1786,7 @@ def test_the_page_has_a_line_for_each_reason_a_pdf_has_no_text():
     table = re.search(r"const PDF_NO_TEXT = \{(.*?)\};", script, re.DOTALL)
     assert table is not None
     lines = re.findall(r"^\s*(\w+):", table[1], re.MULTILINE)
-    assert lines == list(get_args(r3con._PdfNoText))
+    assert lines == list(get_args(_PdfNoText))
 
 
 @pytest.mark.parametrize(
@@ -2129,7 +2129,7 @@ def test_the_page_walks_a_folder_for_the_suffixes_read_documents_walks_for():
     assert walked is not None
     assert walked[1] == "Object.keys(SUFFIX_TYPES)"
     listed = set(re.findall(r"'([^']+)': '", typed[1]))
-    assert listed == r3con.TEXT_SUFFIXES
+    assert listed == TEXT_SUFFIXES
 
 
 @pytest.mark.parametrize(
