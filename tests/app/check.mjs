@@ -1591,7 +1591,7 @@ function tokenColour(token) {
   return color;
 }
 
-// A folder node's look: its two fills, its node's opacity and its chevron's turn.
+// A folder node's look: its two fills, its node's opacity, its chevron's turn, its sources' line and whether it shows a pill.
 function folderLook(selector) {
   const el = document.querySelector(selector);
   const fill = (part) => getComputedStyle(el.querySelector(`.folder-${part}`)).fill;
@@ -1601,7 +1601,7 @@ function folderLook(selector) {
     opacity: Number(getComputedStyle(el).opacity),
     chevron: getComputedStyle(el.querySelector('.chevron svg')).rotate,
     sources: sources && !sources.hidden ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
-    pill: el.querySelector('.pill') !== null,
+    pill: el.querySelector('.pill:not([hidden])') !== null,
   };
 }
 
@@ -1639,7 +1639,7 @@ async function folders() {
     await page.click('#fit-btn');
 
     const look = await page.evaluate(folderLook, folderSel('q3'));
-    check('folders', 'before a run a folder is blue, its chevron pointing down while it is open, and it has no badge', isDeepStrictEqual(look.fills, fillsOf('light', 'normal')) && look.chevron === '90deg' && !look.pill, JSON.stringify(look));
+    check('folders', 'before a run a folder is blue, its chevron pointing down while it is open, and it has no pill', isDeepStrictEqual(look.fills, fillsOf('light', 'normal')) && look.chevron === '90deg' && !look.pill, JSON.stringify(look));
     await pressNode(page, folderSel('q3'));
     const shut = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), focused: await page.evaluate(() => document.activeElement.getAttribute('aria-label')) };
     await pressNode(page, folderSel('q3'), { key: true });
@@ -1733,7 +1733,7 @@ async function folders() {
     const litLook = (look, text) => isDeepStrictEqual(look.fills, fillsOf('light', 'lit')) && look.opacity === 1 && look.chevron === 'none' && !look.pill && look.sources?.text === text && look.sources.color === q3.ink;
     const q3Lit = q3.rows.includes('  q3 · 2 files · 2 sources (lit)') && litLook(q3.look, '2 sources');
     const nested = reportsLit.rows[0] === 'reports · 5 files · 4 sources (lit)' && litLook(reportsLit.look, '4 sources');
-    const litName = "a closed folder holding the answer's sources lights terracotta, with no badge, and counts them under its name in the accent ink, any depth in it: q3's 2, then reports' 4";
+    const litName = "a closed folder holding the answer's sources lights terracotta, with no pill as a simulated answer quotes nothing, and counts them under its name in the accent ink, any depth in it: q3's 2, then reports' 4";
     check('folders', litName, q3Lit && nested, `${q3.rows.join(' | ')}; ${JSON.stringify(q3.look)}; ${reportsLit.rows[0]}; ${JSON.stringify(reportsLit.look)}`);
 
     const index = reports.slice('doc-'.length);
@@ -1875,6 +1875,63 @@ async function folders() {
     const loose = { lines: await page.$eval('#world .tree-lines', (el) => el.getAttribute('d') ?? ''), folders: await count(page, '#world .node.folder'), left: await page.$$eval('#world .node.doc', (els) => [...new Set(els.map((el) => el.style.left))]) };
     const looseName = 'loose files draw no tree and no folder, each row at the left of the column, as before folders';
     check('folders', looseName, loose.lines === '' && loose.folders === 0 && isDeepStrictEqual(loose.left, ['0px']), JSON.stringify(loose));
+  });
+}
+
+// The sample's memos in folders: sites holds the first two and, in its subfolder river, the third; the fourth is loose;
+// canteen holds the fifth, which the answer quotes nothing of.
+const withMemosInFolders = withSample((sample) => {
+  const [first, second, third, fourth, fifth] = sample.docs;
+  sample.docs = [{ ...first, folder: 'sites' }, { ...second, folder: 'sites' }, { ...third, folder: 'sites', name: `river/${third.name}` }, fourth, { ...fifth, folder: 'canteen' }];
+  return sample;
+});
+// app.js with its first recorded ask's trail stopping short of the sample's first memo.
+function withFirstMemoUnasked(script) {
+  const asks = recordedAsks();
+  const [id] = recordedSample().ids;
+  const { trail } = asks[0].provenance;
+  trail.nodes = trail.nodes.filter((node) => !node.endsWith(id));
+  trail.edges = trail.edges.filter((edge) => !edge.some((end) => end.endsWith(id)));
+  return script.replace(/const RECORDED_ASKS = \[[\s\S]*?\n\];/, () => `const RECORDED_ASKS = ${JSON.stringify(asks)};`);
+}
+// The pills shown, each by its node's name up to the first comma: a file's name, or "<name> folder".
+const pillsByName = async (page) => Object.fromEntries(Object.values(await page.evaluate(pillsOn)).map((pill) => [pill[2].split(', ')[0], pill]));
+
+async function folderQuotes() {
+  const pills = SAMPLE_QUOTED.pills;
+  const [first, second, third] = recordedSample().docs.map((doc) => doc.name);
+  const named = (n) => counted(n, 'highlighted sentence');
+  const sitesPill = (n, sources) => [String(n), named(n), `sites folder, 3 files, closed, ${counted(sources, 'source')}, ${named(n)}`];
+  await withPage('folders', { sample: false, before: serving((script) => withMemosInFolders(withFirstMemoUnasked(script))) }, async (page) => {
+    for (const name of ['river', 'sites', 'canteen']) await pressNode(page, folderSel(name));
+    const unlit = await pillsByName(page);
+    check('folders', 'with no answer lit, a closed folder shows no pill', isDeepStrictEqual(unlit, {}), JSON.stringify(unlit));
+
+    await runSample(page);
+    const closed = await pillsByName(page);
+    await pressNode(page, folderSel('sites'));
+    const opened = await pillsByName(page);
+    await pressNode(page, folderSel('river'));
+    const inner = await pillsByName(page);
+    const total = (shown, names) => names.reduce((sum, name) => sum + Number(shown[name]?.[0]), 0);
+    const added = total(opened, [first, second, 'river folder']) === Number(closed['sites folder']?.[0]) && opened['river folder']?.[0] === inner[`river/${third}`]?.[0];
+    const sumName = "a closed folder's pill counts the sentences the lit answer quotes from its files at any depth in it, what their pills add up to once it opens, a closed subfolder's among them; it is titled, and its node named, for them as a file's is";
+    check('folders', sumName, added && isDeepStrictEqual(closed['sites folder'], sitesPill(pills[0] + pills[1] + pills[2], 3)), JSON.stringify({ closed, opened, inner }));
+    const openName = 'an open folder shows no pill, as its files show theirs';
+    check('folders', openName, !('sites folder' in opened) && !('river folder' in inner) && [first, second, `river/${third}`].every((name) => name in inner), JSON.stringify({ opened, inner }));
+    const canteen = { closed: await count(page, `${folderSel('canteen')}[aria-expanded="false"]`), pill: closed['canteen folder'] ?? null };
+    check('folders', 'a closed folder the lit answer quotes nothing of shows no pill', isDeepStrictEqual(canteen, { closed: 1, pill: null }), JSON.stringify(canteen));
+
+    await pressNode(page, folderSel('river'));
+    await pressNode(page, folderSel('sites'));
+    await send(page, recordedAsks()[0].question);
+    await becomes(page, (id) => document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('on-path'), 'answer-1');
+    const asked = (await pillsByName(page))['sites folder'];
+    await page.focus(nodeSel('answer-0'));
+    await page.keyboard.press('Enter');
+    const relit = (await pillsByName(page))['sites folder'];
+    const relitName = "lighting another answer counts its quotes on a closed folder's pill: an ask's, which leaves out a file, then the run's answer's again";
+    check('folders', relitName, isDeepStrictEqual(asked, sitesPill(pills[1] + pills[2], 2)) && isDeepStrictEqual(relit, sitesPill(pills[0] + pills[1] + pills[2], 3)), JSON.stringify({ asked, relit }));
   });
 }
 
@@ -3461,7 +3518,8 @@ function marksIn(selector) {
   return { meta: pre.previousElementSibling.textContent, marks, scrollTop: pre.scrollTop };
 }
 
-// In-page: the pill on each document node that shows one, as its text, its title and its node's name.
+// In-page: the pill on each node of the documents' column that shows one, a document's or a closed folder's, as its
+// text, its title and its node's name.
 function pillsOn() {
   const nodes = [...document.querySelectorAll('.node.doc')].filter((el) => el.querySelector('.pill:not([hidden])'));
   return Object.fromEntries(nodes.map((el) => [el.dataset.id, [el.querySelector('.pill').textContent, el.querySelector('.pill').title, el.getAttribute('aria-label')]]));
@@ -7617,7 +7675,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
+  const areas = [load, beforeRun, folds, folders, folderQuotes, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
