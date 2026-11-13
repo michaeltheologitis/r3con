@@ -125,11 +125,14 @@ a reload reads.
 The server stops in one place, its shutdown, whether ``serve``'s ``stop``, Ctrl-C or
 SIGTERM asks it to. As the shutdown begins, it refuses a new run or ask (503) and
 cancels every one still going, before it waits for open connections such as the page's
-event stream. Once they have closed, it waits up to ``WORKERS_EXIT_SECONDS`` for those
-runs and asks to end, so each finishes its call in flight and writes its run folder,
-with ``run_failed`` in its ``events.jsonl``; a page whose stream has already closed does
-not see it. A second Ctrl-C ends that wait at once, and ``r3con app`` quits there and
-then, leaving those runs and asks as they are.
+event stream. Once they have closed, it waits for those runs and asks to end, so each
+finishes its call in flight and writes its run folder, with ``run_failed`` in its
+``events.jsonl``; a page whose stream has already closed does not see it. The whole
+shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app`` ``QUIT_SECONDS``,
+after which ``r3con app`` ends the process, saying so if a run or ask is still going:
+a call in flight is cut off, and its run folder left without ``run_failed``. A second
+Ctrl-C ends that wait at once, and ``r3con app`` quits there and then, leaving those
+runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -241,6 +244,8 @@ TOO_MANY_ENTRIES = f"it holds more than {MAX_ZIP_ENTRIES:,} entries"
 TOO_MANY_BYTES = f"its documents unzip to more than {MAX_ZIP_MEGABYTES} MB"
 SHUTDOWN_GRACE_SECONDS = 1
 WORKERS_EXIT_SECONDS = 60
+# Enough for a run between model calls to stop and write its folder, and still prompt.
+QUIT_SECONDS = 2
 WORKER_POLL_SECONDS = 0.1
 FORCED_EXIT_CODE = 128 + signal.SIGINT
 KEY_VARIABLES: dict[Provider, str] = {
@@ -1106,25 +1111,21 @@ class _Server(uvicorn.Server):
     """uvicorn's server, which stops as the module docstring says: its shutdown is the
     one place for it, and runs inside uvicorn's signal handling."""
 
-    def __init__(self, config: uvicorn.Config, state: ServerState) -> None:
+    def __init__(
+        self, config: uvicorn.Config, state: ServerState, stop_within: float
+    ) -> None:
         super().__init__(config)
         self.app_state = state
+        self.stop_within = stop_within
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        deadline = time.monotonic() + self.stop_within
         state = self.app_state
         # One step on the loop, where every request is handled: no job starts after.
         state.stopping = True
         _cancel_jobs(state)
         await super().shutdown(sockets)
         workers = [worker for worker in state.workers if worker.is_alive()]
-        if workers:
-            print(
-                f"r3con app: waiting up to {WORKERS_EXIT_SECONDS} s for {len(workers)} "
-                "run(s) or ask(s) to finish their calls in flight; Ctrl-C again to "
-                "quit now",
-                flush=True,
-            )
-        deadline = time.monotonic() + WORKERS_EXIT_SECONDS
         while (
             any(worker.is_alive() for worker in workers)
             and not self.force_exit
@@ -1148,10 +1149,11 @@ def _server(
     completion: Callable[..., Any] | None,
     key_service: str = APP_KEY_SERVICE,
     choose_save_path: ChooseSavePath | None = None,
+    stop_within: float = WORKERS_EXIT_SECONDS,
 ) -> tuple[_Server, str]:
     """A server for ``listener``, with the keys under ``key_service`` in the
-    credential store, saving a tab where ``choose_save_path`` says, and the URL that
-    opens its page."""
+    credential store, saving a tab where ``choose_save_path`` says, whose shutdown
+    takes up to ``stop_within``, and the URL that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
     keys = _stored_keys(key_service)
@@ -1166,7 +1168,8 @@ def _server(
     app = create_app(token=token, port=port, state=state)
     config = uvicorn.Config(app, timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS)
     saves = "" if choose_save_path is None else f"&{SAVE_DIALOG}"
-    return _Server(config, state), f"http://{HOST}:{port}/#token={token}{saves}"
+    url = f"http://{HOST}:{port}/#token={token}{saves}"
+    return _Server(config, state, stop_within), url
 
 
 def serve(
@@ -1202,9 +1205,13 @@ def serve(
 def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
     """Serve the app on ``listener`` until stopped, as ``r3con app`` does, its keys
     under ``APP_KEY_SERVICE``: print the URL that opens the page, with this launch's
-    token, and where its run folders go, and with ``browser``, open the page."""
+    token, and where its run folders go, and with ``browser``, open the page. A
+    Ctrl-C stops it within ``QUIT_SECONDS``, then ends the process, saying so if that
+    cuts off a run or ask still going."""
     configure_logging()
-    server, url = _server(listener, logs_dir, None, APP_KEY_SERVICE)
+    server, url = _server(
+        listener, logs_dir, None, APP_KEY_SERVICE, stop_within=QUIT_SECONDS
+    )
     print(f"r3con app: {url}", flush=True)
     print(f"r3con app: runs go to {logs_dir}", flush=True)
     if browser:
@@ -1212,7 +1219,14 @@ def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
     # uvicorn shuts down on Ctrl-C, then raises it again, as its own run() expects.
     with contextlib.suppress(KeyboardInterrupt):
         server.run(sockets=[listener])
-    if server.force_exit:
+    going = [worker for worker in server.app_state.workers if worker.is_alive()]
+    if going:
+        print(
+            f"r3con app: quitting, cutting off {len(going)} run(s) or ask(s) still "
+            "going",
+            flush=True,
+        )
+    if going or server.force_exit:
         # Quit now: at exit, Python would join r3con's document threads (a
         # ThreadPoolExecutor's), and so wait for their calls in flight.
         os._exit(FORCED_EXIT_CODE)

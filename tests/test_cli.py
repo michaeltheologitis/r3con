@@ -1,10 +1,13 @@
+import contextlib
 import json
 import re
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import httpx2
@@ -13,7 +16,12 @@ import platformdirs
 import pytest
 
 from r3con import settings
-from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE
+from r3con.app.server import (
+    APP_KEY_SERVICE,
+    FORCED_EXIT_CODE,
+    MAC_APP_KEY_SERVICE,
+    QUIT_SECONDS,
+)
 from r3con.cli import build_parser, main
 from r3con.config import PROMPT_STAGES, load_config
 from r3con.r3con import read_documents
@@ -29,6 +37,30 @@ MASKED_HEADER = {"extra_headers": {"Authorization": "REDACTED"}}
 APP_MODULES = ("starlette", "uvicorn", "platformdirs", "keyring")
 # Far longer than the app takes to print its two lines, which it does before serving.
 LAUNCH_SECONDS = 30
+# r3con app whose model calls say so on stdout, in one write, then never return.
+NEVER_ANSWERING_APP = """
+import sys, threading
+import litellm
+from r3con.cli import main
+
+def never_answers(**request):
+    sys.stdout.write("a model call\\n")
+    sys.stdout.flush()
+    threading.Event().wait()
+
+litellm.completion = never_answers
+sys.exit(main(sys.argv[1:]))
+"""
+MODEL_CALLED = "a model call\n"
+# Two documents, so their calls run on the document threads Python's exit joins.
+NEVER_ANSWERED_RUN = {
+    "question": "Which memo?",
+    "model": "openai/never-answers",
+    "documents": ["A memo.", "Another memo."],
+}
+CUT_OFF = "r3con app: quitting, cutting off 1 run(s) or ask(s) still going"
+# Room past QUIT_SECONDS for a slow runner, and far short of the old 60 s wait.
+QUIT_BOUND_SECONDS = QUIT_SECONDS + 3
 NO_APP_EXTRA = (
     'r3con: the app needs its extra: uv tool install "r3context[app]" '
     '(or pip install "r3context[app]")\n'
@@ -549,6 +581,41 @@ def test_the_app_says_where_its_runs_go(monkeypatch, variable, flag, runs):
     assert where == f"r3con app: runs go to {runs}\n"
 
 
+@contextlib.contextmanager
+def started_app(*program: str, logs_dir: Path) -> Iterator[subprocess.Popen[str]]:
+    """``r3con app``, as ``program`` runs it, serving without a browser: killed on
+    leaving, or after ``LAUNCH_SECONDS``, so that a hang fails the test."""
+    with subprocess.Popen(
+        [*program, "app", "--no-browser", "--logs-dir", str(logs_dir)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as app:
+        watchdog = threading.Timer(LAUNCH_SECONDS, app.kill)
+        watchdog.start()
+        try:
+            yield app
+        finally:
+            watchdog.cancel()
+            app.kill()
+
+
+def client_of(app: subprocess.Popen[str]) -> httpx2.Client:
+    """A client of the server ``app`` runs, with its token, from the URL it prints."""
+    base_url, token = app.stdout.readline().split(": ", 1)[1].split("/#token=")
+    headers = {"Authorization": f"Bearer {token.strip()}"}
+    return httpx2.Client(
+        base_url=base_url, headers=headers, timeout=LAUNCH_SECONDS, trust_env=False
+    )
+
+
+def ctrl_c(app: subprocess.Popen[str]) -> int:
+    """Press Ctrl-C in ``app``'s terminal; returns its exit code once it has ended,
+    which must be within ``QUIT_BOUND_SECONDS`` (``subprocess.TimeoutExpired``)."""
+    app.send_signal(signal.SIGINT)
+    return app.wait(QUIT_BOUND_SECONDS)
+
+
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
 def test_r3con_app_keeps_its_keys_under_r3con_never_the_mac_apps(tmp_path, monkeypatch):
@@ -558,26 +625,50 @@ def test_r3con_app_keeps_its_keys_under_r3con_never_the_mac_apps(tmp_path, monke
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "tests.fakes.FileKeyring")
     monkeypatch.setenv(KEYRING_FILE, str(store))
     monkeypatch.setenv("PYTHONPATH", str(REPO))
-    app = subprocess.Popen(
-        [sys.executable, "-m", "r3con.cli", "app", "--no-browser"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    )
-    watchdog = threading.Timer(LAUNCH_SECONDS, app.kill)
-    watchdog.start()
-    try:
-        base_url, token = app.stdout.readline().split(": ", 1)[1].split("/#token=")
-        headers = {"Authorization": f"Bearer {token.strip()}"}
-        with httpx2.Client(
-            base_url=base_url, headers=headers, timeout=LAUNCH_SECONDS, trust_env=False
-        ) as http:
-            loaded = http.get("/api/keys").json()
-            http.post("/api/keys", json={"provider": "anthropic", "key": KEY})
-    finally:
-        watchdog.cancel()
-        app.kill()
-        app.wait()
+    with (
+        started_app(sys.executable, "-m", "r3con.cli", logs_dir=tmp_path) as app,
+        client_of(app) as http,
+    ):
+        loaded = http.get("/api/keys").json()
+        http.post("/api/keys", json={"provider": "anthropic", "key": KEY})
     assert (loaded["openai"]["hint"], loaded["gemini"]) == (KEY[-4:], None)
     saved = json.loads(store.read_text())
     assert saved == {**stored, APP_KEY_SERVICE: {"openai": KEY, "anthropic": KEY}}
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_ctrl_c_with_nothing_in_flight_quits_the_app_cleanly_within_its_bound(
+    tmp_path,
+):
+    with started_app(sys.executable, "-m", "r3con.cli", logs_dir=tmp_path) as app:
+        with client_of(app) as http:
+            assert http.get("/api/keys").status_code == 200
+        exit_code = ctrl_c(app)
+        out, err = app.communicate()
+    assert exit_code == 0
+    assert "r3con app: quitting" not in out
+    assert "Traceback" not in err
+
+
+@pytest.mark.enable_socket
+@pytest.mark.allow_hosts(["127.0.0.1"])
+def test_ctrl_c_quits_the_app_within_its_bound_though_a_model_call_never_returns(
+    tmp_path,
+):
+    with (
+        started_app(
+            sys.executable, "-c", NEVER_ANSWERING_APP, logs_dir=tmp_path
+        ) as app,
+        client_of(app) as http,
+    ):
+        run_id = http.post("/api/runs", json=NEVER_ANSWERED_RUN).json()["run_id"]
+        # Held open, as the page holds it: dropping its lines would close it.
+        with http.stream("GET", f"/api/runs/{run_id}/events") as events:
+            lines = events.iter_lines()
+            assert next(lines).startswith("data: ")
+            assert MODEL_CALLED in iter(app.stdout.readline, "")
+            exit_code = ctrl_c(app)
+        out, _ = app.communicate()
+    assert exit_code == FORCED_EXIT_CODE
+    assert out.endswith(f"{CUT_OFF}\n")
