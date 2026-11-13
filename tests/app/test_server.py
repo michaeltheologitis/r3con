@@ -1742,7 +1742,7 @@ def test_a_pdfs_text_is_extracted_as_read_documents_extracts_it(
     write_pdf(pdf, text, to_unicode=to_unicode)
     response = text_of(client, pdf)
     assert response.status_code == 200
-    assert response.json() == {"text": extracted}
+    assert response.json() == {"text": extracted, "reason": None}
     assert read_documents(pdf) == {"memo.pdf": extracted}
 
 
@@ -1766,7 +1766,7 @@ def test_a_word_files_or_web_pages_text_is_extracted_as_read_documents_extracts_
     response = text_of(client, path)
     [text] = read_documents(path).values()
     assert response.status_code == 200
-    assert response.json() == {"text": text}
+    assert response.json() == {"text": text, "reason": None}
 
 
 def test_the_page_sends_the_server_each_suffix_r3con_extracts():
@@ -1776,8 +1776,9 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
     assert re.findall(r"'([^']+)'", listed[1]) == list(r3con._EXTRACTORS)
 
 
+# A PDF's reason says why it has no text; a Word file or a web page gives none.
 @pytest.mark.parametrize(
-    ("name", "write", "logged"),
+    ("name", "write", "logged", "reason"),
     [
         (
             "memo.pdf",
@@ -1786,50 +1787,63 @@ def test_the_page_sends_the_server_each_suffix_r3con_extracts():
                 "memo.pdf: no extractable text — a scanned PDF needs OCR first; "
                 "skipping it"
             ),
+            "no_text",
+        ),
+        (
+            "memo.pdf",
+            lambda path: write_pdf(path, PDF_TEXT, password="secret"),
+            "memo.pdf: password-protected; skipping it",
+            "password",
         ),
         (
             "memo.pdf",
             lambda path: path.write_bytes(CORRUPT_PDF),
             "memo.pdf: not readable as a PDF (PdfStreamError); skipping it",
+            "unreadable",
         ),
         (
             "memo.docx",
             lambda path: path.write_bytes(CORRUPT_DOCX),
             "memo.docx: not readable as a Word file (BadZipFile); skipping it",
+            None,
         ),
         (
             "memo.docx",
             write_docx,
             "memo.docx: no extractable text; skipping it",
+            None,
         ),
         (
             "memo.html",
             lambda path: path.write_bytes(b"<script>var site;</script>"),
             "memo.html: no extractable text; skipping it",
+            None,
         ),
     ],
     ids=[
         "scanned-pdf",
+        "password-pdf",
         "corrupt-pdf",
         "corrupt-docx",
         "empty-docx",
         "script-only-html",
     ],
 )
-def test_a_file_with_no_text_layer_or_that_cannot_be_read_has_empty_text_and_is_logged(
+def test_a_file_with_no_text_or_unreadable_has_empty_text_is_logged_and_a_pdf_says_why(
     client: TestClient,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     name: str,
     write: Callable[[Path], None],
     logged: str,
+    reason: str | None,
 ):
     file = tmp_path / name
     write(file)
     with caplog.at_level(logging.WARNING, logger="r3con.documents"):
         response = text_of(client, file)
     assert response.status_code == 200
-    assert response.json() == {"text": ""}
+    assert response.json() == {"text": "", "reason": reason}
     assert [r.getMessage() for r in caplog.records if r.name == "r3con.documents"] == [
         logged
     ]
@@ -1958,7 +1972,7 @@ def test_hidden_macos_and_lock_entries_are_left_out_uncounted_and_others_counted
     }
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
     assert response.status_code == 200
-    memo = {"name": "01_memo.txt", "size": len(MEMO), "text": MEMO}
+    memo = {"name": "01_memo.txt", "size": len(MEMO), "text": MEMO, "reason": None}
     assert response.json() == {"files": [memo], "skipped": 2}
 
 
@@ -1967,22 +1981,33 @@ def test_a_zip_in_the_zip_is_skipped_unopened(client: TestClient, tmp_path: Path
     write_zip(inner, {"inner_memo.txt": "A memo in a zip in the zip.\n"})
     entries = {"outer_memo.txt": MEMO, "inner.zip": inner.read_bytes()}
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
-    memo = {"name": "outer_memo.txt", "size": len(MEMO), "text": MEMO}
+    memo = {"name": "outer_memo.txt", "size": len(MEMO), "text": MEMO, "reason": None}
     assert response.json() == {"files": [memo], "skipped": 1}
 
 
-def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_to_refuse(
+def test_a_zipped_document_with_no_text_or_unreadable_comes_back_empty_saying_why(
     client: TestClient, tmp_path: Path
 ):
-    scan = tmp_path / "scan.pdf"
+    scan, locked = tmp_path / "scan.pdf", tmp_path / "locked.pdf"
     write_pdf(scan)
-    entries = {"scan.pdf": scan.read_bytes(), "blank.txt": "", "bad.pdf": CORRUPT_PDF}
+    write_pdf(locked, PDF_TEXT, password="secret")
+    entries = {
+        "scan.pdf": scan.read_bytes(),
+        "locked.pdf": locked.read_bytes(),
+        "blank.txt": "",
+        "bad.pdf": CORRUPT_PDF,
+    }
     response = unzip(client, zipped(tmp_path, entries).read_bytes())
+    empty = [
+        ("bad.pdf", len(CORRUPT_PDF), "unreadable"),
+        ("blank.txt", 0, None),
+        ("locked.pdf", locked.stat().st_size, "password"),
+        ("scan.pdf", scan.stat().st_size, "no_text"),
+    ]
     assert response.json() == {
         "files": [
-            {"name": "bad.pdf", "size": len(CORRUPT_PDF), "text": ""},
-            {"name": "blank.txt", "size": 0, "text": ""},
-            {"name": "scan.pdf", "size": scan.stat().st_size, "text": ""},
+            {"name": name, "size": size, "text": "", "reason": reason}
+            for name, size, reason in empty
         ],
         "skipped": 0,
     }

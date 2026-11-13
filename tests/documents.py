@@ -1,8 +1,11 @@
 import base64
+import io
 import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from pypdf import PdfWriter
 
 CORRUPT_DOCX = b"PK\x03\x04 truncated garbage"
 # A 1x1 PNG.
@@ -47,11 +50,13 @@ def write_pdf(
     *,
     to_unicode: dict[str, str] | None = None,
     padding: int = 0,
+    password: str | None = None,
 ) -> None:
     """A minimal valid PDF (correct xref offsets and %%EOF), with or without a text
     layer: generated, so the fixture stays readable. ``to_unicode`` gives its font a
     ToUnicode CMap, from characters of ``text`` to the UTF-16BE hex each one stands
-    for; ``padding`` adds a stream of that many bytes that no page uses."""
+    for; ``padding`` adds a stream of that many bytes that no page uses; ``password``
+    encrypts it, with AES-256, to open only with that password."""
     objs = ["<</Type/Catalog/Pages 2 0 R>>", "<</Type/Pages/Kids[3 0 R]/Count 1>>"]
     if text:
         cmap = "/ToUnicode 6 0 R" if to_unicode else ""
@@ -79,7 +84,12 @@ def write_pdf(
         out += f"{o:010d} 00000 n \n".encode()
     out += f"trailer<</Size {len(objs) + 1}/Root 1 0 R>>\n".encode()
     out += f"startxref\n{xref}\n%%EOF\n".encode()
-    path.write_bytes(bytes(out))
+    if password is None:
+        path.write_bytes(bytes(out))
+        return
+    writer = PdfWriter(clone_from=io.BytesIO(bytes(out)))
+    writer.encrypt(password, algorithm="AES-256")
+    writer.write(path)
 
 
 def _stream(data: str) -> str:

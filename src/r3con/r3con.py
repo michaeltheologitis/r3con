@@ -59,7 +59,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from fnmatch import fnmatch
 from itertools import count, takewhile
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
 import mammoth
 from bs4 import BeautifulSoup, MarkupResemblesLocatorWarning, XMLParsedAsHTMLWarning
@@ -68,6 +68,7 @@ from bs4.element import NavigableString, PageElement, PreformattedString, Tag
 from dotenv import find_dotenv, load_dotenv
 from markdownify import ATX, MarkdownConverter
 from pypdf import PdfReader
+from pypdf.errors import FileNotDecryptedError
 
 from r3con.config import (
     DEFAULT_CONFIG,
@@ -155,6 +156,10 @@ _INLINE = frozenset(
 _NO_SPACE_BEFORE = frozenset(" \t\r\n.,;:!?)")
 # Where markdownify starts and ends a code block.
 _FENCE = "```"
+_PDF_SUFFIX = ".pdf"
+# Why a PDF has no text: no page has any (a scan, likely), it opens only with a
+# password, or pypdf can't read it.
+_PdfNoText = Literal["no_text", "password", "unreadable"]
 # bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
 # URL or a path isn't one; a web page is read as HTML either way.
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
@@ -188,29 +193,39 @@ def _read_stream(name: str, file: BinaryIO) -> str:
 
 
 def _pdf_text(name: str, pdf: BinaryIO) -> str:
-    """A PDF's text, page by page, from a stream of its bytes; ``name`` is what the
-    warnings call it.
+    """A PDF's text, as :func:`_pdf_read` reads it."""
+    return _pdf_read(name, pdf)[0]
 
-    A PDF pypdf can't read gives ``""``, and so does one with no text layer (a scan),
-    which the caller then drops: say so rather than letting it vanish. The fix is OCR,
-    outside this package. Half a surrogate pair, which a font's ToUnicode map can give
-    and no UTF-8 encoder takes, becomes U+FFFD.
+
+def _pdf_read(name: str, pdf: BinaryIO) -> tuple[str, _PdfNoText | None]:
+    """A PDF's text, page by page, from a stream of its bytes, and why it has none, if
+    it hasn't; ``name`` is what the warnings call it.
+
+    A PDF with no text layer (a scan) gives ``""``, and so does one that opens only with
+    a password, not an empty one, or one pypdf can't read, which the caller then drops:
+    say which rather than letting it vanish. The fix for a scan is OCR, outside this
+    package. Half a surrogate pair, which a font's ToUnicode map can give and no UTF-8
+    encoder takes, becomes U+FFFD.
     """
     try:
         text = "\n\n".join(page.extract_text() or "" for page in PdfReader(pdf).pages)
+    except FileNotDecryptedError:
+        _log.warning("%s: password-protected; skipping it", name)
+        return "", "password"
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as a PDF (%s); skipping it", name, type(e).__name__
         )
-        return ""
+        return "", "unreadable"
     # pypdf decodes ToUnicode maps with surrogatepass, so a pair can come as two code
     # units, or half of one alone: UTF-16 joins the pairs and replaces the halves.
     text = text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "replace")
-    if not text.strip():
-        _log.warning(
-            "%s: no extractable text — a scanned PDF needs OCR first; skipping it", name
-        )
-    return text
+    if text.strip():
+        return text, None
+    _log.warning(
+        "%s: no extractable text — a scanned PDF needs OCR first; skipping it", name
+    )
+    return text, "no_text"
 
 
 def _docx_text(name: str, docx: BinaryIO) -> str:
@@ -506,7 +521,7 @@ class _Markdown(MarkdownConverter):
 
 
 _EXTRACTORS: dict[str, Callable[[str, BinaryIO], str]] = {
-    ".pdf": _pdf_text,
+    _PDF_SUFFIX: _pdf_text,
     ".docx": _docx_text,
     ".html": _html_text,
     ".htm": _html_text,
@@ -704,7 +719,8 @@ def read_documents(source: str | Path | Iterable[str | Path]) -> dict[str, str]:
     hidden or a link.
 
     PDFs are extracted page by page. A PDF with no text layer — a scan — yields nothing,
-    is logged and then dropped; OCR is outside this package. A Word file or a web page
+    as does one that opens only with a password or can't be read: each is logged,
+    saying which, and dropped; OCR is outside this package. A Word file or a web page
     is converted to Markdown, its tables included, a web page under the title, author,
     dates and address its metadata gives; one that can't be read, or has no text, is
     logged and dropped. Everything else is read as UTF-8, replacing undecodable bytes

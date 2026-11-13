@@ -486,6 +486,7 @@ def test_pdfs_are_extracted_and_one_that_cannot_be_read_is_dropped(tmp_path):
     write_pdf(tmp_path / "a_memo.pdf", "Incidents this quarter: 7.")
     write_pdf(tmp_path / "b_scanned.pdf")
     (tmp_path / "c_corrupt.pdf").write_bytes(b"%PDF-1.4 truncated garbage")
+    write_pdf(tmp_path / "c_locked.pdf", "A locked memo.", password="secret")
     (tmp_path / "d_plain.txt").write_text("a plain memo", encoding="utf-8")
     documents = read_documents(tmp_path)
     assert list(documents) == ["a_memo.pdf", "d_plain.txt"]
