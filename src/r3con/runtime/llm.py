@@ -95,6 +95,9 @@ from urllib.parse import unquote, urlsplit
 
 import litellm
 import tenacity
+from litellm.litellm_core_utils.get_llm_provider_logic import (
+    declared_authenticating_provider,
+)
 from litellm.router import Router
 from pydantic import BaseModel, ValidationError
 
@@ -510,6 +513,16 @@ def send_until_valid(
             )
             text = _retry_prompt(user_prompt, error, rewrite)
     return send(text, max_attempts)
+
+
+def signs_in_on_first_call(model: str, llm_kwargs: Mapping[str, Any]) -> bool:
+    """Whether ``model``'s provider signs in on its first call, litellm's
+    ``github_copilot`` and ``chatgpt``, named by the model's prefix or by the
+    ``custom_llm_provider`` among ``llm_kwargs``: concurrent first calls would each
+    start their own device sign-in, printing a code apiece and then waiting minutes on
+    the codes nobody enters, while a call after one has signed in reuses its token."""
+    provider = llm_kwargs.get("custom_llm_provider")
+    return declared_authenticating_provider(model, provider) is not None
 
 
 def register_credentials(

@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+import os
 import threading
 from types import MappingProxyType
 
@@ -19,6 +20,7 @@ from r3con.runs import (
     new_run_folder,
     normalize_model_name,
     reopen_for_resume,
+    run_lock,
     step_totals,
     write_manifest,
 )
@@ -62,7 +64,6 @@ FINGERPRINTED = {
         "387608192a392fe5a3d3253a6c9cc8d2f1b41f1d84e50d10162c56e729a9ad52"
     ),
 }
-FLUSHED = ("calls.json", "transcript.yaml")
 TOOLS = [{"type": "function", "function": {"name": "sign_in", "parameters": SCHEMA}}]
 # A field of a schema, which the rows below name like a credential.
 FIELD = {"type": "string", "description": "The session's sign-in token"}
@@ -450,7 +451,9 @@ def test_each_call_records_its_reply_and_how_long_it_took(logger):
     assert (call["reasoning"], call["output"], call["seconds"]) == (THOUGHT, "a", 1.25)
 
 
-def test_a_resumed_stage_run_writes_its_earlier_calls_again_as_they_were(logger):
+def test_a_resumed_stage_run_writes_its_earlier_calls_back_first_and_counts_them(
+    logger,
+):
     earlier = StageRun(stage="reasoning", task_logger=logger, model=MODEL)
     sent = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
     earlier.add_step(
@@ -460,24 +463,25 @@ def test_a_resumed_stage_run_writes_its_earlier_calls_again_as_they_were(logger)
         tokens=TOKENS,
         usage=USAGE,
         usd=0.5,
-        sends=2,
-        resend_wait_seconds=1.5,
         seconds=3.25,
-        served_model="gpt-6-luna",
-        fingerprint="fp_3f1c2d",
     )
     earlier.add_step(
         kind="turn-2", messages=sent, response={}, usd=0.0, error=ERROR_LINE
     )
     earlier.flush()
-    written = {name: (earlier.dir / name).read_bytes() for name in FLUSHED}
+    calls = json.loads((earlier.dir / "calls.json").read_text())
 
     resumed = StageRun(stage="reasoning", task_logger=logger, model=MODEL, resumed=True)
-    resumed.flush()
-    assert {name: (earlier.dir / name).read_bytes() for name in FLUSHED} == written
     assert resumed.add_step(kind="turn-2", messages=sent, response=reply("B")).step == 3
-    assert resumed.compute_totals() == step_totals(earlier.steps + resumed.steps[2:])
-    assert StageRun(stage="reasoning", task_logger=logger).steps == []
+    resumed.flush()
+    rewritten = json.loads((earlier.dir / "calls.json").read_text())
+    assert rewritten[:2] == calls
+    assert [call["output"] for call in rewritten[2:]] == ["B"]
+    assert resumed.compute_totals() == step_totals([*earlier.steps, *resumed.steps])
+    assert flushed_transcript(resumed)["messages"][-1]["content"] == "B"
+    assert (
+        StageRun(stage="reasoning", task_logger=logger).compute_totals()["n_steps"] == 0
+    )
 
 
 def test_a_resumed_stage_run_starts_afresh_from_a_calls_json_it_cannot_read(
@@ -488,6 +492,14 @@ def test_a_resumed_stage_run_starts_afresh_from_a_calls_json_it_cannot_read(
     (folder / "calls.json").write_text('[{"step": 1, "kind": "relev')
     assert StageRun(stage="relevance", task_logger=logger, resumed=True).steps == []
     assert "calls.json can't be read" in caplog.text
+
+
+def test_a_run_folder_is_held_by_one_run_or_resume_at_a_time(logger):
+    held = pytest.raises(RuntimeError, match=f"in process {os.getpid()};")
+    with run_lock(logger.dir), held, run_lock(logger.dir):
+        pass
+    with run_lock(logger.dir):
+        assert (logger.dir / "run.lock").read_text() == str(os.getpid())
 
 
 def test_reopening_a_folder_for_a_resume_records_it_and_ends_a_line_cut_short(logger):

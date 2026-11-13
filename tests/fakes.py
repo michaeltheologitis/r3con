@@ -216,6 +216,64 @@ class FakeLLM:
         return answer
 
 
+ANSWERING_CODE = (
+    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
+    'provenance_ids={"summary_ids": [], '
+    '"parse_ids": [r["document"] for r in parse["rows"]]})\n</code>'
+)
+
+
+def first_line(request: Request) -> str:
+    """The first line of the document a request sends, below a parse request's
+    ``Document ID`` line."""
+    return PARSE_HEADING.sub("", request["messages"][1]["content"]).splitlines()[0]
+
+
+def joined_rows(request: Request) -> Content:
+    """A reasoning reply that joins the parse's rows and cites their documents for
+    their records: on the coding path, code that does; on the direct path, the rows of
+    the parse its prompt shows, joined, and their documents' ids."""
+    if "response_format" not in request:
+        return ANSWERING_CODE
+    system = request["messages"][0]["content"]
+    shown = system.split("## The parsed data (`parse`)", 1)[1].split("\n## Rules")[0]
+    rows = json.loads(shown[shown.index("{") : shown.rindex("}") + 1])["rows"]
+    return {
+        "answer": "; ".join(row["who"] for row in rows),
+        "provenance_ids": {
+            "summary_ids": [],
+            "parse_ids": [row["document"] for row in rows],
+        },
+    }
+
+
+ANSWERING: dict[str, Content | Callable[[Request], Content]] = {
+    "relevance": lambda request: f"Notes on {first_line(request)}.",
+    "schema": ANSWERING_SCHEMA,
+    "parsing": lambda request: {"rows": [{"who": first_line(request)}]},
+    "reasoning": joined_rows,
+}
+"""What ``answering_llm`` answers each stage with, so that any run completes: each
+document's first line is its note and its one parsed row, and the answer joins the
+rows, on either reasoning path."""
+
+
+def failing_once(
+    when: Callable[[Request], bool], otherwise: Content | Callable[[Request], Content]
+) -> Reply:
+    """A reply that refuses the first request ``when`` holds for, as a provider whose
+    key is refused does, and answers every other with ``otherwise``."""
+    refused: list[Request] = []
+
+    def reply(request: Request) -> Content:
+        if not refused and when(request):
+            refused.append(request)
+            raise bad_key()
+        return otherwise(request) if callable(otherwise) else otherwise
+
+    return reply
+
+
 def unscripted(request: Request) -> UnscriptedRequest:
     """The error for a ``request`` that a fake has no reply for."""
     last = request["messages"][-1]["content"][:UNSCRIPTED_SHOWN_CHARS]

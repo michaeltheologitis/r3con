@@ -334,16 +334,22 @@ def resume(
     """Carry on a run that failed or was stopped from where it was, computing only what
     it lacks, in its own folder.
 
-    Each stage reuses the results the run already wrote: a finished stage's, and an
-    unfinished one's per document (each relevance snippet a round wrote, and each
-    parse), as ``events.jsonl`` holds them. The rest is computed as the run would have,
-    under its question, config and document ids, and reasoning always runs. The folder
-    keeps one record of the whole run: each stage's ``calls.json`` and totals hold the
-    earlier calls as well as the new, ``events.jsonl`` adds the resume's events, and
-    the manifest lists each resume under ``resumes``. A call the run had made when it
-    was killed outright, rather than failing or being cancelled, is not in its stage's
-    ``calls.json``, nor in the totals; its result, when its events hold it, is reused
-    all the same.
+    A stage that finished is taken as its ``result.json`` holds it, its files left as
+    they are. An unfinished one reuses each document's result the run saved in
+    ``events.jsonl`` (each relevance snippet a round wrote, all its parts there, and
+    each parse) and computes the rest, as the run would have, under its question,
+    config and document ids; reasoning always runs. The folder keeps one record of the
+    whole run: an unfinished stage's ``calls.json`` keeps the earlier calls before the
+    new ones, ``events.jsonl`` adds the resume's events, the manifest lists each resume
+    under ``resumes``, and ``run_finished`` totals every stage. A call the run had made
+    when it was killed outright, rather than failing or being cancelled, is not in its
+    stage's ``calls.json``, nor in the totals; its result, when its events hold it, is
+    reused all the same. Lines of ``events.jsonl`` or saved results it can't use are
+    computed again, and a warning counts them.
+
+    A run or resume holds its folder while it writes there (``run.lock``,
+    :func:`r3con.runs.run_lock`), so a run still going, or another resume, is not
+    resumed meanwhile.
 
     Args:
         run_dir: the run's folder, as the note on its exception names it.
@@ -351,13 +357,15 @@ def resume(
             each is checked against the fingerprint the run recorded.
         params: only to pass again the real value of each credential among the run's
             params, which its manifest saved as ``REDACTED`` (:mod:`r3con.masking`):
-            the run's params otherwise.
+            otherwise the run's own, and anything else in them is refused.
         api_key, api_base, completion: as in :func:`run`.
-        on_event: as in :func:`run`, called with the resume's events: ``run_started``,
-            then ``run_resumed`` (the number of results each stage reuses), then each
-            event that reported a result it reuses again, as the folder saved it,
-            then the events of what it computes, as a run's
-            (:func:`~r3con.pipeline.resume_pipeline`).
+        on_event: as in :func:`run`, called with the resume's events: ``run_started``;
+            ``run_resumed``, whose ``reused`` gives how many results each stage reuses
+            (``relevance``, per round, ``schema``, 0 or 1, and ``parsing``); then the
+            ``relevance_finished``, ``schema_finished`` and ``parsing_finished`` events
+            that reported the results it reuses, as the folder saved them, their
+            ``time`` the original's, in the order written, which ``events.jsonl`` does
+            not get twice; then the events of what it computes, as a run's.
         cancel: as in :func:`run`; a cancelled resume can be resumed in turn.
 
     Returns:
@@ -370,6 +378,7 @@ def resume(
             its order, if a prompt it pins now resolves to another file than it read,
             if ``params`` are not the run's, if a param it would send holds
             ``REDACTED``, or if a file in its folder is not as this r3con writes it.
+        RuntimeError: if a run or resume is going in its folder.
         Each of these is raised in one line, before the folder is written to and before
         any request. Anything the stages raise, as for :func:`run`.
     """

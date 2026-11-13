@@ -34,13 +34,11 @@ the document it is reading.
 Round k reads the *frozen* round-(k-1) set, so within a round the per-document calls
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`). For a model whose provider signs in on its
-first call, litellm's ``github_copilot`` and ``chatgpt``, named by the model's prefix
-or by ``custom_llm_provider``, round 1 reads the first document alone before the
-others: concurrent first calls would each start their own device sign-in, printing a
-code apiece and then waiting minutes on the codes nobody enters, while a call after
-one has signed in reuses its token. Downstream stages consume the **final-round**
-snippets (``RelevantContext.snippets``); earlier rounds are kept for inspection and for
-the answer's trail back through them (:mod:`r3con.provenance`).
+first call (:func:`r3con.runtime.llm.signs_in_on_first_call`), each round reads its
+first document alone before the others, the first not saved when a resume carries the
+run on, as a resumed round may make the first call. Downstream stages consume the
+**final-round** snippets (``RelevantContext.snippets``); earlier rounds are kept for
+inspection and for the answer's trail back through them (:mod:`r3con.provenance`).
 """
 
 from __future__ import annotations
@@ -48,11 +46,9 @@ from __future__ import annotations
 import random
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
-from litellm.litellm_core_utils.get_llm_provider_logic import (
-    declared_authenticating_provider,
-)
 from pydantic import BaseModel
 
 from r3con import settings
@@ -62,6 +58,7 @@ from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
+from r3con.runtime.llm import signs_in_on_first_call
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
 from r3con.stages.citing import (
@@ -139,7 +136,13 @@ def draw_document_ids(n: int) -> list[str]:
     return [f"{x:0{_ID_HEX_DIGITS}x}" for x in random.sample(range(space), n)]
 
 
-def _part_ids(document_id: str, n_parts: int) -> list[str]:
+def relevance_call(round_: int) -> str:
+    """The name of round ``round_``'s calls, as ``calls.json`` and ``splits.json`` give
+    it."""
+    return f"relevance-r{round_}"
+
+
+def part_ids(document_id: str, n_parts: int) -> list[str]:
     """The ids of a document's snippets in one round: its id when read whole, else
     ``<id>.<k>`` for part ``k``, from 1."""
     if n_parts == 1:
@@ -165,7 +168,7 @@ def render_relevance(
     Each document gets a ``### Document N`` heading, and each part of a document read in
     parts a ``### Document N.k`` heading, ``k`` from 1. With ``document_ids``, one per
     snippet, the headings name each document, and each part, by its id instead
-    (:func:`_part_ids`): ``### Document ID: <id>``. A note with nothing relevant renders
+    (:func:`part_ids`): ``### Document ID: <id>``. A note with nothing relevant renders
     as ``(no relevant summary for this task)``. An empty / ``None`` list renders to
     ``""`` so the consuming prompt omits the block.
 
@@ -207,7 +210,7 @@ def _headed_notes(
 ) -> Iterator[tuple[str, str]]:
     """Each note of ``relevance_snippets``, in order, with the name heading it: its
     document's from ``names``, or ``<name>.<k>`` for part ``k`` of a document read in
-    parts (:func:`_part_ids`); nothing for an empty / ``None`` list.
+    parts (:func:`part_ids`); nothing for an empty / ``None`` list.
 
     Raises:
         ValueError: if ``names`` is not one name per snippet.
@@ -216,7 +219,7 @@ def _headed_notes(
         return
     for name, snippet in zip(names, relevance_snippets, strict=True):
         notes = snippet if isinstance(snippet, list) else [snippet]
-        for part, note in zip(_part_ids(name, len(notes)), notes, strict=True):
+        for part, note in zip(part_ids(name, len(notes)), notes, strict=True):
             yield part, note or ""
 
 
@@ -378,7 +381,7 @@ def surface_relevance(
     splits: Splits | None = None,
     max_attempts: int | None = None,
     emit: Emit = no_events,
-    saved: Mapping[tuple[int, int], list[SnippetRecord]] | None = None,
+    saved: Mapping[tuple[int, int], list[SnippetRecord]] = MappingProxyType({}),
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -428,8 +431,7 @@ def surface_relevance(
 
     max_workers = workers if workers is not None else active_doc_workers()
     reader = splits if splits is not None else Splits(documents, model=model)
-    provider = llm_kwargs.get("custom_llm_provider")
-    signs_in = declared_authenticating_provider(model, provider) is not None
+    signs_in = signs_in_on_first_call(model, llm_kwargs)
 
     def run_round(
         prev: list[list[SnippetRecord]], round_idx: int
@@ -446,7 +448,7 @@ def surface_relevance(
         shown = {r.id: r.summary for parts in prev for r in parts if r.summary}
 
         def one(i: int, _document: str) -> list[SnippetRecord]:
-            if saved and (records := saved.get((round_idx, i))) is not None:
+            if (records := saved.get((round_idx, i))) is not None:
                 return records
             # Others-only: document i sees the previous round's snippets of the OTHER
             # documents, never its own (the document itself is the user message).
@@ -456,7 +458,7 @@ def surface_relevance(
             emit("relevance_started", round=round_idx, doc_id=document_ids[i])
             replies = reader.read_in_parts(
                 i,
-                call=f"relevance-r{round_idx}",
+                call=relevance_call(round_idx),
                 rest=request.system_prompt,
                 schema=request.schema,
                 send=lambda part, kind: _read(
@@ -469,7 +471,7 @@ def surface_relevance(
                     **llm_kwargs,
                 ),
             )
-            ids = _part_ids(document_ids[i], len(replies))
+            ids = part_ids(document_ids[i], len(replies))
             records = [
                 SnippetRecord(
                     id=id_,
@@ -484,11 +486,12 @@ def surface_relevance(
             _report_snippets(emit, round_idx, document_ids[i], records)
             return records
 
+        unsaved = (i for i in range(len(documents)) if (round_idx, i) not in saved)
         result = parallel_map(
             one,
             documents,
             max_workers=max_workers,
-            first_alone=signs_in and round_idx == 1,
+            alone=next(unsaved, None) if signs_in else None,
         )
         n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))
         _log.info(

@@ -27,9 +27,7 @@ from litellm.llms.github_copilot.authenticator import (
 
 from r3con.config import normalize_model_name
 from tests.fakes import (
-    ANSWERING_SCHEMA,
-    PARSE_HEADING,
-    Content,
+    ANSWERING,
     FakeKeyring,
     FakeLLM,
     Request,
@@ -61,11 +59,6 @@ TOKEN_REQUESTS = (
     (CopilotAuthenticator, "get_api_key", "Copilot"),
     (CopilotAuthenticator, "get_access_token", "Copilot"),
     (ChatGPTAuthenticator, "get_access_token", "ChatGPT"),
-)
-ANSWERING_CODE = (
-    '<code>\nfinal_answer("; ".join(r["who"] for r in parse["rows"]), '
-    'provenance_ids={"summary_ids": [], '
-    '"parse_ids": [r["document"] for r in parse["rows"]]})\n</code>'
 )
 
 
@@ -224,30 +217,6 @@ def shown_parse(sections: dict[str, str]) -> Any:
     return json.loads(parse[parse.index("{") :])
 
 
-def _first_line(request: Request) -> str:
-    """The first line of the document a request sends, below a parse request's
-    ``Document ID`` line."""
-    return re.sub(PARSE_HEADING, "", request["messages"][1]["content"]).splitlines()[0]
-
-
-def _joined_rows(request: Request) -> Content:
-    """A reasoning reply that joins the parse's rows and cites their documents for
-    their records: on the coding path, code that does; on the direct path, the rows of
-    the parse its prompt shows, joined, and their documents' ids."""
-    if "response_format" not in request:
-        return ANSWERING_CODE
-    system = request["messages"][0]["content"]
-    shown = system.split("## The parsed data (`parse`)", 1)[1].split("\n## Rules")[0]
-    rows = json.loads(shown[shown.index("{") : shown.rindex("}") + 1])["rows"]
-    return {
-        "answer": "; ".join(row["who"] for row in rows),
-        "provenance_ids": {
-            "summary_ids": [],
-            "parse_ids": [row["document"] for row in rows],
-        },
-    }
-
-
 @pytest.fixture
 def llm() -> FakeLLM:
     return FakeLLM()
@@ -258,12 +227,7 @@ def answering_llm(llm: FakeLLM) -> FakeLLM:
     """``llm``, answering every stage so that any run completes: each document's
     first line is its note and its one parsed row, and the answer joins the rows, on
     either reasoning path."""
-    return llm.answers(
-        relevance=lambda request: f"Notes on {_first_line(request)}.",
-        schema=ANSWERING_SCHEMA,
-        parsing=lambda request: {"rows": [{"who": _first_line(request)}]},
-        reasoning=_joined_rows,
-    )
+    return llm.answers(**ANSWERING)
 
 
 @pytest.fixture

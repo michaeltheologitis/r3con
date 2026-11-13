@@ -66,7 +66,8 @@ def test_the_lowest_indexed_failure_is_the_one_raised():
         parallel_map(fails, list(range(5)), max_workers=5)
 
 
-def test_with_first_alone_the_first_call_returns_before_any_other_starts():
+@pytest.mark.parametrize("alone", [0, 2])
+def test_the_call_run_alone_returns_before_any_other_starts(alone):
     events = []
 
     def record(i: int, x: str) -> tuple[int, str]:
@@ -75,20 +76,20 @@ def test_with_first_alone_the_first_call_returns_before_any_other_starts():
         events.append(f"end {i}")
         return i, x
 
-    results = parallel_map(record, ["a", "b", "c"], max_workers=3, first_alone=True)
+    results = parallel_map(record, ["a", "b", "c"], max_workers=3, alone=alone)
     assert results == [(0, "a"), (1, "b"), (2, "c")]
-    assert events[:2] == ["start 0", "end 0"]
+    assert events[:2] == [f"start {alone}", f"end {alone}"]
 
 
-def test_with_first_alone_a_failing_first_call_starts_no_other():
+def test_a_failing_call_run_alone_starts_no_other():
     started = []
 
     def first_fails(i: int, x: int) -> int:
         started.append(i)
-        if i == 0:
+        if i == 1:
             raise RuntimeError("first")
         return x
 
     with pytest.raises(RuntimeError, match="first"):
-        parallel_map(first_fails, list(range(5)), max_workers=5, first_alone=True)
-    assert started == [0]
+        parallel_map(first_fails, list(range(5)), max_workers=5, alone=1)
+    assert started == [1]

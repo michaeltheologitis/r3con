@@ -24,15 +24,17 @@ from r3con.documents import read_documents
 from r3con.r3con import ask, resume, run, trace
 from tests.documents import write_pdf, write_tree
 from tests.fakes import (
+    ANSWERING,
     ANSWERING_SCHEMA,
     FINGERPRINT,
-    PARSE_HEADING,
     TWO_LINE_MEMOS,
     USAGE,
     a_parse_citation_short,
     bad_key,
     cited_documents,
     citing,
+    failing_once,
+    first_line,
     in_json,
     is_later_round,
     quoting_a_line_a_round,
@@ -1457,33 +1459,41 @@ MEMOS_BY_NAME = {
     ]
 }
 LAST_THREE = ["Calder memo", "Dunmore memo", "Easton memo"]
+BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
+# A request this long is refused as too long: the grown registry is read in 4 parts.
+REFUSED_OVER_CHARS = 18_000
+# Enough of an event's line to leave it cut short, as a kill does.
+TORN_CHARS = 60
+STRICT_DATED_SCHEMA = """Thought: one row per memo, with its date.
+<schema>
+from datetime import date
+from pydantic import ConfigDict
 
 
-def first_line(request) -> str:
-    """The first line of the document, or part, a request sends."""
-    content = request["messages"][1]["content"]
-    return PARSE_HEADING.sub("", content).splitlines()[0]
+class Row(BaseModel):
+    model_config = ConfigDict(strict=True)
+    who: str
+    on: date
 
 
-def failing_once(stage: str, line: str, *, later_round: bool = False):
-    """A reply for ``stage`` that refuses the first request reading the document whose
-    first line is ``line`` (in a later relevance round only, with ``later_round``), and
-    otherwise answers as ``answering_llm`` does."""
-    refused = []
+class Parse(BaseModel):
+    model_config = ConfigDict(strict=True)
+    rows: list[Row]
+</schema>"""
 
-    def reply(request):
-        if (
-            not refused
-            and first_line(request) == line
-            and (is_later_round(request) or not later_round)
-        ):
-            refused.append(request)
-            raise bad_key()
-        if stage == "relevance":
-            return f"Notes on {first_line(request)}."
-        return {"rows": [{"who": first_line(request)}]}
 
-    return reply
+@pytest.fixture
+def one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documents read one after another, so a failure leaves those before it done."""
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+
+
+def reading(line: str, *, later_round: bool = False):
+    """Whether a request reads the document whose first line is ``line``, in a later
+    relevance round only with ``later_round``."""
+    return lambda request: (
+        first_line(request) == line and (is_later_round(request) or not later_round)
+    )
 
 
 def failed_run(llm, tmp_path: Path, documents=MEMOS_BY_NAME, **options) -> Path:
@@ -1525,80 +1535,86 @@ def as_named(answer: Answer) -> tuple:
     )
 
 
-def saved_events(run_dir: Path) -> list[dict]:
+def as_killed(run_dir: Path, stage: str, keep: int) -> list[str]:
+    """``run_dir`` as a kill during ``stage`` leaves it: the stage's folder without its
+    calls or error, and ``events.jsonl`` its first ``keep`` lines, which it returns."""
+    for name in ("calls.json", "error.txt"):
+        (run_dir / stage / name).unlink()
+    kept = (run_dir / "events.jsonl").read_text().splitlines()[:keep]
+    rewritten(run_dir, kept)
+    return kept
+
+
+def line_of(events: list[dict], kind: str, nth: int = 0, **fields) -> int:
+    """The position among ``events`` of the ``nth`` one of type ``kind`` with
+    ``fields``."""
     return [
-        json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()
-    ]
+        at
+        for at, event in enumerate(events)
+        if event["type"] == kind and fields.items() <= event.items()
+    ][nth]
 
 
-def reasoning_failing_once():
-    """A direct reasoning reply that refuses the first request, then answers with the
-    memos' first lines joined, as ``answering_llm`` does."""
-    refused = []
+def rewritten(run_dir: Path, lines: list[str]) -> None:
+    """``run_dir``'s ``events.jsonl`` written again as ``lines``."""
+    (run_dir / "events.jsonl").write_text("".join(f"{line}\n" for line in lines))
 
-    def reply(request):
-        if not refused:
-            refused.append(request)
-            raise bad_key()
-        return {"answer": "; ".join(MEMOS_BY_NAME.values()), "provenance_ids": {}}
 
-    return reply
+def untouched(run_dir: Path, stages) -> dict[str, tuple]:
+    """Each file of ``stages``' folders, by path, with its bytes and when it was last
+    written."""
+    return {
+        str(path.relative_to(run_dir)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for stage in stages
+        for path in (run_dir / stage).iterdir()
+    }
 
 
 @pytest.mark.parametrize(
-    ("stage", "failing", "resent"),
+    ("stage", "when", "resent", "finished"),
     [
         (
             "relevance",
-            lambda: failing_once("relevance", "Calder memo", later_round=True),
+            reading("Calder memo", later_round=True),
             [
                 *[("relevance", line) for line in LAST_THREE],
                 ("schema", None),
                 *[("parsing", line) for line in MEMOS_BY_NAME.values()],
                 ("reasoning", None),
             ],
+            (),
         ),
-        (
-            "parsing",
-            lambda: failing_once("parsing", "Calder memo"),
-            [*[("parsing", line) for line in LAST_THREE], ("reasoning", None)],
-        ),
-        ("reasoning", reasoning_failing_once, [("reasoning", None)]),
+        ("reasoning", lambda request: True, [("reasoning", None)], BUILT_STAGES),
     ],
-    ids=["in-relevance-round-2", "in-parsing", "in-reasoning"],
+    ids=["in-relevance-round-2", "in-reasoning"],
 )
 def test_a_failed_run_resumes_sending_only_what_it_lacks_and_answers_as_a_whole_run(
-    answering_llm, tmp_path, monkeypatch, stage, failing, resent
+    answering_llm, one_worker, tmp_path, stage, when, resent, finished
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
     whole = finished_run(answering_llm, tmp_path / "whole", MEMOS_BY_NAME)
-    llm = answering_llm.answers(**{stage: failing()})
+    llm = answering_llm.answers(**{stage: failing_once(when, ANSWERING[stage])})
     run_dir = failed_run(llm, tmp_path / "failed")
-    before = the_runs_own_files(run_dir)
+    before = untouched(run_dir, finished)
     answer, requests = resumed(llm, run_dir)
     assert requests == resent
     assert as_named(answer) == as_named(whole)
     assert answer.run_dir == run_dir
-    after = the_runs_own_files(run_dir)
-    finished = [path for path in before if path.endswith("result.json")]
-    assert {path: after[path] for path in finished} == {
-        path: before[path] for path in finished
-    }
+    assert untouched(run_dir, finished) == before
 
 
-def test_a_resumed_stage_keeps_its_earlier_calls_and_leaves_finished_stages_as_they_were(
-    answering_llm, tmp_path, monkeypatch
+def test_a_resumed_stage_keeps_its_earlier_calls_and_leaves_the_finished_ones_alone(
+    answering_llm, one_worker, tmp_path
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(parsing=failing_once("parsing", "Calder memo"))
+    failing = failing_once(reading("Calder memo"), ANSWERING["parsing"])
+    llm = answering_llm.answers(parsing=failing)
     run_dir = failed_run(llm, tmp_path)
-    before = the_runs_own_files(run_dir)
-    resume(run_dir, MEMOS_BY_NAME, completion=llm)
-    after = the_runs_own_files(run_dir)
-    finished = [p for p in before if p.startswith(("relevance", "structuring/schema"))]
-    assert {path: after[path] for path in finished} == {
-        path: before[path] for path in finished
-    }
+    before = untouched(run_dir, BUILT_STAGES[:2])
+    _, requests = resumed(llm, run_dir)
+    assert requests == [
+        *[("parsing", line) for line in LAST_THREE],
+        ("reasoning", None),
+    ]
+    assert untouched(run_dir, BUILT_STAGES[:2]) == before
     calls = json.loads((run_dir / "structuring/parsing/calls.json").read_text())
     assert [(c["step"], c["kind"], c["error"] is None) for c in calls] == [
         (1, "parse-d0", True),
@@ -1615,13 +1631,13 @@ def test_a_resumed_stage_keeps_its_earlier_calls_and_leaves_finished_stages_as_t
     assert resumed_at["r3con_version"] == r3con.__version__
 
 
-def test_a_resume_reports_what_it_reuses_then_its_events_without_writing_them_twice(
-    answering_llm, tmp_path, monkeypatch
+def test_a_resume_reports_what_it_reuses_then_the_events_that_reported_it(
+    answering_llm, one_worker, events_in, tmp_path
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(parsing=failing_once("parsing", "Calder memo"))
+    failing = failing_once(reading("Calder memo"), ANSWERING["parsing"])
+    llm = answering_llm.answers(parsing=failing)
     run_dir = failed_run(llm, tmp_path)
-    before = saved_events(run_dir)
+    before = events_in(run_dir)
     calder = before[0]["document_ids"][2]
     seen = []
     resume(run_dir, MEMOS_BY_NAME, completion=llm, on_event=seen.append)
@@ -1632,30 +1648,41 @@ def test_a_resume_reports_what_it_reuses_then_its_events_without_writing_them_tw
     replayed = [
         event
         for event in before
-        if event["type"].startswith(("relevance_", "schema_"))
-        or (event["type"].startswith("parsing_") and event["doc_id"] != calder)
+        if event["type"] in ("relevance_finished", "schema_finished")
+        or (event["type"] == "parsing_finished" and event["doc_id"] != calder)
     ]
     assert rest[: len(replayed)] == replayed
     new = rest[len(replayed) :]
     assert new[-1]["type"] == "run_finished"
-    assert saved_events(run_dir) == [*before, started, reuse, *new]
+    assert events_in(run_dir) == [*before, started, reuse, *new]
 
 
-def test_a_killed_run_resumes_from_its_events_and_a_line_cut_short_is_read_again(
-    answering_llm, tmp_path, monkeypatch
+def test_an_event_that_differs_from_the_result_reused_is_not_replayed(
+    answering_llm, events_in, tmp_path
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(parsing=failing_once("parsing", "Easton memo"))
+    run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
+    events = events_in(run_dir)
+    at = line_of(events, "schema_finished")
+    events[at] = {**events[at], "schema_code": "class Parse: ..."}
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    seen = []
+    answering_llm.answers(parsing=ANSWERING["parsing"])
+    resume(run_dir, MEMOS_BY_NAME, completion=answering_llm, on_event=seen.append)
+    replayed = [event["type"] for event in seen]
+    assert "schema_finished" not in replayed
+    assert replayed.count("relevance_finished") == len(MEMOS_BY_NAME) * 2
+
+
+def test_a_killed_run_resumes_from_its_events_and_reads_a_line_cut_short_again(
+    answering_llm, one_worker, events_in, tmp_path, caplog
+):
+    failing = failing_once(reading("Easton memo"), ANSWERING["parsing"])
+    llm = answering_llm.answers(parsing=failing)
     run_dir = failed_run(llm, tmp_path)
-    # As a kill would leave it: parsing's folder empty, no run_failed, and the last
-    # line, Dunmore's parse, cut short while it was written.
-    for name in ("calls.json", "error.txt"):
-        (run_dir / "structuring/parsing" / name).unlink()
-    events = run_dir / "events.jsonl"
-    lines = events.read_text().splitlines()
-    dunmore = max(i for i, line in enumerate(lines) if '"parsing_finished"' in line)
-    torn = lines[dunmore][:60]
-    events.write_text("\n".join([*lines[:dunmore], torn]))
+    dunmore = line_of(events_in(run_dir), "parsing_finished", 3)
+    kept = as_killed(run_dir, "structuring/parsing", keep=dunmore + 1)
+    torn = kept[-1][:TORN_CHARS]
+    (run_dir / "events.jsonl").write_text("\n".join([*kept[:-1], torn]))
     answer, requests = resumed(llm, run_dir)
     assert requests == [
         ("parsing", "Dunmore memo"),
@@ -1663,22 +1690,22 @@ def test_a_killed_run_resumes_from_its_events_and_a_line_cut_short_is_read_again
         ("reasoning", None),
     ]
     assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
-    written = events.read_text().splitlines()
+    written = (run_dir / "events.jsonl").read_text().splitlines()
     assert written[dunmore] == torn
     assert json.loads(written[dunmore + 1])["type"] == "run_started"
     calls = json.loads((run_dir / "structuring/parsing/calls.json").read_text())
     assert [(c["step"], c["kind"]) for c in calls] == [(1, "parse-d3"), (2, "parse-d4")]
+    assert "1 line(s) of events.jsonl don't parse" in caplog.text
 
 
 def test_a_document_read_in_parts_resumes_in_the_same_parts_with_the_same_ids(
-    answering_llm, grown_registry, tmp_path, monkeypatch
+    answering_llm, one_worker, grown_registry, tmp_path
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    limit = 18_000
     documents = ["Halloran memo", grown_registry(40_000), "Merrow memo"]
-    llm = answering_llm.answers(
-        relevance=failing_once("relevance", "Merrow memo", later_round=True)
-    ).refuses_over(limit)
+    failing = failing_once(
+        reading("Merrow memo", later_round=True), ANSWERING["relevance"]
+    )
+    llm = answering_llm.answers(relevance=failing).refuses_over(REFUSED_OVER_CHARS)
     run_dir = failed_run(llm, tmp_path, documents, model=QWEN)
     sent = len(llm.requests)
     answer, requests = resumed(llm, run_dir, documents)
@@ -1686,7 +1713,7 @@ def test_a_document_read_in_parts_resumes_in_the_same_parts_with_the_same_ids(
         ("relevance", "Merrow memo")
     ]
     assert all(
-        sum(len(m["content"]) for m in r["messages"]) <= limit
+        sum(len(m["content"]) for m in r["messages"]) <= REFUSED_OVER_CHARS
         for r in llm.requests[sent:]
     )
     registry = answer.document_ids[1]
@@ -1698,26 +1725,17 @@ def test_a_document_read_in_parts_resumes_in_the_same_parts_with_the_same_ids(
 
 
 def test_a_document_whose_parts_were_not_all_saved_is_read_again_in_that_round(
-    answering_llm, grown_registry, tmp_path, monkeypatch
+    answering_llm, one_worker, events_in, grown_registry, tmp_path
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
     registry = grown_registry(40_000)
     documents = ["Halloran memo", registry, "Merrow memo"]
-    llm = answering_llm.answers(
-        relevance=failing_once("relevance", "Merrow memo", later_round=True)
-    ).refuses_over(18_000)
+    failing = failing_once(
+        reading("Merrow memo", later_round=True), ANSWERING["relevance"]
+    )
+    llm = answering_llm.answers(relevance=failing).refuses_over(REFUSED_OVER_CHARS)
     run_dir = failed_run(llm, tmp_path, documents, model=QWEN)
-    # As a kill would leave it: round 2 had saved two of the registry's four parts.
-    (run_dir / "relevance/calls.json").unlink()
-    (run_dir / "relevance/error.txt").unlink()
-    events = run_dir / "events.jsonl"
-    lines = events.read_text().splitlines()
-    second = [
-        i
-        for i, line in enumerate(lines)
-        if '"relevance_finished"' in line and json.loads(line)["round"] == 2
-    ][2]
-    events.write_text("\n".join(lines[:second]) + "\n")
+    third_part = line_of(events_in(run_dir), "relevance_finished", 2, round=2)
+    as_killed(run_dir, "relevance", keep=third_part)
     sent = len(llm.requests)
     resume(run_dir, documents, completion=llm)
     round_2 = [
@@ -1730,65 +1748,149 @@ def test_a_document_whose_parts_were_not_all_saved_is_read_again_in_that_round(
 
 
 def test_a_round_whose_snippets_were_not_all_saved_has_every_later_round_read_again(
-    answering_llm, tmp_path, monkeypatch
+    answering_llm, one_worker, events_in, tmp_path, caplog
 ):
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-    llm = answering_llm.answers(
-        relevance=failing_once("relevance", "Calder memo", later_round=True)
+    failing = failing_once(
+        reading("Calder memo", later_round=True), ANSWERING["relevance"]
     )
+    llm = answering_llm.answers(relevance=failing)
     run_dir = failed_run(llm, tmp_path)
     # Easton's round-1 line is lost, as when writing it failed: round 2's saved
     # snippets were written over a round 1 the resume reads again.
-    events = run_dir / "events.jsonl"
-    lines = events.read_text().splitlines()
-    easton = next(
-        i
-        for i, line in enumerate(lines)
-        if '"relevance_finished"' in line and "Easton" in line
-    )
-    events.write_text("\n".join(lines[:easton] + lines[easton + 1 :]) + "\n")
+    events = events_in(run_dir)
+    del events[line_of(events, "relevance_finished", 4, round=1)]
+    rewritten(run_dir, [json.dumps(event) for event in events])
     _, requests = resumed(llm, run_dir)
     assert [r for r in requests if r[0] == "relevance"] == [
         ("relevance", "Easton memo"),
         *[("relevance", line) for line in MEMOS_BY_NAME.values()],
     ]
+    assert "2 saved result(s) can't be reused" in caplog.text
 
 
-def other_documents(change: str) -> dict[str, str] | list[str]:
-    documents = dict(MEMOS_BY_NAME)
-    if change == "missing":
-        del documents["memos/calder.txt"]
-    elif change == "extra":
-        documents["memos/fenwick.txt"] = "Fenwick memo"
-    elif change == "changed":
-        documents["memos/calder.txt"] = "Calder memo, revised"
-    else:
-        documents = dict(reversed(documents.items()))
-    return documents
+def test_a_snippet_with_a_quote_r3con_did_not_write_is_read_again(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    failing = failing_once(
+        reading("Calder memo", later_round=True), ANSWERING["relevance"]
+    )
+    llm = answering_llm.answers(relevance=failing)
+    run_dir = failed_run(llm, tmp_path)
+    events = events_in(run_dir)
+    at = line_of(events, "relevance_finished", 0, round=2)
+    events[at] = {**events[at], "quotes": [{"text": "Halloran", "start": "0"}]}
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    _, requests = resumed(llm, run_dir)
+    assert [r for r in requests if r[0] == "relevance"] == [
+        ("relevance", line) for line in ["Halloran memo", *LAST_THREE]
+    ]
+
+
+def test_a_parse_saved_under_a_strict_schema_is_reused(
+    answering_llm, one_worker, tmp_path
+):
+    def dated_row(request):
+        return {"rows": [{"who": first_line(request), "on": "2026-03-01"}]}
+
+    llm = answering_llm.answers(
+        schema=STRICT_DATED_SCHEMA,
+        parsing=failing_once(reading("Calder memo"), dated_row),
+    )
+    run_dir = failed_run(llm, tmp_path)
+    _, requests = resumed(llm, run_dir)
+    assert [r for r in requests if r[0] == "parsing"] == [
+        ("parsing", line) for line in LAST_THREE
+    ]
+
+
+@pytest.mark.parametrize("stage", ["relevance", "parsing"])
+def test_a_resume_on_a_model_that_signs_in_starts_one_sign_in(
+    answering_llm, one_worker, tmp_path, monkeypatch, stage
+):
+    sign_ins, cached = [], []
+
+    def get_api_key(self: CopilotAuthenticator) -> str:
+        if not cached:
+            sign_ins.append(threading.current_thread().name)
+            time.sleep(USER_ENTERS_CODE_SECONDS)
+            cached.append("copilot-key")
+        return cached[0]
+
+    monkeypatch.setattr(CopilotAuthenticator, "get_api_key", get_api_key)
+    when = reading("Calder memo", later_round=stage == "relevance")
+    llm = answering_llm.answers(**{stage: failing_once(when, ANSWERING[stage])})
+    run_dir = failed_run(llm, tmp_path, model=COPILOT)
+    # A new process: no token yet, and the documents read at once.
+    sign_ins.clear()
+    cached.clear()
+    monkeypatch.delenv("R3CON_DOC_WORKERS")
+    resume(run_dir, MEMOS_BY_NAME, completion=llm)
+    assert len(sign_ins) == 1
+
+
+def test_a_run_still_going_in_its_folder_is_not_resumed(answering_llm, tmp_path):
+    refusals = []
+
+    def resume_meanwhile(event):
+        if event["type"] != "schema_started":
+            return
+        [run_dir] = (tmp_path / "logs").iterdir()
+        with pytest.raises(RuntimeError) as refused:
+            resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
+        refusals.append(str(refused.value))
+
+    answer = finished_run(
+        answering_llm, tmp_path, MEMOS_BY_NAME, on_event=resume_meanwhile
+    )
+    assert refusals == [
+        (
+            f"{answer.run_dir}: a run or resume is going in it, in process "
+            f"{os.getpid()}; carry it on once that one has stopped."
+        )
+    ]
+
+
+def test_a_lock_a_process_left_behind_does_not_stop_a_resume(answering_llm, tmp_path):
+    run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
+    (run_dir / "run.lock").write_text("999999999")
+    answering_llm.answers(parsing=ANSWERING["parsing"])
+    answer = resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
+    assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
+    assert (run_dir / "run.lock").read_text() == str(os.getpid())
 
 
 @pytest.mark.parametrize(
-    ("change", "said"),
+    ("documents", "said"),
     [
-        ("missing", "these are not the run's documents: missing memos/calder.txt."),
-        ("extra", "these are not the run's documents: extra memos/fenwick.txt."),
-        ("changed", "these are not the run's documents: changed memos/calder.txt."),
         (
-            "reordered",
+            {k: v for k, v in MEMOS_BY_NAME.items() if k != "memos/calder.txt"},
+            "these are not the run's documents: missing memos/calder.txt.",
+        ),
+        (
+            {**MEMOS_BY_NAME, "memos/fenwick.txt": "Fenwick memo"},
+            "these are not the run's documents: extra memos/fenwick.txt.",
+        ),
+        (
+            {**MEMOS_BY_NAME, "memos/calder.txt": "Calder memo, revised"},
+            "these are not the run's documents: changed memos/calder.txt.",
+        ),
+        (
+            dict(reversed(MEMOS_BY_NAME.items())),
             (
                 "these are the run's documents in another order; pass them in its "
                 "order, as its names.json lists them."
             ),
         ),
     ],
+    ids=["missing", "extra", "changed", "reordered"],
 )
 def test_a_resume_over_other_documents_is_refused_before_any_request(
-    answering_llm, tmp_path, change, said
+    answering_llm, tmp_path, documents, said
 ):
     run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
     before, sent = the_runs_own_files(run_dir), len(answering_llm.requests)
     with pytest.raises(ValueError) as refused:
-        resume(run_dir, other_documents(change), completion=answering_llm)
+        resume(run_dir, documents, completion=answering_llm)
     assert str(refused.value) == f"{run_dir}: {said}"
     assert answering_llm.requests[sent:] == []
     assert the_runs_own_files(run_dir) == before
@@ -1819,6 +1921,12 @@ def reading_moved_prompts(run_dir: Path) -> None:
     overlay.write_text(read.read_text())
 
 
+def with_a_margin_out_of_range(run_dir: Path) -> None:
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    manifest["settings"]["window_margin_percent"] = 150
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
 @pytest.mark.parametrize(
     ("change", "error", "said"),
     [
@@ -1826,22 +1934,27 @@ def reading_moved_prompts(run_dir: Path) -> None:
             predating_resume,
             FileNotFoundError,
             (
-                "this run predates resume: it has no documents.json to check the "
-                "documents against."
+                "{run_dir}: this run predates resume: it has no documents.json to "
+                "check the documents against."
             ),
         ),
         (
             reading_moved_prompts,
             ValueError,
             (
-                "the run's prompts resolve to other files than it read: "
+                "{run_dir}: the run's prompts resolve to other files than it read: "
                 "structuring/parsing now reads "
             ),
         ),
+        (
+            with_a_margin_out_of_range,
+            ValueError,
+            "can't read {run_dir} as a run folder: ValueError: ",
+        ),
     ],
-    ids=["predating-resume", "prompts-moved"],
+    ids=["predating-resume", "prompts-moved", "margin-out-of-range"],
 )
-def test_a_folder_resume_cannot_carry_on_is_refused_before_any_request(
+def test_a_folder_resume_cannot_carry_on_is_refused_before_any_request_or_write(
     answering_llm, tmp_path, change, error, said
 ):
     run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
@@ -1849,7 +1962,7 @@ def test_a_folder_resume_cannot_carry_on_is_refused_before_any_request(
     before, sent = the_runs_own_files(run_dir), len(answering_llm.requests)
     with pytest.raises(error) as refused:
         resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
-    assert str(refused.value).startswith(f"{run_dir}: {said}")
+    assert str(refused.value).startswith(said.format(run_dir=run_dir))
     assert answering_llm.requests[sent:] == []
     assert the_runs_own_files(run_dir) == before
 
@@ -1864,41 +1977,42 @@ def test_a_finished_run_is_not_resumed_but_asked(answering_llm, tmp_path):
     )
 
 
+PROXY = {"api_base": f"https://{KEY}@proxy-a.example/v1"}
+OTHER_PARAMS = (
+    "these params are not the run's: resume runs with its own, and takes them only "
+    "for the real value of each credential its manifest saved as REDACTED."
+)
+
+
 @pytest.mark.parametrize(
-    ("params", "said"),
+    ("saved", "given", "said"),
     [
-        (None, MASKED_HEADER_REFUSAL),
-        (
-            {**GATEWAY_HEADER, "temperature": 0.9},
-            (
-                "these params are not the run's: resume runs with its own, and takes "
-                "them only for the real value of each credential its manifest saved "
-                "as REDACTED."
-            ),
-        ),
+        (GATEWAY_HEADER, None, MASKED_HEADER_REFUSAL),
+        (GATEWAY_HEADER, {**GATEWAY_HEADER, "temperature": 0.9}, OTHER_PARAMS),
+        (PROXY, {"api_base": f"https://{KEY}@proxy-b.example/v1"}, OTHER_PARAMS),
     ],
-    ids=["masked-and-not-given", "other-params"],
+    ids=["masked-and-not-given", "other-params", "another-host-around-the-key"],
 )
 def test_a_resume_needs_the_runs_own_params_with_their_real_credentials(
-    answering_llm, tmp_path, params, said
+    answering_llm, tmp_path, saved, given, said
 ):
     llm = answering_llm.answers(parsing=bad_key())
-    run_dir = failed_run(llm, tmp_path, params=GATEWAY_HEADER)
+    run_dir = failed_run(llm, tmp_path, params=saved)
     sent = len(llm.requests)
     with pytest.raises(ValueError) as refused:
-        resume(run_dir, MEMOS_BY_NAME, completion=llm, params=params)
+        resume(run_dir, MEMOS_BY_NAME, completion=llm, params=given)
     assert str(refused.value).endswith(said)
     assert llm.requests[sent:] == []
 
 
+@pytest.mark.parametrize("params", [GATEWAY_HEADER, PROXY], ids=["header", "url"])
 def test_a_resume_given_the_runs_params_sends_their_real_credentials(
-    answering_llm, tmp_path
+    answering_llm, tmp_path, params
 ):
+    failing = failing_once(reading("Calder memo"), ANSWERING["parsing"])
     run_dir = failed_run(
-        answering_llm.answers(parsing=failing_once("parsing", "Calder memo")),
-        tmp_path,
-        params=GATEWAY_HEADER,
+        answering_llm.answers(parsing=failing), tmp_path, params=params
     )
-    resume(run_dir, MEMOS_BY_NAME, completion=answering_llm, params=GATEWAY_HEADER)
+    resume(run_dir, MEMOS_BY_NAME, completion=answering_llm, params=params)
     [*_, reasoned] = answering_llm.requests
-    assert reasoned["extra_headers"] == GATEWAY_HEADER["extra_headers"]
+    assert {name: reasoned[name] for name in params} == params

@@ -320,6 +320,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "names.json",
         "documents.json",
         "events.jsonl",
+        "run.lock",
         "relevance/calls.json",
         "relevance/result.json",
         "structuring/schema/calls.json",

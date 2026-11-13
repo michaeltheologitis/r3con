@@ -66,6 +66,9 @@ Layout per ``logs/<run-folder>/``:
   relevance and parsing, and the run's own start and its finish or failure. A resume
   appends its own, from its ``run_started`` and ``run_resumed`` on, and reads the
   earlier ones back for the results they report.
+- ``run.lock`` — held while a run or a resume of it writes to the folder
+  (:func:`run_lock`), so that only one does at a time; it names the process that last
+  held it.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
   is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
   run folder's name, ``events.jsonl`` (the ask's own events) and ``reasoning/`` as
@@ -145,23 +148,37 @@ import hashlib
 import importlib.metadata
 import json
 import logging
+import os
 import re
 import secrets
+import sys
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import IO, Any, cast
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 # ``normalize_model_name`` lives in ``r3con.config`` — it's a model-identity helper
 # ``RunConfig.label()`` uses too; shared here so the transcript header below records the
 # same normalized name the run label does.
-from r3con.config import normalize_model_name
+from r3con.config import (
+    PROMPT_STAGES,
+    PromptStage,
+    normalize_model_name,
+    resolve_config_path,
+)
 from r3con.logging_setup import get_logger
 from r3con.masking import masked_values
+from r3con.prompts import resolve_prompt_path
 from r3con.settings import active_logs_dir
 
 _log = get_logger("runs")
@@ -171,6 +188,7 @@ _log = get_logger("runs")
 # ``relevance-r2-d3`` and ``parse-d3c1``.
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
 _EVENTS = "events.jsonl"
+_LOCK = "run.lock"
 
 Emit = Callable[..., None]
 """Reports one progress event, ``emit(event_type, **fields)``, as
@@ -319,6 +337,69 @@ def _append_line(path: Path, line: str) -> None:
         lines.write(line + "\n")
 
 
+def read_events(folder: Path) -> tuple[list[dict[str, Any]], int]:
+    """The events ``folder``'s ``events.jsonl`` holds, in order: each of its lines that
+    is a JSON object with a ``type``; and how many of its lines are not, as one a kill
+    cut short. None for a folder without one."""
+    path = folder / _EVENTS
+    if not path.is_file():
+        return [], 0
+    events, unreadable = [], 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict) and isinstance(event.get("type"), str):
+            events.append(event)
+        else:
+            unreadable += 1
+    return events, unreadable
+
+
+@contextmanager
+def run_lock(folder: Path) -> Iterator[None]:
+    """Hold run folder ``folder`` for one run or resume at a time while it writes there:
+    an OS lock on the folder's ``run.lock``, which the OS lifts however the process
+    ends, a kill included, the file naming the process that holds it.
+
+    Raises:
+        RuntimeError: in one line, if another run or resume holds it.
+    """
+    path = folder / _LOCK
+    with path.open("a+", encoding="utf-8") as lock:
+        try:
+            _lock(lock)
+        except OSError:
+            holder = _holder(path)
+            raise RuntimeError(
+                f"{folder}: a run or resume is going in it, in process {holder}; "
+                "carry it on once that one has stopped."
+            ) from None
+        lock.seek(0)
+        lock.truncate()
+        lock.write(str(os.getpid()))
+        lock.flush()
+        yield
+
+
+def _lock(file: IO[str]) -> None:
+    """Take an OS lock on ``file`` without waiting; ``OSError`` if one is held."""
+    if sys.platform == "win32":
+        file.seek(0)
+        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _holder(path: Path) -> str:
+    """The process a lock file names, as far as it can be read."""
+    try:
+        return path.read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 def write_manifest(
     task_logger: TaskLogger,
     *,
@@ -345,8 +426,6 @@ def write_manifest(
     ran?" is unanswerable after an upgrade.
     """
     from r3con import __version__
-    from r3con.config import PROMPT_STAGES, resolve_config_path
-    from r3con.prompts import resolve_prompt_path
     from r3con.settings import settings_snapshot
 
     config_block = (
@@ -374,11 +453,7 @@ def write_manifest(
         # A user overlay (./configs, ./prompts) shadows the packaged copy, and an
         # overlaid file is invisible in the run label — so record the winning path.
         "sources": _sources(
-            config_block.get("name"),
-            config_block.get("prompts") or {},
-            PROMPT_STAGES,
-            resolve_config_path,
-            resolve_prompt_path,
+            config_block.get("name"), config_block.get("prompts") or {}
         ),
         # --- runtime knobs (parallelism / resilience) ---
         "settings": dict(settings) if settings is not None else settings_snapshot(),
@@ -390,10 +465,11 @@ def write_manifest(
 
 
 def reopen_for_resume(task_logger: TaskLogger) -> None:
-    """Ready the run folder ``task_logger`` writes to for a resume (:func:`r3con.resume`):
-    its ``manifest.json`` adds the resume to its ``resumes``, with when it started and
-    under which r3con, and its ``events.jsonl`` ends its last line, should a kill have
-    cut that line short, so that the resume's events start on lines of their own."""
+    """Ready the run folder ``task_logger`` writes to for a resume
+    (:func:`r3con.resume`): its ``manifest.json`` adds the resume to its ``resumes``,
+    with when it started and under which r3con, and its ``events.jsonl`` ends its last
+    line, should a kill have cut that line short, so that the resume's events start on
+    lines of their own."""
     from r3con import __version__
 
     manifest_file = task_logger.dir / "manifest.json"
@@ -405,9 +481,12 @@ def reopen_for_resume(task_logger: TaskLogger) -> None:
     manifest["resumes"] = [*manifest.get("resumes", []), resumed]
     task_logger.write_json("manifest", manifest)
     events = task_logger.dir / _EVENTS
-    written = events.read_bytes() if events.is_file() else b""
-    if written and not written.endswith(b"\n"):
-        _append_line(events, "")
+    if events.is_file() and events.stat().st_size:
+        with events.open("rb") as written:
+            written.seek(-1, os.SEEK_END)
+            cut_short = written.read(1) != b"\n"
+        if cut_short:
+            _append_line(events, "")
 
 
 def fingerprints(document_ids: Sequence[str], texts: Sequence[str]) -> dict[str, str]:
@@ -421,19 +500,22 @@ def fingerprints(document_ids: Sequence[str], texts: Sequence[str]) -> dict[str,
 
 
 def _sources(
-    config_name, prompts, stages, resolve_config, resolve_prompt
+    config_name: str | None, prompts: Mapping[PromptStage, str]
 ) -> dict[str, Any]:
     """Which file on disk each of the run's inputs resolved to."""
-    cfg = resolve_config(config_name) if config_name else None
+    cfg = resolve_config_path(config_name) if config_name else None
+    return {"config": str(cfg) if cfg else None, "prompts": prompt_sources(prompts)}
+
+
+def prompt_sources(prompts: Mapping[PromptStage, str]) -> dict[str, str | None]:
+    """The file each of ``prompts``' pins resolves to now, by stage, as a manifest's
+    ``sources`` records them: ``None`` for a pin with no file."""
     return {
-        "config": str(cfg) if cfg else None,
-        "prompts": {
-            stage: (
-                str(path) if (path := resolve_prompt(stage, prompts[stage])) else None
-            )
-            for stage in stages
-            if stage in prompts
-        },
+        stage: str(path)
+        if (path := resolve_prompt_path(stage, prompts[stage]))
+        else None
+        for stage in PROMPT_STAGES
+        if stage in prompts
     }
 
 
@@ -464,17 +546,24 @@ def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
     (``calls.json`` lists them), the summed tokens of ``steps`` (``None`` when none
     counted any), and their ``usd``: the sum of theirs, or ``None`` when litellm could
     not price one of them."""
-    prompt = completion = total = 0
-    any_tokens = False
-    costs = [s.usd for s in steps]
-    for s in steps:
-        if s.tokens is not None:
+    return call_totals(map(vars, steps))
+
+
+def call_totals(calls: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """:func:`step_totals` of ``calls``, each with a step's ``tokens``, ``usd`` and
+    ``error``, as ``calls.json`` holds them."""
+    prompt = completion = total = n_steps = 0
+    any_tokens, costs = False, []
+    for call in calls:
+        n_steps += call["error"] is None
+        costs.append(call["usd"])
+        if (tokens := call["tokens"]) is not None:
             any_tokens = True
-            prompt += s.tokens.get("prompt", 0)
-            completion += s.tokens.get("completion", 0)
-            total += s.tokens.get("total", 0)
+            prompt += tokens.get("prompt", 0)
+            completion += tokens.get("completion", 0)
+            total += tokens.get("total", 0)
     return {
-        "n_steps": sum(s.error is None for s in steps),
+        "n_steps": n_steps,
         "tokens": {"prompt": prompt, "completion": completion, "total": total}
         if any_tokens
         else None,
@@ -506,9 +595,9 @@ class StageRun:
         self.model = model
         self.dir = task_logger.dir / stage
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.steps: list[StepRecord] = (
-            _earlier_steps(self.dir / "calls.json") if resumed else []
-        )
+        self.steps: list[StepRecord] = []
+        # An earlier attempt's calls, as its calls.json holds them, written back first.
+        self._earlier = _earlier_calls(self.dir / "calls.json") if resumed else []
         self._lock = threading.Lock()
 
     def add_step(
@@ -532,7 +621,7 @@ class StageRun:
         turn is sent again under the same kind."""
         with self._lock:
             step = StepRecord(
-                step=len(self.steps) + 1,
+                step=len(self._earlier) + len(self.steps) + 1,
                 kind=kind,
                 messages=list(messages),
                 response=dict(response),
@@ -574,7 +663,7 @@ class StageRun:
         """Write ``calls.json`` — one entry per LLM call, with the fields the module
         docstring defines. ``doc``/``chunk`` are read out of the call ``kind`` (e.g.
         ``parse-d0``, ``relevance-r1-d2``) when present."""
-        calls: list[dict[str, Any]] = []
+        calls: list[dict[str, Any]] = list(self._earlier)
         for s in self.steps:
             m = _DOC_CHUNK_RE.search(s.kind)
             resp = s.response if isinstance(s.response, dict) else {}
@@ -607,8 +696,9 @@ class StageRun:
         return path
 
     def compute_totals(self) -> dict[str, Any]:
-        """The stage's :func:`step_totals`, for its ``result.json``."""
-        return step_totals(self.steps)
+        """The stage's :func:`step_totals`, an earlier attempt's calls counted in, for
+        its ``result.json``."""
+        return call_totals([*self._earlier, *map(vars, self.steps)])
 
     def _build_transcript_messages(self) -> list[dict[str, Any]]:
         """The readable conversation = the final step's full message thread + its
@@ -627,50 +717,28 @@ class StageRun:
         return thread
 
 
-def _earlier_steps(calls: Path) -> list[StepRecord]:
-    """The steps an earlier attempt at the stage recorded in ``calls``, its
-    ``calls.json``: none when there is none, or when it can't be read, as when a kill
-    cut its writing short."""
-    if not calls.is_file():
+class _Call(BaseModel):
+    """What a resumed stage reads of each of an earlier attempt's calls."""
+
+    tokens: dict[str, StrictInt] | None
+    usd: float | None
+    error: str | None
+
+
+def _earlier_calls(path: Path) -> list[dict[str, Any]]:
+    """The calls an earlier attempt at the stage recorded in ``path``, its
+    ``calls.json``, as it holds them: none when there is none, or when it can't be
+    read, as when a kill cut its writing short."""
+    if not path.is_file():
         return []
     try:
-        return [
-            _step_of(call) for call in json.loads(calls.read_text(encoding="utf-8"))
-        ]
-    except (KeyError, TypeError, ValueError):
-        _log.warning("%s can't be read; its calls are left out of the totals", calls)
+        calls = json.loads(path.read_text(encoding="utf-8"))
+        for call in calls:
+            _Call.model_validate(call)
+    except (TypeError, ValueError):
+        _log.warning("%s can't be read; its calls are left out of the totals", path)
         return []
-
-
-def _step_of(call: Mapping[str, Any]) -> StepRecord:
-    """The step a ``calls.json`` entry records, as :meth:`StageRun._write_calls` would
-    write it again."""
-    response = (
-        {}
-        if call["error"] is not None
-        else {
-            "role": "assistant",
-            "content": call["output"],
-            "finish_reason": call["finish_reason"],
-        }
-    )
-    if call["reasoning"] is not None:
-        response["reasoning"] = call["reasoning"]
-    return StepRecord(
-        step=call["step"],
-        kind=call["kind"],
-        messages=call["prompt"],
-        response=response,
-        tokens=call["tokens"],
-        usage=call["usage"],
-        served_model=call["served_model"],
-        fingerprint=call["fingerprint"],
-        usd=call["usd"],
-        sends=call["sends"],
-        resend_wait_seconds=call["resend_wait_seconds"],
-        seconds=call["seconds"],
-        error=call["error"],
-    )
+    return calls
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
