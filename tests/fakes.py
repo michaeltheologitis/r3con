@@ -274,6 +274,21 @@ def failing_once(
     return reply
 
 
+def silent_when(
+    when: Callable[[Request], bool],
+    otherwise: Content | Callable[[Request], Content] = ANSWERING["relevance"],
+) -> Callable[[Request], Content]:
+    """A relevance reply that says nothing, an empty summary, to each request ``when``
+    holds for, and answers every other with ``otherwise``."""
+
+    def reply(request: Request) -> Content:
+        if when(request):
+            return ""
+        return otherwise(request) if callable(otherwise) else otherwise
+
+    return reply
+
+
 def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool]:
     """Whether a request reads the document whose first line is ``line``, in a later
     relevance round only with ``later_round``."""

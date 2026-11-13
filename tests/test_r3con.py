@@ -45,6 +45,7 @@ from tests.fakes import (
     quoting_its_first_line_and_citing_all_shown,
     reading,
     reading_moved_prompts,
+    silent_when,
     snippets_without_quotes,
     stage_of,
     without_trail,
@@ -1714,14 +1715,6 @@ def test_a_snippet_holding_other_line_separators_is_reused(
     ]
 
 
-def dunmore_silent_after_round_1(request) -> str:
-    """A relevance reply: a note on the document, but none on Dunmore's memo after
-    round 1, which prunes it."""
-    if reading("Dunmore memo", later_round=True)(request):
-        return ""
-    return f"Notes on {first_line(request)}."
-
-
 def reading_in_round(line: str, round_: int):
     """Whether a relevance request reads the document whose first line is ``line`` in
     round ``round_``, from 2, counting its reads in later rounds as they come."""
@@ -1732,6 +1725,15 @@ def reading_in_round(line: str, round_: int):
 
 
 UNPRUNED = [line for line in MEMOS_BY_NAME.values() if line != "Dunmore memo"]
+DUNMORE_SILENT_AFTER_ROUND_1 = silent_when(reading("Dunmore memo", later_round=True))
+
+
+def as_left_before_pruning(result: dict) -> None:
+    """Relevance's ``result.json`` over MEMOS_BY_NAME as r3context 0.6.25 wrote it:
+    no pruned documents listed, and Dunmore's memo, empty in round 2, read again in
+    round 3."""
+    del result["pruned"]
+    result["rounds"][2]["snippets"][3]["summary"] = "Notes on Dunmore memo."
 
 
 @pytest.mark.parametrize(
@@ -1765,17 +1767,54 @@ UNPRUNED = [line for line in MEMOS_BY_NAME.values() if line != "Dunmore memo"]
 def test_a_resume_prunes_what_the_run_pruned_and_never_reads_or_parses_it(
     answering_llm, one_worker, tmp_path, rounds, stage, when, resent
 ):
-    llm = answering_llm.answers(relevance=dunmore_silent_after_round_1)
+    llm = answering_llm.answers(relevance=DUNMORE_SILENT_AFTER_ROUND_1)
     whole = finished_run(
         llm, tmp_path / "whole", MEMOS_BY_NAME, relevance_rounds=rounds
     )
-    replies = {**ANSWERING, "relevance": dunmore_silent_after_round_1}
+    replies = {**ANSWERING, "relevance": DUNMORE_SILENT_AFTER_ROUND_1}
     llm.answers(**{stage: failing_once(when, replies[stage])})
     run_dir = failed_run(llm, tmp_path / "failed", relevance_rounds=rounds)
     answer, requests = resumed(llm, run_dir)
     assert requests == resent
     assert as_named(answer) == as_named(whole)
     assert answer.answer == "; ".join(UNPRUNED)
+
+
+def test_a_run_from_before_pruning_resumes_parsing_every_document(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    llm = answering_llm.answers(
+        relevance=silent_when(reading_in_round("Dunmore memo", 2)),
+        parsing=failing_once(reading("Calder memo"), ANSWERING["parsing"]),
+    )
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
+    events = [e for e in events_in(run_dir) if e["type"] != "documents_pruned"]
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    in_json("relevance/result.json", as_left_before_pruning)(run_dir)
+    answer, requests = resumed(llm, run_dir)
+    assert requests == [
+        *[("parsing", line) for line in LAST_THREE],
+        ("reasoning", None),
+    ]
+    assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
+
+
+def test_a_resume_after_round_2_replays_its_pruning_once_before_the_later_rounds(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    failing = failing_once(
+        reading_in_round("Calder memo", 3), DUNMORE_SILENT_AFTER_ROUND_1
+    )
+    llm = answering_llm.answers(relevance=failing)
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
+    seen = []
+    resume(run_dir, MEMOS_BY_NAME, completion=llm, on_event=seen.append)
+    steps = [(e["type"], e.get("round")) for e in seen]
+    pruning = ("documents_pruned", None)
+    assert steps.count(pruning) == 1
+    assert steps.index(pruning) < steps.index(("relevance_finished", 3))
+    written = [e["type"] for e in events_in(run_dir)]
+    assert written.count("documents_pruned") == 1
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

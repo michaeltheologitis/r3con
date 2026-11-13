@@ -1,12 +1,12 @@
 """Stage 2, step 2 — parsing: read each document and fill instances of the per-task
 Pydantic schema.
 
-Every document is parsed but those relevance pruned after round 2, whose round-2
-snippets are all empty (:attr:`r3con.stages.relevance.RelevantContext.pruned`): a
-pruned document gets no call and no records. Each other document is read whole, or in
-parts when it is too long for the model's window (:mod:`r3con.splitting`). Parsing runs
-**one LLM call per document** (one per part of a document read in parts), all documents
-in parallel (bounded by :func:`r3con.settings.active_doc_workers`):
+Every document is parsed but those relevance pruned
+(:attr:`r3con.stages.relevance.RelevantContext.pruned`), which get no call and no
+records. Each is read whole, or in parts when it is too long for the model's window
+(:mod:`r3con.splitting`). Parsing runs **one LLM call per document** (one per part of a
+document read in parts), all documents in parallel (bounded by
+:func:`r3con.settings.active_doc_workers`):
 
 - The **system prompt** carries the task, the proposed schema source, and the
   relevant context (every document's note, not just this one's) — the
@@ -24,10 +24,10 @@ included (:func:`r3con.stages.relevance.citable_ids`). With no such note,
 (:func:`r3con.stages.citing.cited`). Every call of a run sends the same system
 prompt and reply schema, built once.
 
-Each document (or part) parsed yields one populated ``Parse``; the parses merge into
-one (list fields concatenated in document order, a document's parts in order), and its
-parts' provenance into one list (:attr:`ParseResult.provenance`), empty for a pruned
-document. Every merged record is tagged with its **source-document index**
+Each document (or part) yields one populated ``Parse``; the parses merge into one
+(list fields concatenated in document order, a document's parts in order), and its
+parts' provenance into one list (:attr:`ParseResult.provenance`). Every
+merged record is tagged with its **source-document index**
 (``ParseResult.source_docs``), which the reasoning stage turns into the document's id
 and stamps onto each record as ``"document": "<id>"`` (the id-injection), so the model
 can name the document a fact came from; ``Answer.structured_context`` carries the same
@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import ast
 import typing
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, get_args, get_origin
@@ -417,7 +417,7 @@ def parse_documents(
     splits: Splits | None = None,
     emit: Emit = no_events,
     saved: Mapping[int, tuple[BaseModel, list[str]]] = MappingProxyType({}),
-    pruned: Collection[int] = (),
+    pruned: frozenset[int] = frozenset(),
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
@@ -480,9 +480,11 @@ def parse_documents(
         max_workers,
     )
 
+    nothing = _empty_parse(parse_cls)
+
     def one(i: int, _document: str) -> tuple[BaseModel, list[str]]:
         if i in pruned:
-            return _empty_parse(parse_cls), []
+            return nothing, []
         if (parsed := saved.get(i)) is not None:
             return parsed
         _log.info("parse doc %d/%d", i + 1, len(documents))

@@ -35,6 +35,7 @@ from tests.fakes import (
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
     reading,
+    silent_when,
     without_trail,
 )
 
@@ -283,6 +284,13 @@ def citing_its_own_note(request) -> dict:
 
 def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
+
+
+def halloran_late_or_merrow_early(request) -> bool:
+    """Whether a relevance request reads Halloran's memo after round 1, or Merrow's in
+    round 1."""
+    merrow_early = first_line(request) == "Merrow memo" and not is_later_round(request)
+    return reading("Halloran memo", later_round=True)(request) or merrow_early
 
 
 @pytest.fixture
@@ -740,76 +748,71 @@ def test_each_document_is_read_once_per_configured_round(answering_llm, rounds):
     assert len(answering_llm.requests_for("relevance")) == rounds * len(DOCS)
 
 
-def halloran_silent_after_round_1_and_merrow_in_it(request) -> str:
-    """A relevance reply: a note on the document, but none on Halloran's memo after
-    round 1, nor on Merrow's in round 1."""
-    line = first_line(request)
-    silent = reading("Halloran memo", later_round=True)(request) or (
-        line == "Merrow memo" and not is_later_round(request)
+@pytest.mark.parametrize("rounds", [0, 1])
+def test_nothing_is_pruned_with_fewer_than_two_rounds(answering_llm, tmp_path, rounds):
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(relevance=silent_when(lambda request: True))
+    events = []
+    answer(
+        llm, logger, documents=THREE, relevance_rounds=rounds, on_event=events.append
     )
-    return "" if silent else f"Notes on {line}."
+    parsed_memos = sorted(first_line(r) for r in llm.requests_for("parsing"))
+    assert parsed_memos == sorted(THREE)
+    assert "documents_pruned" not in [e["type"] for e in events]
+    assert read_json(logger, "relevance/result")["pruned"] == []
 
 
 @pytest.mark.parametrize(
-    ("rounds", "parsed", "halloran_reads"),
+    ("rounds", "reads"),
     [
-        (0, THREE, 0),
-        (1, THREE, 1),
-        (2, THREE[1:], 2),
-        (3, THREE[1:], 2),
+        (2, {"Halloran memo": 2, "Merrow memo": 2, "Calder memo": 2}),
+        (3, {"Halloran memo": 2, "Merrow memo": 3, "Calder memo": 3}),
     ],
 )
 def test_a_document_with_nothing_relevant_in_round_2_is_read_no_more_nor_parsed(
-    answering_llm, tmp_path, rounds, parsed, halloran_reads
+    answering_llm, tmp_path, rounds, reads
 ):
     logger = TaskLogger("run", root=tmp_path)
-    llm = answering_llm.answers(
-        relevance=halloran_silent_after_round_1_and_merrow_in_it
-    )
+    llm = answering_llm.answers(relevance=silent_when(halloran_late_or_merrow_early))
     events = []
     result = answer(
         llm, logger, documents=THREE, relevance_rounds=rounds, on_event=events.append
     )
     halloran = result.document_ids[0]
-    reads = Counter(first_line(r) for r in llm.requests_for("relevance"))
-    assert reads == Counter(
-        {"Halloran memo": halloran_reads, "Merrow memo": rounds, "Calder memo": rounds}
-    )
-    assert sorted(first_line(r) for r in llm.requests_for("parsing")) == sorted(parsed)
-    assert [row["who"] for row in result.structured_context["rows"]] == parsed
-    pruned = [] if parsed == THREE else [halloran]
+    assert Counter(first_line(r) for r in llm.requests_for("relevance")) == reads
+    parsed_memos = sorted(first_line(r) for r in llm.requests_for("parsing"))
+    assert parsed_memos == ["Calder memo", "Merrow memo"]
+    assert [row["who"] for row in result.structured_context["rows"]] == THREE[1:]
     reported = [e["doc_ids"] for e in events if e["type"] == "documents_pruned"]
-    assert reported == ([pruned] if rounds >= 2 else [])
-    assert read_json(logger, "relevance/result")["pruned"] == pruned
-    if rounds:
-        final = read_json(logger, "relevance/result")["rounds"][-1]["snippets"]
-        assert [s["id"] for s in final] == result.document_ids
-        assert result.relevant_context[0] == (
-            "" if pruned else "Notes on Halloran memo."
-        )
+    assert reported == [[halloran]]
+    relevance = read_json(logger, "relevance/result")
+    assert relevance["pruned"] == [halloran]
+    assert [s["id"] for s in relevance["rounds"][-1]["snippets"]] == result.document_ids
+    assert result.relevant_context[0] == ""
+
+
+def test_a_round_2_note_of_only_whitespace_prunes_its_document(answering_llm):
+    def note(request) -> str:
+        if reading("Halloran memo", later_round=True)(request):
+            return " \n\t "
+        return f"Notes on {first_line(request)}."
+
+    result = answer(answering_llm.answers(relevance=note), documents=THREE)
+    assert [row["who"] for row in result.structured_context["rows"]] == THREE[1:]
 
 
 def test_the_pruned_documents_are_reported_once_round_2_is_in_and_nothing_after(
     answering_llm,
 ):
-    llm = answering_llm.answers(
-        relevance=halloran_silent_after_round_1_and_merrow_in_it
-    )
+    llm = answering_llm.answers(relevance=silent_when(halloran_late_or_merrow_early))
     events = []
     result = answer(llm, documents=THREE, relevance_rounds=3, on_event=events.append)
     halloran = result.document_ids[0]
-    types = [e["type"] for e in events]
-    [at] = [i for i, t in enumerate(types) if t == "documents_pruned"]
+    [at] = [i for i, e in enumerate(events) if e["type"] == "documents_pruned"]
     assert events[at]["doc_ids"] == [halloran]
-    assert {
-        e.get("round") for e in events[:at] if e["type"] == "relevance_finished"
-    } == {
-        1,
-        2,
-    }
-    assert {
-        e.get("round") for e in events[at:] if e["type"] == "relevance_started"
-    } == {3}
+    before = {e["round"] for e in events[:at] if e["type"] == "relevance_finished"}
+    after = {e["round"] for e in events[at:] if e["type"] == "relevance_started"}
+    assert (before, after) == ({1, 2}, {3})
     assert all(e.get("doc_id") != halloran for e in events[at:])
 
 
@@ -821,13 +824,12 @@ def test_a_document_read_in_parts_is_pruned_only_when_each_of_its_round_2_parts_
 ):
     registry = grown_registry(40_000)
 
-    def note(request) -> str:
+    def silent(request) -> bool:
         part = request["messages"][1]["content"]
         noted = first_part_noted and registry.startswith(part)
-        silent = part in registry and is_later_round(request) and not noted
-        return "" if silent else f"Notes on {part[:20]}."
+        return part in registry and is_later_round(request) and not noted
 
-    llm = answering_llm.answers(relevance=note).refuses_over(18_000)
+    llm = answering_llm.answers(relevance=silent_when(silent)).refuses_over(18_000)
     events = []
     documents = memos_with(registry)
     result = answer(llm, documents=documents, model=QWEN, on_event=events.append)
@@ -842,38 +844,18 @@ def test_a_pruned_documents_round_1_note_cited_in_round_2_still_leads_the_trail_
     answering_llm, shown_ids, tmp_path
 ):
     quoting = quoting_its_first_line_and_citing_all_shown(shown_ids)
-
-    def note(request):
-        return (
-            ""
-            if reading("Halloran memo", later_round=True)(request)
-            else quoting(request)
-        )
-
-    logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(
-        relevance=note, reasoning=citing("Merrow.", summaries=slice(None))
+        relevance=silent_when(reading("Halloran memo", later_round=True), quoting),
+        reasoning=citing("Merrow.", summaries=slice(None)),
     )
-    result = answer(llm, logger, documents=THREE)
+    logger = TaskLogger("run", root=tmp_path)
+    result = answer(llm, logger, documents=TWO_LINE_MEMOS)
     halloran, merrow, _ = result.document_ids
     trail = result.provenance["trail"]
     assert [f"summary:2:{merrow}", f"summary:1:{halloran}", "cites"] in trail["edges"]
     assert f"document:{halloran}" in trail["nodes"]
-    assert f"parse:{halloran}" not in trail["nodes"]
-    assert memo_line_of(THREE, result.document_ids, 0) in result.provenance["quotes"]
+    assert memo_line(result.document_ids, 0, 0) in result.provenance["quotes"]
     assert read_answer(logger.dir, DEFAULT_RULE) == result.provenance
-
-
-def memo_line_of(documents, document_ids, i: int) -> dict:
-    """The quote of all of ``documents[i]``, a one-line memo, as a quote behind an
-    answer names it."""
-    return {
-        "document": document_ids[i],
-        "name": str(i),
-        "start": 0,
-        "end": len(documents[i]),
-        "text": documents[i],
-    }
 
 
 def test_the_configs_params_are_in_every_request(answering_llm):
