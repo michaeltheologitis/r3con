@@ -217,6 +217,7 @@ Every run saves its results and processing records in a folder under `./logs`.
 logs/<timestamp>_<hex>/          <- result.run_dir
 ├── ids.json                     <- each document's ID
 ├── names.json                   <- each document's filename
+├── documents.json               <- each document's SHA-256 (UTF-8, lone surrogates passed through)
 ├── events.jsonl                 <- when each processing step started and finished
 ├── splits.json                  <- how documents were split, if necessary
 ├── relevance/

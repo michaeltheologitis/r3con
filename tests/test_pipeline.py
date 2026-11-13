@@ -318,6 +318,7 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "manifest.json",
         "ids.json",
         "names.json",
+        "documents.json",
         "events.jsonl",
         "relevance/calls.json",
         "relevance/result.json",
@@ -811,6 +812,22 @@ def test_a_failing_stage_leaves_its_calls_and_traceback_and_names_the_run_folder
     assert not (folder / "result.json").exists()
     earlier = list(STAGE_FOLDERS.values())[: list(STAGE_FOLDERS).index(stage)]
     assert all((logger.dir / name / "result.json").is_file() for name in earlier)
+
+
+def test_documents_json_is_on_disk_before_the_first_request_and_after_a_failure(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    on_disk_at_first_request = []
+
+    def down(request):
+        on_disk_at_first_request.append((logger.dir / "documents.json").is_file())
+        raise provider_down()
+
+    with pytest.raises(litellm.APIConnectionError):
+        answer(answering_llm.answers(relevance=down), logger)
+    assert on_disk_at_first_request[0]
+    assert list(read_json(logger, "documents")) == list(read_json(logger, "ids"))
 
 
 def test_a_stage_that_fails_midway_keeps_the_calls_made_before_it(

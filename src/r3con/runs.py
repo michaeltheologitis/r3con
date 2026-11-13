@@ -24,6 +24,10 @@ Layout per ``logs/<run-folder>/``:
   ``documents``. Written with the manifest.
 - ``names.json`` — each document's id mapped to its name
   (:attr:`r3con.pipeline.Answer.document_names`). Written with the manifest.
+- ``documents.json`` — each document's id, in document order, mapped to the SHA-256
+  of its text's UTF-8 bytes, lone surrogates passed through (:func:`fingerprints`), so
+  that the documents the run read can be told apart from any others. Written with the
+  manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
   rounds: [{round, snippets: [{id, summary, quotes, provenance}]}], totals}`` — within
   a round every relevance snippet in document order, a document read in parts as one
@@ -133,6 +137,7 @@ A call that raised an error has ``tokens``, ``usage``, ``served_model``,
 from __future__ import annotations
 
 import datetime
+import hashlib
 import importlib.metadata
 import json
 import logging
@@ -370,6 +375,16 @@ def write_manifest(
     if ask_of is not None:
         manifest["ask_of"] = ask_of
     return task_logger.write_json("manifest", manifest)
+
+
+def fingerprints(document_ids: Sequence[str], texts: Sequence[str]) -> dict[str, str]:
+    """What ``documents.json`` holds: the SHA-256 of each document's text, by its id, in
+    document order. The text is hashed as UTF-8 with lone surrogates passed through, as
+    a caller's text may hold half a surrogate pair, which UTF-8 can't encode."""
+    return {
+        id_: hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+        for id_, text in zip(document_ids, texts, strict=True)
+    }
 
 
 def _sources(

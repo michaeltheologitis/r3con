@@ -27,15 +27,16 @@ import json
 import re
 import threading
 from collections.abc import Callable, Sequence
-from typing import Any, NoReturn, TypeVar
+from types import EllipsisType
+from typing import Annotated, Any, NoReturn, TypeVar
 
 import litellm
 from litellm.exceptions import ContextWindowExceededError
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt, StringConstraints, ValidationError
 
 from r3con import settings
 from r3con.logging_setup import get_logger
-from r3con.masking import masked
+from r3con.masking import masked, one_line
 from r3con.runs import TaskLogger
 from r3con.runtime.llm import count_tokens, quiet_litellm, schema_as_sent
 
@@ -68,9 +69,11 @@ class Splits:
         *,
         model: str,
         margin_percent: int | None = None,
+        max_input_tokens: int | EllipsisType | None = ...,
         task_logger: TaskLogger | None = None,
     ) -> None:
-        """``margin_percent=None`` reads ``settings.WINDOW_MARGIN_PERCENT``.
+        """``margin_percent=None`` reads ``settings.WINDOW_MARGIN_PERCENT``, and
+        ``max_input_tokens=...`` looks the window up in litellm's model map.
 
         Raises:
             ValueError: for a margin that is not an integer from 0 to 99, as the
@@ -79,25 +82,77 @@ class Splits:
         if margin_percent is None:
             margin_percent = settings.WINDOW_MARGIN_PERCENT
         settings.check_cap("window_margin_percent", margin_percent)
+        if max_input_tokens is ...:
+            max_input_tokens = _max_input_tokens(model)
         self._documents = list(documents)
         self._cuts: list[list[int]] = [[] for _ in self._documents]
         self.model = model
         self._task_logger = task_logger
         self._lock = threading.Lock()
         self.margin_percent = margin_percent
-        self.max_input_tokens = _max_input_tokens(model)
+        self.max_input_tokens = max_input_tokens
         self.line = (
             None
-            if self.max_input_tokens is None
-            else self.max_input_tokens * (100 - margin_percent) // 100
+            if max_input_tokens is None
+            else max_input_tokens * (100 - margin_percent) // 100
         )
         self._record: dict[str, Any] = {
             "model": model,
-            "max_input_tokens": self.max_input_tokens,
+            "max_input_tokens": max_input_tokens,
             "margin_percent": margin_percent,
             "line": self.line,
             "documents": {},
         }
+
+    @classmethod
+    def restored(
+        cls,
+        documents: Sequence[str],
+        record: Any,
+        *,
+        task_logger: TaskLogger | None = None,
+    ) -> Splits:
+        """The splits of the run whose ``splits.json`` holds ``record``, over its
+        ``documents``: the window and margin it recorded, whatever litellm's map says
+        now, and each document cut where the run left it, so that reading goes on from
+        the parts the run ended with. With a ``task_logger``, the record is written to
+        it at once, and each later split or stop is added to it.
+
+        Raises:
+            ValueError: in one line, if ``record`` is not a ``splits.json`` as r3con
+                writes one, or cuts a document that is not in ``documents``, or cuts
+                one other than in order and strictly inside it.
+        """
+        try:
+            saved = _SavedSplits.model_validate(record)
+        except ValidationError as error:
+            raise _not_fitting(documents, one_line(error)) from None
+        splits = cls(
+            documents,
+            model=saved.model,
+            margin_percent=saved.margin_percent,
+            max_input_tokens=saved.max_input_tokens,
+            task_logger=task_logger,
+        )
+        for key, entry in saved.documents.items():
+            splits._restore_cuts(int(key), entry.cuts)
+            splits._record["documents"][key] = entry.model_dump()
+        splits._write()
+        return splits
+
+    def _restore_cuts(self, doc: int, cuts: list[int]) -> None:
+        """Cut ``documents[doc]`` at ``cuts``, a run's cuts of it.
+
+        Raises:
+            ValueError: unless there is a ``documents[doc]`` and ``cuts`` fall in
+                order strictly inside it.
+        """
+        inside = doc < len(self._documents) and all(
+            a < b for a, b in itertools.pairwise([0, *cuts, len(self._documents[doc])])
+        )
+        if not inside:
+            raise _not_fitting(self._documents, f"it cuts documents[{doc}] at {cuts}.")
+        self._cuts[doc] = cuts
 
     def parts(self, doc: int) -> list[str]:
         """``documents[doc]`` cut at its cuts so far: ``[documents[doc]]`` until it is
@@ -385,6 +440,31 @@ def halve(text: str) -> int:
         if cuts:
             return min(cuts, key=lambda cut: (abs(cut - middle), cut))
     return middle
+
+
+class _DocumentSplits(BaseModel):
+    cuts: list[StrictInt]
+    parts: dict[str, StrictInt]
+    events: list[dict[str, Any]]
+
+
+class _SavedSplits(BaseModel):
+    """What ``splits.json`` holds, as :meth:`Splits.restored` reads it: each document
+    by its index in ``documents``, as r3con writes one."""
+
+    model: str
+    max_input_tokens: StrictInt | None
+    margin_percent: StrictInt
+    documents: dict[
+        Annotated[str, StringConstraints(pattern=r"^(0|[1-9][0-9]*)$")],
+        _DocumentSplits,
+    ]
+
+
+def _not_fitting(documents: Sequence[str], why: str) -> ValueError:
+    return ValueError(
+        f"splits.json does not fit these {len(documents)} document(s): {why}"
+    )
 
 
 def _max_input_tokens(model: str) -> int | None:
