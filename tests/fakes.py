@@ -274,6 +274,29 @@ def failing_once(
     return reply
 
 
+def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool]:
+    """Whether a request reads the document whose first line is ``line``, in a later
+    relevance round only with ``later_round``."""
+    return lambda request: (
+        first_line(request) == line and (is_later_round(request) or not later_round)
+    )
+
+
+def predating_resume(run_dir: Path) -> None:
+    """``run_dir`` as a run folder from before resume leaves it: no ``documents.json``."""
+    (run_dir / "documents.json").unlink()
+
+
+def reading_moved_prompts(run_dir: Path) -> None:
+    """A ``./prompts`` overlay of the parsing prompt the run read, which shadows it."""
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    stage = "structuring/parsing"
+    read = Path(manifest["sources"]["prompts"][stage])
+    overlay = Path("prompts") / stage / read.name
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(read.read_text())
+
+
 def unscripted(request: Request) -> UnscriptedRequest:
     """The error for a ``request`` that a fake has no reply for."""
     last = request["messages"][-1]["content"][:UNSCRIPTED_SHOWN_CHARS]

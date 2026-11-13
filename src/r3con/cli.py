@@ -25,7 +25,6 @@ import shlex
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -35,11 +34,12 @@ from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import masked, masked_values
 from r3con.pipeline import (
     ASKS_FOLDER,
-    ResumeRefused,
     ask_config,
     ask_pipeline,
     read_representation,
+    read_resume,
     refuse_masked,
+    resumable_folder,
     resume_pipeline,
     run_pipeline,
 )
@@ -64,7 +64,11 @@ RESUME_MASKED_ADVICE = (
     "pass --api-key or --base-url in place of a masked `api_key` or `api_base`; any "
     "other masked param can be passed again only through r3con.resume's `params`"
 )
-NO_DOCUMENTS = "no documents to read (every source was empty)."
+# What a command exits with when its input is refused before anything is sent, when
+# it fails on the way, and when it is interrupted, as a shell's Ctrl-C is.
+EXIT_REFUSED = 2
+EXIT_FAILED = 1
+EXIT_INTERRUPTED = 130
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -243,13 +247,11 @@ def _run(args: argparse.Namespace) -> int:
             relevance_rounds=args.relevance_rounds,
             reasoning=args.reasoning,
         )
-        documents = _sources(args)
+        _use_settings(args)
+        documents = _read_sources(args.documents)
     except (FileNotFoundError, ValueError) as e:
         _error(str(e))
-        return 2
-    if not documents:
-        _error(NO_DOCUMENTS)
-        return 2
+        return EXIT_REFUSED
 
     task_logger = None
     if not args.no_artifacts:
@@ -281,41 +283,36 @@ def _run(args: argparse.Namespace) -> int:
         print(result.answer)
         return 0
     if task_logger is not None:
-        _carry_on(task_logger.dir, args.documents)
+        _carry_on(task_logger.dir, args)
     return code
 
 
 def _resume(args: argparse.Namespace) -> int:
     try:
         configure_logging("INFO" if args.verbose else None)
-        documents = _sources(args)
-    except (FileNotFoundError, ValueError) as e:
-        _error(str(e))
-        return 2
-    if not documents:
-        _error(NO_DOCUMENTS)
-        return 2
-
-    run_dir = Path(args.run_dir)
-
-    def started(event: dict[str, Any]) -> None:
-        # Once its refusals are past, so a refused resume says one line.
-        if event["type"] == "run_started":
-            print(f"{len(documents)} document(s) · resuming the run", file=sys.stderr)
-            print(f"artifacts: {run_dir}", file=sys.stderr)
-
-    try:
-        result = resume_pipeline(
-            run_dir,
-            documents,
+        _use_settings(args)
+        # The folder first: a mistyped one is refused before any document is read.
+        run_dir = resumable_folder(Path(args.run_dir))
+        resumable = read_resume(run_dir, _read_sources(args.documents))
+        refuse_masked(
+            resumable.config.params,
             api_base=args.base_url,
             api_key=args.api_key,
-            on_event=started,
             advice=RESUME_MASKED_ADVICE,
         )
-    except (FileNotFoundError, ResumeRefused, RunFolderBusy) as e:
+    except (FileNotFoundError, ValueError) as e:
         _error(str(e))
-        return 2
+        return EXIT_REFUSED
+
+    print(f"{len(resumable.texts)} document(s) · resuming the run", file=sys.stderr)
+    print(f"artifacts: {resumable.run_dir}", file=sys.stderr)
+    try:
+        result = resume_pipeline(
+            resumable, api_base=args.base_url, api_key=args.api_key
+        )
+    except RunFolderBusy as e:
+        _error(str(e))
+        return EXIT_REFUSED
     except KeyboardInterrupt:
         code = _interrupted()
     except Exception as e:  # noqa: BLE001 — a CLI reports, it doesn't traceback at the user
@@ -323,27 +320,46 @@ def _resume(args: argparse.Namespace) -> int:
     else:
         print(result.answer)
         return 0
-    _carry_on(run_dir, args.documents)
+    _carry_on(resumable.run_dir, args)
     return code
 
 
-def _sources(args: argparse.Namespace) -> dict[str, str]:
-    """The documents ``args`` names, read once the runtime settings are checked and
-    ``--doc-workers`` is in force."""
+def _use_settings(args: argparse.Namespace) -> None:
+    """Check the runtime settings, ``--doc-workers`` in force."""
     if args.doc_workers is not None:
         check_cap("doc_workers", args.doc_workers, name="--doc-workers")
         # The stages read this through settings.active_doc_workers() at call time.
         os.environ["R3CON_DOC_WORKERS"] = str(args.doc_workers)
     settings_snapshot()
-    return read_documents(args.documents)
 
 
-def _carry_on(run_dir: Path, sources: Sequence[str]) -> None:
-    """Say how to carry on the run in ``run_dir`` once it stopped, if a resume can:
-    ``r3con resume`` over the same ``sources``, quoted so that the line pastes."""
-    if (run_dir / "documents.json").is_file():
-        command = shlex.join(["r3con", "resume", str(run_dir), *sources])
-        _error(f"to carry on: {command}")
+def _read_sources(sources: Sequence[str]) -> dict[str, str]:
+    """The documents ``sources`` name (:func:`r3con.read_documents`).
+
+    Raises:
+        FileNotFoundError: if a source names nothing.
+        ValueError: if every source is empty.
+    """
+    documents = read_documents(sources)
+    if not documents:
+        raise ValueError("no documents to read (every source was empty).")
+    return documents
+
+
+def _carry_on(run_dir: Path, args: argparse.Namespace) -> None:
+    """Say how to carry on the run in ``run_dir`` once it stopped, if a resume can
+    (:func:`r3con.pipeline.resumable_folder`): ``r3con resume`` over the same sources
+    and ``--base-url``, quoted so that the line pastes, an ``--api-key`` named but never
+    shown."""
+    try:
+        resumable_folder(run_dir)
+    except (FileNotFoundError, ValueError):
+        return
+    command = ["r3con", "resume", str(run_dir), *args.documents]
+    if args.base_url:
+        command += ["--base-url", args.base_url]
+    key = " (and your --api-key)" if args.api_key else ""
+    _error(f"to carry on: {shlex.join(command)}{key}")
 
 
 def _ask(args: argparse.Namespace) -> int:
@@ -360,7 +376,7 @@ def _ask(args: argparse.Namespace) -> int:
         )
     except (FileNotFoundError, ValueError) as e:
         _error(str(e))
-        return 2
+        return EXIT_REFUSED
     task_logger = TaskLogger(new_run_folder(), root=built.run_dir / ASKS_FOLDER)
     print(f"artifacts: {task_logger.dir}", file=sys.stderr)
     try:
@@ -386,12 +402,12 @@ def _app(args: argparse.Namespace) -> int:
         if (missing.name or "").partition(".")[0] not in APP_PACKAGES:
             raise
         _error(APP_EXTRA_HINT)
-        return 1
+        return EXIT_FAILED
     try:
         listener = server.listen(args.port)
     except (OSError, OverflowError) as error:
         _error(f"can't listen on port {args.port}: {error}")
-        return 2
+        return EXIT_REFUSED
     logs_dir = args.logs_dir or os.environ.get("R3CON_LOGS_DIR") or server.LOGS_DIR
     server.launch(listener, logs_dir=Path(logs_dir), browser=not args.no_browser)
     return 0
@@ -399,14 +415,14 @@ def _app(args: argparse.Namespace) -> int:
 
 def _interrupted() -> int:
     print("\nr3con: interrupted.", file=sys.stderr)
-    return 130
+    return EXIT_INTERRUPTED
 
 
 def _failed(error: Exception) -> int:
     """Report ``error`` and its notes, such as where its artifacts are."""
     notes = getattr(error, "__notes__", ())
     _error("\n".join([f"{type(error).__name__}: {error}", *notes]))
-    return 1
+    return EXIT_FAILED
 
 
 def _error(text: str) -> None:

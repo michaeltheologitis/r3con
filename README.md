@@ -110,7 +110,7 @@ Keep glob patterns in quotes, as shown above. When reading a folder or using
 a glob pattern, R3Con skips links to files outside the selected folder.
 Individual files can be specified directly.
 
-#### Carry on a stopped run
+#### Carry On a Stopped Run
 
 If a run fails or you stop it partway, it prints the command that carries it on:
 
@@ -118,8 +118,8 @@ If a run fails or you stop it partway, it prints the command that carries it on:
 r3con resume logs/20261105T173546Z_bb4f0c37 ./reports
 ```
 
-Give it the same documents the run read. It reuses what the run finished and
-only does the rest.
+Give it the same sources the run read, in the same order. It reuses what the run
+finished and only does the rest.
 
 ### Python
 
