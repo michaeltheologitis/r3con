@@ -28,6 +28,7 @@ from r3con.r3con import ask, read_documents, run, trace, unique_names
 from tests.app.bundle_check import encrypted_pdf
 from tests.documents import (
     CORRUPT_DOCX,
+    LINE_BREAK,
     paragraph,
     picture,
     table,
@@ -639,8 +640,15 @@ def test_a_word_files_picture_gives_its_description_without_its_bytes_being_read
     docx = tmp_path / "report.docx"
     pictured = f"<w:p>{picture(CHART_DESCRIPTION)}</w:p>"
     # Its bytes left out of the file, so reading them would fail.
-    write_docx(docx, xml=paragraph("By site:") + pictured, picture_bytes=False)
+    write_docx(docx, ["By site:"], xml=pictured, picture_bytes=False)
     assert read_documents(docx) == {"report.docx": f"By site:\n\n{CHART_DESCRIPTION}"}
+
+
+def test_a_word_files_picture_between_line_breaks_takes_no_spaces(tmp_path):
+    docx = tmp_path / "report.docx"
+    runs = [text_run("Figure 1"), LINE_BREAK, picture("A chart"), LINE_BREAK]
+    write_docx(docx, xml=f"<w:p>{''.join(runs)}{text_run('Next')}</w:p>")
+    assert read_documents(docx) == {"report.docx": "Figure 1  \nA chart  \nNext"}
 
 
 @pytest.mark.parametrize(
@@ -711,6 +719,17 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
         ),
         ('<pre>x<img alt="+">y</pre>', "```\nx+y\n```"),
         (
+            '<p>Figure 1<br><img alt="A chart"><br>Next</p>',
+            "Figure 1  \nA chart  \nNext",
+        ),
+        (
+            (
+                "<p>Before the chart.<img alt='Diagram, timeline&#10;&#10;"
+                "description automatically generated'> After.</p>"
+            ),
+            "Before the chart. After.",
+        ),
+        (
             '<p><a href="/q3.pdf"><svg><title>Download the Q3 report</title></svg></a></p>',
             "Download the Q3 report",
         ),
@@ -759,6 +778,8 @@ def test_a_file_that_cannot_be_read_or_has_no_text_is_logged_and_dropped(
         "alt-text-starting-a-block-unpadded",
         "alt-text-ending-a-block-unpadded",
         "alt-text-in-code-unpadded",
+        "alt-text-between-line-breaks-unpadded",
+        "alt-text-office-made-up-dropped-in-any-case",
         "svg-title-kept",
         "script-style-noscript-template-dropped",
         "xml-declaration-doctype-comment-dropped",

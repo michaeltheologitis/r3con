@@ -32,6 +32,8 @@ PACKAGE_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 DOCUMENT_RELS = f"""<Relationships xmlns="{PACKAGE_RELATIONSHIPS_NS}">
 <Relationship Id="rIdImage" Type="{OFFICE_RELATIONSHIPS_NS}/image" Target="media/image1.png"/>
 </Relationships>"""
+# A run holding a line break, Word's Shift+Enter.
+LINE_BREAK = "<w:r><w:br/></w:r>"
 
 
 def write_pdf(
@@ -100,7 +102,7 @@ def paragraph(text: str) -> str:
     return f"<w:p>{text_run(text)}</w:p>"
 
 
-def picture(description: str | None = None) -> str:
+def picture(description: str | None) -> str:
     """A run holding :data:`PNG` as a picture, with this description, Word's alt text,
     if given."""
     descr = "" if description is None else f" descr={quoteattr(description)}"
