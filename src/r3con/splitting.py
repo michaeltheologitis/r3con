@@ -132,13 +132,20 @@ class Splits:
             model=saved.model,
             margin_percent=saved.margin_percent,
             max_input_tokens=saved.max_input_tokens,
-            task_logger=task_logger,
         )
         for key, entry in saved.documents.items():
             splits._restore_cuts(int(key), entry.cuts)
             splits._record["documents"][key] = entry.model_dump()
-        splits._write()
+        if task_logger is not None:
+            splits.log_to(task_logger)
         return splits
+
+    def log_to(self, task_logger: TaskLogger) -> None:
+        """Write the record into ``task_logger``'s folder from now on, and at once when
+        it holds a document already, as a restored one does."""
+        self._task_logger = task_logger
+        if self._record["documents"]:
+            self._write()
 
     def _restore_cuts(self, doc: int, cuts: list[int]) -> None:
         """Cut ``documents[doc]`` at ``cuts``, a run's cuts of it.
@@ -153,6 +160,13 @@ class Splits:
         if not inside:
             raise _not_fitting(self._documents, f"it cuts documents[{doc}] at {cuts}.")
         self._cuts[doc] = cuts
+
+    def parts_read(self, doc: int, call: str) -> int:
+        """How many parts ``call`` (``"relevance-r2"``, ``"parse"``) read
+        ``documents[doc]`` in, as recorded: 1 unless the record says it read it in
+        parts."""
+        entry = self._record["documents"].get(str(doc))
+        return 1 if entry is None else entry["parts"].get(call, 1)
 
     def parts(self, doc: int) -> list[str]:
         """``documents[doc]`` cut at its cuts so far: ``[documents[doc]]`` until it is

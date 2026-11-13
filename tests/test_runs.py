@@ -1,3 +1,4 @@
+import errno
 import importlib.metadata
 import json
 import threading
@@ -15,9 +16,12 @@ from r3con.pipeline import run_pipeline
 from r3con.runs import (
     StageRun,
     TaskLogger,
+    call_totals,
     fingerprints,
     new_run_folder,
     normalize_model_name,
+    reopen_for_resume,
+    run_lock,
     write_manifest,
 )
 from r3con.runtime.llm import register_credentials
@@ -445,6 +449,108 @@ def test_each_call_records_its_reply_and_how_long_it_took(logger):
     assert call["usage"] == USAGE
     assert (call["served_model"], call["fingerprint"]) == ("gpt-6-luna", "fp_3f1c2d")
     assert (call["reasoning"], call["output"], call["seconds"]) == (THOUGHT, "a", 1.25)
+
+
+def test_a_resumed_stage_run_writes_its_earlier_calls_back_first_and_counts_them(
+    logger,
+):
+    earlier = StageRun(stage="reasoning", task_logger=logger, model=MODEL)
+    sent = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+    earlier.add_step(
+        kind="turn-1",
+        messages=sent,
+        response={**reply("A"), "reasoning": THOUGHT},
+        tokens=TOKENS,
+        usage=USAGE,
+        usd=0.5,
+        seconds=3.25,
+    )
+    earlier.add_step(
+        kind="turn-2", messages=sent, response={}, usd=0.0, error=ERROR_LINE
+    )
+    earlier.flush()
+    calls = json.loads((earlier.dir / "calls.json").read_text())
+
+    resumed = StageRun(stage="reasoning", task_logger=logger, model=MODEL, resumed=True)
+    assert resumed.add_step(kind="turn-2", messages=sent, response=reply("B")).step == 3
+    resumed.flush()
+    rewritten = json.loads((earlier.dir / "calls.json").read_text())
+    assert rewritten[:2] == calls
+    assert [call["output"] for call in rewritten[2:]] == ["B"]
+    steps = [*earlier.steps, *resumed.steps]
+    assert resumed.compute_totals() == call_totals(map(vars, steps))
+    assert flushed_transcript(resumed)["messages"][-1]["content"] == "B"
+    assert (
+        StageRun(stage="reasoning", task_logger=logger).compute_totals()["n_steps"] == 0
+    )
+
+
+def test_a_resumed_stage_run_starts_afresh_from_a_calls_json_it_cannot_read(
+    logger, caplog
+):
+    folder = logger.dir / "relevance"
+    folder.mkdir()
+    (folder / "calls.json").write_text('[{"step": 1, "kind": "relev')
+    assert StageRun(stage="relevance", task_logger=logger, resumed=True).steps == []
+    assert "calls.json can't be read" in caplog.text
+
+
+def test_a_json_file_is_written_whole_or_left_as_it_was(logger, monkeypatch):
+    logger.write_json("relevance/result", {"rounds": [1]})
+
+    def killed(source, target):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("r3con.runs.os.replace", killed)
+    with pytest.raises(KeyboardInterrupt):
+        logger.write_json("relevance/result", {"rounds": [1, 2]})
+    folder = logger.dir / "relevance"
+    assert json.loads((folder / "result.json").read_text()) == {"rounds": [1]}
+    assert [path.name for path in folder.iterdir()] == ["result.json"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [NotImplementedError("flock"), OSError(errno.ENOSYS, "Function not implemented")],
+    ids=["filelock-without-a-fallback", "the-file-system"],
+)
+def test_a_folder_on_a_file_system_without_locks_is_written_unlocked_with_a_warning(
+    logger, monkeypatch, caplog, error
+):
+    class Unlockable:
+        def __init__(self, path, timeout):
+            pass
+
+        def acquire(self):
+            raise error
+
+    monkeypatch.setattr("r3con.runs.FileLock", Unlockable)
+    with run_lock(logger.dir):
+        logger.write_json("manifest", {})
+    assert "can't be locked" in caplog.text
+    assert (logger.dir / "manifest.json").is_file()
+
+
+def test_a_run_folder_is_held_by_one_run_or_resume_at_a_time(logger):
+    held = pytest.raises(RuntimeError, match="a run or resume is going in it;")
+    with run_lock(logger.dir), held, run_lock(logger.dir):
+        pass
+    with run_lock(logger.dir):
+        assert (logger.dir / "run.lock").is_file()
+
+
+def test_reopening_a_folder_for_a_resume_records_it_and_ends_a_line_cut_short(logger):
+    write_manifest(logger, task="Who?", config=config(), n_docs=1)
+    (logger.dir / "events.jsonl").write_text('{"type": "run_started"}\n{"type": "rel')
+    reopen_for_resume(logger, settings_snapshot())
+    reopen_for_resume(logger, {**settings_snapshot(), "doc_workers": 2})
+    manifest = json.loads((logger.dir / "manifest.json").read_text())
+    version = importlib.metadata.version("r3context")
+    assert [
+        (resume["r3con_version"], resume["settings"]["doc_workers"])
+        for resume in manifest["resumes"]
+    ] == [(version, settings_snapshot()["doc_workers"]), (version, 2)]
+    assert (logger.dir / "events.jsonl").read_text().endswith('{"type": "rel\n')
 
 
 def test_a_transcripts_last_reply_shows_its_reasoning(logger):

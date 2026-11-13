@@ -26,7 +26,9 @@ as that stage succeeds, so a later failure still leaves the earlier work on disk
 stage that fails leaves the calls it completed and its traceback (see
 :mod:`r3con.runs`). No coordinator class; the routing is plain control flow here.
 
-:func:`ask_pipeline` reruns only reasoning over a finished run (:func:`r3con.ask`).
+:func:`ask_pipeline` reruns only reasoning over a finished run (:func:`r3con.ask`),
+and :func:`resume_pipeline` carries on one that failed or was stopped
+(:func:`r3con.resume`).
 
 Both report their progress as it happens, as events (:class:`r3con.runs.EventRecorder`)
 written to the folder's ``events.jsonl`` and handed to the caller's ``on_event``.
@@ -38,14 +40,15 @@ import json
 import threading
 import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, StrictInt, ValidationError
 
 from r3con.config import (
+    PromptStage,
     ReasoningPath,
     RunConfig,
     check_prompts,
@@ -53,16 +56,21 @@ from r3con.config import (
     normalize_model_name,
 )
 from r3con.logging_setup import get_logger
-from r3con.masking import MASK, masked, one_line
+from r3con.masking import MASK, masked, masked_values, one_line
 from r3con.provenance import Citations, Provenance, build_provenance, check_rule
+from r3con.quotes import Match, Quote
 from r3con.runs import (
     Emit,
     EventRecorder,
     StageRun,
     TaskLogger,
+    call_totals,
     fingerprints,
     new_run_folder,
-    step_totals,
+    prompt_sources,
+    read_events,
+    reopen_for_resume,
+    run_lock,
     write_manifest,
 )
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
@@ -76,10 +84,12 @@ from r3con.stages.relevance import (
     citable_ids,
     draw_document_ids,
     join_parts,
+    part_ids,
+    relevance_call,
     surface_relevance,
 )
-from r3con.stages.structuring.parsing import parse_documents
-from r3con.stages.structuring.schema import propose_schema
+from r3con.stages.structuring.parsing import ParseResult, check_schema, parse_documents
+from r3con.stages.structuring.schema import ProposalResult, propose_schema
 
 _log = get_logger("pipeline")
 
@@ -296,6 +306,7 @@ def _recorded_stage(
     emit: Emit,
     cancel: threading.Event | None,
     failed: str = "run_failed",
+    resumed: bool = False,
 ) -> Iterator[_StageRecord]:
     """Record one stage's artifacts under ``<run-folder>/<stage>/``.
 
@@ -303,9 +314,12 @@ def _recorded_stage(
     :class:`~r3con.runtime.llm.Cancelled` at once, and fails as below.
 
     The body passes ``record.run`` to the stage and sets ``record.result`` to the
-    fields of its ``result.json``. On a clean exit this writes ``calls.json`` (and,
+    fields of its ``result.json``; with ``resumed``, ``record.run`` starts from the
+    calls an earlier attempt at the run left in the stage's ``calls.json``
+    (:class:`~r3con.runs.StageRun`). On a clean exit this writes ``calls.json`` (and,
     with ``transcript``, ``transcript.yaml``), then ``result.json`` with the stage's
-    token and cost ``totals``. On any exception, an interrupt included, it writes the
+    token and cost ``totals``, and removes an earlier attempt's ``error.txt``. On any
+    exception, an interrupt included, it writes the
     calls that answered or raised an error (a call an interrupt cut short is not
     recorded) and ``error.txt`` with the traceback, keys masked, adds a note naming the
     run folder to the exception, emits ``failed`` with the stage's name as its events
@@ -316,7 +330,9 @@ def _recorded_stage(
     run = (
         None
         if task_logger is None
-        else StageRun(stage=stage, task_logger=task_logger, model=model)
+        else StageRun(
+            stage=stage, task_logger=task_logger, model=model, resumed=resumed
+        )
     )
     record = _StageRecord(run=run)
     try:
@@ -327,6 +343,7 @@ def _recorded_stage(
             run.task_logger.write_json(
                 f"{stage}/result", {**record.result, "totals": run.compute_totals()}
             )
+            (run.dir / "error.txt").unlink(missing_ok=True)
     except BaseException as error:
         if run is not None:
             run.flush(write_transcript=transcript)
@@ -336,15 +353,18 @@ def _recorded_stage(
         raise
 
 
-def _spent(runs: Sequence[StageRun | None]) -> dict[str, Any]:
-    """The ``tokens`` and ``usd`` of every call ``runs`` recorded, totalled as a stage's
-    ``result.json`` totals its own; both ``None`` when nothing recorded them, in a run
-    without a folder."""
-    recorded = [run for run in runs if run is not None]
-    if not recorded:
+def _spent(
+    runs: Sequence[StageRun | None], finished: Sequence[Mapping[str, Any]] = ()
+) -> dict[str, Any]:
+    """The ``tokens`` and ``usd`` of every call ``runs`` recorded, an earlier attempt's
+    included, and of each of ``finished``, a finished stage's ``result.json`` totals,
+    added up as a stage's ``result.json`` totals its own; both ``None`` when nothing
+    recorded them, in a run without a folder."""
+    totals = [*finished, *(run.compute_totals() for run in runs if run is not None)]
+    if not totals:
         return {"tokens": None, "usd": None}
-    totals = step_totals([step for run in recorded for step in run.steps])
-    return {"tokens": totals["tokens"], "usd": totals["usd"]}
+    summed = call_totals({**stage, "error": None} for stage in totals)
+    return {"tokens": summed["tokens"], "usd": summed["usd"]}
 
 
 def _preview(text: str, n: int = 100) -> str:
@@ -394,7 +414,8 @@ def run_pipeline(
     If ``task_logger`` is provided, each stage's artifacts are written immediately
     after that stage succeeds, so a later failure still leaves earlier artifacts; a
     stage that raises writes its completed calls and ``error.txt``, and the exception
-    carries a note naming the run folder.
+    carries a note naming the run folder. The run holds its folder while it writes there
+    (:func:`r3con.runs.run_lock`), so it is not resumed meanwhile.
 
     ``cancel`` stops the run as :func:`r3con.run` says: once it is set, no new model
     call is sent and no stage starts, and the stage then under way, or the next one,
@@ -441,8 +462,6 @@ def run_pipeline(
     document_names, texts = names_and_texts(documents)
     check_prompts(config)
     caps = settings_snapshot(reasoning_max_turns=max_reasoning_turns)
-    model = config.model
-    rounds = config.relevance_rounds
     llm_kwargs = _llm_kwargs(
         config.params,
         api_base=api_base,
@@ -453,38 +472,102 @@ def run_pipeline(
 
     document_ids = draw_document_ids(len(texts))
     names = dict(zip(document_ids, document_names, strict=True))
-    # The identity card first, so even a run that dies in stage 1 says what it was.
-    if task_logger is not None:
-        write_manifest(
-            task_logger,
-            task=task,
-            config=config,
-            n_docs=len(texts),
-            context_chars=sum(len(d) for d in texts),
-            settings=caps,
-        )
-        task_logger.write_json("ids", {id_: i for i, id_ in enumerate(document_ids)})
-        task_logger.write_json("names", names)
-        task_logger.write_json("documents", fingerprints(document_ids, texts))
+    with nullcontext() if task_logger is None else run_lock(task_logger.dir):
+        # The identity card first, so even a run that dies in stage 1 says what it was.
+        if task_logger is not None:
+            write_manifest(
+                task_logger,
+                task=task,
+                config=config,
+                n_docs=len(texts),
+                context_chars=sum(len(d) for d in texts),
+                settings=caps,
+            )
+            ids = {id_: i for i, id_ in enumerate(document_ids)}
+            task_logger.write_json("ids", ids)
+            task_logger.write_json("names", names)
+            task_logger.write_json("documents", fingerprints(document_ids, texts))
 
-    # Where each document is cut into parts, shared by every stage that reads one.
-    splits = Splits(
-        texts,
-        model=model,
-        margin_percent=caps["window_margin_percent"],
-        task_logger=task_logger,
-    )
-    emit = EventRecorder(on_event, task_logger)
+        # Where each document is cut into parts, shared by every stage that reads one.
+        splits = Splits(
+            texts,
+            model=config.model,
+            margin_percent=caps["window_margin_percent"],
+            task_logger=task_logger,
+        )
+        return _build_and_answer(
+            task=task,
+            texts=texts,
+            names=names,
+            config=config,
+            caps=caps,
+            llm_kwargs=llm_kwargs,
+            splits=splits,
+            task_logger=task_logger,
+            emit=EventRecorder(on_event, task_logger),
+            cancel=cancel,
+            reasoning_timeout_s=reasoning_timeout_s,
+        )
+
+
+@dataclass
+class _Saved:
+    """What earlier attempts at a run left that a resume reuses (:func:`_read_saved`):
+    each finished stage's results, from its ``result.json``, with its ``totals``; an
+    unfinished stage's results document by document; the events that reported them, in
+    the order written; and how many there are of each stage's, as ``run_resumed`` gives
+    them."""
+
+    reused: dict[str, Any] = field(default_factory=dict)
+    relevance: RelevantContext | None = None
+    snippets: dict[tuple[int, int], list[SnippetRecord]] = field(default_factory=dict)
+    proposal: ProposalResult | None = None
+    extraction: ParseResult | None = None
+    parses: dict[int, tuple[BaseModel, list[str]]] = field(default_factory=dict)
+    totals: list[dict[str, Any]] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _build_and_answer(
+    *,
+    task: str,
+    texts: list[str],
+    names: dict[str, str],
+    config: RunConfig,
+    caps: Mapping[str, int],
+    llm_kwargs: dict[str, Any],
+    splits: Splits,
+    task_logger: TaskLogger | None,
+    emit: EventRecorder,
+    cancel: threading.Event | None,
+    reasoning_timeout_s: float | None,
+    saved: _Saved | None = None,
+) -> Answer:
+    """Run every stage for ``task`` over ``texts``, ``names`` giving each one's name by
+    its id, in document order, as :func:`run_pipeline` says; with ``saved``, after
+    reporting ``run_resumed`` and handing the events that reported its results to
+    ``on_event`` again, take each finished stage's results as they are and compute only
+    what the others lack (:func:`resume_pipeline`)."""
+    model = config.model
+    rounds = config.relevance_rounds
+    document_ids = list(names)
     run_dir = task_logger.dir if task_logger is not None else None
     emit(
         "run_started",
         question=task,
         model=model,
         document_ids=document_ids,
-        document_names=document_names,
+        document_names=list(names.values()),
         rounds=rounds,
         run_dir=run_dir,
     )
+    resumed = saved is not None
+    if saved is None:
+        saved = _Saved()
+    else:
+        emit("run_resumed", run_dir=run_dir, reused=saved.reused)
+        for event in saved.events:
+            emit.replay(event)
     stage_runs: list[StageRun | None] = []
 
     # --- Stage 1: surface relevance — the relevant context. ---
@@ -493,113 +576,139 @@ def run_pipeline(
         rounds,
         len(texts),
     )
-    with _recorded_stage(
-        task_logger, "relevance", model, transcript=False, emit=emit, cancel=cancel
-    ) as record:
-        relevance = surface_relevance(
-            task=task,
-            documents=texts,
-            document_ids=document_ids,
-            model=model,
-            prompts=config.prompts,
-            rounds=rounds,
-            max_attempts=caps["relevance_max_attempts"],
-            workers=caps["doc_workers"],
-            run=record.run,
-            splits=splits,
+    relevance = saved.relevance
+    if relevance is None:
+        with _recorded_stage(
+            task_logger,
+            "relevance",
+            model,
+            transcript=False,
             emit=emit,
-            **llm_kwargs,
-        )
-        record.result = {
-            "n_rounds": rounds,
-            "n_docs": len(texts),
-            "rounds": [
-                {
-                    "round": k + 1,
-                    "snippets": [asdict(r) for parts in per_doc for r in parts],
-                }
-                for k, per_doc in enumerate(relevance.records)
-            ],
-        }
-    stage_runs.append(record.run)
+            cancel=cancel,
+            resumed=resumed,
+        ) as record:
+            relevance = surface_relevance(
+                task=task,
+                documents=texts,
+                document_ids=document_ids,
+                model=model,
+                prompts=config.prompts,
+                rounds=rounds,
+                max_attempts=caps["relevance_max_attempts"],
+                workers=caps["doc_workers"],
+                run=record.run,
+                splits=splits,
+                emit=emit,
+                saved=saved.snippets,
+                **llm_kwargs,
+            )
+            record.result = {
+                "n_rounds": rounds,
+                "n_docs": len(texts),
+                "rounds": [
+                    {
+                        "round": k + 1,
+                        "snippets": [asdict(r) for parts in per_doc for r in parts],
+                    }
+                    for k, per_doc in enumerate(relevance.records)
+                ],
+            }
+        stage_runs.append(record.run)
     # the relevant context feeds every later stage
     relevance_snippets = relevance.snippets
 
     # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
     _log.info("stage 2/3 · structuring · proposing the schema")
-    emit("schema_started")
-    with _recorded_stage(
-        task_logger,
-        "structuring/schema",
-        model,
-        transcript=True,
-        emit=emit,
-        cancel=cancel,
-    ) as record:
-        proposal = propose_schema(
-            task=task,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            prompt_version=config.prompts["structuring/schema"],
-            max_attempts=caps["schema_max_attempts"],
-            run=record.run,
-            **llm_kwargs,
+    proposal = saved.proposal
+    if proposal is None:
+        emit("schema_started")
+        with _recorded_stage(
+            task_logger,
+            "structuring/schema",
+            model,
+            transcript=True,
+            emit=emit,
+            cancel=cancel,
+            resumed=resumed,
+        ) as record:
+            proposal = propose_schema(
+                task=task,
+                relevance_snippets=relevance_snippets,
+                model=model,
+                prompt_version=config.prompts["structuring/schema"],
+                max_attempts=caps["schema_max_attempts"],
+                run=record.run,
+                **llm_kwargs,
+            )
+            record.result = {
+                "schema_code": proposal.schema_code,
+                "thought": proposal.attempts[-1].thought if proposal.attempts else None,
+                "attempts": [
+                    {
+                        "schema_code": a.schema_code,
+                        "error": a.error,
+                        "thought": a.thought,
+                    }
+                    for a in proposal.attempts
+                ],
+            }
+        stage_runs.append(record.run)
+        emit(
+            "schema_finished",
+            schema_code=proposal.schema_code,
+            thought=record.result["thought"],
         )
-        record.result = {
-            "schema_code": proposal.schema_code,
-            "thought": proposal.attempts[-1].thought if proposal.attempts else None,
-            "attempts": [
-                {"schema_code": a.schema_code, "error": a.error, "thought": a.thought}
-                for a in proposal.attempts
-            ],
-        }
-    stage_runs.append(record.run)
-    emit(
-        "schema_finished",
-        schema_code=proposal.schema_code,
-        thought=record.result["thought"],
-    )
 
     # --- Stage 2b: structuring — parse every document, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(texts))
-    with _recorded_stage(
-        task_logger,
-        "structuring/parsing",
-        model,
-        transcript=False,
-        emit=emit,
-        cancel=cancel,
-    ) as record:
-        extraction = parse_documents(
-            documents=texts,
-            schema_code=proposal.schema_code,
-            parse_cls=proposal.parse_cls,
-            task=task,
-            prompt_version=config.prompts["structuring/parsing"],
-            relevance_snippets=relevance_snippets,
-            document_ids=document_ids,
-            model=model,
-            max_attempts=caps["parsing_max_attempts"],
-            run=record.run,
-            workers=caps["doc_workers"],
-            splits=splits,
+    extraction = saved.extraction
+    if extraction is None:
+        with _recorded_stage(
+            task_logger,
+            "structuring/parsing",
+            model,
+            transcript=False,
             emit=emit,
-            **llm_kwargs,
-        )
-        record.result = {
-            "parsed": extraction.parse,
-            "source_docs": extraction.source_docs,
-            "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
-            "provenance": extraction.provenance,
-        }
-    stage_runs.append(record.run)
+            cancel=cancel,
+            resumed=resumed,
+        ) as record:
+            extraction = parse_documents(
+                documents=texts,
+                schema_code=proposal.schema_code,
+                parse_cls=proposal.parse_cls,
+                task=task,
+                prompt_version=config.prompts["structuring/parsing"],
+                relevance_snippets=relevance_snippets,
+                document_ids=document_ids,
+                model=model,
+                max_attempts=caps["parsing_max_attempts"],
+                run=record.run,
+                workers=caps["doc_workers"],
+                splits=splits,
+                emit=emit,
+                saved=saved.parses,
+                **llm_kwargs,
+            )
+            record.result = {
+                "parsed": extraction.parse,
+                "source_docs": extraction.source_docs,
+                "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
+                "provenance": extraction.provenance,
+            }
+        stage_runs.append(record.run)
     parsed = extraction.parse
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
     emit("reasoning_started", question=task, model=model)
     with _recorded_stage(
-        task_logger, "reasoning", model, transcript=True, emit=emit, cancel=cancel
+        task_logger,
+        "reasoning",
+        model,
+        transcript=True,
+        emit=emit,
+        cancel=cancel,
+        resumed=resumed,
     ) as record:
         result = reasoning.reason(
             task=task,
@@ -634,7 +743,7 @@ def run_pipeline(
         record.result = _reasoning_record(result, provenance)
     stage_runs.append(record.run)
     emit("reasoning_finished", **_reasoning_outcome(result, provenance))
-    emit("run_finished", run_dir=run_dir, **_spent(stage_runs))
+    emit("run_finished", run_dir=run_dir, **_spent(stage_runs, saved.totals))
     return _answer(
         result,
         provenance=provenance,
@@ -646,6 +755,416 @@ def run_pipeline(
         names=names,
         run_dir=run_dir,
     )
+
+
+def resume_pipeline(
+    run_dir: Path,
+    documents: Mapping[str, str] | Sequence[str],
+    *,
+    params: Mapping[str, Any] | None = None,
+    api_base: str | None = None,
+    api_key: str | None = None,
+    completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
+) -> Answer:
+    """Carry on the run in ``run_dir`` over its ``documents``, as :func:`r3con.resume`
+    says, reusing what :func:`_read_saved` reads back, and holding the folder
+    (:func:`r3con.runs.run_lock`) while it reads and writes there. It runs under the
+    settings the run recorded where they shape what it computes, the reasoning turns
+    and the window's margin, and under the current ones for concurrency and resends.
+    """
+    document_names, texts = names_and_texts(documents)
+    run_dir = _run_of(run_dir)
+    _refuse_finished(run_dir)
+    if not (run_dir / "documents.json").is_file():
+        raise FileNotFoundError(
+            f"{run_dir}: this run predates resume: it has no documents.json to check "
+            "the documents against."
+        )
+    with _readable(run_dir):
+        manifest = _read_json(run_dir / "manifest.json")
+        task, read_prompts = manifest["task"], manifest["sources"]["prompts"]
+        margin = manifest["settings"]["window_margin_percent"]
+        turns = manifest["settings"]["reasoning_max_turns"]
+        config = _run_config(manifest)
+        names = _names(run_dir, _read_json(run_dir / "ids.json"))
+        digests = _read_json(run_dir / "documents.json")
+        run_documents = {name: digests[id_] for id_, name in names.items()}
+    _refuse_other_documents(run_dir, run_documents, fingerprints(document_names, texts))
+    if params is not None:
+        register_credentials(params, completion)
+        if masked_values(params) != config.params:
+            raise ValueError(
+                f"{run_dir}: these params are not the run's: resume runs with its own, "
+                "and takes them only for the real value of each credential its "
+                f"manifest saved as {MASK}."
+            )
+        config = config.model_copy(update={"params": dict(params)})
+    with _readable(run_dir):
+        recorded = run_dir / "splits.json"
+        splits = (
+            Splits.restored(texts, _read_json(recorded))
+            if recorded.is_file()
+            else Splits(texts, model=config.model, margin_percent=margin)
+        )
+    check_prompts(config)
+    _refuse_moved_prompts(run_dir, config.prompts, read_prompts)
+    caps = {
+        **settings_snapshot(reasoning_max_turns=turns),
+        "window_margin_percent": splits.margin_percent,
+    }
+    refuse_masked(config.params, api_base=api_base, api_key=api_key)
+    llm_kwargs = _llm_kwargs(
+        config.params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        cancel=cancel,
+    )
+    with run_lock(run_dir):
+        # It may have finished while this resume waited to hold its folder.
+        _refuse_finished(run_dir)
+        with _readable(run_dir):
+            saved = _read_saved(run_dir, list(names), config.relevance_rounds, splits)
+        task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
+        reopen_for_resume(task_logger, caps)
+        splits.log_to(task_logger)
+        return _build_and_answer(
+            task=task,
+            texts=texts,
+            names=names,
+            config=config,
+            caps=caps,
+            llm_kwargs=llm_kwargs,
+            splits=splits,
+            task_logger=task_logger,
+            emit=EventRecorder(on_event, task_logger),
+            cancel=cancel,
+            reasoning_timeout_s=DEFAULT_EXEC_TIMEOUT_S,
+            saved=saved,
+        )
+
+
+def _refuse_finished(run_dir: Path) -> None:
+    """Refuse to resume the run in ``run_dir`` once it has finished.
+
+    Raises:
+        ValueError: if its reasoning finished.
+    """
+    if (run_dir / "reasoning" / "result.json").is_file():
+        raise ValueError(
+            f"{run_dir}: this run finished; ask it a new question with r3con.ask "
+            "instead."
+        )
+
+
+def _refuse_other_documents(
+    run_dir: Path, run: Mapping[str, str], given: Mapping[str, str]
+) -> None:
+    """Refuse ``given``, each document's fingerprint by its name, unless it is
+    ``run``, the run's, in its order.
+
+    Raises:
+        ValueError: naming the documents missing, extra or changed, or saying they are
+            in another order.
+    """
+    differences = {
+        "missing": [name for name in run if name not in given],
+        "extra": [name for name in given if name not in run],
+        "changed": [name for name in run if name in given and given[name] != run[name]],
+    }
+    if any(differences.values()):
+        listed = "; ".join(
+            f"{what} {_some(names)}" for what, names in differences.items() if names
+        )
+        raise ValueError(f"{run_dir}: these are not the run's documents: {listed}.")
+    if list(given) != list(run):
+        raise ValueError(
+            f"{run_dir}: these are the run's documents in another order; pass them in "
+            "its order, as its names.json lists them."
+        )
+
+
+def _some(names: Sequence[str], shown: int = 3) -> str:
+    """The first ``shown`` of ``names``, and how many more there are."""
+    listed = ", ".join(names[:shown])
+    more = len(names) - shown
+    return f"{listed} and {more} more" if more > 0 else listed
+
+
+def _refuse_moved_prompts(
+    run_dir: Path,
+    prompts: Mapping[PromptStage, str],
+    read: Mapping[str, str | None],
+) -> None:
+    """Refuse a resume whose ``prompts`` pins now resolve to other files than ``read``,
+    those the run read, as its manifest's ``sources`` names them.
+
+    Raises:
+        ValueError: naming each stage whose file moved.
+    """
+    moved = [
+        f"{stage} now reads {now}, not {read.get(stage)}"
+        for stage, now in prompt_sources(prompts).items()
+        if now != read.get(stage)
+    ]
+    if moved:
+        raise ValueError(
+            f"{run_dir}: the run's prompts resolve to other files than it read: "
+            f"{'; '.join(moved)}."
+        )
+
+
+def _read_saved(
+    run_dir: Path, document_ids: list[str], rounds: int, splits: Splits
+) -> _Saved:
+    """What the earlier attempts at the run in ``run_dir`` left that a resume reuses,
+    ``splits`` giving how many parts each call read a document in.
+
+    A finished stage's results are its ``result.json``'s. An unfinished one's come from
+    ``events.jsonl`` (:func:`r3con.runs.read_events`), each event checked as it is read
+    and the last one written for a result winning: a document's snippet in a round when
+    the events hold each of its parts, as many as that round read it in, and only while
+    every earlier round's are all there (:func:`_saved_snippets`); a parse when the
+    schema finished and the parse fits it. The events kept to replay are those that
+    reported a result reused, a finished stage's when they match its ``result.json``.
+    The lines and results it skips, which the resume computes again, are counted in one
+    warning.
+    """
+    events, unreadable = read_events(run_dir)
+    snippets, skipped = _saved_snippets(events, document_ids, rounds, splits)
+    parse_events, unfit = _validated(
+        events, "parsing_finished", _ParseEvent, document_ids
+    )
+    reported = {doc: (at, event) for at, doc, event in parse_events}
+    relevance_result = _finished(run_dir, "relevance")
+    schema_result = (
+        _finished(run_dir, "structuring/schema") if relevance_result else None
+    )
+    parsing_result = (
+        _finished(run_dir, "structuring/parsing") if schema_result else None
+    )
+    finished = [r for r in (relevance_result, schema_result, parsing_result) if r]
+    saved = _Saved(totals=[result["totals"] for result in finished])
+    replayed: list[int] = []
+    if relevance_result is None:
+        saved.snippets = {key: records for key, (records, _) in snippets.items()}
+        replayed += [at for _, ats in snippets.values() for at in ats]
+    else:
+        index = {id_: doc for doc, id_ in enumerate(document_ids)}
+        saved.relevance = _relevance(relevance_result["rounds"], index)
+        replayed += [
+            at
+            for (k, doc), (records, ats) in snippets.items()
+            if records == saved.relevance.records[k - 1][doc]
+            for at in ats
+        ]
+        skipped = 0
+    if schema_result is None:
+        skipped += unfit + len(reported)
+    else:
+        code = schema_result["schema_code"]
+        parse_cls = check_schema(code)
+        saved.proposal = ProposalResult(schema_code=code, parse_cls=parse_cls)
+        replayed += _reporting_schema(events, code)
+        if parsing_result is None:
+            saved.parses, fitting = _fitting_parses(reported, parse_cls)
+            replayed += fitting
+            skipped += unfit + len(reported) - len(saved.parses)
+        else:
+            saved.extraction = _extraction(parsing_result, parse_cls)
+            replayed += [
+                at
+                for doc, (at, event) in reported.items()
+                if (event.parse, event.provenance) == _parse_of(parsing_result, doc)
+            ]
+    if unreadable or skipped:
+        _log.warning(
+            "resuming %s: %d line(s) of events.jsonl don't parse, and %d saved "
+            "result(s) can't be reused, so are computed again",
+            run_dir,
+            unreadable,
+            skipped,
+        )
+    saved.events = [events[at] for at in sorted(replayed)]
+    n = len(document_ids)
+    saved.reused = {
+        "relevance": [
+            n if saved.relevance is not None else sum(k == r for k, _ in saved.snippets)
+            for r in range(1, rounds + 1)
+        ],
+        "schema": int(saved.proposal is not None),
+        "parsing": n if saved.extraction is not None else len(saved.parses),
+    }
+    return saved
+
+
+def _finished(run_dir: Path, stage: str) -> dict[str, Any] | None:
+    """``stage``'s ``result.json``, when the stage finished."""
+    result = run_dir / stage / "result.json"
+    return _read_json(result) if result.is_file() else None
+
+
+class _DocumentEvent(BaseModel):
+    """What a resume reads of an event that reports a document's result."""
+
+    doc_id: str
+
+
+class _Quote(BaseModel):
+    """A snippet's quote, as a ``relevance_finished`` event gives it."""
+
+    text: str
+    start: StrictInt | None
+    end: StrictInt | None
+    match: Match | None
+    score: float | None
+
+
+class _SnippetEvent(_DocumentEvent):
+    round: StrictInt
+    part: StrictInt | None
+    summary: str
+    quotes: list[_Quote]
+    provenance: list[str]
+
+
+class _ParseEvent(_DocumentEvent):
+    parse: dict[str, Any]
+    provenance: list[str]
+
+
+_Event = TypeVar("_Event", bound=_DocumentEvent)
+
+
+def _validated(
+    events: list[dict[str, Any]],
+    kind: str,
+    model: type[_Event],
+    document_ids: list[str],
+) -> tuple[list[tuple[int, int, _Event]], int]:
+    """Each of ``events`` of type ``kind`` that ``model`` reads and that names one of
+    ``document_ids``, with its position and its document's index, in order; and how
+    many others of that type there are."""
+    index = {id_: doc for doc, id_ in enumerate(document_ids)}
+    read: list[tuple[int, int, _Event]] = []
+    of_kind = [(at, event) for at, event in enumerate(events) if event["type"] == kind]
+    for at, event in of_kind:
+        try:
+            checked = model.model_validate(event)
+        except ValidationError:
+            continue
+        if checked.doc_id in index:
+            read.append((at, index[checked.doc_id], checked))
+    return read, len(of_kind) - len(read)
+
+
+def _saved_snippets(
+    events: list[dict[str, Any]],
+    document_ids: list[str],
+    rounds: int,
+    splits: Splits,
+) -> tuple[dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]], int]:
+    """Each document's snippet in each round that ``events`` hold whole, by round and
+    document index, with the positions of the events that reported its parts: each of
+    the parts that round read it in, as ``splits`` records them; and kept only while
+    every earlier round's snippets are all there, since a round reads the one before,
+    and only when written after them. Also how many of those events or snippets it
+    leaves out."""
+    read, unusable = _validated(
+        events, "relevance_finished", _SnippetEvent, document_ids
+    )
+    found: dict[tuple[int, int], dict[str, tuple[int, _SnippetEvent]]] = {}
+    for at, doc, event in read:
+        id_ = event.doc_id if event.part is None else f"{event.doc_id}.{event.part}"
+        found.setdefault((event.round, doc), {})[id_] = (at, event)
+    whole: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]] = {}
+    for (k, doc), parts in found.items():
+        ids = part_ids(document_ids[doc], splits.parts_read(doc, relevance_call(k)))
+        if 1 <= k <= rounds and parts.keys() == set(ids):
+            reported = [parts[id_] for id_ in ids]
+            whole[(k, doc)] = (
+                [_snippet(id_, event) for id_, (_, event) in zip(ids, reported)],
+                [at for at, _ in reported],
+            )
+    # A round's snippets hold only while the round before is whole, and only those
+    # written after it: an earlier attempt's were read over a round since redone.
+    kept: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]] = {}
+    latest = -1
+    for k in range(1, rounds + 1):
+        this = {
+            key: g for key, g in whole.items() if key[0] == k and min(g[1]) > latest
+        }
+        kept.update(this)
+        if len(this) < len(document_ids):
+            break
+        latest = max(at for _, ats in this.values() for at in ats)
+    return kept, unusable + len(found) - len(kept)
+
+
+def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
+    """The snippet ``event`` reports, as its document's part ``id_``."""
+    quotes = [
+        Quote(text=q.text, start=q.start, end=q.end, match=q.match, score=q.score)
+        for q in event.quotes
+    ]
+    return SnippetRecord(
+        id=id_, summary=event.summary, quotes=quotes, provenance=event.provenance
+    )
+
+
+def _reporting_schema(events: list[dict[str, Any]], schema_code: str) -> list[int]:
+    """The position of the last ``schema_finished`` among ``events`` that reported
+    ``schema_code``, if one did."""
+    reported = [
+        at
+        for at, event in enumerate(events)
+        if event["type"] == "schema_finished"
+        and event.get("schema_code") == schema_code
+    ]
+    return reported[-1:]
+
+
+def _fitting_parses(
+    reported: Mapping[int, tuple[int, _ParseEvent]], parse_cls: type[BaseModel]
+) -> tuple[dict[int, tuple[BaseModel, list[str]]], list[int]]:
+    """Each of the ``reported`` parses, by document index, that fits ``parse_cls``, read
+    as JSON, as it was written, with the ids it used; and the positions of their
+    events."""
+    parses: dict[int, tuple[BaseModel, list[str]]] = {}
+    positions: list[int] = []
+    for doc, (at, event) in reported.items():
+        try:
+            parse = parse_cls.model_validate_json(json.dumps(event.parse))
+        except ValidationError:
+            continue
+        parses[doc] = (parse, event.provenance)
+        positions.append(at)
+    return parses, positions
+
+
+def _extraction(result: Mapping[str, Any], parse_cls: type[BaseModel]) -> ParseResult:
+    """What the parsing stage's ``result.json``, ``result``, holds, its parse read as
+    JSON into ``parse_cls``."""
+    return ParseResult(
+        parse=parse_cls.model_validate_json(json.dumps(result["parsed"])),
+        source_docs=result["source_docs"],
+        provenance=result["provenance"],
+    )
+
+
+def _parse_of(result: Mapping[str, Any], doc: int) -> tuple[dict[str, Any], list[str]]:
+    """Document ``doc``'s parse and the ids it used, as the parsing stage's
+    ``result.json``, ``result``, holds them among every document's."""
+    parsed, sources = result["parsed"], result["source_docs"]
+    records = {
+        name: [
+            r for r, at in zip(parsed[name], sources[name], strict=True) if at == doc
+        ]
+        for name in sources
+    }
+    return records, result["provenance"][doc]
 
 
 def read_representation(run_dir: Path) -> Representation:
@@ -769,13 +1288,12 @@ def _readable(folder: Path) -> Iterator[None]:
 
 def _read_built(run_dir: Path) -> Representation:
     manifest = _read_json(run_dir / "manifest.json")
-    model = manifest.get("litellm_model") or manifest["config"]["model"]
     names, relevance = _names_and_relevance(run_dir)
     parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
     schema = _read_json(run_dir / "structuring" / "schema" / "result.json")
     return Representation(
         run_dir=run_dir,
-        config=RunConfig.model_validate({**manifest["config"], "model": model}),
+        config=_run_config(manifest),
         names=names,
         relevance=relevance,
         schema_code=schema["schema_code"],
@@ -785,16 +1303,28 @@ def _read_built(run_dir: Path) -> Representation:
     )
 
 
+def _run_config(manifest: Mapping[str, Any]) -> RunConfig:
+    """The config a run's ``manifest`` records, its model the string litellm was called
+    with, or, for a run recorded before r3con kept that, the bare name."""
+    model = manifest.get("litellm_model") or manifest["config"]["model"]
+    return RunConfig.model_validate({**manifest["config"], "model": model})
+
+
 def _names_and_relevance(run_dir: Path) -> tuple[dict[str, str], RelevantContext]:
     """Each document's name by its id, in document order, and every round's snippets,
     as ``run_dir`` holds them."""
     ids: dict[str, int] = _read_json(run_dir / "ids.json")
+    rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
+    return _names(run_dir, ids), _relevance(rounds, ids)
+
+
+def _names(run_dir: Path, ids: Mapping[str, int]) -> dict[str, str]:
+    """Each document's name by its id, in document order, as ``run_dir`` holds them,
+    ``ids`` giving each id's position, as its ``ids.json`` does."""
     names_file = run_dir / "names.json"
     # A run folder written before names.json existed: its names are positions.
     recorded = _read_json(names_file) if names_file.is_file() else ids
-    rounds = _read_json(run_dir / "relevance" / "result.json")["rounds"]
-    names = {id_: str(recorded[id_]) for id_ in sorted(ids, key=ids.__getitem__)}
-    return names, _relevance(rounds, ids)
+    return {id_: str(recorded[id_]) for id_ in sorted(ids, key=ids.__getitem__)}
 
 
 def _relevance(rounds: list[dict[str, Any]], ids: dict[str, int]) -> RelevantContext:

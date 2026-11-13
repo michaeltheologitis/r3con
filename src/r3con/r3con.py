@@ -22,7 +22,8 @@ behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
-:func:`ask` reruns only reasoning over a finished run, for a new question, and
+:func:`ask` reruns only reasoning over a finished run, for a new question,
+:func:`resume` carries on a run that failed or was stopped from where it was, and
 :func:`trace` builds a saved answer's provenance again, under any rule, calling no
 model.
 
@@ -70,6 +71,7 @@ from r3con.pipeline import (
     names_and_texts,
     read_answer,
     read_representation,
+    resume_pipeline,
     run_pipeline,
 )
 from r3con.provenance import DEFAULT_RULE, Provenance
@@ -318,6 +320,81 @@ def ask(
     )
 
 
+def resume(
+    run_dir: str | Path,
+    documents: Mapping[str, str] | Sequence[str],
+    *,
+    params: dict[str, Any] | None = None,
+    api_key: str | None = None,
+    api_base: str | None = None,
+    completion: Callable[..., Any] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    cancel: threading.Event | None = None,
+) -> Answer:
+    """Carry on a run that failed or was stopped from where it was, computing only what
+    it lacks, in its own folder.
+
+    A stage that finished is taken as its ``result.json`` holds it, its files left as
+    they are. An unfinished one reuses each document's result the run saved in
+    ``events.jsonl`` (each relevance snippet a round wrote, all its parts there, and
+    each parse) and computes the rest, as the run would have, under its question,
+    config and document ids; reasoning always runs. The folder keeps one record of the
+    whole run: an unfinished stage's ``calls.json`` keeps the earlier calls before the
+    new ones, ``events.jsonl`` adds the resume's events, the manifest lists each resume
+    under ``resumes``, and ``run_finished`` totals every stage. A call the run had made
+    when it was killed outright, rather than failing or being cancelled, is not in its
+    stage's ``calls.json``, nor in the totals; its result, when its events hold it, is
+    reused all the same. Lines of ``events.jsonl`` or saved results it can't use are
+    computed again, and a warning counts them.
+
+    A run or resume holds its folder while it writes there (``run.lock``,
+    :func:`r3con.runs.run_lock`), so a run still going, or another resume, is not
+    resumed meanwhile.
+
+    Args:
+        run_dir: the run's folder, as the note on its exception names it.
+        documents: the run's documents, as :func:`run` took them, in the same order:
+            each is checked against the fingerprint the run recorded.
+        params: only to pass again the real value of each credential among the run's
+            params, which its manifest saved as ``REDACTED`` (:mod:`r3con.masking`):
+            otherwise the run's own, and anything else in them is refused.
+        api_key, api_base, completion: as in :func:`run`.
+        on_event: as in :func:`run`, called with the resume's events: ``run_started``;
+            ``run_resumed``, whose ``reused`` gives how many results each stage reuses
+            (``relevance``, per round, ``schema``, 0 or 1, and ``parsing``); then the
+            ``relevance_finished``, ``schema_finished`` and ``parsing_finished`` events
+            that reported the results it reuses, as the folder saved them, their
+            ``time`` the original's, in the order written, which ``events.jsonl`` does
+            not get twice; then the events of what it computes, as a run's.
+        cancel: as in :func:`run`; a cancelled resume can be resumed in turn.
+
+    Returns:
+        An :class:`Answer`, as :func:`run` returns it.
+
+    Raises:
+        FileNotFoundError: if ``run_dir`` is not a run folder, if it predates resume,
+            or if a prompt version it pins has no file.
+        ValueError: if the run finished, if ``documents`` are not the run's or not in
+            its order, if a prompt it pins now resolves to another file than it read,
+            if ``params`` are not the run's, if a param it would send holds
+            ``REDACTED``, or if a file in its folder is not as this r3con writes it.
+        RuntimeError: if a run or resume is going in its folder.
+        Each of these is raised in one line, before the folder is written to and before
+        any request. Anything the stages raise, as for :func:`run`.
+    """
+    load_dotenv(find_dotenv(usecwd=True))
+    return resume_pipeline(
+        Path(run_dir),
+        documents,
+        params=params,
+        api_base=api_base,
+        api_key=api_key,
+        completion=completion,
+        on_event=on_event,
+        cancel=cancel,
+    )
+
+
 def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
     """The provenance of the answer ``source`` saved, its trail walked under ``rule``
     (:mod:`r3con.provenance`), built from the files of its folder alone.
@@ -366,6 +443,7 @@ __all__ = [
     "Cancelled",
     "ask",
     "read_documents",
+    "resume",
     "run",
     "trace",
     "unique_names",
