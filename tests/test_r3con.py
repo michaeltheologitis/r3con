@@ -1,5 +1,6 @@
 import errno
 import importlib.metadata
+import itertools
 import json
 import logging
 import os
@@ -1645,7 +1646,8 @@ def test_a_resume_reports_what_it_reuses_then_the_events_that_reported_it(
     replayed = [
         event
         for event in before
-        if event["type"] in ("relevance_finished", "schema_finished")
+        if event["type"]
+        in ("relevance_finished", "documents_pruned", "schema_finished")
         or (event["type"] == "parsing_finished" and event["doc_id"] != calder)
     ]
     assert rest[: len(replayed)] == replayed
@@ -1710,6 +1712,70 @@ def test_a_snippet_holding_other_line_separators_is_reused(
     assert [r for r in requests if r[0] == "relevance"] == [
         ("relevance", line) for line in LAST_THREE
     ]
+
+
+def dunmore_silent_after_round_1(request) -> str:
+    """A relevance reply: a note on the document, but none on Dunmore's memo after
+    round 1, which prunes it."""
+    if reading("Dunmore memo", later_round=True)(request):
+        return ""
+    return f"Notes on {first_line(request)}."
+
+
+def reading_in_round(line: str, round_: int):
+    """Whether a relevance request reads the document whose first line is ``line`` in
+    round ``round_``, from 2, counting its reads in later rounds as they come."""
+    later = itertools.count(2)
+    return lambda request: (
+        reading(line, later_round=True)(request) and next(later) == round_
+    )
+
+
+UNPRUNED = [line for line in MEMOS_BY_NAME.values() if line != "Dunmore memo"]
+
+
+@pytest.mark.parametrize(
+    ("rounds", "stage", "when", "resent"),
+    [
+        (
+            2,
+            "parsing",
+            reading("Calder memo"),
+            [
+                ("parsing", "Calder memo"),
+                ("parsing", "Easton memo"),
+                ("reasoning", None),
+            ],
+        ),
+        (
+            4,
+            "relevance",
+            reading_in_round("Calder memo", 4),
+            [
+                ("relevance", "Calder memo"),
+                ("relevance", "Easton memo"),
+                ("schema", None),
+                *[("parsing", line) for line in UNPRUNED],
+                ("reasoning", None),
+            ],
+        ),
+    ],
+    ids=["in-parsing", "in-relevance-round-4"],
+)
+def test_a_resume_prunes_what_the_run_pruned_and_never_reads_or_parses_it(
+    answering_llm, one_worker, tmp_path, rounds, stage, when, resent
+):
+    llm = answering_llm.answers(relevance=dunmore_silent_after_round_1)
+    whole = finished_run(
+        llm, tmp_path / "whole", MEMOS_BY_NAME, relevance_rounds=rounds
+    )
+    replies = {**ANSWERING, "relevance": dunmore_silent_after_round_1}
+    llm.answers(**{stage: failing_once(when, replies[stage])})
+    run_dir = failed_run(llm, tmp_path / "failed", relevance_rounds=rounds)
+    answer, requests = resumed(llm, run_dir)
+    assert requests == resent
+    assert as_named(answer) == as_named(whole)
+    assert answer.answer == "; ".join(UNPRUNED)
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

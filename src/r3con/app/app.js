@@ -97,6 +97,7 @@
    * @property {string | null} [id]
    * @property {string[]} ids
    * @property {Map<string, number>} indexes each document id's index
+   * @property {Set<number>} pruned the documents r3con pruned after round PRUNED_AFTER_ROUND, read in no later round nor parsed
    * @property {string | null} [lit]
    */
   /**
@@ -194,7 +195,7 @@
   /**
    * What r3con app gives of a run's folder, each file by its path there, as far as the page reads it.
    * @typedef {{ 'ids.json': Record<string, number>, 'names.json': Record<string, string>,
-   *   'relevance/result.json': { rounds: { snippets: Snippet[] }[] },
+   *   'relevance/result.json': { rounds: { snippets: Snippet[] }[], pruned?: string[] },
    *   'structuring/schema/result.json': { schema_code: string, thought: string | null },
    *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][] }
    * }} Representation
@@ -218,6 +219,7 @@
    *   | { type: 'relevance_started', round: number, doc_id: string }
    *   | { type: 'relevance_finished', round: number, doc_id: string, part: number | null, summary: string, quotes: Quote[],
    *       provenance: string[] }
+   *   | { type: 'documents_pruned', doc_ids: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
@@ -1657,6 +1659,8 @@
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
+  // r3con's PRUNED_AFTER_ROUND: a document whose summaries in it are all empty is read in no later round, nor parsed.
+  const PRUNED_AFTER_ROUND = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -2089,8 +2093,20 @@
     return [tokens !== null && `${fmtInt(tokens)} tokens`, usd !== null && fmtUsd(usd)].filter(Boolean);
   }
 
-  /** @param {Parse} parse */
-  const hasRecords = (parse) => Object.values(parse.parse).some((records) => records.length > 0);
+  // A live run has no parse of a document until it is parsed, nor ever of one r3con pruned.
+  /** @param {Parse | undefined} parse */
+  const hasRecords = (parse) => parse !== undefined && Object.values(parse.parse).some((records) => records.length > 0);
+
+  // Whether a run has a call, and so a node, at per-document node `id`: not past round PRUNED_AFTER_ROUND for a pruned document.
+  /** @param {Pick<Run, 'pruned'>} run @param {string} id */
+  function isRead(run, id) {
+    const [kind, d] = splitId(id);
+    return !isPerDocument(kind) || !run.pruned.has(d) || (isRound(kind) && roundOf(kind) <= PRUNED_AFTER_ROUND);
+  }
+
+  // The documents a run reads at a kind of per-document node.
+  /** @param {Pick<Run, 'docs' | 'pruned'>} run @param {PerDocumentKind} kind */
+  const docsReading = (run, kind) => range(run.docs.length).filter((d) => isRead(run, `${kind}-${d}`));
 
   // ---------- r3con app ----------
 
@@ -2326,6 +2342,7 @@
       rounds: SAMPLE.rounds.map((summaries, k) => inUnits(summaries, k + 1)),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
+      pruned: new Set(),
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       source: RECORDED_SOURCE,
@@ -2386,6 +2403,7 @@
       rounds: range(rounds).map(round),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
+      pruned: new Set(),
       calls: null,
       totals: null,
     };
@@ -2396,8 +2414,8 @@
   // It is planned for the rounds it asks for, unless its run_started event says it has others.
   /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @param {number} rounds @returns {Run} */
   function liveRun(question, model, endpoint, docs, rounds) {
-    /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'calls' | 'totals'>} */
-    const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], calls: null, totals: null };
+    /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'pruned' | 'calls' | 'totals'>} */
+    const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], pruned: new Set(), calls: null, totals: null };
     return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
@@ -2444,7 +2462,7 @@
     if (kind === 'answer') {
       // Only an answer that has landed is asked what it cites.
       const { summary_ids, parse_ids } = /** @type {Provenance} */ (answerAt(run, id).provenance);
-      return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
+      return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)].filter((node) => isRead(run, node));
     }
     if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${final}-${d}`);
     if (!isRound(kind)) return [];
@@ -2465,10 +2483,10 @@
     const [kind, ...rest] = node.split(':');
     const d = docIndex(run, rest[rest.length - 1]);
     if (d === undefined || !run.docs[d]) return null;
-    if (kind === 'parse') return run.parsed[d] ? `parsed-${d}` : null;
     if (kind === 'document') return docId(run.docs[d]);
-    const round = Number(rest[0]);
-    return run.rounds[round - 1]?.[d] ? `${roundKind(round)}-${d}` : null;
+    const id = kind === 'parse' ? `parsed-${d}` : `${roundKind(Number(rest[0]))}-${d}`;
+    const recorded = kind === 'parse' ? run.parsed[d] : run.rounds[Number(rest[0]) - 1]?.[d];
+    return recorded && isRead(run, id) ? id : null;
   }
 
   // r3con walks the trail from the answer, so a summary's first edge on it comes from the node nearest the answer.
@@ -3665,7 +3683,7 @@
     if (kind === 'answer') return [...eachRow(final), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
     const previous = previousRound(kind);
     if (!previous) return [];
-    const shown = [...fold.relevant].filter((j) => j !== i && summariesIn(run, previous)[j].summary);
+    const shown = [...fold.relevant].filter((j) => j !== i && summariesIn(run, previous)[j]?.summary);
     return shown.sort((a, b) => a - b).map((j) => `${previous}-${j}`);
   }
 
@@ -4590,7 +4608,7 @@
   function inputsOf(run, id) {
     const [kind, i] = splitId(id);
     /** @param {string} step @param {(j: number) => unknown} [keep] */
-    const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
+    const every = (step, keep = () => true) => range(run.docs.length).filter((j) => isRead(run, `${step}-${j}`) && keep(j)).map((j) => `${step}-${j}`);
     const final = finalRound(run);
     if (kind === 'parsed' || kind === 'schema') return every(final);
     if (kind === 'answer') return [...every(final), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
@@ -4636,14 +4654,14 @@
 
   /** @param {RunTab} tab @param {StageKind} kind */
   function showProgress(tab, kind) {
-    const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${tab.run.docs.length}`;
+    const progress = kind === 'schema' || kind === 'answer' ? '' : ` · ${settledCount(tab, kind)} of ${docsReading(tab.run, kind).length}`;
     tabStatus(tab, `running · ${phaseOf(kind)}${progress}`);
   }
 
   /** @param {Run} run @param {StageKind} kind */
   function stepLine(run, kind) {
     if (isRound(kind)) return `${roundName(kind)} · extracting relevance`;
-    return kind === 'parsed' ? `parsing ${plural(run.docs.length, 'document')}` : phaseOf(kind);
+    return kind === 'parsed' ? `parsing ${plural(docsReading(run, 'parsed').length, 'document')}` : phaseOf(kind);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
@@ -4724,6 +4742,12 @@
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
+  function sayPruned(tab, narr) {
+    const { size } = tab.run.pruned;
+    if (size) narr.log('sub', `${plural(size, 'document')} with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`);
+  }
+
+  /** @param {RunTab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
     const { run } = tab;
     sayReady(narr, run.answers[0].model, run.simulated, run.totals);
@@ -4753,10 +4777,13 @@
     const n = run.docs.length;
     const { calls } = run;
     // A recorded run's nodes settle in the order its calls finished; a simulated run's, in document order.
-    /** @param {PerDocumentKind} kind */
-    const finishOrder = (kind) => (calls ? range(n).sort((a, b) => calls[`${kind}-${a}`].step - calls[`${kind}-${b}`].step) : range(n));
+    /** @param {PerDocumentKind} kind @param {number[]} docs */
+    const finishOrder = (kind, docs) => (calls ? range(docs.length).sort((a, b) => calls[`${kind}-${docs[a]}`].step - calls[`${kind}-${docs[b]}`].step) : range(docs.length));
     /** @param {number} t0 @param {PerDocumentKind} kind */
-    const perDocument = (t0, kind) => stage(at, t0, finishOrder(kind), n, (i) => appear(tab, `${kind}-${i}`), (i) => settle(tab, narr, `${kind}-${i}`));
+    const perDocument = (t0, kind) => {
+      const docs = docsReading(run, kind);
+      return stage(at, t0, finishOrder(kind, docs), docs.length, (k) => appear(tab, `${kind}-${docs[k]}`), (k) => settle(tab, narr, `${kind}-${docs[k]}`));
+    };
     let t = TIMING.start;
 
     at(t, () => {
@@ -4782,6 +4809,7 @@
       t += TIMING.phaseGap;
       at(t, () => beginStage(tab, narr, kind));
       t = perDocument(t, kind);
+      if (roundOf(kind) === PRUNED_AFTER_ROUND) at(t, () => sayPruned(tab, narr));
     }
 
     t += TIMING.phaseGap;
@@ -4846,6 +4874,10 @@
         break;
       case 'relevance_finished':
         addSnippet(tab, narr, doc(event.doc_id), event);
+        break;
+      case 'documents_pruned':
+        run.pruned = new Set(docIndices(run, event.doc_ids));
+        sayPruned(tab, narr);
         break;
       case 'schema_started':
         beginStage(tab, narr, 'schema');
@@ -6558,7 +6590,7 @@
       'manifest.json': isObject,
       'ids.json': recordOf(isCount),
       'names.json': recordOf(isPath),
-      'relevance/result.json': { rounds: [{ snippets: [SNIPPET], [OTHER_KEYS]: anything }], [OTHER_KEYS]: anything },
+      'relevance/result.json': { rounds: [{ snippets: [SNIPPET], [OTHER_KEYS]: anything }], 'pruned?': ['string'], [OTHER_KEYS]: anything },
       'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
       'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
     },
@@ -6605,6 +6637,7 @@
       rounds: r['relevance/result.json'].rounds.map(({ snippets }, k) => summaries(snippets, k + 1)),
       schema: { code: schema.schema_code, thought: schema.thought ?? '' },
       parsed: docs.map((_, d) => ({ parse: parseOf(d), provenance: docIndices(indexed, provenance[d]) })),
+      pruned: new Set(docIndices(indexed, r['relevance/result.json'].pruned ?? [])),
       answers: [own],
       calls: null,
       totals,

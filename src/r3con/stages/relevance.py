@@ -21,6 +21,14 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
   the whole history. The reply adds ``provenance_ids``, the ids of the shown snippets
   it used. With nothing to show, the first-round prompt is used instead.
 
+A document whose round-2 snippet is empty, every part's, is **pruned** after round 2
+(:attr:`RelevantContext.pruned`): no later round reads it, its snippet there empty, and
+parsing does not parse it (:mod:`r3con.stages.structuring.parsing`). An empty round-1
+snippet alone prunes nothing, since round 2 may bring the document back once the
+others are known; with fewer than two rounds nothing is pruned. The other documents'
+round-2 snippets may still cite its round-1 snippet, so the answer's trail can reach it
+through them.
+
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
 null or empty summary keeps no quotes. Later stages read the summaries alone; the quotes
@@ -43,7 +51,7 @@ earlier rounds are kept for inspection and for the answer's trail back through t
 from __future__ import annotations
 
 import random
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -70,6 +78,7 @@ _log = get_logger("relevance")
 
 _ID_HEX_DIGITS = 6
 _REWRITE = "Write the summary of the same document again"
+PRUNED_AFTER_ROUND = 2
 
 Snippet = str | list[str]
 """A document's relevance snippet, or, for a document read in parts, one per part."""
@@ -123,8 +132,32 @@ class RelevantContext:
             for parts in self._final_round()
         ]
 
+    @property
+    def pruned(self) -> list[int]:
+        """The documents pruned after round 2, by index, in order: those whose round-2
+        snippet is empty, every part's (:func:`says_nothing`). None with fewer than two
+        rounds."""
+        if len(self.records) < PRUNED_AFTER_ROUND:
+            return []
+        round_ = self.records[PRUNED_AFTER_ROUND - 1]
+        return [d for d, parts in enumerate(round_) if says_nothing(parts)]
+
     def _final_round(self) -> list[list[SnippetRecord]]:
         return self.records[-1] if self.records else []
+
+
+def says_nothing(parts: Iterable[SnippetRecord]) -> bool:
+    """Whether a document's snippet in a round is empty, every part's."""
+    return not any(part.summary for part in parts)
+
+
+def unread(parts: Iterable[SnippetRecord]) -> list[SnippetRecord]:
+    """A pruned document's snippet in a round that does not read it: an empty one under
+    each of its ``parts``' ids in the round before."""
+    return [
+        SnippetRecord(id=part.id, summary="", quotes=[], provenance=[])
+        for part in parts
+    ]
 
 
 def draw_document_ids(n: int) -> list[str]:
@@ -385,11 +418,11 @@ def surface_relevance(
     """Surface the relevant context over ``rounds`` synchronous rounds.
 
     Round 1 writes each document's snippet from the task + document alone; each later
-    round rewrites every document given the *previous round's* snippets of the OTHER
-    documents (never its own). Returns a :class:`RelevantContext` holding every round's
-    snippet records. ``rounds=1`` = independent round-1 only; ``rounds < 1`` = no
-    relevance snippets at all (no records — a deliberate "no-relevance" run). An empty
-    ``documents`` → empty results.
+    round rewrites every document but those pruned after round 2 given the *previous
+    round's* snippets of the OTHER documents (never its own). Returns a
+    :class:`RelevantContext` holding every round's snippet records. ``rounds=1`` =
+    independent round-1 only; ``rounds < 1`` = no relevance snippets at all (no records
+    — a deliberate "no-relevance" run). An empty ``documents`` → empty results.
 
     ``document_ids`` names each document, one distinct id each
     (:func:`draw_document_ids`). ``prompts`` and ``max_attempts`` are as in
@@ -401,10 +434,14 @@ def surface_relevance(
     other parts: the others' block holds the other documents only, a split one's
     snippets listed separately under their part ids.
 
+    A document pruned after round 2 (:attr:`RelevantContext.pruned`) is not read in a
+    later round: its snippet there is empty, under its round-2 ids (:func:`unread`), and
+    reports nothing.
+
     ``emit`` reports ``relevance_started`` before each document is read in a round, and
-    ``relevance_finished`` for each of its final parts once it is read
-    (:func:`r3con.pipeline.run_pipeline` lists their fields). It is called from worker
-    threads.
+    ``relevance_finished`` for each of its final parts once it is read; once round 2 is
+    in, ``documents_pruned`` (:func:`r3con.pipeline.run_pipeline` lists their fields).
+    It is called from worker threads.
 
     ``saved`` holds snippets an earlier attempt at the run read, by round and document
     index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
@@ -431,20 +468,22 @@ def surface_relevance(
     reader = splits if splits is not None else Splits(documents, model=model)
 
     def run_round(
-        prev: list[list[SnippetRecord]], round_idx: int
+        prev: list[list[SnippetRecord]], round_idx: int, pruned: Collection[int]
     ) -> list[list[SnippetRecord]]:
-        """Rewrite every document's relevance snippet in parallel. ``prev`` is the frozen
-        previous-round set (no snippets in round 1)."""
+        """Rewrite every document's relevance snippet in parallel, but the ``pruned``
+        ones'. ``prev`` is the frozen previous-round set (no snippets in round 1)."""
         _log.info(
             "round %d/%d · %d doc(s) (≤%d parallel)",
             round_idx,
             rounds,
-            len(documents),
+            len(documents) - len(pruned),
             max_workers,
         )
         shown = {r.id: r.summary for parts in prev for r in parts if r.summary}
 
         def one(i: int, _document: str) -> list[SnippetRecord]:
+            if i in pruned:
+                return unread(prev[i])
             if (records := saved.get((round_idx, i))) is not None:
                 return records
             # Others-only: document i sees the previous round's snippets of the OTHER
@@ -484,7 +523,7 @@ def surface_relevance(
             return records
 
         result = parallel_map(one, documents, max_workers=max_workers)
-        n_nonempty = sum(1 for parts in result if any(r.summary for r in parts))
+        n_nonempty = sum(1 for parts in result if not says_nothing(parts))
         _log.info(
             "round %d/%d done · %d/%d doc(s) had a relevant snippet",
             round_idx,
@@ -494,8 +533,18 @@ def surface_relevance(
         )
         return result
 
-    records = [run_round([[] for _ in documents], 1)]
+    records = [run_round([[] for _ in documents], 1, ())]
+    pruned: list[int] = []
     for r in range(2, rounds + 1):
         # only the previous round feeds in
-        records.append(run_round(records[-1], r))
+        records.append(run_round(records[-1], r, set(pruned)))
+        if r == PRUNED_AFTER_ROUND:
+            pruned = RelevantContext(records=records).pruned
+            _log.info(
+                "%d/%d doc(s) pruned: nothing relevant in round %d",
+                len(pruned),
+                len(documents),
+                r,
+            )
+            emit("documents_pruned", doc_ids=[document_ids[i] for i in pruned])
     return RelevantContext(records=records)

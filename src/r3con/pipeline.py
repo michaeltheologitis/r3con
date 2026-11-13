@@ -5,12 +5,14 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
 1. **surfacing relevance** (:mod:`r3con.stages.relevance`) — each document gets a
    task-conditioned **relevance snippet**, rebuilt over ``relevance_rounds`` synchronous
    rounds; from round 2 on, each document is re-read in light of the *other* documents'
-   previous snippets. The collection of them is the **relevant context**, and
-   it is what every later stage reads.
+   previous snippets, and one whose round-2 snippet is empty is pruned: read no more.
+   The collection of them is the **relevant context**, and it is what every later
+   stage reads.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
    from the task and the relevant context
-   (:mod:`r3con.stages.structuring.schema`), then **parse** every document, in
-   parallel, into instances of it (:mod:`r3con.stages.structuring.parsing`).
+   (:mod:`r3con.stages.structuring.schema`), then **parse** every document but the
+   pruned ones, in parallel, into instances of it
+   (:mod:`r3con.stages.structuring.parsing`).
 3. **reasoning** (:mod:`r3con.stages.reasoning`) — answer over the merged parse and
    the relevant context: in one completion (``reasoning: direct``), or in a multi-turn
    sandboxed Python loop (``reasoning: coding``, and a direct run whose prompt does not
@@ -79,6 +81,7 @@ from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
 from r3con.stages.relevance import (
+    PRUNED_AFTER_ROUND,
     RelevantContext,
     SnippetRecord,
     citable_ids,
@@ -86,6 +89,7 @@ from r3con.stages.relevance import (
     join_parts,
     part_ids,
     relevance_call,
+    says_nothing,
     surface_relevance,
 )
 from r3con.stages.structuring.parsing import ParseResult, check_schema, parse_documents
@@ -216,9 +220,9 @@ class Answer:
       name is ``list(documents.values())[i]``); a document read in parts has
       its parts' notes joined. A document that contributes nothing is an empty string,
       which is a real result rather than a failure.
-    - ``structured_context`` — the merged parse: the per-task schema filled from every document,
-      as plain JSON-able data. Each record carries a ``document`` key naming the id of the
-      document it came from, as reasoning saw it.
+    - ``structured_context`` — the merged parse: the per-task schema filled from every
+      document parsed, as plain JSON-able data. Each record carries a ``document`` key
+      naming the id of the document it came from, as reasoning saw it.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
       most characteristic artifact of the method: it is what the question was decided to
       be *about*.
@@ -243,7 +247,8 @@ class Answer:
       ids of the final-round relevance snippets its parse used, its own document's
       among them when it helped: each a document's id, or ``<id>.<k>`` for part ``k``
       of a document read in parts in that round, combined across a document's parts
-      as in ``relevance_provenance``.
+      as in ``relevance_provenance``; none for a document relevance pruned, which is
+      not parsed.
     - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
       ``source_docs`` with each index replaced by that document's id, so it lines up
       with ``source_docs`` by position. A record parsed from one part of a document read
@@ -434,6 +439,10 @@ def run_pipeline(
       ``quotes`` as the snippet record holds them, and the ids of the previous round's
       snippets it used, ``provenance``. A part refused as too long and cut further is
       no event.
+    - ``documents_pruned``, once round 2 is in, when ``rounds`` is 2 or more:
+      ``doc_ids``, the documents whose round-2 snippets are all empty, in document
+      order, which no later round reads and parsing does not parse, so they get no
+      more ``relevance_*`` events and no ``parsing_*`` ones.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
@@ -605,6 +614,7 @@ def _build_and_answer(
             record.result = {
                 "n_rounds": rounds,
                 "n_docs": len(texts),
+                "pruned": [document_ids[i] for i in relevance.pruned],
                 "rounds": [
                     {
                         "round": k + 1,
@@ -659,7 +669,7 @@ def _build_and_answer(
             thought=record.result["thought"],
         )
 
-    # --- Stage 2b: structuring — parse every document, in parallel. ---
+    # --- Stage 2b: structuring — parse every document but the pruned, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing %d doc(s)", len(texts))
     extraction = saved.extraction
     if extraction is None:
@@ -687,6 +697,7 @@ def _build_and_answer(
                 splits=splits,
                 emit=emit,
                 saved=saved.parses,
+                pruned=relevance.pruned,
                 **llm_kwargs,
             )
             record.result = {
@@ -996,7 +1007,8 @@ def _read_saved(
     the events hold each of its parts, as many as that round read it in, and only while
     every earlier round's are all there (:func:`_saved_snippets`); a parse when the
     schema finished and the parse fits it. The events kept to replay are those that
-    reported a result reused, a finished stage's when they match its ``result.json``.
+    reported a result reused, a finished stage's when they match its ``result.json``,
+    the ``documents_pruned`` that reported a finished relevance's pruning among them.
     The lines and results it skips, which the resume computes again, are counted in one
     warning.
     """
@@ -1028,6 +1040,8 @@ def _read_saved(
             if records == saved.relevance.records[k - 1][doc]
             for at in ats
         ]
+        pruned = [document_ids[doc] for doc in saved.relevance.pruned]
+        replayed += _last_reporting(events, "documents_pruned", doc_ids=pruned)
         skipped = 0
     if schema_result is None:
         skipped += unfit + len(reported)
@@ -1035,7 +1049,7 @@ def _read_saved(
         code = schema_result["schema_code"]
         parse_cls = check_schema(code)
         saved.proposal = ProposalResult(schema_code=code, parse_cls=parse_cls)
-        replayed += _reporting_schema(events, code)
+        replayed += _last_reporting(events, "schema_finished", schema_code=code)
         if parsing_result is None:
             saved.parses, fitting = _fitting_parses(reported, parse_cls)
             replayed += fitting
@@ -1137,9 +1151,10 @@ def _saved_snippets(
     """Each document's snippet in each round that ``events`` hold whole, by round and
     document index, with the positions of the events that reported its parts: each of
     the parts that round read it in, as ``splits`` records them; and kept only while
-    every earlier round's snippets are all there, since a round reads the one before,
-    and only when written after them. Also how many of those events or snippets it
-    leaves out."""
+    every earlier round's snippets are all there, but those of the documents pruned
+    after round 2, which no later round reads, since a round reads the one before, and
+    only when written after them. Also how many of those events or snippets it leaves
+    out."""
     read, unusable = _validated(
         events, "relevance_finished", _SnippetEvent, document_ids
     )
@@ -1160,14 +1175,21 @@ def _saved_snippets(
     # written after it: an earlier attempt's were read over a round since redone.
     kept: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]] = {}
     latest = -1
+    pruned: set[int] = set()
     for k in range(1, rounds + 1):
         this = {
-            key: g for key, g in whole.items() if key[0] == k and min(g[1]) > latest
+            key: g
+            for key, g in whole.items()
+            if key[0] == k and key[1] not in pruned and min(g[1]) > latest
         }
         kept.update(this)
-        if len(this) < len(document_ids):
+        if len(this) + len(pruned) < len(document_ids):
             break
-        latest = max(at for _, ats in this.values() for at in ats)
+        latest = max((at for _, ats in this.values() for at in ats), default=latest)
+        if k == PRUNED_AFTER_ROUND:
+            pruned = {
+                doc for (_, doc), (parts, _) in this.items() if says_nothing(parts)
+            }
     return kept, unusable + len(found) - len(kept)
 
 
@@ -1182,14 +1204,15 @@ def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
     )
 
 
-def _reporting_schema(events: list[dict[str, Any]], schema_code: str) -> list[int]:
-    """The position of the last ``schema_finished`` among ``events`` that reported
-    ``schema_code``, if one did."""
+def _last_reporting(
+    events: list[dict[str, Any]], kind: str, **fields: Any
+) -> list[int]:
+    """The position of the last event of type ``kind`` among ``events`` that reported
+    ``fields``, if one did."""
     reported = [
         at
         for at, event in enumerate(events)
-        if event["type"] == "schema_finished"
-        and event.get("schema_code") == schema_code
+        if event["type"] == kind and fields.items() <= event.items()
     ]
     return reported[-1:]
 

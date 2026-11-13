@@ -363,10 +363,11 @@ def resume(
         on_event: as in :func:`run`, called with the resume's events: ``run_started``;
             ``run_resumed``, whose ``reused`` gives how many results each stage reuses
             (``relevance``, per round, ``schema``, 0 or 1, and ``parsing``); then the
-            ``relevance_finished``, ``schema_finished`` and ``parsing_finished`` events
-            that reported the results it reuses, as the folder saved them, their
-            ``time`` the original's, in the order written, which ``events.jsonl`` does
-            not get twice; then the events of what it computes, as a run's.
+            ``relevance_finished``, ``documents_pruned``, ``schema_finished`` and
+            ``parsing_finished`` events that reported the results it reuses, as the
+            folder saved them, their ``time`` the original's, in the order written,
+            which ``events.jsonl`` does not get twice; then the events of what it
+            computes, as a run's.
         cancel: as in :func:`run`; a cancelled resume can be resumed in turn.
 
     Returns:
