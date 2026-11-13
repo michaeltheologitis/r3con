@@ -64,10 +64,9 @@ RESUME_MASKED_ADVICE = (
     "pass --api-key or --base-url in place of a masked `api_key` or `api_base`; any "
     "other masked param can be passed again only through r3con.resume's `params`"
 )
-# What a command exits with when its input is refused before anything is sent, when
-# it fails on the way, and when it is interrupted, as a shell's Ctrl-C is.
 EXIT_REFUSED = 2
 EXIT_FAILED = 1
+# 128 + SIGINT, as shells report Ctrl-C.
 EXIT_INTERRUPTED = 130
 
 
@@ -348,9 +347,9 @@ def _read_sources(sources: Sequence[str]) -> dict[str, str]:
 
 def _carry_on(run_dir: Path, args: argparse.Namespace) -> None:
     """Say how to carry on the run in ``run_dir`` once it stopped, if a resume can
-    (:func:`r3con.pipeline.resumable_folder`): ``r3con resume`` over the same sources
-    and ``--base-url``, quoted so that the line pastes, an ``--api-key`` named but never
-    shown."""
+    (:func:`r3con.pipeline.resumable_folder`): ``r3con resume`` over the same sources,
+    ``--base-url`` and ``--doc-workers``, quoted so that the line pastes, an
+    ``--api-key`` named but never shown."""
     try:
         resumable_folder(run_dir)
     except (FileNotFoundError, ValueError):
@@ -358,6 +357,8 @@ def _carry_on(run_dir: Path, args: argparse.Namespace) -> None:
     command = ["r3con", "resume", str(run_dir), *args.documents]
     if args.base_url:
         command += ["--base-url", args.base_url]
+    if args.doc_workers is not None:
+        command += ["--doc-workers", str(args.doc_workers)]
     key = " (and your --api-key)" if args.api_key else ""
     _error(f"to carry on: {shlex.join(command)}{key}")
 

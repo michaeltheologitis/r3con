@@ -736,13 +736,11 @@ def test_a_stopped_run_says_how_to_carry_on_and_the_command_pasted_finishes_it(
     assert len(answering.requests) - sent == 2
 
 
-def test_the_command_to_carry_on_keeps_the_base_url_and_names_but_hides_the_key(
+def test_the_command_to_carry_on_keeps_its_options_and_names_but_hides_the_key(
     answering, capsys
 ):
-    run_dir, err = stopped_run(
-        answering, capsys, "--base-url", GATEWAY, "--api-key", KEY
-    )
-    options = ("--base-url", GATEWAY)
+    options = ("--base-url", GATEWAY, "--doc-workers", "2")
+    run_dir, err = stopped_run(answering, capsys, *options, "--api-key", KEY)
     assert err.splitlines()[-1] == (
         f"{carrying_on(run_dir, str(MEMOS), options=options)} (and your --api-key)"
     )

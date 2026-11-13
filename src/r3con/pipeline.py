@@ -859,7 +859,7 @@ def resume_pipeline(
         RunFolderBusy: if another run or resume holds its folder.
         Anything the stages raise, as :func:`run_pipeline` says.
     """
-    run_dir, task, texts, names, config, caps, splits = resumable
+    config, splits = resumable.config, resumable.splits
     refuse_masked(config.params, api_base=api_base, api_key=api_key)
     llm_kwargs = _llm_kwargs(
         config.params,
@@ -868,19 +868,21 @@ def resume_pipeline(
         completion=completion,
         cancel=cancel,
     )
+    run_dir = resumable.run_dir
     with run_lock(run_dir):
         _refuse_finished(run_dir)
+        document_ids = list(resumable.names)
         with _readable(run_dir):
-            saved = _read_saved(run_dir, list(names), config.relevance_rounds, splits)
+            saved = _read_saved(run_dir, document_ids, config.relevance_rounds, splits)
         task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
-        reopen_for_resume(task_logger, caps)
+        reopen_for_resume(task_logger, resumable.caps)
         splits.log_to(task_logger)
         return _build_and_answer(
-            task=task,
-            texts=texts,
-            names=names,
+            task=resumable.task,
+            texts=resumable.texts,
+            names=resumable.names,
             config=config,
-            caps=caps,
+            caps=resumable.caps,
             llm_kwargs=llm_kwargs,
             splits=splits,
             task_logger=task_logger,
