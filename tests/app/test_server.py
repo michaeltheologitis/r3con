@@ -438,8 +438,8 @@ def shut_down_with_a_stream_open(
 ) -> tuple[str, dict[str, Any]]:
     """Over a real connection: start a run and read its stream's first event; once
     ``model`` holds its first call, call ``shut_down``, and read on until the server's
-    shutdown closes the stream, after its grace. Returns the run's id and that first
-    event."""
+    shutdown ends the stream, whole, though the run is still going. Returns the run's
+    id and that first event."""
     with http_client(url) as http:
         run_id = http.post("/api/runs", json=run_body()).json()["run_id"]
         with http.stream("GET", f"/api/runs/{run_id}/events") as response:
@@ -447,10 +447,9 @@ def shut_down_with_a_stream_open(
             first = next(line for line in lines if line.startswith("data: "))
             assert model.called.wait(GATE_TIMEOUT_SECONDS)
             shut_down()
-            # Cut short, so without the end of its body.
-            with contextlib.suppress(httpx2.RemoteProtocolError):
-                for _ in lines:
-                    pass
+            # Read to the end of its body: uvicorn cutting it short raises here.
+            for _ in lines:
+                pass
     return run_id, json.loads(first.removeprefix("data: "))
 
 

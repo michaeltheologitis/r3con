@@ -125,14 +125,16 @@ a reload reads.
 The server stops in one place, its shutdown, whether ``serve``'s ``stop``, Ctrl-C or
 SIGTERM asks it to. As the shutdown begins, it refuses a new run or ask (503) and
 cancels every one still going, before it waits for open connections such as the page's
-event stream. Once they have closed, it waits for those runs and asks to end, so each
-finishes its call in flight and writes its run folder, with ``run_failed`` in its
-``events.jsonl``; a page whose stream has already closed does not see it. The whole
-shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app`` ``QUIT_SECONDS``,
-after which ``r3con app`` ends the process, saying so if a run or ask is still going:
-a call in flight is cut off, and its run folder left without ``run_failed``. A second
-Ctrl-C ends that wait at once, and ``r3con app`` quits there and then, leaving those
-runs and asks as they are.
+event stream. A stream whose run or ask has not ended ``STREAMS_CLOSE_SECONDS`` into the
+shutdown then ends, without its last event, before uvicorn's grace for open connections
+runs out and cuts it off. Once they have closed, it waits for those runs and asks to
+end, so each finishes its call in flight and writes its run folder, with ``run_failed``
+in its ``events.jsonl``; a page whose stream has already closed does not see it. The
+whole shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app``
+``QUIT_SECONDS``, after which ``r3con app`` ends the process, saying so if a run or ask
+is still going: a call in flight is cut off, and its run folder left without
+``run_failed``. A second Ctrl-C ends that wait at once, and ``r3con app`` quits there
+and then, leaving those runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -243,6 +245,9 @@ ENCRYPTED_ZIP = "it's encrypted"
 TOO_MANY_ENTRIES = f"it holds more than {MAX_ZIP_ENTRIES:,} entries"
 TOO_MANY_BYTES = f"its documents unzip to more than {MAX_ZIP_MEGABYTES} MB"
 SHUTDOWN_GRACE_SECONDS = 1
+# Inside that grace, past which uvicorn cancels a stream, printing a traceback; long
+# enough for a run cancelled between model calls to send its last event first.
+STREAMS_CLOSE_SECONDS = SHUTDOWN_GRACE_SECONDS / 2
 WORKERS_EXIT_SECONDS = 60
 # Enough for a run between model calls to stop and write its folder, and still prompt.
 QUIT_SECONDS = 2
@@ -475,11 +480,14 @@ STORED_KEY: TypeAdapter[SecretStr] = TypeAdapter(Secret)
 @dataclass
 class Job:
     """One run's or ask's events so far, and the event that cancels it. Only the event
-    loop's thread touches ``events`` and ``wake``; its worker reads ``cancel``."""
+    loop's thread touches ``events``, ``wake`` and ``closed``; its worker reads
+    ``cancel``."""
 
     events: list[dict[str, Any]] = field(default_factory=list)
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     cancel: threading.Event = field(default_factory=threading.Event)
+    # Set as the server's shutdown ends its streams, whether or not the job has ended.
+    closed: bool = False
 
 
 @dataclass
@@ -706,7 +714,7 @@ async def _stream(job: Job) -> AsyncIterator[str]:
         while sent < len(job.events):
             yield f"data: {json.dumps(job.events[sent])}\n\n"
             sent += 1
-        if _ended(job):
+        if _ended(job) or job.closed:
             return
         await wake.wait()
 
@@ -1008,6 +1016,13 @@ def _cancel_jobs(state: ServerState) -> None:
             job.cancel.set()
 
 
+def _close_streams(state: ServerState) -> None:
+    for jobs in state.jobs.values():
+        for job in jobs.values():
+            job.closed = True
+            job.wake.set()
+
+
 async def _error(request: Request, error: Exception) -> Response:
     # Starlette types every handler as taking any Exception; this one is HTTPException's.
     assert isinstance(error, HTTPException)
@@ -1124,6 +1139,8 @@ class _Server(uvicorn.Server):
         # One step on the loop, where every request is handled: no job starts after.
         state.stopping = True
         _cancel_jobs(state)
+        loop = asyncio.get_running_loop()
+        loop.call_later(STREAMS_CLOSE_SECONDS, _close_streams, state)
         await super().shutdown(sockets)
         workers = [worker for worker in state.workers if worker.is_alive()]
         while (
