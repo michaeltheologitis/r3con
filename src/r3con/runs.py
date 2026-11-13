@@ -369,6 +369,11 @@ def read_events(folder: Path) -> tuple[list[dict[str, Any]], int]:
     return events, unreadable
 
 
+class RunFolderBusy(RuntimeError):
+    """A run or resume holds the run folder another one was to write to
+    (:func:`run_lock`)."""
+
+
 @contextmanager
 def run_lock(folder: Path) -> Iterator[None]:
     """Hold run folder ``folder`` for one run or resume at a time while it writes there:
@@ -377,12 +382,12 @@ def run_lock(folder: Path) -> Iterator[None]:
     file system can't lock, it warns and goes on without.
 
     Raises:
-        RuntimeError: in one line, if another run or resume holds it.
+        RunFolderBusy: in one line, if another run or resume holds it.
     """
     try:
         held = FileLock(folder / _LOCK, timeout=0).acquire()
     except Timeout:
-        raise RuntimeError(
+        raise RunFolderBusy(
             f"{folder}: a run or resume is going in it; carry it on once that one has "
             "stopped."
         ) from None

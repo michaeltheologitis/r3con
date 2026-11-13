@@ -767,66 +767,72 @@ def resume_pipeline(
     completion: Callable[..., Any] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     cancel: threading.Event | None = None,
+    advice: str = PARAMS_ADVICE,
 ) -> Answer:
     """Carry on the run in ``run_dir`` over its ``documents``, as :func:`r3con.resume`
     says, reusing what :func:`_read_saved` reads back, and holding the folder
     (:func:`r3con.runs.run_lock`) while it reads and writes there. It runs under the
     settings the run recorded where they shape what it computes, the reasoning turns
     and the window's margin, and under the current ones for concurrency and resends.
+    Each ``ValueError`` it refuses with before it writes or sends anything is a
+    :class:`ResumeRefused`; a refusal for a masked param gives ``advice``
+    (:func:`refuse_masked`).
     """
-    document_names, texts = names_and_texts(documents)
-    run_dir = _run_of(run_dir)
-    _refuse_finished(run_dir)
-    if not (run_dir / "documents.json").is_file():
-        raise FileNotFoundError(
-            f"{run_dir}: this run predates resume: it has no documents.json to check "
-            "the documents against."
-        )
-    with _readable(run_dir):
-        manifest = _read_json(run_dir / "manifest.json")
-        task, read_prompts = manifest["task"], manifest["sources"]["prompts"]
-        margin = manifest["settings"]["window_margin_percent"]
-        turns = manifest["settings"]["reasoning_max_turns"]
-        config = _run_config(manifest)
-        names = _names(run_dir, _read_json(run_dir / "ids.json"))
-        digests = _read_json(run_dir / "documents.json")
-        run_documents = {name: digests[id_] for id_, name in names.items()}
-    _refuse_other_documents(run_dir, run_documents, fingerprints(document_names, texts))
-    if params is not None:
-        register_credentials(params, completion)
-        if masked_values(params) != config.params:
-            raise ValueError(
-                f"{run_dir}: these params are not the run's: resume runs with its own, "
-                "and takes them only for the real value of each credential its "
-                f"manifest saved as {MASK}."
-            )
-        config = config.model_copy(update={"params": dict(params)})
-    with _readable(run_dir):
-        recorded = run_dir / "splits.json"
-        splits = (
-            Splits.restored(texts, _read_json(recorded))
-            if recorded.is_file()
-            else Splits(texts, model=config.model, margin_percent=margin)
-        )
-    check_prompts(config)
-    _refuse_moved_prompts(run_dir, config.prompts, read_prompts)
-    caps = {
-        **settings_snapshot(reasoning_max_turns=turns),
-        "window_margin_percent": splits.margin_percent,
-    }
-    refuse_masked(config.params, api_base=api_base, api_key=api_key)
-    llm_kwargs = _llm_kwargs(
-        config.params,
-        api_base=api_base,
-        api_key=api_key,
-        completion=completion,
-        cancel=cancel,
-    )
-    with run_lock(run_dir):
-        # It may have finished while this resume waited to hold its folder.
+    with _refusing():
+        document_names, texts = names_and_texts(documents)
+        run_dir = _run_of(run_dir)
         _refuse_finished(run_dir)
+        if not (run_dir / "documents.json").is_file():
+            raise FileNotFoundError(
+                f"{run_dir}: this run predates resume: it has no documents.json to "
+                "check the documents against."
+            )
         with _readable(run_dir):
-            saved = _read_saved(run_dir, list(names), config.relevance_rounds, splits)
+            manifest = _read_json(run_dir / "manifest.json")
+            task, read_prompts = manifest["task"], manifest["sources"]["prompts"]
+            margin = manifest["settings"]["window_margin_percent"]
+            turns = manifest["settings"]["reasoning_max_turns"]
+            config = _run_config(manifest)
+            names = _names(run_dir, _read_json(run_dir / "ids.json"))
+            digests = _read_json(run_dir / "documents.json")
+            run_documents = {name: digests[id_] for id_, name in names.items()}
+        given = fingerprints(document_names, texts)
+        _refuse_other_documents(run_dir, run_documents, given)
+        if params is not None:
+            register_credentials(params, completion)
+            if masked_values(params) != config.params:
+                raise ValueError(
+                    f"{run_dir}: these params are not the run's: resume runs with its "
+                    "own, and takes them only for the real value of each credential "
+                    f"its manifest saved as {MASK}."
+                )
+            config = config.model_copy(update={"params": dict(params)})
+        with _readable(run_dir):
+            recorded = run_dir / "splits.json"
+            splits = (
+                Splits.restored(texts, _read_json(recorded))
+                if recorded.is_file()
+                else Splits(texts, model=config.model, margin_percent=margin)
+            )
+        check_prompts(config)
+        _refuse_moved_prompts(run_dir, config.prompts, read_prompts)
+        caps = {
+            **settings_snapshot(reasoning_max_turns=turns),
+            "window_margin_percent": splits.margin_percent,
+        }
+        refuse_masked(config.params, api_base=api_base, api_key=api_key, advice=advice)
+        llm_kwargs = _llm_kwargs(
+            config.params,
+            api_base=api_base,
+            api_key=api_key,
+            completion=completion,
+            cancel=cancel,
+        )
+    with run_lock(run_dir):
+        with _refusing():
+            saved = _saved_unless_finished(
+                run_dir, list(names), config.relevance_rounds, splits
+            )
         task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
         reopen_for_resume(task_logger, caps)
         splits.log_to(task_logger)
@@ -844,6 +850,35 @@ def resume_pipeline(
             reasoning_timeout_s=DEFAULT_EXEC_TIMEOUT_S,
             saved=saved,
         )
+
+
+class ResumeRefused(ValueError):
+    """A resume refused before it wrote to the run folder or sent a request
+    (:func:`resume_pipeline`): the folder is not one it can carry on, or what it was
+    given is not the run's."""
+
+
+@contextmanager
+def _refusing() -> Iterator[None]:
+    """Raise each ``ValueError`` the block raises as a :class:`ResumeRefused`, its
+    message unchanged."""
+    try:
+        yield
+    except ResumeRefused:
+        raise
+    except ValueError as error:
+        raise ResumeRefused(str(error)) from error
+
+
+def _saved_unless_finished(
+    run_dir: Path, document_ids: list[str], rounds: int, splits: Splits
+) -> _Saved:
+    """What :func:`_read_saved` reads back of the run in ``run_dir``, once it is
+    checked again not to have finished, as it may have while the resume waited to hold
+    its folder."""
+    _refuse_finished(run_dir)
+    with _readable(run_dir):
+        return _read_saved(run_dir, document_ids, rounds, splits)
 
 
 def _refuse_finished(run_dir: Path) -> None:

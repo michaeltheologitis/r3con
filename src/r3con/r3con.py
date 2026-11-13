@@ -374,11 +374,13 @@ def resume(
     Raises:
         FileNotFoundError: if ``run_dir`` is not a run folder, if it predates resume,
             or if a prompt version it pins has no file.
-        ValueError: if the run finished, if ``documents`` are not the run's or not in
-            its order, if a prompt it pins now resolves to another file than it read,
-            if ``params`` are not the run's, if a param it would send holds
-            ``REDACTED``, or if a file in its folder is not as this r3con writes it.
-        RuntimeError: if a run or resume is going in its folder.
+        ValueError: a :class:`~r3con.pipeline.ResumeRefused`, if the run finished, if
+            ``documents`` are not the run's or not in its order, if a prompt it pins
+            now resolves to another file than it read, if ``params`` are not the run's,
+            if a param it would send holds ``REDACTED``, or if a file in its folder is
+            not as this r3con writes it.
+        RuntimeError: a :class:`~r3con.runs.RunFolderBusy`, if a run or resume is going
+            in its folder.
         Each of these is raised in one line, before the folder is written to and before
         any request. Anything the stages raise, as for :func:`run`.
     """
