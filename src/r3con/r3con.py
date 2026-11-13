@@ -153,6 +153,12 @@ _INLINE = frozenset(
 )
 # What needs no space before it after an image's alt text.
 _NO_SPACE_BEFORE = frozenset(" \t\r\n.,;:!?)")
+# What Office writes into a picture's description it made up: a guess, not the author's.
+_OFFICE_DESCRIPTION_MARKERS = (
+    "Description automatically generated",
+    "Description generated with",
+    "AI-generated content may be incorrect",
+)
 # Where markdownify starts and ends a code block.
 _FENCE = "```"
 # bs4 warns that a page starting <?xml may be XML, and that one whose text looks like a
@@ -220,14 +226,18 @@ def _docx_text(name: str, docx: BinaryIO) -> str:
     mammoth turns its body into HTML, and markdownify that into Markdown: headings,
     lists and tables keep their shape, a table's first row is its header, and a tracked
     insertion stays while a deletion goes. The text is kept as written, its ``_`` and
-    ``*`` unescaped, but for a ``|`` in a table's cell. Images are left out. A file that
-    can't be read gives ``""``, and so does one with no text, which the caller then
-    drops: say so.
+    ``*`` unescaped, but for a ``|`` in a table's cell. A picture is its description,
+    put where it was as a web page's image is its alt text, unless Office wrote it
+    (:data:`_OFFICE_DESCRIPTION_MARKERS`). A file that can't be read gives ``""``, and
+    so does one with no text, which the caller then drops: say so.
     """
     try:
-        # An image converter that makes no element, so no image's bytes are read.
-        converted = mammoth.convert_to_html(docx, convert_image=lambda image: [])
-        text = _Markdown().convert(converted.value)
+        converted = mammoth.convert_to_html(
+            docx, convert_image=mammoth.images.img_element(_picture_attributes)
+        )
+        soup = BeautifulSoup(converted.value, "html.parser")
+        _images_as_text(soup)
+        text = _Markdown().convert_soup(soup)
     except Exception as e:  # noqa: BLE001 — one unreadable file, not a dead run
         _log.warning(
             "%s: not readable as a Word file (%s); skipping it", name, type(e).__name__
@@ -238,6 +248,15 @@ def _docx_text(name: str, docx: BinaryIO) -> str:
     if not text.strip():
         _log.warning("%s: no extractable text; skipping it", name)
     return text
+
+
+def _picture_attributes(picture: Any) -> dict[str, str]:
+    """A Word picture's ``<img>`` attributes beyond the alt text mammoth gives it from
+    the picture's description: an empty alt if Office wrote it, else none. With no
+    ``src``, no picture's bytes are read."""
+    description = picture.alt_text or ""
+    made_up = any(marker in description for marker in _OFFICE_DESCRIPTION_MARKERS)
+    return {"alt": ""} if made_up else {}
 
 
 def _html_text(name: str, html: BinaryIO) -> str:

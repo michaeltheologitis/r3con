@@ -29,7 +29,9 @@ from tests.app.bundle_check import encrypted_pdf
 from tests.documents import (
     CORRUPT_DOCX,
     paragraph,
+    picture,
     table,
+    text_run,
     write_docx,
     write_pdf,
 )
@@ -77,6 +79,8 @@ PLAIN_TEXT = b"Plain words, saved under the wrong name."
 # Curly quotes and a dash, which windows-1252 has and Latin-1 does not.
 QUOTED = "“Incidents” — 7, at Merrow’s site."
 NOT_A_WORD_FILE = "not readable as a Word file (BadZipFile)"
+# What a person wrote to describe a picture in a Word file.
+CHART_DESCRIPTION = "A chart of incidents by site"
 Q3_ADDRESS = "https://example.com/q3"
 # Deeper than markdownify can recurse: each level takes it at least one call.
 NESTED_DEEPER_THAN_RECURSION = sys.getrecursionlimit()
@@ -591,13 +595,52 @@ def test_a_table_nested_in_a_word_table_keeps_its_text(tmp_path):
     assert all(word in text for word in ["outer", "inner1", "inner2"])
 
 
-def test_a_word_files_image_leaves_nothing_in_the_text_not_even_its_description(
+@pytest.mark.parametrize(
+    ("description", "text"),
+    [
+        (CHART_DESCRIPTION, "Before the chart. A chart of incidents by site After."),
+        (
+            (
+                "A picture containing text, screenshot, font\n\n"
+                "Description automatically generated"
+            ),
+            "Before the chart. After.",
+        ),
+        (
+            "A close up of a logo\n\nDescription generated with high confidence",
+            "Before the chart. After.",
+        ),
+        (
+            "A bar chart of incidents\n\nAI-generated content may be incorrect.",
+            "Before the chart. After.",
+        ),
+        (None, "Before the chart. After."),
+    ],
+    ids=[
+        "written-by-a-person-kept",
+        "office-generated-dropped",
+        "office-generated-with-confidence-dropped",
+        "ai-generated-dropped",
+        "no-description-dropped",
+    ],
+)
+def test_a_word_files_picture_is_its_description_where_it_was_unless_office_wrote_it(
+    tmp_path, description: str | None, text: str
+):
+    docx = tmp_path / "report.docx"
+    runs = [text_run("Before the chart."), picture(description), text_run(" After.")]
+    write_docx(docx, xml=f"<w:p>{''.join(runs)}</w:p>")
+    assert read_documents(docx) == {"report.docx": text}
+
+
+def test_a_word_files_picture_gives_its_description_without_its_bytes_being_read(
     tmp_path,
 ):
     docx = tmp_path / "report.docx"
-    write_docx(docx, ["Before the chart."], image=True)
-    [text] = read_documents(docx).values()
-    assert text == "Before the chart."
+    pictured = f"<w:p>{picture(CHART_DESCRIPTION)}</w:p>"
+    # Its bytes left out of the file, so reading them would fail.
+    write_docx(docx, xml=paragraph("By site:") + pictured, picture_bytes=False)
+    assert read_documents(docx) == {"report.docx": f"By site:\n\n{CHART_DESCRIPTION}"}
 
 
 @pytest.mark.parametrize(
