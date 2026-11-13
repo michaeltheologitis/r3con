@@ -154,6 +154,13 @@ class Splits:
             raise _not_fitting(self._documents, f"it cuts documents[{doc}] at {cuts}.")
         self._cuts[doc] = cuts
 
+    def parts_read(self, doc: int, call: str) -> int:
+        """How many parts ``call`` (``"relevance-r2"``, ``"parse"``) read
+        ``documents[doc]`` in, as recorded: 1 unless the record says it read it in
+        parts."""
+        entry = self._record["documents"].get(str(doc))
+        return 1 if entry is None else entry["parts"].get(call, 1)
+
     def parts(self, doc: int) -> list[str]:
         """``documents[doc]`` cut at its cuts so far: ``[documents[doc]]`` until it is
         split."""

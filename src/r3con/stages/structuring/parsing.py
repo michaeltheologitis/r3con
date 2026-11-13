@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import ast
 import typing
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, get_args, get_origin
 
@@ -413,6 +413,7 @@ def parse_documents(
     workers: int | None = None,
     splits: Splits | None = None,
     emit: Emit = no_events,
+    saved: Mapping[int, tuple[BaseModel, list[str]]] | None = None,
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
@@ -436,6 +437,10 @@ def parse_documents(
     ``emit`` reports ``parsing_started`` and ``parsing_finished`` around each
     document's parse, all its parts' (:func:`r3con.pipeline.run_pipeline` lists their
     fields). It is called from worker threads.
+
+    ``saved`` holds parses an earlier attempt at the run made, each with the ids it
+    used, by document index (:func:`r3con.pipeline.resume_pipeline`): such a document is
+    not parsed again, and reports nothing.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per document, or ``max_attempts``
@@ -465,6 +470,8 @@ def parse_documents(
     _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
 
     def one(i: int, _document: str) -> tuple[BaseModel, list[str]]:
+        if saved and (parsed := saved.get(i)) is not None:
+            return parsed
         _log.info("parse doc %d/%d", i + 1, len(documents))
         emit("parsing_started", doc_id=document_ids[i])
         parts = reader.read_in_parts(

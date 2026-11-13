@@ -173,6 +173,20 @@ print(other)
 This reuses the information organized during the first run and only
 repeats the final reasoning step.
 
+#### Resume a Run
+
+If a run fails or is stopped partway, for example by a rate limit or a lost
+connection, `r3con.resume` carries it on from where it was, in the same folder.
+Give it the run's folder (the error names it) and the same documents:
+
+```python
+result = r3con.resume("logs/20261105T173546Z_bb4f0c37", docs)
+```
+
+It checks that the documents are the run's, reuses each result the run had
+saved, document by document, and computes only what is missing, then the final
+reasoning step.
+
 #### Provenance
 
 `result.provenance["quotes"]` lists the sentences the answer is based on.

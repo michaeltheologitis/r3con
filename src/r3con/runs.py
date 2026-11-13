@@ -19,7 +19,8 @@ Layout per ``logs/<run-folder>/``:
   (the file the config and each prompt came from), a ``settings`` block (the runtime
   knobs), and ``created``, when it was written. Written first, so a crashed task is
   still discoverable. The run label is **not** stored — it is recomputed from the
-  ``config`` block (:meth:`r3con.config.RunConfig.label`).
+  ``config`` block (:meth:`r3con.config.RunConfig.label`). Each resume of the run
+  (:func:`r3con.resume`) adds ``{time, r3con_version}`` to its ``resumes``.
 - ``ids.json`` — each document's id in this run, mapped to its 0-based index in
   ``documents``. Written with the manifest.
 - ``names.json`` — each document's id mapped to its name
@@ -62,7 +63,9 @@ Layout per ``logs/<run-folder>/``:
 - ``events.jsonl`` — the run's progress events (:class:`EventRecorder`), one JSON
   object per line, in the order and at the wall-clock time they happened, so the run
   can be replayed: each stage's start and finish, each document's (or part's) in
-  relevance and parsing, and the run's own start and its finish or failure.
+  relevance and parsing, and the run's own start and its finish or failure. A resume
+  appends its own, from its ``run_started`` and ``run_resumed`` on, and reads the
+  earlier ones back for the results they report.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
   is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
   run folder's name, ``events.jsonl`` (the ask's own events) and ``reasoning/`` as
@@ -70,7 +73,8 @@ Layout per ``logs/<run-folder>/``:
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that answered or raised an error, plus ``transcript.yaml`` where the stage writes
-one) and ``error.txt``, the traceback.
+one) and ``error.txt``, the traceback. A resume that finishes the stage keeps those
+calls in its ``calls.json``, before its own, and removes ``error.txt``.
 
 Error text is written with keys masked (:mod:`r3con.masking`): ``calls.json``'s
 ``error``, ``error.txt``, the ``error`` of ``run_failed`` and ``ask_failed`` in
@@ -301,6 +305,14 @@ class EventRecorder:
             )
             self._raised.add(raised)
 
+    def replay(self, event: Mapping[str, Any]) -> None:
+        """Hand ``event``, one this folder's ``events.jsonl`` already holds, to
+        ``on_event`` alone, as a copy, guarded as any other."""
+        with self._lock:
+            if self._on_event is not None:
+                copy = json.loads(json.dumps(event))
+                self._guarded("on_event", event["type"], self._on_event, copy)
+
 
 def _append_line(path: Path, line: str) -> None:
     with path.open("a", encoding="utf-8") as lines:
@@ -375,6 +387,27 @@ def write_manifest(
     if ask_of is not None:
         manifest["ask_of"] = ask_of
     return task_logger.write_json("manifest", manifest)
+
+
+def reopen_for_resume(task_logger: TaskLogger) -> None:
+    """Ready the run folder ``task_logger`` writes to for a resume (:func:`r3con.resume`):
+    its ``manifest.json`` adds the resume to its ``resumes``, with when it started and
+    under which r3con, and its ``events.jsonl`` ends its last line, should a kill have
+    cut that line short, so that the resume's events start on lines of their own."""
+    from r3con import __version__
+
+    manifest_file = task_logger.dir / "manifest.json"
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    resumed = {
+        "time": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+        "r3con_version": __version__,
+    }
+    manifest["resumes"] = [*manifest.get("resumes", []), resumed]
+    task_logger.write_json("manifest", manifest)
+    events = task_logger.dir / _EVENTS
+    written = events.read_bytes() if events.is_file() else b""
+    if written and not written.endswith(b"\n"):
+        _append_line(events, "")
 
 
 def fingerprints(document_ids: Sequence[str], texts: Sequence[str]) -> dict[str, str]:
@@ -454,7 +487,10 @@ class StageRun:
 
     ``add_step`` records one LLM call (or one turn of a multi-turn loop), and
     ``flush`` writes them. ``add_step`` is thread-safe, so calls fanned out across
-    documents in parallel can share one run.
+    documents in parallel can share one run. With ``resumed``, for a stage of a run that
+    carries on (:func:`r3con.resume`), it starts from the calls its folder's
+    ``calls.json`` holds, if it has one, so that its next flush and its totals keep
+    them.
     """
 
     def __init__(
@@ -463,14 +499,17 @@ class StageRun:
         stage: str,
         task_logger: TaskLogger,
         model: str | None = None,
+        resumed: bool = False,
     ) -> None:
         self.stage = stage
         self.task_logger = task_logger
         self.model = model
-        self.steps: list[StepRecord] = []
-        self._lock = threading.Lock()
         self.dir = task_logger.dir / stage
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.steps: list[StepRecord] = (
+            _earlier_steps(self.dir / "calls.json") if resumed else []
+        )
+        self._lock = threading.Lock()
 
     def add_step(
         self,
@@ -586,6 +625,52 @@ class StageRun:
         if last.response.get("content"):
             thread.append(last.response)
         return thread
+
+
+def _earlier_steps(calls: Path) -> list[StepRecord]:
+    """The steps an earlier attempt at the stage recorded in ``calls``, its
+    ``calls.json``: none when there is none, or when it can't be read, as when a kill
+    cut its writing short."""
+    if not calls.is_file():
+        return []
+    try:
+        return [
+            _step_of(call) for call in json.loads(calls.read_text(encoding="utf-8"))
+        ]
+    except (KeyError, TypeError, ValueError):
+        _log.warning("%s can't be read; its calls are left out of the totals", calls)
+        return []
+
+
+def _step_of(call: Mapping[str, Any]) -> StepRecord:
+    """The step a ``calls.json`` entry records, as :meth:`StageRun._write_calls` would
+    write it again."""
+    response = (
+        {}
+        if call["error"] is not None
+        else {
+            "role": "assistant",
+            "content": call["output"],
+            "finish_reason": call["finish_reason"],
+        }
+    )
+    if call["reasoning"] is not None:
+        response["reasoning"] = call["reasoning"]
+    return StepRecord(
+        step=call["step"],
+        kind=call["kind"],
+        messages=call["prompt"],
+        response=response,
+        tokens=call["tokens"],
+        usage=call["usage"],
+        served_model=call["served_model"],
+        fingerprint=call["fingerprint"],
+        usd=call["usd"],
+        sends=call["sends"],
+        resend_wait_seconds=call["resend_wait_seconds"],
+        seconds=call["seconds"],
+        error=call["error"],
+    )
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:

@@ -271,6 +271,17 @@ def test_restoring_a_record_that_does_not_fit_the_documents_fails_at_once_in_one
     assert "\n" not in str(refused.value)
 
 
+def test_parts_read_is_how_many_parts_the_record_says_a_call_read_a_document_in(
+    logger,
+):
+    splits = Splits([PARAGRAPHS, LOPSIDED], model=QWEN, task_logger=logger)
+    splits.read_in_parts(0, call="parse", rest=REST, send=Provider(700))
+    splits.read_in_parts(1, call="parse", rest=REST, send=Provider())
+    assert splits.parts_read(0, "parse") == len(splits.parts(0)) > 1
+    assert splits.parts_read(0, "relevance-r1") == 1
+    assert splits.parts_read(1, "parse") == 1
+
+
 def test_over_the_line_a_document_is_split_before_anything_is_sent(window, logger):
     provider = Provider()
     read(PARAGRAPHS, provider, model=window(500), task_logger=logger)

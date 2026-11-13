@@ -378,6 +378,7 @@ def surface_relevance(
     splits: Splits | None = None,
     max_attempts: int | None = None,
     emit: Emit = no_events,
+    saved: Mapping[tuple[int, int], list[SnippetRecord]] | None = None,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -403,6 +404,10 @@ def surface_relevance(
     ``relevance_finished`` for each of its final parts once it is read
     (:func:`r3con.pipeline.run_pipeline` lists their fields). It is called from worker
     threads.
+
+    ``saved`` holds snippets an earlier attempt at the run read, by round and document
+    index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
+    that round, and reports nothing.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -441,6 +446,8 @@ def surface_relevance(
         shown = {r.id: r.summary for parts in prev for r in parts if r.summary}
 
         def one(i: int, _document: str) -> list[SnippetRecord]:
+            if saved and (records := saved.get((round_idx, i))) is not None:
+                return records
             # Others-only: document i sees the previous round's snippets of the OTHER
             # documents, never its own (the document itself is the user message).
             own = {record.id for record in prev[i]}
