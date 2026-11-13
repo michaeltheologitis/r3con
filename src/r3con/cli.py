@@ -103,8 +103,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="Max documents processed concurrently within the run (default: 16, or "
-        "R3CON_DOC_WORKERS). Each document is one LLM call per relevance round "
-        "and one for parsing, so this is your main lever on endpoint load.",
+        "R3CON_DOC_WORKERS). Each document is at most one LLM call per relevance "
+        "round and one for parsing, so this is your main lever on endpoint load.",
     )
 
     run_cmd = sub.add_parser(

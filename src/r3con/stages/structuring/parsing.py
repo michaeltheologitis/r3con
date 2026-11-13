@@ -1,7 +1,9 @@
 """Stage 2, step 2 — parsing: read each document and fill instances of the per-task
 Pydantic schema.
 
-Each document is read whole, or in parts when it is too long for the model's window
+Every document is parsed but those relevance pruned
+(:attr:`r3con.stages.relevance.RelevantContext.pruned`), which get no call and no
+records. Each is read whole, or in parts when it is too long for the model's window
 (:mod:`r3con.splitting`). Parsing runs **one LLM call per document** (one per part of a
 document read in parts), all documents in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`):
@@ -391,7 +393,7 @@ class ParseResult:
       which document a fact came from.
     - ``provenance`` — for each document, aligned 1:1 with the documents, the ids of
       the notes its parse used, a document read in parts having its parts' ids
-      combined (:func:`r3con.stages.relevance.combine_parts`).
+      combined (:func:`r3con.stages.relevance.combine_parts`); none for a pruned one.
     """
 
     parse: BaseModel
@@ -415,16 +417,19 @@ def parse_documents(
     splits: Splits | None = None,
     emit: Emit = no_events,
     saved: Mapping[int, tuple[BaseModel, list[str]]] = MappingProxyType({}),
+    pruned: frozenset[int] = frozenset(),
     **llm_kwargs: Any,
 ) -> ParseResult:
     """Parse a corpus of documents into one merged ``Parse``.
 
-    Each document is read whole, or in parts when too long for the model's window, one
-    call per part; the documents are processed **in parallel** (bounded by ``workers`` /
-    :func:`r3con.settings.active_doc_workers`). Every call sends the request
-    :func:`parse_one_document` sends, built once for the corpus, so each document is
-    read with the cross-document context even though the calls are independent.
-    ``document_ids``, one per document, heads each document's notes with its id.
+    Each document but the ``pruned`` ones, by index, is read whole, or in parts when too
+    long for the model's window, one call per part; a pruned document is not read, and
+    has no records, cites nothing and reports nothing. The documents are processed **in
+    parallel** (bounded by ``workers`` / :func:`r3con.settings.active_doc_workers`).
+    Every call sends the request :func:`parse_one_document` sends, built once for the
+    corpus, so each document is read with the cross-document context even though the
+    calls are independent. ``document_ids``, one per document, heads each document's
+    notes with its id.
 
     The parts come from ``splits`` (built over ``documents``; ``None`` builds one), so
     parsing starts from any parts it already holds and may cut them further; it never
@@ -468,9 +473,18 @@ def parse_documents(
         document_ids=document_ids,
         prompt_version=prompt_version,
     )
-    _log.info("parsing %d doc(s) (≤%d parallel)", len(documents), max_workers)
+    _log.info(
+        "parsing %d doc(s), %d pruned (≤%d parallel)",
+        len(documents) - len(pruned),
+        len(pruned),
+        max_workers,
+    )
+
+    nothing = _empty_parse(parse_cls)
 
     def one(i: int, _document: str) -> tuple[BaseModel, list[str]]:
+        if i in pruned:
+            return nothing, []
         if (parsed := saved.get(i)) is not None:
             return parsed
         _log.info("parse doc %d/%d", i + 1, len(documents))

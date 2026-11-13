@@ -13,12 +13,13 @@ answering it is built *per question*, at the moment you ask:
 Three moves, in order:
 
 1. **surfacing relevance** — every document is read against the question and written up
-   as a **relevance snippet**; then re-read in light of the *other* documents' snippets.
-   Together they are the **relevant context**. Relevance is not a property a
-   document has; it is a relation between the document, the question, and the rest of
-   the collection, so it cannot be settled from a document in isolation.
+   as a **relevance snippet**; then re-read in light of the *other* documents' snippets,
+   until it is pruned for saying nothing. Together they are the **relevant context**.
+   Relevance is not a property a document has; it is a relation between the document,
+   the question, and the rest of the collection, so it cannot be settled from a
+   document in isolation.
 2. **structuring** — a Pydantic schema is proposed for exactly what this question needs,
-   then every document is parsed into instances of it.
+   then every document not pruned is parsed into instances of it.
 3. **reasoning** — one call answers over the structured records and the relevance
    snippets together; or, when the run asks for it or that prompt does not fit the
    model's window, the merged parse is loaded into a sandboxed Python runtime and an
