@@ -56,17 +56,21 @@ a reload reads.
   masking.
 - ``POST /api/documents/text?name=<file name>``, with the bytes of a file whose name
   ends in a suffix in ``r3con._EXTRACTORS`` as the body (422 for any other), a PDF, a
-  Word file or a web page, answers ``{text}``: its text as ``r3con.read_documents``
-  extracts it, which is ``""`` for a scan, a file with no text or one that can't be
-  read, as the server's log then says. The page sends each such file it is given here,
-  and reads other files itself.
+  Word file or a web page, answers ``{text, reason}``: its text as
+  ``r3con.read_documents`` extracts it, which is ``""`` for a scan, a file with no text
+  or one that can't be read, as the server's log then says; and, for a PDF with no
+  text, why: ``"no_text"`` if no page has any (a scan, likely), ``"password"`` if it
+  is encrypted and won't open, as with a password, or ``"unreadable"`` if pypdf can't
+  read it. ``reason`` is ``null`` otherwise. The page sends each such file it is given
+  here, and reads other files itself.
 - ``POST /api/documents/zip?name=<file name>``, with a zip's bytes as the body,
-  answers ``{files: [{name, size, text}], skipped}``. Its documents are the entries
-  ``r3con.read_documents``' folder walk would read, judged by their paths below the
-  one top folder the zip's files share, if they do, ``__MACOSX/`` aside: by suffix,
+  answers ``{files: [{name, size, text, reason}], skipped}``. Its documents are the
+  entries ``r3con.read_documents``' folder walk would read, judged by their paths below
+  the one top folder the zip's files share, if they do, ``__MACOSX/`` aside: by suffix,
   and with no Office lock file and nothing hidden, in a hidden folder or under
   ``__MACOSX/``. They are read in the walk's order, as that walk reads a file; each
-  is named by that path, and one with no text comes back with ``""``.
+  is named by that path, and one with no text comes back with ``""`` and, for a PDF,
+  its ``reason``, as above.
   ``skipped`` counts the files left out by their suffix, nested zips among them,
   which are never opened. A zip that is corrupt, encrypted, of more than
   ``MAX_ZIP_ENTRIES`` entries, or whose documents would unzip to more than
@@ -154,7 +158,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal, TypeVar
+from typing import Annotated, Any, BinaryIO, Literal, TypeVar
 from urllib.parse import urlsplit
 
 import keyring
@@ -752,16 +756,23 @@ async def forget_key(request: Request) -> Response:
     return JSONResponse(_key_status(state))
 
 
+def _document(name: str, file: BinaryIO) -> dict[str, Any]:
+    """``{text, reason}`` of the file called ``name``: its text as r3con reads it, and,
+    for a PDF, why it has none (``r3con._pdf_read``), else ``None``."""
+    if r3con._extractor(name) is not r3con._pdf_text:
+        return {"text": r3con._read_stream(name, file), "reason": None}
+    text, reason = r3con._pdf_read(name, file)
+    return {"text": text, "reason": reason}
+
+
 async def document_text(request: Request) -> Response:
     query = _valid(DocumentQuery.model_validate, dict(request.query_params))
-    extract = r3con._extractor(query.name)
-    if extract is None:
+    if r3con._extractor(query.name) is None:
         suffixes = ", ".join(r3con._EXTRACTORS)
         raise HTTPException(422, f"name: must end in one of {suffixes}")
     file = io.BytesIO(await request.body())
     # Extracting is CPU-bound: on the event loop, it would hold up every other request.
-    text = await run_in_threadpool(extract, query.name, file)
-    return JSONResponse({"text": text})
+    return JSONResponse(await run_in_threadpool(_document, query.name, file))
 
 
 def _below_shared_folder(paths: list[list[str]]) -> list[list[str]]:
@@ -825,8 +836,8 @@ def _read_entries(
             raise HTTPException(422, TOO_MANY_BYTES)
         # zipfile stops each entry at the size it claims, and fails its CRC if it lied.
         data = _refused_if_unreadable(name, partial(archive.read, entry))
-        text = r3con._read_stream(f"{name}/{entry.filename}", io.BytesIO(data))
-        unzipped.append({"name": "/".join(parts), "size": len(data), "text": text})
+        read = _document(f"{name}/{entry.filename}", io.BytesIO(data))
+        unzipped.append({"name": "/".join(parts), "size": len(data), **read})
     return unzipped
 
 

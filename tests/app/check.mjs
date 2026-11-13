@@ -282,12 +282,15 @@ const PDF_PADDING = 25000;
 // The Markdown r3con makes of report.docx below.
 const WORD_TEXT = 'Incidents by site:\n\n| Site | Incidents |\n| --- | --- |\n| Halloran | 7 |\n| Merrow | 3 |';
 const ZIPPED_TEXT = 'A memo that came in a zip.\n';
-// What memos.zip holds, all in one folder: a memo, a blank one, a .py the walk leaves out by its suffix, and hidden,
-// macOS and lock files the page leaves out unsaid.
+// A file named as a PDF that pypdf can't read.
+const BROKEN_PDF = '%PDF-1.4 truncated garbage';
+// What memos.zip holds, all in one folder: a memo, a blank one, a broken PDF, a .py the walk leaves out by its suffix,
+// and hidden, macOS and lock files the page leaves out unsaid.
 const ZIPPED_ENTRIES = {
   'memos/': '',
   'memos/01_zipped.txt': ZIPPED_TEXT,
   'memos/02_blank.txt': '',
+  'memos/03_broken.pdf': BROKEN_PDF,
   'memos/.DS_Store': 'x',
   '__MACOSX/memos/._01_zipped.txt': 'x',
   'memos/notes.py': "print('not a document')\n",
@@ -301,6 +304,7 @@ const DOCUMENT_SPECS = {
   '01_memo.pdf': { text: PDF_TEXT },
   '02_scan.pdf': {},
   '03_padded.pdf': { text: PADDED_TEXT, padding: PDF_PADDING },
+  '04_locked.pdf': { text: PDF_TEXT, password: 'secret' },
   'empty.docx': {},
   'report.docx': { blocks: ['Incidents by site:', [['Site', 'Incidents'], ['Halloran', '7'], ['Merrow', '3']]] },
   'memos.zip': { entries: ZIPPED_ENTRIES },
@@ -331,8 +335,11 @@ const NAMED_AT_MOST = 5;
 const EXTRACTIONS_AT_ONCE = 4;
 // Long enough for every request the page sends at once to reach a route that holds them.
 const ROUTED_MS = 300;
-const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
 const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
+// The page's PDF_NO_TEXT: why a PDF has no text, by the reason r3con app gives.
+const SCANNED = "No text: it's likely a scan, which needs OCR first.";
+const PASSWORD_PROTECTED = 'Password-protected: save a copy without the password.';
+const NOT_A_PDF = 'Not a readable PDF: it may be damaged.';
 const NEW_TAB = 'new tab';
 const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
 const DROP_FILES = 'drop files and folders here';
@@ -2175,6 +2182,7 @@ function writeDocuments(specs) {
 }
 
 const oldWord = () => ({ name: 'old.doc', mimeType: 'application/msword', buffer: Buffer.from(OLE2_START) });
+const brokenPdf = () => ({ name: '05_broken.pdf', mimeType: 'application/pdf', buffer: Buffer.from(BROKEN_PDF) });
 const oldPowerPoint = () => ({ name: 'old.ppt', mimeType: 'application/vnd.ms-powerpoint', buffer: Buffer.from(OLE2_START) });
 const filesError = (page) => page.$eval('#files-error', (el) => (el.hidden ? null : el.textContent));
 
@@ -6345,14 +6353,15 @@ async function livePdf(url) {
     const posts = postsOf(page);
     const memoPdf = documents['01_memo.pdf'];
     const padded = documents['03_padded.pdf'];
-    await page.setInputFiles('#file-input', [memoPdf, documents['02_scan.pdf'], padded]);
+    await page.setInputFiles('#file-input', [memoPdf, documents['02_scan.pdf'], padded, documents['04_locked.pdf'], brokenPdf()]);
     const two = await becomes(page, () => document.querySelectorAll('.node.doc').length === 2);
     await page.click('#tab-files');
     const listed = await removeNames(page);
     const error = await filesError(page);
-    const sentToApp = isDeepStrictEqual(posts, Array(3).fill('/api/documents/text'));
-    const scanRefused = error === `Not added: 02_scan.pdf. ${NO_TEXT_LAYER}` && isDeepStrictEqual(listed, ['remove 01_memo.pdf', 'remove 03_padded.pdf']);
-    const scanName = 'each PDF added goes to r3con app for its text, and a scan, with none, is refused as it is added, named, saying why';
+    const sentToApp = isDeepStrictEqual(posts, Array(5).fill('/api/documents/text'));
+    const refusals = `Not added: 02_scan.pdf. ${SCANNED} Not added: 04_locked.pdf. ${PASSWORD_PROTECTED} Not added: 05_broken.pdf. ${NOT_A_PDF}`;
+    const scanRefused = error === refusals && isDeepStrictEqual(listed, ['remove 01_memo.pdf', 'remove 03_padded.pdf']);
+    const scanName = "each PDF added goes to r3con app for its text, and a scan, one with a password and one that isn't a PDF are each refused as they are added, named, saying why";
     check('live', scanName, two && sentToApp && scanRefused, `${listed.join(', ')}; ${error}; ${posts.join(', ')}`);
 
     const shown = await openFileView(page, '01_memo.pdf');
@@ -6601,10 +6610,10 @@ async function liveZip(url) {
     const expected = {
       names: ['01_zipped.txt'],
       said: '1 file added; 1 skipped.',
-      error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: photos.zip. ${NO_DOCUMENTS}; 1 skipped.`,
+      error: `Not added: broken.zip. ${UNREADABLE_ZIP} Not added: 02_blank.txt. ${NO_TEXT} Not added: 03_broken.pdf. ${NOT_A_PDF} Not added: photos.zip. ${NO_DOCUMENTS}; 1 skipped.`,
     };
     const name =
-      "zips dropped on the panel are unpacked by r3con app: their documents are added by their paths below the folder they share, one with no text is refused, the files pane counts what was left out by its suffix, and a zip with no documents, or one r3con app can't open, is refused saying so";
+      "zips dropped on the panel are unpacked by r3con app: their documents are added by their paths below the folder they share, one with no text is refused, a PDF saying why, the files pane counts what was left out by its suffix, and a zip with no documents, or one r3con app can't open, is refused saying so";
     check('live', name, isDeepStrictEqual(pane, expected), JSON.stringify(pane));
     await page.click('#tab-chat');
     const started = runPosted(page);
@@ -6875,7 +6884,7 @@ async function liveRefusalsThenFailure(url) {
     await page.setInputFiles('#file-input', memo('first.txt', 'A first memo.\n'));
     await page.evaluate(() => document.getElementById('file-list').remove());
     release();
-    const expected = `Not added: 02_scan.pdf. ${NO_TEXT_LAYER} Not added: old.doc. ${OLD_WORD} Couldn't add those files.`;
+    const expected = `Not added: 02_scan.pdf. ${SCANNED} Not added: old.doc. ${OLD_WORD} Couldn't add those files.`;
     const kept = await becomes(page, (text) => document.getElementById('files-error').textContent === text, expected, LIVE_RUN_MS);
     check('live', "queued batches' refusals and a later failure to add all stay in the error line", kept, await filesError(page));
   });

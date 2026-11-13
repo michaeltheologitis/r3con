@@ -18,6 +18,7 @@
   /** @typedef {{ files: LoadedFile[], at: Map<string, Point> }} Removed What remove all took: the files, and where their nodes were. */
   /** @typedef {{ removed?: Removed, at?: Map<string, Point> }} FilesChange */
   /** @typedef {{ text: string } | { why: string }} FileRead A file's text, or why it can't be added. */
+  /** @typedef {{ text: string, reason: keyof typeof PDF_NO_TEXT | null }} Extracted A file's text from r3con app, and why a PDF has none. */
   /** @typedef {{ name: string, size: number } & FileRead} DocumentRead */
   /**
    * A file's documents, many for a zip, and how many files it left out by their suffix.
@@ -247,7 +248,7 @@
    * @property {(question: string) => string} nextRun
    * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
-   * @property {(file: File, noText: string) => Promise<FileRead>} extract
+   * @property {(file: File) => Promise<FileRead>} extract
    * @property {(file: File) => Promise<Unpacked>} unzip
    * @property {(question: string, files: LoadedFile[]) => Run} newRun
    * @property {(tab: RunTab, narr: Narrator) => void} play
@@ -1549,7 +1550,6 @@
   const MAX_SCROLL_PX = 15000000;
   const MAX_DRIFT_PX = 1000000;
   const JSON_INDENT = 2;
-  const PDF_SUFFIX = '.pdf';
   // Office's lock file for a document someone has open: ~$report.docx.
   const LOCK_FILE_PREFIX = '~$';
   // Where macOS's Finder puts each file's metadata in a zip it makes.
@@ -1682,8 +1682,15 @@
   const BROWSER_COULD_NOT_READ = "The browser couldn't read it.";
   // A refusal names this many files, then counts the rest.
   const NAMED_AT_MOST = 5;
-  const NO_TEXT_LAYER = "No text layer: a scanned PDF needs OCR first, or it isn't a readable PDF.";
   const NO_TEXT = "No text: it's empty or only images, or R3Con can't read it.";
+  // Why a PDF has no text, by the reason r3con app gives.
+  const PDF_NO_TEXT = {
+    no_text: "No text: it's likely a scan, which needs OCR first.",
+    password: 'Password-protected: save a copy without the password.',
+    unreadable: 'Not a readable PDF: it may be damaged.',
+  };
+  /** @param {Extracted['reason']} reason */
+  const noTextWhy = (reason) => (reason && PDF_NO_TEXT[reason]) ?? NO_TEXT;
   const FILES_LOCKED = "These are this tab's files. Press + for a new tab.";
   const NO_FILES = 'no files yet';
   const DROP_FILES = 'drop files and folders here';
@@ -5291,8 +5298,7 @@
 
   /** @param {File} file @returns {Promise<FileRead>} */
   async function readFile(file) {
-    if (hasSuffix(file, PDF_SUFFIX)) return mode.extract(file, NO_TEXT_LAYER);
-    if (EXTRACTED_SUFFIXES.some((suffix) => hasSuffix(file, suffix))) return mode.extract(file, NO_TEXT);
+    if (EXTRACTED_SUFFIXES.some((suffix) => hasSuffix(file, suffix))) return mode.extract(file);
     // A file that can't be read goes on to readText, which reads it as no text.
     const start = new Uint8Array(await file.slice(0, SNIFF_BYTES).arrayBuffer().catch(() => new ArrayBuffer(0)));
     if (looksLikeText(start)) return { text: await readText(file) };
@@ -6749,10 +6755,11 @@
     nextRun: () => pickedModel() || 'type a model',
     needsModel: () => true,
     refuseFiles: unreadableFiles,
-    async extract(file, noText) {
+    async extract(file) {
       try {
-        const { text } = await inTurn(async () => (await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })).json());
-        return text.trim() ? { text } : { why: noText };
+        /** @type {Extracted} */
+        const { text, reason } = await inTurn(async () => (await api(`/api/documents/text?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })).json());
+        return text.trim() ? { text } : { why: noTextWhy(reason) };
       } catch (error) {
         return { why: `Couldn't get the text: ${explain(error, /** @type {Error} */ (error).message, "couldn't get a file's text")}.` };
       }
@@ -6760,11 +6767,10 @@
     // A zipped document with no text is refused as a dropped one is, and so is a zip with none.
     async unzip(file) {
       try {
-        /** @type {{ files: { name: string, size: number, text: string }[], skipped: number }} */
+        /** @type {{ files: ({ name: string, size: number } & Extracted)[], skipped: number }} */
         const { files, skipped } = await inTurn(async () => (await api(`/api/documents/zip?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: file })).json());
         if (!files.length) return oneDocument(file, { why: noDocuments(skipped) });
-        const noText = (/** @type {{ name: string }} */ f) => (hasSuffix(f, PDF_SUFFIX) ? NO_TEXT_LAYER : NO_TEXT);
-        return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noText(f) })), skipped };
+        return { docs: files.map((f) => (f.text.trim() ? f : { name: f.name, size: f.size, why: noTextWhy(f.reason) })), skipped };
       } catch (error) {
         return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }
