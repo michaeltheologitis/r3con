@@ -67,8 +67,7 @@ Layout per ``logs/<run-folder>/``:
   appends its own, from its ``run_started`` and ``run_resumed`` on, and reads the
   earlier ones back for the results they report.
 - ``run.lock`` — held while a run or a resume of it writes to the folder
-  (:func:`run_lock`), so that only one does at a time; it names the process that last
-  held it.
+  (:func:`run_lock`), so that only one does at a time.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
   is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
   run folder's name, ``events.jsonl`` (the ask's own events) and ``reasoning/`` as
@@ -151,21 +150,16 @@ import logging
 import os
 import re
 import secrets
-import sys
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import Any, cast
 
 import yaml
+from filelock import FileLock, Timeout
 from pydantic import BaseModel, StrictInt
-
-if sys.platform == "win32":
-    import msvcrt
-else:
-    import fcntl
 
 # ``normalize_model_name`` lives in ``r3con.config`` — it's a model-identity helper
 # ``RunConfig.label()`` uses too; shared here so the transcript header below records the
@@ -360,44 +354,21 @@ def read_events(folder: Path) -> tuple[list[dict[str, Any]], int]:
 @contextmanager
 def run_lock(folder: Path) -> Iterator[None]:
     """Hold run folder ``folder`` for one run or resume at a time while it writes there:
-    an OS lock on the folder's ``run.lock``, which the OS lifts however the process
-    ends, a kill included, the file naming the process that holds it.
+    a lock on the folder's ``run.lock`` (:class:`filelock.FileLock`), taken without
+    waiting, which the OS lifts however the process ends, a kill included.
 
     Raises:
         RuntimeError: in one line, if another run or resume holds it.
     """
-    path = folder / _LOCK
-    with path.open("a+", encoding="utf-8") as lock:
-        try:
-            _lock(lock)
-        except OSError:
-            holder = _holder(path)
-            raise RuntimeError(
-                f"{folder}: a run or resume is going in it, in process {holder}; "
-                "carry it on once that one has stopped."
-            ) from None
-        lock.seek(0)
-        lock.truncate()
-        lock.write(str(os.getpid()))
-        lock.flush()
-        yield
-
-
-def _lock(file: IO[str]) -> None:
-    """Take an OS lock on ``file`` without waiting; ``OSError`` if one is held."""
-    if sys.platform == "win32":
-        file.seek(0)
-        msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
-    else:
-        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-
-def _holder(path: Path) -> str:
-    """The process a lock file names, as far as it can be read."""
     try:
-        return path.read_text(encoding="utf-8").strip() or "unknown"
-    except OSError:
-        return "unknown"
+        held = FileLock(folder / _LOCK, timeout=0).acquire()
+    except Timeout:
+        raise RuntimeError(
+            f"{folder}: a run or resume is going in it; carry it on once that one has "
+            "stopped."
+        ) from None
+    with held:
+        yield
 
 
 def write_manifest(

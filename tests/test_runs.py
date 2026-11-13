@@ -1,6 +1,5 @@
 import importlib.metadata
 import json
-import os
 import threading
 from types import MappingProxyType
 
@@ -495,11 +494,11 @@ def test_a_resumed_stage_run_starts_afresh_from_a_calls_json_it_cannot_read(
 
 
 def test_a_run_folder_is_held_by_one_run_or_resume_at_a_time(logger):
-    held = pytest.raises(RuntimeError, match=f"in process {os.getpid()};")
+    held = pytest.raises(RuntimeError, match="a run or resume is going in it;")
     with run_lock(logger.dir), held, run_lock(logger.dir):
         pass
     with run_lock(logger.dir):
-        assert (logger.dir / "run.lock").read_text() == str(os.getpid())
+        assert (logger.dir / "run.lock").is_file()
 
 
 def test_reopening_a_folder_for_a_resume_records_it_and_ends_a_line_cut_short(logger):

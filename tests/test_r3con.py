@@ -1844,8 +1844,8 @@ def test_a_run_still_going_in_its_folder_is_not_resumed(answering_llm, tmp_path)
     )
     assert refusals == [
         (
-            f"{answer.run_dir}: a run or resume is going in it, in process "
-            f"{os.getpid()}; carry it on once that one has stopped."
+            f"{answer.run_dir}: a run or resume is going in it; carry it on once that "
+            "one has stopped."
         )
     ]
 
@@ -1856,7 +1856,6 @@ def test_a_lock_a_process_left_behind_does_not_stop_a_resume(answering_llm, tmp_
     answering_llm.answers(parsing=ANSWERING["parsing"])
     answer = resume(run_dir, MEMOS_BY_NAME, completion=answering_llm)
     assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
-    assert (run_dir / "run.lock").read_text() == str(os.getpid())
 
 
 @pytest.mark.parametrize(
