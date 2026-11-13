@@ -127,11 +127,12 @@ SIGTERM asks it to. As the shutdown begins, it refuses a new run or ask (503) an
 cancels every one still going, before it waits for open connections such as the page's
 event stream. Once they have closed, it waits for those runs and asks to end, so each
 finishes its call in flight and writes its run folder, with ``run_failed`` in its
-``events.jsonl``; a page whose stream has already closed does not see it. It waits up
-to ``WORKERS_EXIT_SECONDS``, or ``serve``'s ``stop_within``; ``r3con app`` and the Mac
-app, up to ``QUIT_SECONDS``, then end the process, cutting off a call still in flight
-and leaving its run folder without ``run_failed``. A second Ctrl-C ends that wait at
-once.
+``events.jsonl``; a page whose stream has already closed does not see it. The whole
+shutdown takes up to ``WORKERS_EXIT_SECONDS``, or in ``r3con app`` ``QUIT_SECONDS``,
+after which ``r3con app`` ends the process, saying so if a run or ask is still going:
+a call in flight is cut off, and its run folder left without ``run_failed``. A second
+Ctrl-C ends that wait at once, and ``r3con app`` quits there and then, leaving those
+runs and asks as they are.
 
 A failure answers ``{"error": "..."}``, except a body over the size limit, which gets
 Starlette's plain-text 413. A run or ask that r3con refuses before it starts ends its
@@ -1111,21 +1112,20 @@ class _Server(uvicorn.Server):
     one place for it, and runs inside uvicorn's signal handling."""
 
     def __init__(
-        self, config: uvicorn.Config, state: ServerState, stop_within: float | None
+        self, config: uvicorn.Config, state: ServerState, stop_within: float
     ) -> None:
         super().__init__(config)
         self.app_state = state
         self.stop_within = stop_within
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+        deadline = time.monotonic() + self.stop_within
         state = self.app_state
         # One step on the loop, where every request is handled: no job starts after.
         state.stopping = True
         _cancel_jobs(state)
         await super().shutdown(sockets)
         workers = [worker for worker in state.workers if worker.is_alive()]
-        bound = WORKERS_EXIT_SECONDS if self.stop_within is None else self.stop_within
-        deadline = time.monotonic() + bound
         while (
             any(worker.is_alive() for worker in workers)
             and not self.force_exit
@@ -1149,12 +1149,11 @@ def _server(
     completion: Callable[..., Any] | None,
     key_service: str = APP_KEY_SERVICE,
     choose_save_path: ChooseSavePath | None = None,
-    stop_within: float | None = None,
+    stop_within: float = WORKERS_EXIT_SECONDS,
 ) -> tuple[_Server, str]:
     """A server for ``listener``, with the keys under ``key_service`` in the
     credential store, saving a tab where ``choose_save_path`` says, whose shutdown
-    waits for its runs and asks up to ``stop_within``, if given, and the URL that
-    opens its page."""
+    takes up to ``stop_within``, and the URL that opens its page."""
     port = listener.getsockname()[1]
     token = secrets.token_urlsafe(TOKEN_BYTES)
     keys = _stored_keys(key_service)
@@ -1190,9 +1189,7 @@ def serve(
     at most, leaving what is still going to the server's thread, a daemon, until the
     process ends."""
     listener = listen(port)
-    server, url = _server(
-        listener, logs_dir, completion, key_service, choose_save_path, stop_within
-    )
+    server, url = _server(listener, logs_dir, completion, key_service, choose_save_path)
     thread = threading.Thread(
         target=server.run, kwargs={"sockets": [listener]}, daemon=True
     )
@@ -1210,7 +1207,7 @@ def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
     under ``APP_KEY_SERVICE``: print the URL that opens the page, with this launch's
     token, and where its run folders go, and with ``browser``, open the page. A
     Ctrl-C stops it within ``QUIT_SECONDS``, then ends the process, saying so if that
-    cuts off a run or ask still on a model call."""
+    cuts off a run or ask still going."""
     configure_logging()
     server, url = _server(
         listener, logs_dir, None, APP_KEY_SERVICE, stop_within=QUIT_SECONDS
@@ -1226,9 +1223,10 @@ def launch(listener: socket.socket, *, logs_dir: Path, browser: bool) -> None:
     if going:
         print(
             f"r3con app: quitting, cutting off {len(going)} run(s) or ask(s) still "
-            "on a model call",
+            "going",
             flush=True,
         )
+    if going or server.force_exit:
         # Quit now: at exit, Python would join r3con's document threads (a
         # ThreadPoolExecutor's), and so wait for their calls in flight.
         os._exit(FORCED_EXIT_CODE)
