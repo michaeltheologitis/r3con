@@ -1660,6 +1660,8 @@
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
+  // The first round r3con prunes after: an empty round-1 note alone prunes nothing.
+  const FIRST_PRUNING_ROUND = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -5066,6 +5068,8 @@
   /** @param {RunTab} tab @param {Narrator} narr */
   async function continueRun(tab, narr) {
     if (tab.fold) foldsStopped(tab, false);
+    // Its replay reports again what the run pruned, which a round it reads again may change.
+    tab.run.pruned.clear();
     narr.restart(CONTINUING);
     tabStatus(tab, `running · ${CONTINUING}`);
     await playLive(tab, narr, `/api/runs/${tab.run.id}/continue`, documentsOf(tab.run), NOT_CONTINUED);
@@ -6727,9 +6731,8 @@
     const sourced = Object.entries(parsed).every(([field, records]) => Object.hasOwn(sources, field) && sources[field].length === records.length && sources[field].every((d) => d < n));
     const cited = run.answers.flatMap((a) => /** @type {Provenance} */ (a.provenance)).flatMap((p) => [...p.summary_ids, ...p.parse_ids]);
     const perDocument = order.length === n && order.every((d, i) => d === i) && provenance.length === n;
-    // r3con prunes after a round of the run from round 2 on.
     const after = Object.entries(r['relevance/result.json'].pruned_after ?? {});
-    const pruned = after.every(([id, round]) => Object.hasOwn(ids, id) && round > 1 && round <= rounds.length);
+    const pruned = after.every(([id, round]) => Object.hasOwn(ids, id) && round >= FIRST_PRUNING_ROUND && round <= rounds.length);
     return n > 0 && perDocument && named && snippets && sourced && pruned && rounds.length >= 1 && rounds.length <= MAX_ROUNDS && run.answers.length > 0 && cited.every((d) => d < n);
   }
 
