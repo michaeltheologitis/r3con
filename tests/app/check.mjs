@@ -271,9 +271,6 @@ const STOPPED = '● stopped';
 const CONTINUE_LINE = 'continue · from where it left off';
 const CONTINUE_BUTTON = `${CHAT} .turn-body .run-btn`;
 const CONTINUING = 'continuing';
-// r3con app's refusals of a continue: while a job on the run's folder is going, and once the run has finished.
-const CONTINUE_GOING = 'This run is still going: continue it once it has stopped.';
-const CONTINUE_FINISHED = 'This run has finished: ask it a new question instead.';
 const NOT_CONTINUED = "couldn't continue";
 const CONFLICT_LOG = 'Failed to load resource: the server responded with a status of 409';
 // A stopped ask's folded line.
@@ -7363,26 +7360,90 @@ async function stoppedRun(page, server) {
   return runId;
 }
 
+// What r3con app answers the page's continue, once it is clicked: its status and body.
+async function continueAnswered(page) {
+  const answered = startedJob(page, '/continue');
+  await page.click(CONTINUE_BUTTON);
+  const response = await answered;
+  return { status: response.status(), body: await response.json() };
+}
+
+// The shown tab's run once a continue ended: how the log's head and the lines under it read, and whether continue is
+// offered again.
+async function afterContinue(page) {
+  const { folded, after } = await page.evaluate(logOf);
+  return { folded, after, offered: await count(page, CONTINUE_BUTTON) };
+}
+
 // A continue sent around the page holds the run's folder while the page's is refused, then finishes the run.
 async function liveContinueRefused(url, server) {
   await withPage('live', { url, sample: false, memos: true, expectedErrors: [CONFLICT_LOG] }, async (page) => {
     const runId = await stoppedRun(page, server);
     server.hold();
     const elsewhere = await continueElsewhere(url, runId);
-    await page.click(CONTINUE_BUTTON);
-    const going = await becomes(page, statusIs, `● ${CONTINUE_GOING}`, LIVE_RUN_MS);
-    const whileGoing = { folded: (await page.evaluate(logOf)).folded, after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
-    const goingExpected = { folded: NOT_CONTINUED, after: [CONTINUE_GOING, CONTINUE_LINE], offered: 1 };
+    const going = await continueAnswered(page);
+    const said = going.body.error;
+    const shown = await becomes(page, statusIs, `● ${said}`, LIVE_RUN_MS);
+    const whileGoing = await afterContinue(page);
     const goingName = "a continue refused while another job holds the run's folder says so in one plain line, and offers continue again";
-    check('live', goingName, going && isDeepStrictEqual(whileGoing, goingExpected), JSON.stringify(whileGoing));
+    const goingExpected = { folded: NOT_CONTINUED, after: [said, CONTINUE_LINE], offered: 1 };
+    check('live', goingName, going.status === 409 && going.body.code === 'going' && shown && isDeepStrictEqual(whileGoing, goingExpected), JSON.stringify({ going, whileGoing }));
 
     server.release();
     await streamedOut(url, elsewhere);
-    await page.click(CONTINUE_BUTTON);
-    const finished = await becomes(page, statusIs, `● ${CONTINUE_FINISHED}`, LIVE_RUN_MS);
-    const ended = { after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
+    const finished = await continueAnswered(page);
+    const refused = await becomes(page, statusIs, `● ${finished.body.error}`, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
     const finishedName = 'a continue refused for good, its run finished meanwhile, says so in one plain line and offers no continue';
-    check('live', finishedName, finished && isDeepStrictEqual(ended, { after: [CONTINUE_GOING, CONTINUE_FINISHED], offered: 0 }), JSON.stringify(ended));
+    const endedExpected = { folded: NOT_CONTINUED, after: [said, finished.body.error], offered: 0 };
+    check('live', finishedName, finished.body.code === 'finished' && refused && isDeepStrictEqual(ended, endedExpected), JSON.stringify({ finished, ended }));
+  });
+}
+
+// The run's server is removed from settings, then added again: a refusal the user can fix.
+async function liveContinueFixable(url, server) {
+  const model = 'hosted_vllm/qwen3-32b';
+  const stored = { provider: 'other', endpoint: TEST_ENDPOINT };
+  const keys = (method) =>
+    fetch(new URL('/api/keys', url), { method, headers: { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' }, body: JSON.stringify(stored) });
+  await keys('POST');
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [REFUSED_LOG] }, async (page) => {
+    await page.selectOption('#model-pick', { label: 'other model on 10.0.0.7:8000…' });
+    await page.fill('#model-other', model);
+    await page.press('#model-other', 'Enter');
+    await stoppedRun(page, server);
+    await keys('DELETE');
+    const unknown = await continueAnswered(page);
+    const shown = await becomes(page, statusIs, `● ${unknown.body.error}`, LIVE_RUN_MS);
+    const refused = await afterContinue(page);
+    const refusedName = "a continue refused for a server no longer in settings says so, and offers continue again";
+    const refusedExpected = { folded: NOT_CONTINUED, after: [unknown.body.error, CONTINUE_LINE], offered: 1 };
+    check('live', refusedName, unknown.status === 422 && !unknown.body.code && shown && isDeepStrictEqual(refused, refusedExpected), JSON.stringify({ unknown, refused }));
+
+    await keys('POST');
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, `^● done · ${model} · `, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    check('live', 'with the server added again, continue carries the run on to its end', done && ended.offered === 0, JSON.stringify(ended));
+  });
+}
+
+// r3con app refuses every run before it starts; the page's stop is pressed before the run's id comes back.
+async function liveStoppedUnstarted(url) {
+  let letThrough;
+  const posted = new Promise((resolve) => (letThrough = resolve));
+  const before = (page) => page.route('**/api/runs', async (route) => {
+    await posted;
+    await route.continue();
+  });
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+    await send(page, 'Which site logged the most incidents?');
+    await becomes(page, () => !document.getElementById('stop-btn').hidden);
+    await pressStop(page);
+    letThrough();
+    const stopped = await becomes(page, statusIs, STOPPED, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    check('live', 'a run stopped before it started, and refused by r3con, has no folder to continue: none is offered', stopped && ended.offered === 0, JSON.stringify(ended));
   });
 }
 
@@ -7395,9 +7456,9 @@ async function liveContinueLost(url, server) {
     await becomes(page, () => document.querySelector('#world .node.working') !== null, null, LIVE_RUN_MS);
     await server.stop();
     const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
-    const ended = { after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
-    const lostName = 'a continue cut off from r3con app says the connection was lost, and offers no continue';
-    check('live', lostName, lost && isDeepStrictEqual(ended, { after: [LOST_CONNECTION.slice(2)], offered: 0 }), JSON.stringify(ended));
+    const ended = await afterContinue(page);
+    const lostName = 'a continue cut off from r3con app says the connection was lost, and offers continue again';
+    check('live', lostName, lost && isDeepStrictEqual(ended.after, [LOST_CONNECTION.slice(2), CONTINUE_LINE]) && ended.offered === 1, JSON.stringify(ended));
   });
 }
 
@@ -7897,10 +7958,11 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
+  await withFakeServer(liveStoppedUnstarted, { R3CON_DOC_WORKERS: '0' });
   await withFakeServer(liveSaveDialog, {}, [SAVE_DIALOG]);
   await liveElsewhere();
 }

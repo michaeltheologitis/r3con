@@ -228,7 +228,7 @@
    *   | { type: 'reasoning_finished', answer: string,
    *       provenance: R3conProvenance }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
-   *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
+   *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string, code?: string }
    * } ServerEvent
    */
   /**
@@ -1678,8 +1678,8 @@
   const CONTINUE_NOTE = ' · from where it left off';
   const CONTINUING = 'continuing';
   const NOT_CONTINUED = "couldn't continue";
-  // r3con app's refusal while a job on the run's folder is going, which a later continue gets past.
-  const CONTINUE_GOING = 'This run is still going: continue it once it has stopped.';
+  // The codes of r3con app's refusals of a continue that no later one gets past.
+  const NEVER_CONTINUED = new Set(['finished', 'other_files', 'not_continuable']);
   // The r3con stage, as its events name it, that each kind of node but a round's is drawn in; a replay reads first.
   const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
@@ -2126,7 +2126,14 @@
   // ---------- r3con app ----------
 
   // An error whose message is for the user, from r3con app, from reaching it, or from a saved tab.
-  class ServerError extends Error {}
+  // r3con app's refusal, and why in a word, where it gives one.
+  class ServerError extends Error {
+    /** @param {string} message @param {string} [code] */
+    constructor(message, code) {
+      super(message);
+      this.code = code;
+    }
+  }
 
   // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
   /** @type {string | null} */
@@ -2166,7 +2173,7 @@
       return response;
     }
     const reply = await response.json().catch(/** @returns {null} */ () => null);
-    throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim());
+    throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim(), reply?.code);
   }
 
   /** @param {string} frame */
@@ -4479,6 +4486,7 @@
         mark.className = 'log-spin';
         mark.textContent = MARK;
         begun = null;
+        this.stage = null;
         log('main', text);
       },
     };
@@ -4909,9 +4917,10 @@
     const doc = (id) => /** @type {number} */ (docIndex(run, id));
     switch (event.type) {
       case 'run_started':
+        // A continue's says again what its run's said.
+        if (!run.ids.length) narr.log('main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         Object.assign(run, withIds(event.document_ids));
         if (event.rounds !== run.rounds.length) makeRoomForRounds(tab, event.rounds);
-        narr.logAs('sent', 'main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         beginStage(tab, narr, roundKind(event.round));
@@ -4998,35 +5007,38 @@
   /** @param {Run} run */
   const documentsOf = (run) => ({ documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) });
 
-  // A run that started, then failed or was stopped, can carry on, and so can one whose folder another job held then;
-  // one refused for good, or cut off from r3con app, can't.
-  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} ending */
-  const continuable = (stopped, { stage, error }) => stopped || stage !== null || error === CONTINUE_GOING;
+  // Only a run with a folder can carry on, and only past a refusal a later continue may get past.
+  /** @param {Run} run @param {string} [code] */
+  const continuable = (run, code) => run.ids.length > 0 && !NEVER_CONTINUED.has(code ?? '');
 
-  // Starts r3con app's job at `path`, a run or a continue of one, and draws its events in `tab` as they arrive. One
-  // refused before it started ends as `refused` says, and continue is offered as `continuable` says.
+  // A run's job, or a continue's: one refused before it started ends as `refused` says.
   /** @param {RunTab} tab @param {Narrator} narr @param {string} path @param {object} body @param {string} refused */
   async function playLive(tab, narr, path, body, refused) {
     const { run } = tab;
     const stream = openStream('run', tab, run);
     const before = run.id;
-    let offered = false;
+    /** @param {string} error */
+    const refuse = (error) => failRun(tab, narr, { outcome: refused, error }, error);
+    /** @type {string | undefined} */
+    let code;
     try {
       const started = await api(path, { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
       const last = await follow(`/api/runs/${run.id}/events`, (event) => {
-        if (event.type === 'run_failed' && !event.stage && !stream.stopping) failRun(tab, narr, { outcome: refused, error: event.error });
+        if (event.type === 'run_failed' && !event.stage && !stream.stopping) refuse(event.error);
         else drawEvent(tab, narr, event);
       });
-      offered = last.type === 'run_failed' && continuable(stream.stopping, last);
+      if (last.type !== 'run_failed') return;
+      code = last.code;
     } catch (error) {
       const said = explain(error, /** @type {Error} */ (error).message, 'the live run stopped');
-      failRun(tab, narr, { outcome: run.id === before ? refused : inStage('failed', narr.stage), error: said }, said);
-      offered = continuable(false, { stage: null, error: said });
+      if (run.id === before) refuse(said);
+      else failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
+      code = error instanceof ServerError ? error.code : undefined;
     } finally {
       closeStream(stream);
     }
-    if (offered) offerContinue(tab, narr);
+    if (continuable(run, code)) offerContinue(tab, narr);
   }
 
   // A run that failed or was stopped carries on in its tab and folder, over its files, as r3con.resume does.
@@ -5043,8 +5055,7 @@
     });
   }
 
-  // What r3con reuses comes back first as the events that reported it, each drawn again in its place over the panel
-  // as it stands, then what it computes as a run's. A continue refused before it started leaves the run as it was.
+  // Its replayed events draw over the panel as it stands, each in its place.
   /** @param {RunTab} tab @param {Narrator} narr */
   async function continueRun(tab, narr) {
     if (tab.fold) foldsStopped(tab, false);
