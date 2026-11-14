@@ -4466,6 +4466,9 @@
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
       /** @type {string | null} */
       stage: null,
+      // The line under the log that says why it failed, until a continue takes it back.
+      /** @type {HTMLElement | null} */
+      error: null,
       /** @param {StageKind} kind */
       begins(kind) {
         if (begun === kind) return false;
@@ -4484,6 +4487,7 @@
         mark.textContent = MARK;
         begun = null;
         this.stage = null;
+        this.error?.remove();
         log('main', text);
       },
     };
@@ -4517,7 +4521,7 @@
   /** @param {Narrator} narr @param {Ending} ending */
   function sayEnding(narr, { outcome, error }) {
     narr.finish(outcome, 'err');
-    if (error) narr.say('main', h('span', { class: 'err' }, error));
+    if (error) narr.error = narr.say('main', h('span', { class: 'err' }, error));
   }
   /** @param {Run} run */
   const doneLine = (run) => [h('span', { class: run.simulated ? 'flag' : 'ok' }, '● '), `done · ${runSummary(run)}`];
