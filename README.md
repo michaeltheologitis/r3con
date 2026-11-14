@@ -18,7 +18,10 @@ organizes the relevant information, then reasons over it to produce an answer.
 
 #### Direct
 
-[Download R3Con](https://github.com/michaeltheologitis/r3con/releases/latest/download/R3Con.dmg), open it, and drag R3Con to Applications.
+[Download R3Con](https://github.com/michaeltheologitis/r3con/releases/latest/download/R3Con.dmg), double-click it, and drag R3Con to Applications.
+
+<img src="https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/install.png" width="480" alt="The R3Con disk image window: drag R3Con onto the Applications folder">
+
 
 #### Brew
 
