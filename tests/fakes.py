@@ -1,4 +1,5 @@
 import copy
+import itertools
 import json
 import os
 import re
@@ -295,6 +296,13 @@ def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool
     return lambda request: (
         first_line(request) == line and (is_later_round(request) or not later_round)
     )
+
+
+def reading_from_round(line: str, round_: int) -> Callable[[Request], bool]:
+    """Whether a relevance request reads the document whose first line is ``line`` in
+    round ``round_`` or a later one, counting its reads, one a round, as they come."""
+    reads = itertools.count(1)
+    return lambda request: first_line(request) == line and next(reads) >= round_
 
 
 def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:

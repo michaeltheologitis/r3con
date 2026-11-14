@@ -30,9 +30,11 @@ Layout per ``logs/<run-folder>/``:
   that the documents the run read can be told apart from any others. Written with the
   manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  pruned, rounds: [{round, snippets: [{id, summary, quotes, provenance}]}], totals}`` —
-  ``pruned`` the ids of the documents relevance pruned, in document order
-  (:attr:`r3con.stages.relevance.RelevantContext.pruned`); within
+  pruned_after, rounds: [{round, snippets: [{id, summary, quotes, provenance}]}],
+  totals}`` — ``pruned_after`` the id of each document relevance pruned, in document
+  order, mapped to the round after which it was pruned
+  (:attr:`r3con.stages.relevance.RelevantContext.pruned`); r3context 0.6.26 to 0.6.28
+  wrote ``pruned`` instead, a list of the ids, each pruned after round 2; within
   a round every relevance snippet in document order, a document read in parts as one
   per part, each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that
   round), its quotes, each ``{text, start, end, match, score}``: the sentence the
@@ -65,9 +67,9 @@ Layout per ``logs/<run-folder>/``:
 - ``events.jsonl`` — the run's progress events (:class:`EventRecorder`), one JSON
   object per line, in the order and at the wall-clock time they happened, so the run
   can be replayed: each stage's start and finish, each document's (or part's) in
-  relevance and parsing, the documents pruned, and the run's own start and its finish
-  or failure. A resume appends its own, from its ``run_started`` and ``run_resumed``
-  on, and reads the earlier ones back for the results they report.
+  relevance and parsing, the documents pruned after each round, and the run's own
+  start and its finish or failure. A resume appends its own, from its ``run_started``
+  and ``run_resumed`` on, and reads the earlier ones back for the results they report.
 - ``run.lock`` — held while a run or a resume of it writes to the folder
   (:func:`run_lock`), so that only one does at a time.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder

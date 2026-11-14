@@ -35,6 +35,7 @@ from tests.fakes import (
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
     reading,
+    reading_from_round,
     silent_when,
     without_trail,
 )
@@ -286,11 +287,15 @@ def first_turns(llm) -> list[dict]:
     return [r for r in llm.requests_for("reasoning") if len(r["messages"]) == 2]
 
 
+def merrow_early(request) -> bool:
+    """Whether a relevance request reads Merrow's memo in round 1."""
+    return first_line(request) == "Merrow memo" and not is_later_round(request)
+
+
 def halloran_late_or_merrow_early(request) -> bool:
     """Whether a relevance request reads Halloran's memo after round 1, or Merrow's in
     round 1."""
-    merrow_early = first_line(request) == "Merrow memo" and not is_later_round(request)
-    return reading("Halloran memo", later_round=True)(request) or merrow_early
+    return reading("Halloran memo", later_round=True)(request) or merrow_early(request)
 
 
 @pytest.fixture
@@ -759,34 +764,39 @@ def test_nothing_is_pruned_with_fewer_than_two_rounds(answering_llm, tmp_path, r
     parsed_memos = sorted(first_line(r) for r in llm.requests_for("parsing"))
     assert parsed_memos == sorted(THREE)
     assert "documents_pruned" not in [e["type"] for e in events]
-    assert read_json(logger, "relevance/result")["pruned"] == []
+    assert read_json(logger, "relevance/result")["pruned_after"] == {}
 
 
 @pytest.mark.parametrize(
-    ("rounds", "reads"),
-    [
-        (2, {"Halloran memo": 2, "Merrow memo": 2, "Calder memo": 2}),
-        (3, {"Halloran memo": 2, "Merrow memo": 3, "Calder memo": 3}),
-    ],
+    ("rounds", "empty_from", "halloran_reads"),
+    [(2, 2, 2), (3, 2, 2), (4, 3, 3), (4, 4, 4)],
 )
-def test_a_document_with_nothing_relevant_in_round_2_is_read_no_more_nor_parsed(
-    answering_llm, tmp_path, rounds, reads
+def test_a_document_is_pruned_after_the_first_round_from_2_on_its_note_is_empty(
+    answering_llm, tmp_path, rounds, empty_from, halloran_reads
 ):
+    halloran_late = reading_from_round("Halloran memo", empty_from)
+    llm = answering_llm.answers(
+        relevance=silent_when(lambda r: merrow_early(r) or halloran_late(r))
+    )
     logger = TaskLogger("run", root=tmp_path)
-    llm = answering_llm.answers(relevance=silent_when(halloran_late_or_merrow_early))
     events = []
     result = answer(
         llm, logger, documents=THREE, relevance_rounds=rounds, on_event=events.append
     )
     halloran = result.document_ids[0]
-    assert Counter(first_line(r) for r in llm.requests_for("relevance")) == reads
+    reads = Counter(first_line(r) for r in llm.requests_for("relevance"))
+    assert reads == Counter(
+        {"Halloran memo": halloran_reads, "Merrow memo": rounds, "Calder memo": rounds}
+    )
     parsed_memos = sorted(first_line(r) for r in llm.requests_for("parsing"))
     assert parsed_memos == ["Calder memo", "Merrow memo"]
     assert [row["who"] for row in result.structured_context["rows"]] == THREE[1:]
-    reported = [e["doc_ids"] for e in events if e["type"] == "documents_pruned"]
-    assert reported == [[halloran]]
+    reported = [
+        (e["round"], e["doc_ids"]) for e in events if e["type"] == "documents_pruned"
+    ]
+    assert reported == [(empty_from, [halloran])]
     relevance = read_json(logger, "relevance/result")
-    assert relevance["pruned"] == [halloran]
+    assert relevance["pruned_after"] == {halloran: empty_from}
     assert [s["id"] for s in relevance["rounds"][-1]["snippets"]] == result.document_ids
     assert result.relevant_context[0] == ""
 
@@ -801,19 +811,31 @@ def test_a_round_2_note_of_only_whitespace_prunes_its_document(answering_llm):
     assert [row["who"] for row in result.structured_context["rows"]] == THREE[1:]
 
 
-def test_the_pruned_documents_are_reported_once_round_2_is_in_and_nothing_after(
+def test_each_rounds_pruning_is_reported_once_it_is_in_and_its_documents_after_none(
     answering_llm,
 ):
-    llm = answering_llm.answers(relevance=silent_when(halloran_late_or_merrow_early))
+    halloran_late = reading("Halloran memo", later_round=True)
+    calder_late = reading_from_round("Calder memo", 3)
+    silent = silent_when(lambda r: halloran_late(r) or calder_late(r))
     events = []
-    result = answer(llm, documents=THREE, relevance_rounds=3, on_event=events.append)
-    halloran = result.document_ids[0]
-    [at] = [i for i, e in enumerate(events) if e["type"] == "documents_pruned"]
-    assert events[at]["doc_ids"] == [halloran]
-    before = {e["round"] for e in events[:at] if e["type"] == "relevance_finished"}
-    after = {e["round"] for e in events[at:] if e["type"] == "relevance_started"}
-    assert (before, after) == ({1, 2}, {3})
-    assert all(e.get("doc_id") != halloran for e in events[at:])
+    result = answer(
+        answering_llm.answers(relevance=silent),
+        documents=THREE,
+        relevance_rounds=4,
+        on_event=events.append,
+    )
+    halloran, _, calder = result.document_ids
+    pruning = [
+        (at, e["round"], e["doc_ids"])
+        for at, e in enumerate(events)
+        if e["type"] == "documents_pruned"
+    ]
+    assert [(k, ids) for _, k, ids in pruning] == [(2, [halloran]), (3, [calder])]
+    for at, k, ids in pruning:
+        before = {e["round"] for e in events[:at] if e["type"] == "relevance_finished"}
+        after = {e["round"] for e in events[at:] if e["type"] == "relevance_started"}
+        assert (max(before), min(after)) == (k, k + 1)
+        assert all(e.get("doc_id") not in ids for e in events[at:])
 
 
 @pytest.mark.parametrize(
@@ -836,8 +858,8 @@ def test_a_document_read_in_parts_is_pruned_only_when_each_of_its_round_2_parts_
     registry_parsed = any(parsed(r) in registry for r in llm.requests_for("parsing"))
     assert registry_parsed == first_part_noted
     assert (3 in result.source_docs["rows"]) == first_part_noted
-    [pruned] = [e["doc_ids"] for e in events if e["type"] == "documents_pruned"]
-    assert pruned == ([] if first_part_noted else [result.document_ids[3]])
+    pruned = [e["doc_ids"] for e in events if e["type"] == "documents_pruned"]
+    assert pruned == ([] if first_part_noted else [[result.document_ids[3]]])
 
 
 def test_a_pruned_documents_round_1_note_cited_in_round_2_still_leads_the_trail_to_it(

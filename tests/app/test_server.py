@@ -139,7 +139,6 @@ RUN_EVENTS = [
     "run_started",
     "relevance_started",
     "relevance_finished",
-    "documents_pruned",
     "schema_started",
     "schema_finished",
     "parsing_started",
