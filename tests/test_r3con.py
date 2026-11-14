@@ -1866,6 +1866,35 @@ def test_a_resume_replays_each_rounds_pruning_once_before_the_round_after_it(
     assert written.count("documents_pruned") == 2
 
 
+def test_a_finished_relevances_pruning_is_replayed_from_its_result_round_by_round(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    easton_late = reading_in_round("Easton memo", 3, or_later=True)
+    llm = answering_llm.answers(
+        relevance=silent_when(lambda r: DUNMORE_LATE(r) or easton_late(r)),
+        parsing=failing_once(reading("Calder memo"), ANSWERING["parsing"]),
+    )
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=4)
+    events = events_in(run_dir)
+    ids = events[0]["document_ids"]
+    lines = [json.dumps(event) for event in events]
+    torn = line_of(events, "documents_pruned", round=2)
+    lines[torn] = lines[torn][:TORN_CHARS]
+    rewritten(run_dir, lines)
+    seen = []
+    resume(run_dir, MEMOS_BY_NAME, completion=llm, on_event=seen.append)
+    pruning = [
+        (e["round"], e["doc_ids"]) for e in seen if e["type"] == "documents_pruned"
+    ]
+    assert pruning == [(2, [ids[3]]), (3, [ids[4]])]
+    steps = [(e["type"], e.get("round")) for e in seen]
+    for k in (2, 3):
+        at = steps.index(("documents_pruned", k))
+        before = {r for kind, r in steps[:at] if kind == "relevance_finished"}
+        after = {r for kind, r in steps[at:] if kind == "relevance_finished"}
+        assert max(before) <= k < min(after, default=k + 1)
+
+
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(
     answering_llm, one_worker, events_in, tmp_path
 ):

@@ -108,18 +108,20 @@ class RelevantContext:
     (one for a document read whole). Earlier rounds are kept for inspection and for
     the answer's trail (:mod:`r3con.provenance`); the final round is what downstream
     stages consume, as :attr:`snippets`. ``pruned_after`` maps each document the run
-    pruned, by index, to the round after which it was pruned (the module's rule),
-    read-only, and ``pruned`` holds those documents: both empty with fewer than two
-    rounds.
+    pruned, by index, to the round after which it was pruned (the module's rule), a
+    copy of the mapping given: empty with fewer than two rounds.
     """
 
     records: list[list[list[SnippetRecord]]]
-    pruned_after: Mapping[int, int] = field(default_factory=dict)
-    pruned: frozenset[int] = field(init=False)
+    pruned_after: dict[int, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.pruned_after = MappingProxyType(dict(self.pruned_after))
-        self.pruned = frozenset(self.pruned_after)
+        self.pruned_after = dict(self.pruned_after)
+
+    @property
+    def pruned(self) -> frozenset[int]:
+        """The documents the run pruned, by index."""
+        return frozenset(self.pruned_after)
 
     @property
     def snippets(self) -> list[Snippet]:

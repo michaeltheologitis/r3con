@@ -45,6 +45,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
+from operator import itemgetter
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
@@ -525,10 +526,11 @@ def run_pipeline(
 class _Saved:
     """What earlier attempts at a run left that a resume reuses (:func:`_read_saved`):
     each finished stage's results, from its ``result.json``, with its ``totals``; an
-    unfinished stage's results document by document; each document the run pruned, by
-    index, mapped to the round after which it pruned it, as it recorded it for every
-    round up to ``recorded_through``; the events that reported them, in the order
-    written; and how many there are of each stage's, as ``run_resumed`` gives them."""
+    unfinished stage's results document by document, an unfinished relevance's pruning
+    among them: each document it pruned, by index, mapped to the round after which it
+    did, as it recorded it for every round up to ``recorded_through``; the events that
+    reported them, in the order written; and how many there are of each stage's, as
+    ``run_resumed`` gives them."""
 
     reused: dict[str, Any] = field(default_factory=dict)
     relevance: RelevantContext | None = None
@@ -1029,8 +1031,10 @@ def _read_saved(
     finished relevance's ``result.json`` maps it, and an unfinished one's
     ``documents_pruned`` events, after each round that is whole. The events kept to
     replay are those that reported a result reused, a finished stage's when they match
-    its ``result.json``, ``documents_pruned`` among them. The lines and results it
-    skips, which the resume computes again, are counted in one warning.
+    its ``result.json``, an unfinished relevance's ``documents_pruned`` among them; a
+    finished one's pruning is replayed from its ``result.json`` (:func:`_pruning_of`).
+    The lines and results it skips, which the resume computes again, are counted in one
+    warning.
     """
     events, unreadable = read_events(run_dir)
     found = _saved_snippets(events, document_ids, rounds, splits)
@@ -1049,6 +1053,7 @@ def _read_saved(
     finished = [r for r in (relevance_result, schema_result, parsing_result) if r]
     saved = _Saved(totals=[result["totals"] for result in finished])
     replayed: list[int] = []
+    rebuilt: list[tuple[float, dict[str, Any]]] = []
     if relevance_result is None:
         saved.snippets = {key: records for key, (records, _) in snippets.items()}
         saved.pruned, saved.recorded_through = found.pruned, found.recorded_through
@@ -1057,15 +1062,13 @@ def _read_saved(
     else:
         index = {id_: doc for doc, id_ in enumerate(document_ids)}
         saved.relevance = _relevance(relevance_result, index)
-        saved.pruned = dict(saved.relevance.pruned_after)
         replayed += [
             at
             for (k, doc), (records, ats) in snippets.items()
             if records == saved.relevance.records[k - 1][doc]
             for at in ats
         ]
-        through = {d: k for d, k in saved.pruned.items() if k <= found.recorded_through}
-        replayed += found.pruned_at if found.pruned == through else []
+        rebuilt = _pruning_of(events, saved.relevance.pruned_after, document_ids)
         skipped = 0
     if schema_result is None:
         skipped += unfit + len(reported)
@@ -1093,12 +1096,16 @@ def _read_saved(
             unreadable,
             skipped,
         )
-    saved.events = [events[at] for at in sorted(replayed)]
+    in_order = sorted(
+        [(at, events[at]) for at in replayed] + rebuilt, key=itemgetter(0)
+    )
+    saved.events = [event for _, event in in_order]
     n = len(document_ids)
+    pruned = saved.pruned if saved.relevance is None else saved.relevance.pruned_after
     # A pruned document counts as reused in each round and stage that skips it.
     read = Counter(k for k, _ in saved.snippets)
-    read.update(r for k in saved.pruned.values() for r in range(k + 1, rounds + 1))
-    parsed = saved.parses.keys() | saved.pruned.keys()
+    read.update(r for k in pruned.values() for r in range(k + 1, rounds + 1))
+    parsed = saved.parses.keys() | pruned.keys()
     saved.reused = {
         "relevance": [
             n if saved.relevance is not None else read[r] for r in range(1, rounds + 1)
@@ -1107,6 +1114,31 @@ def _read_saved(
         "parsing": n if saved.extraction is not None else len(parsed),
     }
     return saved
+
+
+def _pruning_of(
+    events: list[dict[str, Any]],
+    pruned_after: Mapping[int, int],
+    document_ids: list[str],
+) -> list[tuple[float, dict[str, Any]]]:
+    """A ``documents_pruned`` for each round ``pruned_after`` prunes after, as a finished
+    relevance's ``result.json`` records them: each placed, by a position among
+    ``events``, just after the last ``relevance_finished`` of its round or an earlier
+    one, or the first event without one, and timed as that event."""
+    last: dict[int, int] = {}
+    for at, event in enumerate(events):
+        if event["type"] == "relevance_finished" and isinstance(
+            event.get("round"), int
+        ):
+            last[event["round"]] = at
+    rebuilt: list[tuple[float, dict[str, Any]]] = []
+    for k in sorted(set(pruned_after.values())):
+        after = max((at for r, at in last.items() if r <= k), default=0)
+        ids = [document_ids[d] for d, j in sorted(pruned_after.items()) if j == k]
+        time = events[after].get("time") if events else None
+        event = {"type": "documents_pruned", "time": time, "round": k, "doc_ids": ids}
+        rebuilt.append((after + 0.5, event))
+    return rebuilt
 
 
 def _finished(run_dir: Path, stage: str) -> dict[str, Any] | None:
