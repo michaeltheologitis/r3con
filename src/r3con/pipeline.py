@@ -944,6 +944,11 @@ def _refuse_other_params(
         )
 
 
+class OtherDocuments(ValueError):
+    """A resume was given other documents than its run read, or not in its order
+    (:func:`read_resume`)."""
+
+
 def _refuse_other_documents(
     run_dir: Path, run: Mapping[str, str], given: Mapping[str, str]
 ) -> None:
@@ -951,8 +956,8 @@ def _refuse_other_documents(
     ``run``, the run's, in its order.
 
     Raises:
-        ValueError: naming the documents missing, extra or changed, or saying they are
-            in another order.
+        OtherDocuments: naming the documents missing, extra or changed, or saying they
+            are in another order.
     """
     differences = {
         "missing": [name for name in run if name not in given],
@@ -963,9 +968,9 @@ def _refuse_other_documents(
         listed = "; ".join(
             f"{what} {_some(names)}" for what, names in differences.items() if names
         )
-        raise ValueError(f"{run_dir}: these are not the run's documents: {listed}.")
+        raise OtherDocuments(f"{run_dir}: these are not the run's documents: {listed}.")
     if list(given) != list(run):
-        raise ValueError(
+        raise OtherDocuments(
             f"{run_dir}: these are the run's documents in another order; pass them in "
             "its order, as its names.json lists them."
         )

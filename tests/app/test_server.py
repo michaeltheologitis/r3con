@@ -1,7 +1,9 @@
 import contextlib
 import json
 import logging
+import os
 import re
+import shutil
 import socket
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -23,6 +25,11 @@ from starlette.types import ASGIApp
 from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
+    CONTINUE_FINISHED,
+    CONTINUE_GOING,
+    CONTINUE_IMPORTED,
+    CONTINUE_OTHER_FILES,
+    CONTINUE_REFUSED,
     DEFAULT_RELEVANCE_ROUNDS,
     DIRECT_ONLY,
     ENCRYPTED_ZIP,
@@ -66,6 +73,7 @@ from tests.fakes import (
     FakeLLM,
     a_parse_citation_short,
     in_json,
+    stage_of,
 )
 
 litellm.suppress_debug_info = True
@@ -150,6 +158,16 @@ ANSWER = {
     "answer": "Northgate",
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
+PARSE = {"memos": [{"title": "Northgate", "lines": []}]}
+# What a continue's stream holds that a run's doesn't; and the events a run that failed
+# in parsing reports once continued: a run's, but the relevance and schema it reuses
+# are replayed, never started again.
+RESUMED = "run_resumed"
+CONTINUED_AFTER_PARSING = set(RUN_EVENTS) - {"relevance_started", "schema_started"}
+NEW_OPENAI_KEY = "sk-stored-openai-key-5678"
+NEW_SERVER_KEY = "other-endpoint-key-9012"
+# A key a request carries, which a continue never sends.
+REQUEST_KEY = "sk-carried-by-the-request-3456"
 SAVES = "/api/saves"
 IMPORTS = "/api/imports"
 # A server a crafted file's params would send an imported run's asks to, with its key.
@@ -251,7 +269,7 @@ def llm() -> FakeLLM:
     return FakeLLM().answers(
         relevance="A site memo.",
         schema=SCHEMA_REPLY,
-        parsing={"memos": [{"title": "Northgate", "lines": []}]},
+        parsing=PARSE,
         reasoning=ANSWER,
     )
 
@@ -1230,6 +1248,267 @@ def test_an_ask_over_a_run_folder_it_cannot_read_fails_saying_why_and_sends_noth
     )
     assert llm.requests[sent:] == []
     assert not (run_dir / "asks").exists()
+
+
+def failed_run(
+    client: TestClient,
+    llm: FakeLLM,
+    model: str = MODEL,
+    endpoint: str | None = None,
+) -> tuple[str, Path]:
+    """A run whose parsing fails, after which ``llm`` parses again: its id and
+    folder."""
+    llm.answers(parsing=RuntimeError("the model is down"))
+    run_id = start_run(client, model, endpoint)
+    events = run_events(client, run_id)
+    assert (events[-1]["type"], events[-1]["stage"]) == ("run_failed", "parsing")
+    llm.answers(parsing=PARSE)
+    return run_id, Path(events[0]["run_dir"])
+
+
+def continue_run(
+    client: TestClient, run_id: str, body: dict[str, Any] | None = None, **request: Any
+) -> httpx2.Response:
+    body = {"documents": memos()} if body is None else body
+    return client.post(f"/api/runs/{run_id}/continue", json=body, **request)
+
+
+def continued_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
+    response = continue_run(client, run_id)
+    assert response.status_code == 202, response.text
+    return run_events(client, response.json()["run_id"])
+
+
+def stopped(client: TestClient, model: FakeLLM, run_id: str) -> dict[str, Any]:
+    """Stop the run ``run_id`` once ``model`` holds its call, then let that call
+    through: the run's last event."""
+    assert model.called.wait(GATE_TIMEOUT_SECONDS)
+    client.post(f"/api/runs/{run_id}/cancel")
+    model.gate.set()
+    return run_events(client, run_id)[-1]
+
+
+def files_in(folder: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(folder)): path.read_bytes()
+        for path in folder.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_a_failed_run_continues_in_its_folder_sending_only_what_it_lacks_then_is_asked_and_saved(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    sent = len(llm.requests)
+    response = continue_run(client, run_id)
+    continued = response.json()["run_id"]
+    events = run_events(client, continued)
+    stages = [stage_of(request) for request in llm.requests[sent:]]
+    assert response.status_code == 202 and continued != run_id
+    assert [event["type"] for event in events[:2]] == ["run_started", RESUMED]
+    assert Path(events[0]["run_dir"]) == run_dir.resolve()
+    assert {event["type"] for event in events} == CONTINUED_AFTER_PARSING | {RESUMED}
+    assert stages == ["parsing"] * len(memos()) + ["reasoning"]
+    assert [event["type"] for event in ask_events(client, continued)] == ASK_EVENTS
+    assert imported(client, representation_of(client, continued))
+
+
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_stopped_run_continues_and_so_does_a_stopped_continue_each_call_sent_once(
+    client: TestClient, llm: FakeLLM
+):
+    finished_run(client)
+    whole = len(llm.requests)
+    llm.gate.clear()
+    llm.called.clear()
+    run_id = start_run(client)
+    first = stopped(client, llm, run_id)
+    llm.gate.clear()
+    llm.called.clear()
+    continued = continue_run(client, run_id).json()["run_id"]
+    second = stopped(client, llm, continued)
+    last = continued_events(client, continued)[-1]
+    ends = [(event["type"], event.get("stage")) for event in (first, second, last)]
+    assert ends == [
+        ("run_failed", "relevance"),
+        ("run_failed", "relevance"),
+        ("run_finished", None),
+    ]
+    assert len(llm.requests) == 2 * whole
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        lambda texts: texts[:-1],
+        lambda texts: [*texts[:-1], "Another memo."],
+        lambda texts: texts[::-1],
+    ],
+    ids=["missing", "changed", "reordered"],
+)
+def test_a_continue_over_other_files_is_refused_plainly_and_sends_nothing(
+    client: TestClient, llm: FakeLLM, other: Callable[[list[str]], list[str]]
+):
+    run_id, run_dir = failed_run(client, llm)
+    before, sent = files_in(run_dir), len(llm.requests)
+    response = continue_run(client, run_id, {"documents": other(memos())})
+    assert (response.status_code, response.json()) == (
+        422,
+        {"error": CONTINUE_OTHER_FILES},
+    )
+    assert llm.requests[sent:] == []
+    assert files_in(run_dir) == before
+
+
+def test_a_run_folder_outside_the_logs_dir_is_not_continued_and_the_log_says_why(
+    client: TestClient,
+    llm: FakeLLM,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    run_id, run_dir = failed_run(client, llm)
+    outside = tmp_path / "elsewhere"
+    run_dir.rename(outside)
+    run_dir.symlink_to(outside, target_is_directory=True)
+    before, sent = files_in(outside), len(llm.requests)
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        response = continue_run(client, run_id)
+    assert (response.status_code, response.json()) == (409, {"error": CONTINUE_REFUSED})
+    assert llm.requests[sent:] == []
+    assert files_in(outside) == before
+    assert f"{run_dir} isn't a folder of {run_dir.parent}" in caplog.text
+
+
+def test_an_imported_run_is_never_continued(client: TestClient, llm: FakeLLM):
+    run_id = imported(client, representation_of(client, finished_run(client)))
+    sent = len(llm.requests)
+    response = continue_run(client, run_id)
+    assert (response.status_code, response.json()) == (
+        409,
+        {"error": CONTINUE_IMPORTED},
+    )
+    assert llm.requests[sent:] == []
+
+
+def moved_out(run_dir: Path, outside: Path, path: str) -> None:
+    """``path`` in ``run_dir`` moved to ``outside``, a symbolic link to it in its
+    place."""
+    shutil.move(run_dir / path, outside / Path(path).name)
+    (run_dir / path).symlink_to(outside / Path(path).name)
+
+
+# Each way a link in a run folder could have a resume read or write outside it.
+LINKS_OUT = {
+    "a-file-read-and-appended-to": lambda run_dir, outside: moved_out(
+        run_dir, outside, "events.jsonl"
+    ),
+    "a-finished-stages-folder": lambda run_dir, outside: moved_out(
+        run_dir, outside, "structuring/schema"
+    ),
+    "a-folder-not-there-yet": lambda run_dir, outside: (
+        run_dir / "reasoning"
+    ).symlink_to(outside / "reasoning"),
+    "a-hard-link": lambda run_dir, outside: os.link(
+        run_dir / "events.jsonl", outside / "events.jsonl"
+    ),
+}
+
+
+@pytest.mark.parametrize("plant", LINKS_OUT.values(), ids=LINKS_OUT.keys())
+def test_a_run_folder_holding_a_link_that_reaches_outside_is_not_continued(
+    client: TestClient,
+    llm: FakeLLM,
+    tmp_path: Path,
+    plant: Callable[[Path, Path], None],
+):
+    run_id, run_dir = failed_run(client, llm)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    plant(run_dir, outside)
+    before, sent = files_in(outside), len(llm.requests)
+    response = continue_run(client, run_id)
+    assert (response.status_code, response.json()) == (409, {"error": CONTINUE_REFUSED})
+    assert llm.requests[sent:] == []
+    assert files_in(outside) == before
+
+
+@pytest.mark.parametrize(
+    ("model", "endpoint", "keys", "sent_with"),
+    [
+        (
+            MODEL,
+            None,
+            [STORED_OPENAI, {"provider": "openai", "key": NEW_OPENAI_KEY}],
+            {"api_key": NEW_OPENAI_KEY},
+        ),
+        (
+            SERVED_OPENAI_MODEL,
+            ENDPOINT,
+            [OTHER, {**OTHER, "key": NEW_SERVER_KEY}],
+            {"api_key": NEW_SERVER_KEY, "api_base": ENDPOINT},
+        ),
+    ],
+    ids=["provider", "server"],
+)
+def test_a_continue_runs_on_the_runs_server_with_the_key_stored_here_whatever_it_carries(
+    client: TestClient,
+    llm: FakeLLM,
+    model: str,
+    endpoint: str | None,
+    keys: list[dict[str, str]],
+    sent_with: dict[str, str],
+):
+    first, now = keys
+    client.post("/api/keys", json=first)
+    run_id, _ = failed_run(client, llm, model, endpoint)
+    client.post("/api/keys", json=now)
+    sent = len(llm.requests)
+    carried = {"documents": memos(), "api_key": REQUEST_KEY, "endpoint": ELSEWHERE}
+    refused = continue_run(client, run_id, carried)
+    headers = {"X-Api-Key": REQUEST_KEY, "Api-Key": REQUEST_KEY}
+    response = continue_run(client, run_id, headers=headers)
+    last = run_events(client, response.json()["run_id"])[-1]
+    assert refused.status_code == 422
+    assert refused.json()["error"] == (
+        "api_key: Extra inputs are not permitted; "
+        "endpoint: Extra inputs are not permitted"
+    )
+    assert last["type"] == "run_finished"
+    assert transport(llm)[sent:] == [sent_with] * (len(llm.requests) - sent)
+
+
+def test_a_second_continue_while_the_first_holds_the_folder_ends_on_one_plain_line(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    first = continue_run(client, run_id).json()["run_id"]
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    second = continued_events(client, run_id)
+    llm.gate.set()
+    last = run_events(client, first)[-1]
+    assert [(e["type"], e["stage"], e["error"]) for e in second] == [
+        ("run_failed", None, CONTINUE_GOING)
+    ]
+    assert last["type"] == "run_finished"
+
+
+def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
+    held_llm: FakeLLM, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        going = continue_run(client, run_id)
+        held_llm.gate.set()
+        assert run_events(client, run_id)[-1]["type"] == "run_finished"
+        finished = continue_run(client, run_id)
+    assert [(r.status_code, r.json()) for r in (going, finished)] == [
+        (409, {"error": CONTINUE_GOING}),
+        (409, {"error": CONTINUE_FINISHED}),
+    ]
 
 
 def representation_of(client: TestClient, run_id: str) -> dict[str, Any]:

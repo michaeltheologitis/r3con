@@ -11,8 +11,9 @@ note, and the answer the first two documents' summaries and parses. It refuses a
 document over ``PART_CHARS`` as too long, so that r3con reads it in parts.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
-wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, and one holding
-``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
+wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, one holding ``BREAKS``
+makes every parsing call raise until then, and one holding ``OFF_SCHEMA`` makes
+every reply with a schema miss it, so r3con sends again.
 The server keeps the keys it is given in a credential store of its own, in memory,
 never the system's. With ``--save-dialog`` after LOGS_DIR, it saves a tab as the Mac
 app does, through a Save dialog, faked: it saves in LOGS_DIR's ``saved``, under the
@@ -52,6 +53,7 @@ litellm.suppress_debug_info = True
 FAILS = "(the model is down)"
 HANGS = "(the model hangs)"
 STALLS = "(the model stalls)"
+BREAKS = "(the parser breaks)"
 RELEASE = "release"
 RELEASE_POLL_SECONDS = 0.05
 OFF_SCHEMA = "(the model answers off schema)"
@@ -132,8 +134,11 @@ def scripted_model(**request: Any) -> Any:
         raise RuntimeError("the check's model is down")
     if HANGS in sent:
         never.wait()
-    while STALLS in sent and not Path(sys.argv[1], RELEASE).exists():
+    released = Path(sys.argv[1], RELEASE)
+    while STALLS in sent and not released.exists():
         time.sleep(RELEASE_POLL_SECONDS)
+    if BREAKS in sent and stage_of(request) == "parsing" and not released.exists():
+        raise RuntimeError("the check's parser is down")
     part = request["messages"][-1]["content"]
     if stage_of(request) in READS_A_DOCUMENT and len(part) > PART_CHARS:
         raise ContextWindowExceededError(

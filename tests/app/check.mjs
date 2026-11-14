@@ -217,6 +217,8 @@ const LIVE_RUN_MS = 30_000;
 const FAILS = '(the model is down)';
 const HANGS = '(the model hangs)';
 const STALLS = '(the model stalls)';
+const BREAKS = '(the parser breaks)';
+const PARSER_ERROR = "RuntimeError: the check's parser is down";
 const OFF_SCHEMA = '(the model answers off schema)';
 // fake_server.py's RELEASE: once it is in the logs dir, stalled calls answer.
 const RELEASE_FILE = 'release';
@@ -265,6 +267,10 @@ const STOPPED_IN_PARSING = '● stopped in parsing';
 const STOPPED_WHILE_READING = '● stopped while reading';
 const STOPPED_ASK = '● ask stopped in reasoning';
 const STOPPED = '● stopped';
+// A run that failed or was stopped offers to continue, on a line of its own under its log.
+const CONTINUE_LINE = 'continue · from where it left off';
+const CONTINUE_BUTTON = `${CHAT} .turn-body .run-btn`;
+const CONTINUING = 'continuing';
 // A stopped ask's folded line.
 const STOPPED_ASK_LINE = 'stopped in reasoning';
 const CANCEL_REFUSED = 'no run with that id';
@@ -5342,7 +5348,8 @@ function startFakeServer(keys = {}, args = []) {
     rmSync(logsDir, { recursive: true, force: true });
   };
   const release = () => writeFileSync(join(logsDir, RELEASE_FILE), '');
-  return { url, stop, release, logsDir };
+  const hold = () => rmSync(join(logsDir, RELEASE_FILE));
+  return { url, stop, release, hold, logsDir };
 }
 
 async function withFakeServer(body, keys, args) {
@@ -6451,8 +6458,8 @@ async function liveFailure(url) {
     const stoppedName = "a failed run's unfinished nodes look and read as stopped, not as empty";
     check('live', stoppedName, readsStopped, stopped.map(([, name]) => name).join(' | '));
     const failedLog = await page.evaluate(logOf);
-    const inView = !failedLog.open && failedLog.mark === 'err' && failedLog.folded === 'failed in relevance' && isDeepStrictEqual(failedLog.after, [LIVE_ERROR]);
-    check('live', "a failed run's log ends on where it failed, its spinner gone, and its error is in view below it", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
+    const inView = !failedLog.open && failedLog.mark === 'err' && failedLog.folded === 'failed in relevance' && isDeepStrictEqual(failedLog.after, [LIVE_ERROR, CONTINUE_LINE]);
+    check('live', "a failed run's log ends on where it failed, its spinner gone, and its error is in view below it, then continue", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
     const label = await page.textContent('#run-btn');
     const started = runPosted(page);
     await send(page, 'Which site logged the most incidents?');
@@ -7235,6 +7242,99 @@ async function liveStopEarly(url, server) {
   });
 }
 
+// In-page: the shown tab's last turn's log lines, folded or not, each by the node it links to, or else its text: a
+// document's line reads the same in each round.
+function loggedLines() {
+  const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
+  return [...turn.querySelectorAll('.log-lines .line')].map((el) => el.dataset.node ?? el.querySelector('.t').textContent);
+}
+
+// The shown tab's panel and its run's log once a continue has ended: how many nodes, each once and none left working or
+// stopped, the lines its log holds more than once, and whether continue is still offered.
+async function continuedRun(page) {
+  const ids = await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id));
+  const lines = await page.evaluate(loggedLines);
+  return {
+    nodes: ids.length,
+    once: new Set(ids).size === ids.length,
+    unsettled: await count(page, '#world .node.working, #world .node.failed'),
+    repeated: lines.filter((text, i) => lines.indexOf(text) !== i),
+    offered: await count(page, CONTINUE_BUTTON),
+  };
+}
+
+// The parser breaks until the server releases it: the run fails in parsing, and continues once it is back.
+async function liveContinueFailed(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.setInputFiles('#file-input', [...sampleMemos(), splitMemo()]);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, SAMPLE_DOCS + 1);
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    const offered = { after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
+    const offeredName = 'a run that failed offers continue once, under its error';
+    check('live', offeredName, failed && isDeepStrictEqual(offered, { after: [PARSER_ERROR, CONTINUE_LINE], buttons: 1 }), JSON.stringify(offered));
+    const split = await inspect(page, `r1-${SAMPLE_DOCS}`, '#inspector .insp-text');
+
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ended = await continuedRun(page);
+    const lines = await page.evaluate(loggedLines);
+    const same = (await inspect(page, `r1-${SAMPLE_DOCS}`, '#inspector .insp-text')) === split;
+    const expected = { nodes: SAMPLE_COUNTS.nodes + DOCUMENT_AND_PARSE + ROUNDS, once: true, unsettled: 0, repeated: [], offered: 0 };
+    const continues = posts.filter((path) => path.endsWith('/continue')).length;
+    const doneName = "continue carries the run on in its tab: its panel picks up where it was, each node once and settled, each log line once, a document read in parts as it read, and once it is done no continue";
+    check('live', doneName, done && same && continues === 1 && lines.includes(CONTINUING) && isDeepStrictEqual(ended, expected), `${JSON.stringify(ended)}; split the same ${same}`);
+
+    await send(page, 'Which memo is the registry?');
+    const asked = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    check('live', 'a continued run, once done, is asked over like any other', asked && /^\/api\/runs\/\w+\/asks$/.test(posts.at(-1)), posts.at(-1));
+  });
+}
+
+// Stalls the run until the server releases it, stops it, then stalls and stops its continue.
+async function liveContinueStopped(url, server) {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const posts = postsOf(page);
+    const started = startedJob(page, '/api/runs');
+    await send(page, `Which site logged the most incidents? ${STALLS}`);
+    const runId = (await (await started).json()).run_id;
+    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+    await pressStop(page);
+    await becomes(page, statusIs, STOPPING);
+    server.release();
+    const stopped = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+    const offered = { after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
+    check('live', 'a stopped run offers continue once, under its log', stopped && isDeepStrictEqual(offered, { after: [CONTINUE_LINE], buttons: 1 }), JSON.stringify(offered));
+
+    server.hold();
+    const continued = startedJob(page, '/continue');
+    await page.click(CONTINUE_BUTTON);
+    const continuedId = (await (await continued).json()).run_id;
+    const going = await becomes(page, () => document.querySelector('#world .node.r2.working') !== null, null, LIVE_RUN_MS);
+    const whileGoing = { offered: await count(page, CONTINUE_BUTTON), stop: (await page.evaluate(composer)).stop, status: await page.textContent('#run-status') };
+    await pressStop(page);
+    await becomes(page, statusIs, STOPPING);
+    server.release();
+    const stoppedAgain = await becomes(page, statusMatches, '^● stopped in ', LIVE_RUN_MS);
+    const again = await count(page, CONTINUE_BUTTON);
+    const cancels = cancelsIn(posts);
+    const stops = going && whileGoing.offered === 0 && whileGoing.stop && whileGoing.status.startsWith('running · ') && stoppedAgain && again === 1;
+    const againName = 'a continued run goes on in its tab with stop offered and no continue; stopped, it offers continue again';
+    check('live', againName, stops && isDeepStrictEqual(cancels, [`/api/runs/${runId}/cancel`, `/api/runs/${continuedId}/cancel`]), `${JSON.stringify(whileGoing)}; ${cancels.join(' ')}`);
+
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ended = await continuedRun(page);
+    const continues = posts.filter((path) => path.endsWith('/continue'));
+    const chained = isDeepStrictEqual(continues, [`/api/runs/${runId}/continue`, `/api/runs/${continuedId}/continue`]);
+    const expected = { nodes: SAMPLE_COUNTS.nodes, once: true, unsettled: 0, repeated: [CONTINUING], offered: 0 };
+    const doneName = "continued again it finishes in the same tab: each node once and settled, each log line once but one continuing per continue, and no continue";
+    check('live', doneName, done && chained && isDeepStrictEqual(ended, expected), `${JSON.stringify(ended)}; ${continues.join(' ')}`);
+  });
+}
+
 // Stalls two asks' calls until it releases them; their replies then miss their schema, so r3con would send again.
 async function liveStopAsk(url, server) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
@@ -7459,6 +7559,7 @@ async function liveImport(url, server) {
     const openedName = "a saved tab's file dropped on the empty first tab opens there as it was saved: its panel, folders, icons and lit trail, its run's and ask's turns, and its files";
     const there = opened && !differ.length && (await tabCount(page)) === 1 && runFolders(server) === runs + 1;
     check('live', openedName, there, differ.map((key) => `${key}: ${JSON.stringify(shown[key]).slice(0, DETAIL_CHARS)}`).join(' | '));
+    check('live', 'a tab opened from a saved file offers no continue', (await count(page, CONTINUE_BUTTON)) === 0);
 
     await send(page, IMPORTED_ASK);
     const asked = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
@@ -7730,7 +7831,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
