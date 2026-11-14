@@ -24,11 +24,7 @@ from starlette.types import ASGIApp
 from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
-    CONTINUE_FINISHED,
-    CONTINUE_GOING,
-    CONTINUE_MASKED,
-    CONTINUE_OTHER_FILES,
-    CONTINUE_REFUSED,
+    CONTINUE_REFUSALS,
     DEFAULT_RELEVANCE_ROUNDS,
     DIRECT_ONLY,
     ENCRYPTED_ZIP,
@@ -1225,7 +1221,7 @@ def test_an_ask_that_would_send_a_masked_param_fails_naming_it_and_sends_nothing
         ("ask_failed", None)
     ]
     assert events[0]["error"] == (
-        "ValueError: REDACTED, the mask a run's manifest saves in place of a "
+        "MaskedParams: REDACTED, the mask a run's manifest saves in place of a "
         "credential, would be sent: pass the real value in `params`, which replaces "
         "all of the run's params. Masked params: `extra_headers.Authorization`."
     )
@@ -1284,14 +1280,24 @@ def continued_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
     return run_events(client, continued_id(client, run_id))
 
 
-def refusal(response: httpx2.Response) -> tuple[int, str]:
-    return response.status_code, response.json()["error"]
+def refusal(response: httpx2.Response) -> tuple[int, dict[str, Any]]:
+    return response.status_code, response.json()
 
 
-def ends(events: list[dict[str, Any]]) -> list[tuple[str, str | None, str | None]]:
-    """Each of ``events`` that ended its stream, a refusal before it began among them,
-    by its type, its stage and its error."""
-    return [(e["type"], e.get("stage"), e.get("error")) for e in events]
+def refused(code: str) -> dict[str, str]:
+    """A continue's refusal, as its answer gives it."""
+    return {"error": CONTINUE_REFUSALS[code], "code": code}
+
+
+def ends(events: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """Each of ``events`` that ended a stream, a refusal before it began among them, by
+    its type, stage, error and code."""
+    return [(e["type"], e.get("stage"), e.get("error"), e.get("code")) for e in events]
+
+
+def refused_in_stream(code: str) -> tuple[Any, ...]:
+    """A continue's refusal, as the event that ends its stream gives it."""
+    return ("run_failed", None, CONTINUE_REFUSALS[code], code)
 
 
 def stopped(client: TestClient, model: FakeLLM, run_id: str) -> dict[str, Any]:
@@ -1343,9 +1349,9 @@ def test_a_stopped_run_continues_and_so_does_a_stopped_continue_each_call_sent_o
     second = stopped(client, llm, continued)
     last = continued_events(client, continued)[-1]
     assert ends([first, second, last]) == [
-        ("run_failed", "relevance", first["error"]),
-        ("run_failed", "relevance", second["error"]),
-        ("run_finished", None, None),
+        ("run_failed", "relevance", first["error"], None),
+        ("run_failed", "relevance", second["error"], None),
+        ("run_finished", None, None, None),
     ]
     assert len(llm.requests) == 2 * whole
 
@@ -1365,7 +1371,7 @@ def test_a_continue_over_other_files_is_refused_plainly_and_sends_nothing(
     run_id, run_dir = failed_run(client, llm)
     before, sent = the_runs_own_files(run_dir), len(llm.requests)
     response = continue_run(client, run_id, {"documents": other(memos())})
-    assert refusal(response) == (422, CONTINUE_OTHER_FILES)
+    assert refusal(response) == (422, refused("other_files"))
     assert llm.requests[sent:] == []
     assert the_runs_own_files(run_dir) == before
 
@@ -1383,7 +1389,7 @@ def test_a_run_folder_outside_the_logs_dir_is_not_continued_and_the_log_says_why
     before, sent = the_runs_own_files(outside), len(llm.requests)
     with caplog.at_level(logging.WARNING, logger="r3con.app"):
         response = continue_run(client, run_id)
-    assert refusal(response) == (409, CONTINUE_REFUSED)
+    assert refusal(response) == (409, refused("not_continuable"))
     assert llm.requests[sent:] == []
     assert the_runs_own_files(outside) == before
     assert f"{run_dir} isn't a folder of {run_dir.parent}" in caplog.text
@@ -1394,7 +1400,7 @@ def test_an_imported_run_has_finished_so_is_never_continued(
 ):
     run_id = imported(client, representation_of(client, finished_run(client)))
     sent = len(llm.requests)
-    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_FINISHED)
+    assert refusal(continue_run(client, run_id)) == (409, refused("finished"))
     assert llm.requests[sent:] == []
 
 
@@ -1403,7 +1409,7 @@ def test_a_run_a_continue_finished_says_it_has_finished_when_continued_again(
 ):
     run_id, _ = failed_run(client, llm)
     assert continued_events(client, run_id)[-1]["type"] == "run_finished"
-    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_FINISHED)
+    assert refusal(continue_run(client, run_id)) == (409, refused("finished"))
 
 
 def test_a_run_refused_before_it_started_has_no_folder_to_continue(
@@ -1412,7 +1418,7 @@ def test_a_run_refused_before_it_started_has_no_folder_to_continue(
     monkeypatch.setenv("R3CON_DOC_WORKERS", "0")
     run_id = start_run(client)
     assert run_events(client, run_id)[-1]["stage"] is None
-    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_REFUSED)
+    assert refusal(continue_run(client, run_id)) == (409, refused("not_continuable"))
 
 
 @pytest.mark.parametrize(
@@ -1447,22 +1453,24 @@ def test_a_continue_runs_on_the_runs_server_with_the_key_stored_here_whatever_it
     client.post("/api/keys", json=now)
     sent = len(llm.requests)
     carried = {"documents": memos(), "api_key": REQUEST_KEY, "endpoint": ELSEWHERE}
-    refused = continue_run(client, run_id, carried)
+    carrying = continue_run(client, run_id, carried)
     headers = {"X-Api-Key": REQUEST_KEY, "Api-Key": REQUEST_KEY}
     response = continue_run(client, run_id, headers=headers)
     last = run_events(client, response.json()["run_id"])[-1]
-    assert refusal(refused) == (
+    assert refusal(carrying) == (
         422,
-        (
-            "api_key: Extra inputs are not permitted; "
-            "endpoint: Extra inputs are not permitted"
-        ),
+        {
+            "error": (
+                "api_key: Extra inputs are not permitted; "
+                "endpoint: Extra inputs are not permitted"
+            )
+        },
     )
     assert last["type"] == "run_finished"
     assert transport(llm)[sent:] == [sent_with] * (len(llm.requests) - sent)
 
 
-def test_a_run_whose_config_sends_a_credential_its_folder_masked_is_not_continued(
+def test_a_continue_whose_config_sends_a_credential_its_folder_masked_ends_refused(
     client: TestClient, llm: FakeLLM, tmp_path: Path
 ):
     config = yaml.safe_load((CONFIGS_DIR / "default.yaml").read_text())
@@ -1473,8 +1481,22 @@ def test_a_run_whose_config_sends_a_credential_its_folder_masked_is_not_continue
     )
     run_id, _ = failed_run(client, llm)
     sent = len(llm.requests)
-    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_MASKED)
+    assert ends(continued_events(client, run_id)) == [refused_in_stream("masked")]
     assert llm.requests[sent:] == []
+
+
+def test_a_continue_while_a_job_on_its_folder_goes_is_going_before_any_read(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    first = continued_id(client, run_id)
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    other = continue_run(client, run_id, {"documents": ["Another memo."]})
+    llm.gate.set()
+    assert run_events(client, first)[-1]["type"] == "run_finished"
+    assert refusal(other) == (409, refused("going"))
 
 
 def test_a_continue_while_one_is_going_is_refused_as_still_going(
@@ -1489,7 +1511,7 @@ def test_a_continue_while_one_is_going_is_refused_as_still_going(
     again = continue_run(client, run_id)
     llm.gate.set()
     assert run_events(client, first)[-1]["type"] == "run_finished"
-    assert [refusal(r) for r in (second, again)] == [(409, CONTINUE_GOING)] * 2
+    assert [refusal(r) for r in (second, again)] == [(409, refused("going"))] * 2
 
 
 def test_a_continue_sent_as_its_run_fails_waits_for_the_run_to_let_go_of_its_folder(
@@ -1520,7 +1542,7 @@ def test_a_continue_refused_while_another_program_holds_the_folder_continues_aga
     with run_lock(run_dir):
         refused = continued_id(client, run_id)
         events = run_events(client, refused)
-    assert ends(events) == [("run_failed", None, CONTINUE_GOING)]
+    assert ends(events) == [refused_in_stream("going")]
     assert continued_events(client, refused)[-1]["type"] == "run_finished"
 
 
@@ -1530,8 +1552,18 @@ def test_a_continue_r3con_refuses_once_started_ends_its_stream_on_one_plain_line
     run_id, run_dir = failed_run(client, llm)
     (run_dir / "relevance" / "result.json").write_text("not JSON")
     assert ends(continued_events(client, run_id)) == [
-        ("run_failed", None, CONTINUE_REFUSED)
+        refused_in_stream("not_continuable")
     ]
+
+
+def test_a_run_folder_file_that_cannot_be_read_is_refused_plainly(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    (run_dir / "ids.json").unlink()
+    (run_dir / "ids.json").mkdir()
+    response = continue_run(client, run_id)
+    assert refusal(response) == (409, refused("not_continuable"))
 
 
 def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
@@ -1545,8 +1577,8 @@ def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
         assert run_events(client, run_id)[-1]["type"] == "run_finished"
         finished = continue_run(client, run_id)
     assert [refusal(r) for r in (going, finished)] == [
-        (409, CONTINUE_GOING),
-        (409, CONTINUE_FINISHED),
+        (409, refused("going")),
+        (409, refused("finished")),
     ]
 
 

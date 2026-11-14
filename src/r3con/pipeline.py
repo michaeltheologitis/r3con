@@ -1640,6 +1640,11 @@ def _llm_kwargs(
     return llm_kwargs
 
 
+class MaskedParams(ValueError):
+    """A request would send the mask a run's manifest saves in place of a credential
+    (:func:`refuse_masked`)."""
+
+
 def refuse_masked(
     params: Mapping[str, Any],
     *,
@@ -1655,7 +1660,7 @@ def refuse_masked(
     refused too, since it can't be told from a saved one.
 
     Raises:
-        ValueError: giving ``advice``, then naming each param that holds the mask, by
+        MaskedParams: giving ``advice``, then naming each param that holds the mask, by
             the path to it, or by its name alone when it holds it more than once.
     """
     transport = {"api_base": api_base, "api_key": api_key}
@@ -1666,7 +1671,7 @@ def refuse_masked(
         holding += paths if len(paths) < 2 else [name]
     if holding:
         listed = ", ".join(f"`{param}`" for param in holding)
-        raise ValueError(
+        raise MaskedParams(
             f"{MASK}, the mask a run's manifest saves in place of a credential, would "
             f"be sent: {advice}. Masked params: {listed}."
         )
