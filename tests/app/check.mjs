@@ -7447,6 +7447,72 @@ async function liveStoppedUnstarted(url) {
   });
 }
 
+// The run's first event, as its folder's events.jsonl holds it.
+function firstEventOf(server) {
+  const folder = readdirSync(server.logsDir).find((name) => existsSync(join(server.logsDir, name, 'events.jsonl')));
+  return JSON.parse(readFileSync(join(server.logsDir, folder, 'events.jsonl'), 'utf8').split('\n')[0]);
+}
+
+// A continue's answer and stream, served in r3con app's place: it starts the round-2 call of the first document again,
+// then fails before any stage, with no code, as a full disk would fail it.
+async function liveContinueRedrawn(url, server) {
+  const failure = 'OSError: [Errno 28] No space left on device';
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    const { document_ids: ids, rounds } = firstEventOf(server);
+    const cited = await page.$$eval('.edge.cite', (els) => els.map((el) => el.dataset.key).filter((key) => key.endsWith('>r2-0')));
+    const events = [
+      { type: 'run_started', document_ids: ids, rounds },
+      { type: 'run_resumed', reused: {} },
+      { type: 'relevance_started', round: 2, doc_id: ids[0] },
+      { type: 'run_failed', stage: null, error: failure },
+    ];
+    await page.route('**/api/runs/*/continue', (route) => route.fulfill({ status: 202, contentType: 'application/json', body: '{"run_id": "redrawn"}' }));
+    await page.route('**/api/runs/redrawn/events', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') }),
+    );
+    await page.click(CONTINUE_BUTTON);
+    const failed = await becomes(page, statusIs, `● failed · ${failure}`, LIVE_RUN_MS);
+    const kinds = await page.$$eval('.edge', (els, keys) => els.filter((el) => keys.includes(el.dataset.key)).map((el) => el.classList.contains('cite')), cited);
+    const citesName = "a node a continue draws again keeps the lines its call cited, which the continue's other lines into it don't replace";
+    check('live', citesName, cited.length > 0 && kinds.length === cited.length && kinds.every(Boolean), `${cited.join(' ')}: ${kinds}`);
+    const ended = await afterContinue(page);
+    const failedName = 'a continue that fails before any stage, with no code, says why and offers continue again';
+    check('live', failedName, failed && isDeepStrictEqual(ended, { folded: 'failed', after: [PARSER_ERROR, failure, CONTINUE_LINE], offered: 1 }), JSON.stringify(ended));
+  });
+}
+
+// Holds the continue's POST back until stop has been pressed.
+async function liveContinueStopEarly(url, server) {
+  let letThrough;
+  const posted = new Promise((resolve) => (letThrough = resolve));
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const posts = postsOf(page);
+    const runId = await stoppedRun(page, server);
+    server.hold();
+    await page.route('**/api/runs/*/continue', async (route) => {
+      await posted;
+      await route.continue();
+    });
+    const started = startedJob(page, '/continue');
+    await page.click(CONTINUE_BUTTON);
+    await becomes(page, () => !document.getElementById('stop-btn').hidden);
+    await pressStop(page);
+    const early = await page.waitForRequest(isCancel, { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    const cancelled = page.waitForRequest((request) => isCancel(request) && !request.url().includes(runId));
+    letThrough();
+    const continuedId = (await (await started).json()).run_id;
+    await cancelled;
+    server.release();
+    const stopped = await becomes(page, statusMatches, '^● stopped in ', LIVE_RUN_MS);
+    const cancels = cancelsIn(posts);
+    const name = "stop pressed before a continue's job answers cancels no earlier job, and cancels the continue's once it does";
+    const expected = [`/api/runs/${runId}/cancel`, `/api/runs/${continuedId}/cancel`];
+    check('live', name, early === null && stopped && isDeepStrictEqual(cancels, expected) && (await count(page, CONTINUE_BUTTON)) === 1, cancels.join(' '));
+  });
+}
+
 // The server goes away while a continue goes.
 async function liveContinueLost(url, server) {
   await withPage('live', { url, sample: false, memos: true, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
@@ -7958,7 +8024,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
