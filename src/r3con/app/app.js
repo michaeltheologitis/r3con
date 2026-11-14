@@ -98,7 +98,7 @@
    * @property {string | null} [id]
    * @property {string[]} ids
    * @property {Map<string, number>} indexes each document id's index
-   * @property {Set<number>} pruned the documents r3con pruned after round PRUNED_AFTER_ROUND, read in no later round nor parsed
+   * @property {Set<number>[]} pruned the documents r3con pruned after each round, at its index: read in no later round, nor parsed
    * @property {string | null} [lit]
    */
   /**
@@ -196,7 +196,7 @@
   /**
    * What r3con app gives of a run's folder, each file by its path there, as far as the page reads it.
    * @typedef {{ 'ids.json': Record<string, number>, 'names.json': Record<string, string>,
-   *   'relevance/result.json': { rounds: { snippets: Snippet[] }[], pruned?: string[] },
+   *   'relevance/result.json': { rounds: { snippets: Snippet[] }[], pruned_after?: Record<string, number>, pruned?: string[] },
    *   'structuring/schema/result.json': { schema_code: string, thought: string | null },
    *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][] }
    * }} Representation
@@ -220,7 +220,7 @@
    *   | { type: 'relevance_started', round: number, doc_id: string }
    *   | { type: 'relevance_finished', round: number, doc_id: string, part: number | null, summary: string, quotes: Quote[],
    *       provenance: string[] }
-   *   | { type: 'documents_pruned', doc_ids: string[] }
+   *   | { type: 'documents_pruned', round?: number, doc_ids: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
@@ -1660,8 +1660,8 @@
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
-  // r3con's PRUNED_AFTER_ROUND: a document whose summaries in it are all empty is read in no later round, nor parsed.
-  const PRUNED_AFTER_ROUND = 2;
+  // r3context 0.6.26 to 0.6.28 pruned after round 2 alone, and recorded no round.
+  const LEGACY_PRUNING_ROUND = 2;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -2104,13 +2104,14 @@
   /** @param {Parse | undefined} parse */
   const hasRecords = (parse) => parse !== undefined && Object.values(parse.parse).some((records) => records.length > 0);
 
-  // r3con reads a document it pruned in no round after PRUNED_AFTER_ROUND, nor parses it.
-  /** @param {PerDocumentKind} kind */
-  const skipsPruned = (kind) => !isRound(kind) || roundOf(kind) > PRUNED_AFTER_ROUND;
+  // r3con reads a document it pruned after a round in no later round, nor parses it: these are the documents it
+  // pruned before a kind of node, after an earlier round or, for a parse, after any.
+  /** @param {Pick<Run, 'pruned'>} run @param {PerDocumentKind} kind */
+  const prunedBefore = (run, kind) => run.pruned.slice(0, isRound(kind) ? roundOf(kind) : undefined);
   /** @param {Pick<Run, 'pruned'>} run @param {PerDocumentKind} kind @param {number} d */
-  const isRead = (run, kind, d) => !skipsPruned(kind) || !run.pruned.has(d);
+  const isRead = (run, kind, d) => !prunedBefore(run, kind).some((docs) => docs.has(d));
   /** @param {Pick<Run, 'docs' | 'pruned'>} run @param {PerDocumentKind} kind */
-  const readCount = (run, kind) => run.docs.length - (skipsPruned(kind) ? run.pruned.size : 0);
+  const readCount = (run, kind) => prunedBefore(run, kind).reduce((n, docs) => n - docs.size, run.docs.length);
 
   // `make(i)` at each index below `n` that `keep` holds for, and a hole at each other, as a live run's summaries and
   // parses have until their events come.
@@ -2364,7 +2365,7 @@
       rounds: SAMPLE.rounds.map((summaries, k) => inUnits(summaries, k + 1)),
       schema: SAMPLE.schema,
       parsed: SAMPLE.parsed,
-      pruned: new Set(),
+      pruned: [],
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
       source: RECORDED_SOURCE,
@@ -2425,7 +2426,7 @@
       rounds: range(rounds).map(round),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
       parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
-      pruned: new Set(),
+      pruned: [],
       calls: null,
       totals: null,
     };
@@ -2437,7 +2438,7 @@
   /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @param {number} rounds @returns {Run} */
   function liveRun(question, model, endpoint, docs, rounds) {
     /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'pruned' | 'calls' | 'totals'>} */
-    const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], pruned: new Set(), calls: null, totals: null };
+    const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], pruned: [], calls: null, totals: null };
     return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
@@ -4795,10 +4796,11 @@
     return fold(line, groups, 'fold sentences');
   }
 
-  /** @param {RunTab} tab @param {Narrator} narr */
-  function sayPruned(tab, narr) {
-    const { size } = tab.run.pruned;
-    if (size) narr.logAs('pruned', 'sub', `${plural(size, 'document')} with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`);
+  /** @param {RunTab} tab @param {Narrator} narr @param {number} round */
+  function sayPruned(tab, narr, round) {
+    const size = tab.run.pruned[round]?.size;
+    const after = round < tab.run.rounds.length ? 'not read further, nor parsed' : 'not parsed';
+    if (size) narr.logAs(`pruned-${round}`, 'sub', `${plural(size, 'document')} with nothing relevant in round ${round} · ${after}`);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
@@ -4863,7 +4865,7 @@
       t += TIMING.phaseGap;
       at(t, () => beginStage(tab, narr, kind));
       t = perDocument(t, kind);
-      if (roundOf(kind) === PRUNED_AFTER_ROUND) at(t, () => sayPruned(tab, narr));
+      at(t, () => sayPruned(tab, narr, roundOf(kind)));
     }
 
     t += TIMING.phaseGap;
@@ -4931,8 +4933,7 @@
         addSnippet(tab, narr, doc(event.doc_id), event);
         break;
       case 'documents_pruned':
-        run.pruned = new Set(docIndices(run, event.doc_ids));
-        sayPruned(tab, narr);
+        addPruned(tab, narr, event);
         break;
       case 'schema_started':
         beginStage(tab, narr, 'schema');
@@ -4967,6 +4968,13 @@
         failRun(tab, narr, endingOf(stopping(tab), event));
         break;
     }
+  }
+
+  // A round that prunes says so once it is in; one of r3context 0.6.26 to 0.6.28 named no round, as it pruned after one.
+  /** @param {RunTab} tab @param {Narrator} narr @param {Extract<ServerEvent, { type: 'documents_pruned' }>} event */
+  function addPruned(tab, narr, { round = LEGACY_PRUNING_ROUND, doc_ids }) {
+    tab.run.pruned[round] = new Set(docIndices(tab.run, doc_ids));
+    sayPruned(tab, narr, round);
   }
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
@@ -6701,7 +6709,12 @@
       'manifest.json': isObject,
       'ids.json': recordOf(isCount),
       'names.json': recordOf(isPath),
-      'relevance/result.json': { rounds: [{ snippets: [SNIPPET], [OTHER_KEYS]: anything }], 'pruned?': ['string'], [OTHER_KEYS]: anything },
+      'relevance/result.json': {
+        rounds: [{ snippets: [SNIPPET], [OTHER_KEYS]: anything }],
+        'pruned_after?': recordOf((round) => isCount(round) && /** @type {number} */ (round) <= MAX_ROUNDS),
+        'pruned?': ['string'],
+        [OTHER_KEYS]: anything,
+      },
       'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
       'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
     },
@@ -6727,7 +6740,15 @@
   function runOf(r, docs, own, totals) {
     const ids = Object.keys(r['ids.json']).sort((a, b) => r['ids.json'][a] - r['ids.json'][b]);
     const indexed = withIds(ids);
-    const pruned = new Set(docIndices(indexed, r['relevance/result.json'].pruned ?? []));
+    const relevance = r['relevance/result.json'];
+    // A flat list of the documents pruned, as r3context 0.6.26 to 0.6.28 wrote it, is round 2's.
+    const after = relevance.pruned_after ?? Object.fromEntries((relevance.pruned ?? []).map((id) => [id, LEGACY_PRUNING_ROUND]));
+    /** @type {Set<number>[]} */
+    const pruned = [];
+    for (const [id, round] of Object.entries(after)) {
+      const d = docIndex(indexed, id);
+      if (d !== undefined) (pruned[round] ??= new Set()).add(d);
+    }
     // As in a live run, a document r3con pruned has no summary in a round that did not read it, nor a parse.
     /** @param {Snippet[]} snippets @param {number} round @returns {Summary[]} */
     const summaries = (snippets, round) =>
@@ -6747,9 +6768,9 @@
       simulated: false,
       docs,
       ...indexed,
-      rounds: r['relevance/result.json'].rounds.map(({ snippets }, k) => summaries(snippets, k + 1)),
+      rounds: relevance.rounds.map(({ snippets }, k) => summaries(snippets, k + 1)),
       schema: { code: schema.schema_code, thought: schema.thought ?? '' },
-      parsed: sparse(docs.length, (d) => !pruned.has(d), (d) => ({ parse: parseOf(d), provenance: docIndices(indexed, provenance[d]) })),
+      parsed: sparse(docs.length, (d) => isRead({ pruned }, 'parsed', d), (d) => ({ parse: parseOf(d), provenance: docIndices(indexed, provenance[d]) })),
       pruned,
       answers: [own],
       calls: null,

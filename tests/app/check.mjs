@@ -233,8 +233,6 @@ const MAX_ROUNDS = 4;
 const FEWER_ROUNDS = 1;
 const MORE_ROUNDS = 3;
 const OTHER_ROUNDS = [FEWER_ROUNDS, MORE_ROUNDS, MAX_ROUNDS];
-// r3con's PRUNED_AFTER_ROUND: a document whose summaries in it are all empty is read in no later round, nor parsed.
-const PRUNED_AFTER_ROUND = 2;
 // The kinds of node of `rounds` relevance rounds, r1 on.
 const roundKinds = (rounds) => Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
 // Besides its rounds' nodes, a run draws a document and a parse per document, then one structure and one answer.
@@ -5691,7 +5689,12 @@ async function liveParts(url) {
 
 // A memo whose every line fake_server.py's model skips, so its summary is empty in every round and r3con prunes it.
 const quietMemo = () => memo('06_quiet_memo.txt', `${QUIET} The canteen's menu for the week.\n${QUIET} Nothing else to report.\n`);
-const PRUNED_LINE = `1 document with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`;
+// fake_server.py's FADES: a memo holding it says nothing from its third read on, round 3 when it is read whole once a
+// round. The server counts reads by a memo's text, so each run's has a `tag` of its own.
+const FADES = '(nothing relevant from round 3 on)';
+const fadingMemo = (tag) => memo('07_fading_memo.txt', `Fading memo, ${tag}: the Eastfield site logged a late incident.\n${FADES}\n`);
+// What a run's log says once a round of `rounds` has pruned one memo.
+const prunedLine = (round, rounds) => `1 document with nothing relevant in round ${round} · ${round < rounds ? 'not read further, nor parsed' : 'not parsed'}`;
 
 // In-page: each node but the documents', by id, those that came back empty marked so.
 function stageNodes() {
@@ -5699,53 +5702,102 @@ function stageNodes() {
   return ids.map((el) => `${el.dataset.id}${el.classList.contains('void') ? ' · empty' : ''}`).sort();
 }
 
-// A run of MAX_ROUNDS rounds over the sample memos and a quiet one, which r3con prunes after PRUNED_AFTER_ROUND: the
-// quiet memo's path ends at its empty node of that round in the live run, after an ask over it, and in the tab saved
-// and opened again.
-async function livePruned(url) {
-  const quiet = SAMPLE_DOCS;
+// The kinds of node on each document's path among `nodes`, as stageNodes gives them, for `docs` documents of `rounds`.
+const pathsIn = (nodes, docs, rounds) =>
+  Array.from({ length: docs }, (_, d) => [...roundKinds(rounds), 'parsed'].filter((kind) => nodes.some((id) => id.split(' ')[0] === `${kind}-${d}`)));
+
+// Over the sample memos, a quiet one and a fading one, MAX_ROUNDS rounds: r3con prunes the quiet memo after round 2
+// and the fading one after round 3, and each one's path ends at its empty node of that round, with no later round's
+// node and no parse node: in the live run, its log, an ask over it, and the tab saved and opened again; then in a tab
+// of r3context 0.6.28's, its pruned memos listed flat, which are round 2's; and in a run continued after it failed.
+async function livePruned(url, server) {
+  const [quiet, fading] = [SAMPLE_DOCS, SAMPLE_DOCS + 1];
   const whole = [...roundKinds(MAX_ROUNDS), 'parsed'];
-  const paths = (nodes) => Array.from({ length: SAMPLE_DOCS + 1 }, (_, d) => whole.filter((kind) => nodes.some((id) => id.split(' ')[0] === `${kind}-${d}`)));
-  const expected = [...Array(SAMPLE_DOCS).fill(whole), roundKinds(PRUNED_AFTER_ROUND)];
-  const endsAtRound2 = (nodes) => isDeepStrictEqual(paths(nodes), expected) && nodes.includes(`r${PRUNED_AFTER_ROUND}-${quiet} · empty`);
+  const expected = [...Array(SAMPLE_DOCS).fill(whole), roundKinds(2), roundKinds(3)];
+  const paths = (nodes) => pathsIn(nodes, SAMPLE_DOCS + 2, MAX_ROUNDS);
+  const ended = (nodes) => isDeepStrictEqual(paths(nodes), expected) && nodes.includes(`r2-${quiet} · empty`) && nodes.includes(`r3-${fading} · empty`);
   let html;
   let asked;
+  let ids = [];
   const before = (page) => page.addInitScript(recordEvents);
   await withPage('live', { url, sample: false, question: true, before }, async (page) => {
-    await page.setInputFiles('#file-input', [...sampleMemos(), quietMemo()]);
-    await filesCounted(page, SAMPLE_DOCS + 1);
+    await page.setInputFiles('#file-input', [...sampleMemos(), quietMemo(), fadingMemo('read live')]);
+    await filesCounted(page, SAMPLE_DOCS + 2);
     await pickRounds(page, MAX_ROUNDS);
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const events = await page.evaluate(() => window.events);
-    const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
-    const pruned = events.filter((e) => e.type === 'documents_pruned').map((e) => e.doc_ids);
+    ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
+    const pruned = events.filter((e) => e.type === 'documents_pruned').map((e) => [e.round, e.doc_ids]);
     const ran = await page.evaluate(stageNodes);
-    const endsName = `a memo with nothing relevant in round ${PRUNED_AFTER_ROUND}, which r3con's event names pruned, ends its path at its empty round-${PRUNED_AFTER_ROUND} node: no later round's node nor a parse node, while the others run on`;
-    check('live', endsName, done && isDeepStrictEqual(pruned, [[ids[quiet]]]) && endsAtRound2(ran), `${JSON.stringify(pruned)}; ${JSON.stringify(paths(ran))}`);
+    const endsName = "a memo pruned after round 2 or 3, as r3con's events name it with its round, ends its path at its empty node of that round: no later round's node nor a parse node, while the others run on";
+    check('live', endsName, done && isDeepStrictEqual(pruned, [[2, [ids[quiet]]], [3, [ids[fading]]]]) && ended(ran), `${JSON.stringify(pruned)}; ${JSON.stringify(paths(ran))}`);
 
     await page.focus('.log-toggle');
     await page.keyboard.press('Enter');
     const steps = Object.fromEntries((await page.evaluate(logOf)).steps.map(({ step, nested }) => [step, nested]));
-    const logged = steps[`round ${PRUNED_AFTER_ROUND} · extracting relevance`]?.at(-1) === PRUNED_LINE && roundKinds(MAX_ROUNDS).slice(PRUNED_AFTER_ROUND).every((kind) => steps[`round ${kind.slice(1)} · extracting relevance`]?.length === SAMPLE_DOCS) && steps[`parsing ${SAMPLE_DOCS} documents`]?.length === SAMPLE_DOCS;
-    check('live', `its log says so after round ${PRUNED_AFTER_ROUND}, and each later round and the parsing count only the other ${SAMPLE_DOCS} memos`, logged, JSON.stringify(Object.keys(steps)));
+    const round = (k) => steps[`round ${k} · extracting relevance`] ?? [];
+    const logged = {
+      said: [round(2).at(-1), round(3).at(-1)],
+      counted: [round(3).length, round(4).length, steps[`parsing ${SAMPLE_DOCS} documents`]?.length],
+    };
+    const loggedExpected = { said: [prunedLine(2, MAX_ROUNDS), prunedLine(3, MAX_ROUNDS)], counted: [SAMPLE_DOCS + 2, SAMPLE_DOCS, SAMPLE_DOCS] };
+    check('live', 'its log says how many it pruned after which round, and each later round and the parsing count only the memos still read', isDeepStrictEqual(logged, loggedExpected), JSON.stringify(logged));
 
     await send(page, SAVED_ASK);
     const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
     asked = await page.evaluate(stageNodes);
-    check('live', 'an ask over that run lands, and the pruned path still ends there', landed && endsAtRound2(asked), JSON.stringify(paths(asked)));
+    check('live', 'an ask over that run lands, and the pruned paths still end there', landed && ended(asked), JSON.stringify(paths(asked)));
     html = await savedHtml(page);
   });
-  const recorded = savedBlockOf(html).representation['relevance/result.json'].pruned;
+  const recorded = savedBlockOf(html).representation['relevance/result.json'].pruned_after;
   await withPage('live', { url, sample: false }, async (page) => {
     await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
     const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const shown = await page.evaluate(stageNodes);
-    const openedName = "saved, the run's folder lists the memo pruned, and the tab opened again draws every node the live run and its ask did, the pruned path ending at round 2";
-    check('live', openedName, opened && recorded?.length === 1 && isDeepStrictEqual(shown, asked), `${JSON.stringify(recorded)}; ${shown.length} nodes, ${asked?.length} live`);
+    const openedName = "saved, the run's folder maps each pruned memo to its round, and the tab opened again draws every node the live run and its ask did";
+    check('live', openedName, opened && isDeepStrictEqual(recorded, { [ids[quiet]]: 2, [ids[fading]]: 3 }) && isDeepStrictEqual(shown, asked), `${JSON.stringify(recorded)}; ${shown.length} nodes, ${asked?.length} live`);
     await send(page, NEW_QUESTION);
     const again = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
-    check('live', 'an ask over the tab opened again lands, its pruned path as it was', again && endsAtRound2(await page.evaluate(stageNodes)), await page.textContent('#run-status'));
+    check('live', 'an ask over the tab opened again lands, its pruned paths as they were', again && ended(await page.evaluate(stageNodes)), await page.textContent('#run-status'));
+  });
+
+  let legacy;
+  let live;
+  await withPage('live', { url, sample: false, question: true }, async (page) => {
+    await page.setInputFiles('#file-input', [...sampleMemos(), quietMemo()]);
+    await filesCounted(page, SAMPLE_DOCS + 1);
+    await page.click('#run-btn');
+    await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    live = await page.evaluate(stageNodes);
+    legacy = withBlock(await savedHtml(page), (b) => {
+      const { pruned_after: after, ...relevance } = b.representation['relevance/result.json'];
+      return { ...b, representation: { ...b.representation, 'relevance/result.json': { ...relevance, pruned: Object.keys(after) } } };
+    });
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, legacy]] });
+    const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = await page.evaluate(stageNodes);
+    const ends = isDeepStrictEqual(pathsIn(shown, SAMPLE_DOCS + 1, ROUNDS), [...Array(SAMPLE_DOCS).fill([...roundKinds(ROUNDS), 'parsed']), roundKinds(2)]);
+    const legacyName = "a tab of r3context 0.6.28's, its pruned memo listed flat, opens with that memo pruned after round 2, as its live run drew it";
+    check('live', legacyName, opened && ends && isDeepStrictEqual(shown, live), `${shown.length} nodes, ${live?.length} live`);
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', [...sampleMemos(), quietMemo(), fadingMemo('continued')]);
+    await filesCounted(page, SAMPLE_DOCS + 2);
+    await pickRounds(page, MAX_ROUNDS);
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const nodes = await page.evaluate(stageNodes);
+    const lines = await page.evaluate(loggedLines);
+    const once = [prunedLine(2, MAX_ROUNDS), prunedLine(3, MAX_ROUNDS)].every((line) => lines.filter((text) => text === line).length === 1);
+    const continuedName = 'a run that failed after pruning continues with its pruned paths ending where they did, and its log says each round it pruned once';
+    check('live', continuedName, failed && done && ended(nodes) && once, `${JSON.stringify(paths(nodes))}; once ${once}`);
   });
 }
 

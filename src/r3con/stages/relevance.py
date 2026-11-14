@@ -26,8 +26,9 @@ After each round from 2 on, a document whose snippet in it is empty, every part'
 empty, and parsing does not parse it (:mod:`r3con.stages.structuring.parsing`), the
 final round's included. An empty round-1 snippet alone prunes nothing, since round 2
 may bring the document back once the others are known; with fewer than two rounds
-nothing is pruned. The other documents' snippets of the round after may still cite its
-snippets, so the answer's trail can reach it through them.
+nothing is pruned. The other documents' snippets in the round it went empty in may
+still cite its snippet of the round before, so the answer's trail can reach it through
+them.
 
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
