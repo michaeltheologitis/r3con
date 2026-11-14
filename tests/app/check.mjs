@@ -271,6 +271,11 @@ const STOPPED = '● stopped';
 const CONTINUE_LINE = 'continue · from where it left off';
 const CONTINUE_BUTTON = `${CHAT} .turn-body .run-btn`;
 const CONTINUING = 'continuing';
+// r3con app's refusals of a continue: while a job on the run's folder is going, and once the run has finished.
+const CONTINUE_GOING = 'This run is still going: continue it once it has stopped.';
+const CONTINUE_FINISHED = 'This run has finished: ask it a new question instead.';
+const NOT_CONTINUED = "couldn't continue";
+const CONFLICT_LOG = 'Failed to load resource: the server responded with a status of 409';
 // A stopped ask's folded line.
 const STOPPED_ASK_LINE = 'stopped in reasoning';
 const CANCEL_REFUSED = 'no run with that id';
@@ -7297,22 +7302,16 @@ async function liveContinueFailed(url, server) {
 async function liveContinueStopped(url, server) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
     const posts = postsOf(page);
-    const started = startedJob(page, '/api/runs');
-    await send(page, `Which site logged the most incidents? ${STALLS}`);
-    const runId = (await (await started).json()).run_id;
-    await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
-    await pressStop(page);
-    await becomes(page, statusIs, STOPPING);
-    server.release();
-    const stopped = await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
-    const offered = { after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
-    check('live', 'a stopped run offers continue once, under its log', stopped && isDeepStrictEqual(offered, { after: [CONTINUE_LINE], buttons: 1 }), JSON.stringify(offered));
+    const runId = await stoppedRun(page, server);
+    const offered = { status: await page.textContent('#run-status'), after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
+    const offeredExpected = { status: STOPPED_IN_RELEVANCE, after: [CONTINUE_LINE], buttons: 1 };
+    check('live', 'a stopped run offers continue once, under its log', isDeepStrictEqual(offered, offeredExpected), JSON.stringify(offered));
 
     server.hold();
     const continued = startedJob(page, '/continue');
     await page.click(CONTINUE_BUTTON);
     const continuedId = (await (await continued).json()).run_id;
-    const going = await becomes(page, () => document.querySelector('#world .node.r2.working') !== null, null, LIVE_RUN_MS);
+    const going = await becomes(page, () => document.querySelector('#world .node.working') !== null, null, LIVE_RUN_MS);
     const whileGoing = { offered: await count(page, CONTINUE_BUTTON), stop: (await page.evaluate(composer)).stop, status: await page.textContent('#run-status') };
     await pressStop(page);
     await becomes(page, statusIs, STOPPING);
@@ -7332,6 +7331,73 @@ async function liveContinueStopped(url, server) {
     const expected = { nodes: SAMPLE_COUNTS.nodes, once: true, unsettled: 0, repeated: [CONTINUING], offered: 0 };
     const doneName = "continued again it finishes in the same tab: each node once and settled, each log line once but one continuing per continue, and no continue";
     check('live', doneName, done && chained && isDeepStrictEqual(ended, expected), `${JSON.stringify(ended)}; ${continues.join(' ')}`);
+  });
+}
+
+// The run's memos, continued around the page through r3con app's API: the new job's id.
+async function continueElsewhere(url, runId) {
+  const memos = sampleMemos();
+  const response = await fetch(new URL(`/api/runs/${runId}/continue`, url), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documents: memos.map((m) => m.buffer.toString()), names: memos.map((m) => m.name) }),
+  });
+  return (await response.json()).run_id;
+}
+
+// Reads the job's stream through r3con app's API to its end.
+async function streamedOut(url, runId) {
+  await (await fetch(new URL(`/api/runs/${runId}/events`, url), { headers: { Authorization: `Bearer ${tokenOf(url)}` } })).text();
+}
+
+// A run stalled until the server releases it, then stopped: its id, once it has stopped.
+async function stoppedRun(page, server) {
+  const started = startedJob(page, '/api/runs');
+  await send(page, `Which site logged the most incidents? ${STALLS}`);
+  const runId = (await (await started).json()).run_id;
+  await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+  await pressStop(page);
+  await becomes(page, statusIs, STOPPING);
+  server.release();
+  await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+  return runId;
+}
+
+// A continue sent around the page holds the run's folder while the page's is refused, then finishes the run.
+async function liveContinueRefused(url, server) {
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [CONFLICT_LOG] }, async (page) => {
+    const runId = await stoppedRun(page, server);
+    server.hold();
+    const elsewhere = await continueElsewhere(url, runId);
+    await page.click(CONTINUE_BUTTON);
+    const going = await becomes(page, statusIs, `● ${CONTINUE_GOING}`, LIVE_RUN_MS);
+    const whileGoing = { folded: (await page.evaluate(logOf)).folded, after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
+    const goingExpected = { folded: NOT_CONTINUED, after: [CONTINUE_GOING, CONTINUE_LINE], offered: 1 };
+    const goingName = "a continue refused while another job holds the run's folder says so in one plain line, and offers continue again";
+    check('live', goingName, going && isDeepStrictEqual(whileGoing, goingExpected), JSON.stringify(whileGoing));
+
+    server.release();
+    await streamedOut(url, elsewhere);
+    await page.click(CONTINUE_BUTTON);
+    const finished = await becomes(page, statusIs, `● ${CONTINUE_FINISHED}`, LIVE_RUN_MS);
+    const ended = { after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
+    const finishedName = 'a continue refused for good, its run finished meanwhile, says so in one plain line and offers no continue';
+    check('live', finishedName, finished && isDeepStrictEqual(ended, { after: [CONTINUE_GOING, CONTINUE_FINISHED], offered: 0 }), JSON.stringify(ended));
+  });
+}
+
+// The server goes away while a continue goes.
+async function liveContinueLost(url, server) {
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
+    await stoppedRun(page, server);
+    server.hold();
+    await page.click(CONTINUE_BUTTON);
+    await becomes(page, () => document.querySelector('#world .node.working') !== null, null, LIVE_RUN_MS);
+    await server.stop();
+    const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
+    const ended = { after: (await page.evaluate(logOf)).after, offered: await count(page, CONTINUE_BUTTON) };
+    const lostName = 'a continue cut off from r3con app says the connection was lost, and offers no continue';
+    check('live', lostName, lost && isDeepStrictEqual(ended, { after: [LOST_CONNECTION.slice(2)], offered: 0 }), JSON.stringify(ended));
   });
 }
 
@@ -7831,7 +7897,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);

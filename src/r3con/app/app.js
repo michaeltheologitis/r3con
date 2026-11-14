@@ -1678,6 +1678,8 @@
   const CONTINUE_NOTE = ' · from where it left off';
   const CONTINUING = 'continuing';
   const NOT_CONTINUED = "couldn't continue";
+  // r3con app's refusal while a job on the run's folder is going, which a later continue gets past.
+  const CONTINUE_GOING = 'This run is still going: continue it once it has stopped.';
   // The r3con stage, as its events name it, that each kind of node but a round's is drawn in; a replay reads first.
   const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
@@ -2924,13 +2926,17 @@
     tab.arrangeFrame = requestAnimationFrame(step);
   }
 
+  // A call starts, or starts again, as a continued run starts one its stop or failure left.
   /** @param {Tab} tab @param {string} id */
   function markWorking(tab, id) {
-    if (tab.fold) {
+    if (tab.fold && docOf(tab, id) !== null) {
       setCall(tab.fold, id, 'working');
       if (showFolded(tab, id)) return;
     }
-    drawnNode(tab, id).el.classList.add('working');
+    const node = drawnNode(tab, id);
+    node.el.classList.remove('void', 'failed');
+    node.el.classList.add('working');
+    if (!node.fold) node.el.setAttribute('aria-label', ariaName(tab, node));
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
@@ -4422,6 +4428,8 @@
     body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
     const named = new Map();
+    /** @type {StageKind | null} */
+    let begun = null;
     /** @param {HTMLElement} parent @param {string} kind @param {Child} text @param {LineOptions} [opts] */
     const add = (parent, kind, text, opts) => {
       const el = line(kind, text, opts);
@@ -4452,6 +4460,13 @@
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
       /** @type {string | null} */
       stage: null,
+      // Whether `kind` is another stage than the one begun last, which it now is.
+      /** @param {StageKind} kind */
+      begins(kind) {
+        if (begun === kind) return false;
+        begun = kind;
+        return true;
+      },
       /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
       finish(text, tone) {
         latest.textContent = text;
@@ -4463,6 +4478,7 @@
       restart(text) {
         mark.className = 'log-spin';
         mark.textContent = MARK;
+        begun = null;
         log('main', text);
       },
     };
@@ -4693,26 +4709,17 @@
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
+    if (!narr.begins(kind)) return;
     narr.logAs(`stage-${kind}`, 'main', stepLine(tab.run, kind));
     narr.stage = isRound(kind) ? 'relevance' : STAGE_OF[kind];
     showProgress(tab, kind);
   }
 
-  // A node drawn already, as a continued run starts again a call its stop or failure left, works again.
   /** @param {RunTab} tab @param {string} id */
   function appear(tab, id) {
-    const node = tab.nodes.get(id);
-    if (node) workAgain(tab, node);
+    if (tab.nodes.has(id)) markWorking(tab, id);
     else addNode(tab, id);
     drawLines(tab, linesInto(tab, id));
-  }
-
-  /** @param {Tab} tab @param {PanelNode} node */
-  function workAgain(tab, node) {
-    if (tab.fold && isPerDocument(node.kind)) setCall(tab.fold, node.id, 'working');
-    node.el.classList.remove('void', 'failed');
-    node.el.classList.add('working');
-    node.el.setAttribute('aria-label', ariaName(tab, node));
   }
 
   /** @param {Run} run @param {string} id */
@@ -4904,7 +4911,7 @@
       case 'run_started':
         Object.assign(run, withIds(event.document_ids));
         if (event.rounds !== run.rounds.length) makeRoomForRounds(tab, event.rounds);
-        narr.log('main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
+        narr.logAs('sent', 'main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
         beginStage(tab, narr, roundKind(event.round));
@@ -4982,22 +4989,44 @@
 
   /** @param {RunTab} tab @param {Narrator} narr */
   async function streamRun(tab, narr) {
+    const { question, model, endpoint } = tab.run.answers[0];
+    const body = { question, model, endpoint, ...documentsOf(tab.run), relevance_rounds: tab.run.rounds.length };
+    await playLive(tab, narr, '/api/runs', body, 'failed');
+  }
+
+  // The run's documents, as r3con app takes them, each by its name.
+  /** @param {Run} run */
+  const documentsOf = (run) => ({ documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) });
+
+  // A run that started, then failed or was stopped, can carry on, and so can one whose folder another job held then;
+  // one refused for good, or cut off from r3con app, can't.
+  /** @param {boolean} stopped @param {{ stage: string | null, error: string }} ending */
+  const continuable = (stopped, { stage, error }) => stopped || stage !== null || error === CONTINUE_GOING;
+
+  // Starts r3con app's job at `path`, a run or a continue of one, and draws its events in `tab` as they arrive. One
+  // refused before it started ends as `refused` says, and continue is offered as `continuable` says.
+  /** @param {RunTab} tab @param {Narrator} narr @param {string} path @param {object} body @param {string} refused */
+  async function playLive(tab, narr, path, body, refused) {
     const { run } = tab;
     const stream = openStream('run', tab, run);
+    const before = run.id;
+    let offered = false;
     try {
-      const { question, model, endpoint } = run.answers[0];
-      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name), relevance_rounds: run.rounds.length };
-      const started = await api('/api/runs', { method: 'POST', body });
+      const started = await api(path, { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
-      const last = await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
-      // One that failed before it started has no folder to carry on from.
-      if (last.type === 'run_failed' && last.stage) offerContinue(tab, narr);
+      const last = await follow(`/api/runs/${run.id}/events`, (event) => {
+        if (event.type === 'run_failed' && !event.stage && !stream.stopping) failRun(tab, narr, { outcome: refused, error: event.error });
+        else drawEvent(tab, narr, event);
+      });
+      offered = last.type === 'run_failed' && continuable(stream.stopping, last);
     } catch (error) {
       const said = explain(error, /** @type {Error} */ (error).message, 'the live run stopped');
-      failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
+      failRun(tab, narr, { outcome: run.id === before ? refused : inStage('failed', narr.stage), error: said }, said);
+      offered = continuable(false, { stage: null, error: said });
     } finally {
       closeStream(stream);
     }
+    if (offered) offerContinue(tab, narr);
   }
 
   // A run that failed or was stopped carries on in its tab and folder, over its files, as r3con.resume does.
@@ -5006,9 +5035,11 @@
     const button = h('button', { class: 'btn run-btn', type: 'button' }, CONTINUE);
     const offered = narr.say('main', [button, h('span', { class: 'dim' }, CONTINUE_NOTE)]);
     button.addEventListener('click', () => {
+      // Removing the focused button would drop the focus to the page.
       if (document.activeElement === button) questionEl.focus();
       offered.remove();
       continueRun(tab, narr);
+      updateComposer();
     });
   }
 
@@ -5016,28 +5047,10 @@
   // as it stands, then what it computes as a run's. A continue refused before it started leaves the run as it was.
   /** @param {RunTab} tab @param {Narrator} narr */
   async function continueRun(tab, narr) {
-    const { run } = tab;
-    const stream = openStream('run', tab, run);
     if (tab.fold) foldsStopped(tab, false);
     narr.restart(CONTINUING);
     tabStatus(tab, `running · ${CONTINUING}`);
-    updateComposer();
-    /** @param {string} error */
-    const refused = (error) => failRun(tab, narr, { outcome: NOT_CONTINUED, error });
-    try {
-      const body = { documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) };
-      const continued = await api(`/api/runs/${run.id}/continue`, { method: 'POST', body });
-      jobStarted(stream, (await continued.json()).run_id);
-      await follow(`/api/runs/${run.id}/events`, (event) => {
-        if (event.type === 'run_failed' && !event.stage) refused(event.error);
-        else if (event.type !== 'run_started') drawEvent(tab, narr, event);
-      });
-    } catch (error) {
-      refused(explain(error, /** @type {Error} */ (error).message, 'the continued run stopped'));
-    } finally {
-      closeStream(stream);
-    }
-    if (!landed(tab, RUN_ANSWER)) offerContinue(tab, narr);
+    await playLive(tab, narr, `/api/runs/${tab.run.id}/continue`, documentsOf(tab.run), NOT_CONTINUED);
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.
