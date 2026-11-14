@@ -72,6 +72,8 @@ from tests.fakes import (
     FakeLLM,
     a_parse_citation_short,
     in_json,
+    reading,
+    silent_when,
     stage_of,
     the_runs_own_files,
 )
@@ -1092,6 +1094,18 @@ def test_a_run_streams_its_events_in_order_and_replays_them_to_a_late_reader(
     assert run_events(client, run_id) == events
     assert events[0]["run_dir"] == events[-1]["run_dir"]
     assert Path(events[-1]["run_dir"]).parent == logs_dir
+
+
+def test_a_run_relays_each_rounds_pruning_with_its_round(
+    client: TestClient, llm: FakeLLM
+):
+    last = memos()[-1].splitlines()[0]
+    llm.answers(relevance=silent_when(reading(last, later_round=True), "A site memo."))
+    events = run_events(client, start_run(client))
+    types = [event["type"] for event in events]
+    [pruned] = [event for event in events if event["type"] == "documents_pruned"]
+    assert (pruned["round"], pruned["doc_ids"]) == (2, events[0]["document_ids"][-1:])
+    assert types.index("documents_pruned") < types.index("schema_started")
 
 
 MEMO_NAMES = sorted(path.name for path in MEMOS.iterdir())

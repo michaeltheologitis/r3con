@@ -33,8 +33,7 @@ Layout per ``logs/<run-folder>/``:
   pruned_after, rounds: [{round, snippets: [{id, summary, quotes, provenance}]}],
   totals}`` — ``pruned_after`` the id of each document relevance pruned, in document
   order, mapped to the round after which it was pruned
-  (:attr:`r3con.stages.relevance.RelevantContext.pruned`); r3context 0.6.26 to 0.6.28
-  wrote ``pruned`` instead, a list of the ids, each pruned after round 2; within
+  (:attr:`r3con.stages.relevance.RelevantContext.pruned`); within
   a round every relevance snippet in document order, a document read in parts as one
   per part, each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that
   round), its quotes, each ``{text, start, end, match, score}``: the sentence the

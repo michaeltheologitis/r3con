@@ -35,7 +35,7 @@ from tests.fakes import (
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
     reading,
-    reading_from_round,
+    reading_in_round,
     silent_when,
     without_trail,
 )
@@ -290,12 +290,6 @@ def first_turns(llm) -> list[dict]:
 def merrow_early(request) -> bool:
     """Whether a relevance request reads Merrow's memo in round 1."""
     return first_line(request) == "Merrow memo" and not is_later_round(request)
-
-
-def halloran_late_or_merrow_early(request) -> bool:
-    """Whether a relevance request reads Halloran's memo after round 1, or Merrow's in
-    round 1."""
-    return reading("Halloran memo", later_round=True)(request) or merrow_early(request)
 
 
 @pytest.fixture
@@ -767,14 +761,11 @@ def test_nothing_is_pruned_with_fewer_than_two_rounds(answering_llm, tmp_path, r
     assert read_json(logger, "relevance/result")["pruned_after"] == {}
 
 
-@pytest.mark.parametrize(
-    ("rounds", "empty_from", "halloran_reads"),
-    [(2, 2, 2), (3, 2, 2), (4, 3, 3), (4, 4, 4)],
-)
+@pytest.mark.parametrize(("rounds", "empty_from"), [(2, 2), (3, 2), (4, 3), (4, 4)])
 def test_a_document_is_pruned_after_the_first_round_from_2_on_its_note_is_empty(
-    answering_llm, tmp_path, rounds, empty_from, halloran_reads
+    answering_llm, tmp_path, rounds, empty_from
 ):
-    halloran_late = reading_from_round("Halloran memo", empty_from)
+    halloran_late = reading_in_round("Halloran memo", empty_from, or_later=True)
     llm = answering_llm.answers(
         relevance=silent_when(lambda r: merrow_early(r) or halloran_late(r))
     )
@@ -786,7 +777,7 @@ def test_a_document_is_pruned_after_the_first_round_from_2_on_its_note_is_empty(
     halloran = result.document_ids[0]
     reads = Counter(first_line(r) for r in llm.requests_for("relevance"))
     assert reads == Counter(
-        {"Halloran memo": halloran_reads, "Merrow memo": rounds, "Calder memo": rounds}
+        {"Halloran memo": empty_from, "Merrow memo": rounds, "Calder memo": rounds}
     )
     parsed_memos = sorted(first_line(r) for r in llm.requests_for("parsing"))
     assert parsed_memos == ["Calder memo", "Merrow memo"]
@@ -815,7 +806,7 @@ def test_each_rounds_pruning_is_reported_once_it_is_in_and_its_documents_after_n
     answering_llm,
 ):
     halloran_late = reading("Halloran memo", later_round=True)
-    calder_late = reading_from_round("Calder memo", 3)
+    calder_late = reading_in_round("Calder memo", 3, or_later=True)
     silent = silent_when(lambda r: halloran_late(r) or calder_late(r))
     events = []
     result = answer(

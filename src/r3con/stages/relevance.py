@@ -107,13 +107,19 @@ class RelevantContext:
     ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
     (one for a document read whole). Earlier rounds are kept for inspection and for
     the answer's trail (:mod:`r3con.provenance`); the final round is what downstream
-    stages consume, as :attr:`snippets`. ``pruned`` maps each document the run pruned,
-    by index, to the round after which it was pruned (the module's rule): empty with
-    fewer than two rounds.
+    stages consume, as :attr:`snippets`. ``pruned_after`` maps each document the run
+    pruned, by index, to the round after which it was pruned (the module's rule),
+    read-only, and ``pruned`` holds those documents: both empty with fewer than two
+    rounds.
     """
 
     records: list[list[list[SnippetRecord]]]
-    pruned: Mapping[int, int] = field(default_factory=dict)
+    pruned_after: Mapping[int, int] = field(default_factory=dict)
+    pruned: frozenset[int] = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.pruned_after = MappingProxyType(dict(self.pruned_after))
+        self.pruned = frozenset(self.pruned_after)
 
     @property
     def snippets(self) -> list[Snippet]:
@@ -400,7 +406,8 @@ def surface_relevance(
     max_attempts: int | None = None,
     emit: Emit = no_events,
     saved: Mapping[tuple[int, int], list[SnippetRecord]] = MappingProxyType({}),
-    recorded: Mapping[int, Collection[int]] = MappingProxyType({}),
+    recorded: Mapping[int, int] = MappingProxyType({}),
+    recorded_through: int = 1,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -433,10 +440,10 @@ def surface_relevance(
 
     ``saved`` holds snippets an earlier attempt at the run read, by round and document
     index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
-    that round, and reports nothing. ``recorded`` holds, for each round of that attempt
-    that ``saved`` holds whole, the documents it pruned after it, as it recorded them:
-    those are pruned after that round, whatever their snippets say, and its
-    ``documents_pruned`` is not reported again.
+    that round, and reports nothing. ``recorded`` maps each document that attempt
+    pruned after a round up to ``recorded_through`` to that round, as it recorded it:
+    up to that round, those are the documents pruned, whatever their snippets say, and
+    no ``documents_pruned`` is reported again.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -525,15 +532,15 @@ def surface_relevance(
         return result
 
     pruned: dict[int, int] = {}
-    records = [run_round([[] for _ in documents], 1, ())]
+    records = [run_round([[] for _ in documents], 1, pruned.keys())]
     for r in range(2, rounds + 1):
         # only the previous round feeds in
-        records.append(run_round(records[-1], r, frozenset(pruned)))
-        if r in recorded:
-            pruned |= dict.fromkeys(recorded[r], r)
+        records.append(run_round(records[-1], r, pruned.keys()))
+        if r <= recorded_through:
+            pruned |= {d: k for d, k in recorded.items() if k == r}
             continue
         newly = sorted(_pruned(records[-1]) - pruned.keys())
         if newly:
             emit("documents_pruned", round=r, doc_ids=[document_ids[i] for i in newly])
         pruned |= dict.fromkeys(newly, r)
-    return RelevantContext(records=records, pruned=pruned)
+    return RelevantContext(records=records, pruned_after=pruned)

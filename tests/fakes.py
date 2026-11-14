@@ -298,11 +298,21 @@ def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool
     )
 
 
-def reading_from_round(line: str, round_: int) -> Callable[[Request], bool]:
+def reading_in_round(
+    line: str, round_: int, *, or_later: bool = False
+) -> Callable[[Request], bool]:
     """Whether a relevance request reads the document whose first line is ``line`` in
-    round ``round_`` or a later one, counting its reads, one a round, as they come."""
+    round ``round_``, or with ``or_later`` in a later one too, counting its reads, one
+    a round, as they come."""
     reads = itertools.count(1)
-    return lambda request: first_line(request) == line and next(reads) >= round_
+
+    def when(request: Request) -> bool:
+        if first_line(request) != line:
+            return False
+        read = next(reads)
+        return read >= round_ if or_later else read == round_
+
+    return when
 
 
 def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
