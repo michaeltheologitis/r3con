@@ -7265,6 +7265,11 @@ async function continuedRun(page) {
   };
 }
 
+// In-page: the error lines in the shown tab's chat, hidden or not.
+function chatErrors() {
+  return [...document.querySelectorAll('.transcript:not([hidden]) .turn-body > .line .err')].map((el) => el.textContent);
+}
+
 // The parser breaks until the server releases it: the run fails in parsing, and continues once it is back.
 async function liveContinueFailed(url, server) {
   await withPage('live', { url, sample: false }, async (page) => {
@@ -7280,6 +7285,8 @@ async function liveContinueFailed(url, server) {
 
     server.release();
     await page.click(CONTINUE_BUTTON);
+    const pressed = { errors: await page.evaluate(chatErrors), buttons: await count(page, CONTINUE_BUTTON) };
+    check('live', "pressing continue takes its run's error out of the chat, with the continue line", isDeepStrictEqual(pressed, { errors: [], buttons: 0 }), JSON.stringify(pressed));
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const ended = await continuedRun(page);
     const lines = await page.evaluate(loggedLines);
@@ -7292,6 +7299,13 @@ async function liveContinueFailed(url, server) {
     await send(page, 'Which memo is the registry?');
     const asked = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
     check('live', 'a continued run, once done, is asked over like any other', asked && /^\/api\/runs\/\w+\/asks$/.test(posts.at(-1)), posts.at(-1));
+
+    const html = await savedHtml(page);
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    const reopened = (await becomes(page, () => document.querySelectorAll('.run-tab').length === 2, undefined, LIVE_RUN_MS)) && (await becomes(page, statusMatches, LIVE_DONE.source));
+    const errors = await page.evaluate(chatErrors);
+    const savedName = 'a continued run, once done, saves no error: saved and opened again, its chat shows none';
+    check('live', savedName, reopened && !html.includes(PARSER_ERROR) && !errors.length, `${errors.join(' | ')}; ${await page.textContent('#run-status')}`);
   });
 }
 
@@ -7395,7 +7409,7 @@ async function liveContinueRefused(url, server) {
     const refused = await becomes(page, statusIs, `● ${finished.body.error}`, LIVE_RUN_MS);
     const ended = await afterContinue(page);
     const finishedName = 'a continue refused for good, its run finished meanwhile, says so in one plain line and offers no continue';
-    const endedExpected = { folded: NOT_CONTINUED, after: [said, finished.body.error], offered: 0 };
+    const endedExpected = { folded: NOT_CONTINUED, after: [finished.body.error], offered: 0 };
     check('live', finishedName, finished.body.code === 'finished' && refused && isDeepStrictEqual(ended, endedExpected), JSON.stringify({ finished, ended }));
   });
 }
@@ -7477,9 +7491,9 @@ async function liveContinueRedrawn(url, server) {
     const kinds = await page.$$eval('.edge', (els, keys) => els.filter((el) => keys.includes(el.dataset.key)).map((el) => el.classList.contains('cite')), cited);
     const citesName = "a node a continue draws again keeps the lines its call cited, which the continue's other lines into it don't replace";
     check('live', citesName, cited.length > 0 && kinds.length === cited.length && kinds.every(Boolean), `${cited.join(' ')}: ${kinds}`);
-    const ended = await afterContinue(page);
-    const failedName = 'a continue that fails before any stage, with no code, says why and offers continue again';
-    check('live', failedName, failed && isDeepStrictEqual(ended, { folded: 'failed', after: [PARSER_ERROR, failure, CONTINUE_LINE], offered: 1 }), JSON.stringify(ended));
+    const ended = { ...(await afterContinue(page)), errors: await page.evaluate(chatErrors) };
+    const failedName = "a continue that fails before any stage, with no code, says why in the chat's one error line, in place of the run's, and offers continue again";
+    check('live', failedName, failed && isDeepStrictEqual(ended, { folded: 'failed', after: [failure, CONTINUE_LINE], offered: 1, errors: [failure] }), JSON.stringify(ended));
   });
 }
 
