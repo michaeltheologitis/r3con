@@ -37,7 +37,8 @@
   /** @typedef {Quote & { snippet: string }} RecordedQuote A quote, and the id of the snippet quoting it. */
   /** @typedef {Quote & { summary: string }} RunQuote A quote, and the trail node of the summary quoting it. */
   /** @typedef {{ summary: string, provenance: number[], quotes: RecordedQuote[] }} RecordedSummary */
-  /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[] }} Summary */
+  /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[] }} Snippets What a document's snippets in a round say, together. */
+  /** @typedef {Snippets & { parts?: Map<string, Snippets> }} Summary A live run's also has each part's, by its trail node. */
   /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
   /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
   /** @typedef {{ spans: Span[], sentences: TextRange[] }} Quoted What a trail quotes of one document. */
@@ -137,7 +138,7 @@
    * @property {Set<string>} sourced the folders, by path, that hold an answer's sources
    * @property {Map<string, number>} index each document node's document
    * @property {Map<string, CallState>} calls each call by its node's id; a document node's is reading the file
-   * @property {Map<NodeKind, number>} settled how many calls of each kind are back
+   * @property {Map<NodeKind, number>} settled how many calls of each kind are back, not counting those the run stopped first
    * @property {Set<number>} relevant documents with a snippet, or on an answer's trail, which have a row of their own
    * @property {Set<number>} kept documents kept in view from before the run until their first round is back
    * @property {Set<number>} opened documents in an opened fold
@@ -227,7 +228,7 @@
    *   | { type: 'reasoning_finished', answer: string,
    *       provenance: R3conProvenance }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
-   *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string }
+   *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string, code?: string }
    * } ServerEvent
    */
   /**
@@ -1673,6 +1674,11 @@
   const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
+  const CONTINUE = 'continue';
+  const CONTINUE_NOTE = ' · from where it left off';
+  const CONTINUING = 'continuing';
+  const NOT_CONTINUED = "couldn't continue";
+  const NEVER_CONTINUED = new Set(['finished', 'other_files', 'not_continuable']);
   // The r3con stage, as its events name it, that each kind of node but a round's is drawn in; a replay reads first.
   const STAGE_OF = { schema: 'schema', parsed: 'parsing', answer: 'reasoning' };
   const READING = 'reading';
@@ -2119,7 +2125,13 @@
   // ---------- r3con app ----------
 
   // An error whose message is for the user, from r3con app, from reaching it, or from a saved tab.
-  class ServerError extends Error {}
+  class ServerError extends Error {
+    /** @param {string} message @param {string} [code] */
+    constructor(message, code) {
+      super(message);
+      this.code = code;
+    }
+  }
 
   // A stale token or r3con app out of reach, kept for the status until a call to it succeeds.
   /** @type {string | null} */
@@ -2159,7 +2171,7 @@
       return response;
     }
     const reply = await response.json().catch(/** @returns {null} */ () => null);
-    throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim());
+    throw new ServerError(reply?.error ?? `r3con app answered ${response.status} ${response.statusText}`.trim(), reply?.code);
   }
 
   /** @param {string} frame */
@@ -2191,7 +2203,8 @@
     }
   }
 
-  // Hands each of a run's or an ask's events to `onEvent`; a stream that stops before its last event lost the server.
+  // Hands each of a run's or an ask's events to `onEvent`, and returns the last; a stream that stops before its last
+  // event lost the server.
   /** @param {string} path @param {(event: ServerEvent) => void} onEvent */
   async function follow(path, onEvent) {
     const response = await api(path);
@@ -2202,6 +2215,7 @@
       onEvent(event);
     }
     if (!last || !ENDINGS.has(last.type)) throw lostConnection();
+    return last;
   }
 
   /** @param {Tab} tab */
@@ -2917,13 +2931,17 @@
     tab.arrangeFrame = requestAnimationFrame(step);
   }
 
+  // Clears a stopped node too, as a continue starts its call again.
   /** @param {Tab} tab @param {string} id */
   function markWorking(tab, id) {
-    if (tab.fold) {
+    if (tab.fold && docOf(tab, id) !== null) {
       setCall(tab.fold, id, 'working');
       if (showFolded(tab, id)) return;
     }
-    drawnNode(tab, id).el.classList.add('working');
+    const node = drawnNode(tab, id);
+    node.el.classList.remove('void', 'failed');
+    node.el.classList.add('working');
+    if (!node.fold) node.el.setAttribute('aria-label', ariaName(tab, node));
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
@@ -3043,7 +3061,8 @@
     }
     const key = `${from}>${to}`;
     let edge = tab.edges.get(key);
-    if (edge && tab.fold && EDGE_RANK[edge.kind] >= EDGE_RANK[kind]) return edge;
+    // A node drawn again, as a continue starts its call again, keeps the lines its call cited.
+    if (edge && EDGE_RANK[edge.kind] >= EDGE_RANK[kind]) return edge;
     if (!edge) {
       edge = { key, from, to, kind, el: document.createElementNS(SVG_NS, 'path') };
       edge.el.classList.add('edge');
@@ -3576,7 +3595,7 @@
   function setCall(fold, id, call) {
     const was = fold.calls.get(id);
     fold.calls.set(id, call);
-    const back = (/** @type {CallState | undefined} */ state) => state === 'done' || state === 'failed';
+    const back = (/** @type {CallState | undefined} */ state) => state === 'done';
     if (back(was) === back(call)) return;
     const [kind] = splitId(id);
     fold.settled.set(kind, (fold.settled.get(kind) ?? 0) + (back(call) ? 1 : -1));
@@ -3663,11 +3682,11 @@
     paintNode(tab, node);
   }
 
-  // A stopped run's folds say so, where their documents weren't all read.
+  // A stopped run's folds say so, where their documents weren't all read, until it is continued.
   /** @param {Tab} tab */
-  function foldsStopped(tab) {
+  function foldsStopped(tab, stopped = true) {
     refoldNow(tab);
-    foldingOf(tab).stopped = true;
+    foldingOf(tab).stopped = stopped;
     for (const node of tab.nodes.values()) if (node.fold) labelFold(tab, node);
   }
 
@@ -4415,6 +4434,8 @@
     body.append(h('div', { class: 'log' }, h('div', { class: 'line log-head' }, toggle, mark, latest), lines));
     /** @type {Map<string, HTMLElement>} */
     const named = new Map();
+    /** @type {StageKind | null} */
+    let begun = null;
     /** @param {HTMLElement} parent @param {string} kind @param {Child} text @param {LineOptions} [opts] */
     const add = (parent, kind, text, opts) => {
       const el = line(kind, text, opts);
@@ -4429,23 +4450,41 @@
     };
     return {
       log,
-      // Logs a line once under `key`; logging it again rewrites it in place.
+      // Logs a line once under `key`; logging it again rewrites it in place, and the head with a main line.
       /** @param {string} key @param {string} kind @param {string} text @param {LineOptions} [opts] */
       logAs(key, kind, text, opts) {
         const said = named.get(key);
-        if (said) /** @type {Element} */ (said.querySelector('.t')).textContent = text;
-        else named.set(key, log(kind, text, opts));
+        if (!said) {
+          named.set(key, log(kind, text, opts));
+          return;
+        }
+        /** @type {Element} */ (said.querySelector('.t')).textContent = text;
+        if (kind === 'main') latest.textContent = text;
       },
       /** @param {string} kind @param {Child} text @param {LineOptions} [opts] */
       say: (kind, text, opts) => add(body, kind, text, opts),
       // The r3con stage being told, READING while a replay reads its documents, or null between them.
       /** @type {string | null} */
       stage: null,
+      /** @param {StageKind} kind */
+      begins(kind) {
+        if (begun === kind) return false;
+        begun = kind;
+        return true;
+      },
       /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
       finish(text, tone) {
         latest.textContent = text;
         mark.className = tone;
         mark.textContent = '●';
+      },
+      /** @param {string} text */
+      restart(text) {
+        mark.className = 'log-spin';
+        mark.textContent = MARK;
+        begun = null;
+        this.stage = null;
+        log('main', text);
       },
     };
   }
@@ -4655,10 +4694,8 @@
   // A replay's timeline and a live run's events both draw through these, so the two look the same.
 
   /** @param {Tab} tab @param {NodeKind} kind */
-  const hasNodes = (tab, kind) => [...tab.nodes.values()].some((n) => n.kind === kind);
-  /** @param {Tab} tab @param {NodeKind} kind */
   const settledCount = (tab, kind) =>
-    tab.fold ? (tab.fold.settled.get(kind) ?? 0) : [...tab.nodes.values()].filter((n) => n.kind === kind && !n.el.classList.contains('working')).length;
+    tab.fold ? (tab.fold.settled.get(kind) ?? 0) : [...tab.nodes.values()].filter((n) => n.kind === kind && landed(tab, n.id)).length;
 
   /** @param {StageKind} kind */
   const phaseOf = (kind) => (isRound(kind) ? roundName(kind) : STAGE_PHASE[kind]);
@@ -4677,14 +4714,16 @@
 
   /** @param {RunTab} tab @param {Narrator} narr @param {StageKind} kind */
   function beginStage(tab, narr, kind) {
-    narr.log('main', stepLine(tab.run, kind));
+    if (!narr.begins(kind)) return;
+    narr.logAs(`stage-${kind}`, 'main', stepLine(tab.run, kind));
     narr.stage = isRound(kind) ? 'relevance' : STAGE_OF[kind];
     showProgress(tab, kind);
   }
 
   /** @param {RunTab} tab @param {string} id */
   function appear(tab, id) {
-    addNode(tab, id);
+    if (tab.nodes.has(id)) markWorking(tab, id);
+    else addNode(tab, id);
     drawLines(tab, linesInto(tab, id));
   }
 
@@ -4755,7 +4794,7 @@
   /** @param {RunTab} tab @param {Narrator} narr */
   function sayPruned(tab, narr) {
     const { size } = tab.run.pruned;
-    if (size) narr.log('sub', `${plural(size, 'document')} with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`);
+    if (size) narr.logAs('pruned', 'sub', `${plural(size, 'document')} with nothing relevant in round ${PRUNED_AFTER_ROUND} · not read further, nor parsed`);
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
@@ -4875,12 +4914,13 @@
     const doc = (id) => /** @type {number} */ (docIndex(run, id));
     switch (event.type) {
       case 'run_started':
+        // A continue's says again what its run's said.
+        if (!run.ids.length) narr.log('main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         Object.assign(run, withIds(event.document_ids));
         if (event.rounds !== run.rounds.length) makeRoomForRounds(tab, event.rounds);
-        narr.log('main', `sent ${plural(run.docs.length, 'document')} to R3Con · ${fmtBytes(textBytes(run.docs))}`);
         break;
       case 'relevance_started':
-        if (!hasNodes(tab, roundKind(event.round))) beginStage(tab, narr, roundKind(event.round));
+        beginStage(tab, narr, roundKind(event.round));
         appear(tab, `${roundKind(event.round)}-${doc(event.doc_id)}`);
         break;
       case 'relevance_finished':
@@ -4903,7 +4943,7 @@
         settle(tab, narr, 'schema');
         break;
       case 'parsing_started':
-        if (!hasNodes(tab, 'parsed')) beginStage(tab, narr, 'parsed');
+        beginStage(tab, narr, 'parsed');
         appear(tab, `parsed-${doc(event.doc_id)}`);
         break;
       case 'parsing_finished':
@@ -4926,17 +4966,21 @@
   }
 
   // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
-  // quotes are placed in the whole document, so they add up as they are, each with its part's trail node.
+  // quotes are placed in the whole document, so they add up as they are, each with its part's trail node. A part
+  // reported again, as a continued run replays what it reuses, takes its own place.
   /** @param {RunTab} tab @param {Narrator} narr @param {number} i @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
   function addSnippet(tab, narr, i, { round, doc_id, part, summary, provenance, quotes }) {
     const { run } = tab;
     const summaries = run.rounds[round - 1];
     const node = summaryNode(round, part == null ? doc_id : `${doc_id}.${part}`);
-    const earlier = summaries[i] ?? { summary: '', provenance: [], quotes: [] };
+    const placed = quotesInUnits(run.docs[i].text, quotes).map((q) => ({ ...q, summary: node }));
+    const parts = new Map(summaries[i]?.parts).set(node, { summary, provenance: docIndices(run, provenance), quotes: placed });
+    const all = [...parts.values()];
     summaries[i] = {
-      summary: [earlier.summary, summary].filter(Boolean).join('\n\n'),
-      provenance: [...new Set([...earlier.provenance, ...docIndices(run, provenance)])],
-      quotes: [...earlier.quotes, ...quotesInUnits(run.docs[i].text, quotes).map((q) => ({ ...q, summary: node }))],
+      summary: all.map((p) => p.summary).filter(Boolean).join('\n\n'),
+      provenance: [...new Set(all.flatMap((p) => p.provenance))],
+      quotes: all.flatMap((p) => p.quotes),
+      parts,
     };
     settle(tab, narr, `${roundKind(round)}-${i}`);
   }
@@ -4951,20 +4995,72 @@
 
   /** @param {RunTab} tab @param {Narrator} narr */
   async function streamRun(tab, narr) {
+    const { question, model, endpoint } = tab.run.answers[0];
+    const body = { question, model, endpoint, ...documentsOf(tab.run), relevance_rounds: tab.run.rounds.length };
+    await playLive(tab, narr, '/api/runs', body, 'failed');
+  }
+
+  /** @param {Run} run */
+  const documentsOf = (run) => ({ documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name) });
+
+  // A run's ids came with its run_started, so only a run with them has a folder to carry on.
+  /** @param {Run} run @param {string} [code] */
+  const continuable = (run, code) => run.ids.length > 0 && !NEVER_CONTINUED.has(code ?? '');
+
+  /** @param {RunTab} tab @param {Narrator} narr @param {string} path @param {object} body @param {string} refused */
+  async function playLive(tab, narr, path, body, refused) {
     const { run } = tab;
     const stream = openStream('run', tab, run);
+    const before = run.id;
+    // A stop before the job answers waits for its id, rather than cancelling the job before it.
+    run.id = null;
+    /** @param {string} error */
+    const refuse = (error) => failRun(tab, narr, { outcome: refused, error }, error);
+    /** @type {string | undefined} */
+    let code;
     try {
-      const { question, model, endpoint } = run.answers[0];
-      const body = { question, model, endpoint, documents: run.docs.map((f) => f.text), names: run.docs.map((f) => f.name), relevance_rounds: run.rounds.length };
-      const started = await api('/api/runs', { method: 'POST', body });
+      const started = await api(path, { method: 'POST', body });
       jobStarted(stream, (await started.json()).run_id);
-      await follow(`/api/runs/${run.id}/events`, (event) => drawEvent(tab, narr, event));
+      const last = await follow(`/api/runs/${run.id}/events`, (event) => {
+        if (event.type === 'run_failed' && event.code) refuse(event.error);
+        else drawEvent(tab, narr, event);
+      });
+      if (last.type !== 'run_failed') return;
+      code = last.code;
     } catch (error) {
       const said = explain(error, /** @type {Error} */ (error).message, 'the live run stopped');
-      failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
+      if (run.id === null) {
+        run.id = before;
+        refuse(said);
+      } else {
+        failRun(tab, narr, { outcome: inStage('failed', narr.stage), error: said }, said);
+      }
+      code = error instanceof ServerError ? error.code : undefined;
     } finally {
       closeStream(stream);
     }
+    if (continuable(run, code)) offerContinue(tab, narr);
+  }
+
+  /** @param {RunTab} tab @param {Narrator} narr */
+  function offerContinue(tab, narr) {
+    const button = h('button', { class: 'btn run-btn', type: 'button' }, CONTINUE);
+    const offered = narr.say('main', [button, h('span', { class: 'dim' }, CONTINUE_NOTE)]);
+    button.addEventListener('click', () => {
+      // Removing the focused button would drop the focus to the page.
+      if (document.activeElement === button) questionEl.focus();
+      offered.remove();
+      continueRun(tab, narr);
+      updateComposer();
+    });
+  }
+
+  /** @param {RunTab} tab @param {Narrator} narr */
+  async function continueRun(tab, narr) {
+    if (tab.fold) foldsStopped(tab, false);
+    narr.restart(CONTINUING);
+    tabStatus(tab, `running · ${CONTINUING}`);
+    await playLive(tab, narr, `/api/runs/${tab.run.id}/continue`, documentsOf(tab.run), NOT_CONTINUED);
   }
 
   // An ask runs only reasoning, over what the run built; its node waits in the answer column until it lands.

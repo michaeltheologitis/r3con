@@ -24,6 +24,7 @@ from r3con import Answer, RunConfig
 from r3con import r3con as namespace
 from r3con.config import PROMPT_STAGES, REASONING_PATHS, load_config
 from r3con.documents import read_documents
+from r3con.pipeline import OtherDocuments
 from r3con.r3con import ask, resume, run, trace
 from tests.documents import write_pdf, write_tree
 from tests.fakes import (
@@ -48,6 +49,7 @@ from tests.fakes import (
     silent_when,
     snippets_without_quotes,
     stage_of,
+    the_runs_own_files,
     without_trail,
 )
 
@@ -126,15 +128,6 @@ def files_holding(text: str, folder: Path) -> list[str]:
     """The files under ``folder`` that hold ``text``, by path."""
     files = [path for path in folder.rglob("*") if path.is_file()]
     return [str(path.relative_to(folder)) for path in files if text in path.read_text()]
-
-
-def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
-    """Every file in ``run_dir`` but those under ``asks/``, by path."""
-    return {
-        str(path.relative_to(run_dir)): path.read_bytes()
-        for path in run_dir.rglob("*")
-        if path.is_file() and path.relative_to(run_dir).parts[0] != "asks"
-    }
 
 
 def snippets_without_provenance(result: dict) -> None:
@@ -2102,7 +2095,7 @@ def test_a_resume_over_other_documents_is_refused_before_any_request(
 ):
     run_dir = failed_run(answering_llm.answers(parsing=bad_key()), tmp_path)
     before, sent = the_runs_own_files(run_dir), len(answering_llm.requests)
-    with pytest.raises(ValueError) as refused:
+    with pytest.raises(OtherDocuments) as refused:
         resume(run_dir, documents, completion=answering_llm)
     assert str(refused.value) == f"{run_dir}: {said}"
     assert answering_llm.requests[sent:] == []

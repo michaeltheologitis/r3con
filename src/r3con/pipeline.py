@@ -910,14 +910,18 @@ def resume_pipeline(
         )
 
 
+class RunFinished(ValueError):
+    """A resume was asked of a run that has finished (:func:`read_resume`)."""
+
+
 def _refuse_finished(run_dir: Path) -> None:
     """Refuse to resume the run in ``run_dir`` once it has finished.
 
     Raises:
-        ValueError: if its reasoning finished.
+        RunFinished: if its reasoning finished.
     """
     if (run_dir / "reasoning" / "result.json").is_file():
-        raise ValueError(
+        raise RunFinished(
             f"{run_dir}: this run finished; ask it a new question instead (r3con ask, "
             "or r3con.ask)."
         )
@@ -944,6 +948,11 @@ def _refuse_other_params(
         )
 
 
+class OtherDocuments(ValueError):
+    """A resume was given other documents than its run read, or not in its order
+    (:func:`read_resume`)."""
+
+
 def _refuse_other_documents(
     run_dir: Path, run: Mapping[str, str], given: Mapping[str, str]
 ) -> None:
@@ -951,8 +960,8 @@ def _refuse_other_documents(
     ``run``, the run's, in its order.
 
     Raises:
-        ValueError: naming the documents missing, extra or changed, or saying they are
-            in another order.
+        OtherDocuments: naming the documents missing, extra or changed, or saying they
+            are in another order.
     """
     differences = {
         "missing": [name for name in run if name not in given],
@@ -963,9 +972,9 @@ def _refuse_other_documents(
         listed = "; ".join(
             f"{what} {_some(names)}" for what, names in differences.items() if names
         )
-        raise ValueError(f"{run_dir}: these are not the run's documents: {listed}.")
+        raise OtherDocuments(f"{run_dir}: these are not the run's documents: {listed}.")
     if list(given) != list(run):
-        raise ValueError(
+        raise OtherDocuments(
             f"{run_dir}: these are the run's documents in another order; pass them in "
             "its order, as its names.json lists them."
         )
@@ -1631,6 +1640,11 @@ def _llm_kwargs(
     return llm_kwargs
 
 
+class MaskedParams(ValueError):
+    """A request would send the mask a run's manifest saves in place of a credential
+    (:func:`refuse_masked`)."""
+
+
 def refuse_masked(
     params: Mapping[str, Any],
     *,
@@ -1646,7 +1660,7 @@ def refuse_masked(
     refused too, since it can't be told from a saved one.
 
     Raises:
-        ValueError: giving ``advice``, then naming each param that holds the mask, by
+        MaskedParams: giving ``advice``, then naming each param that holds the mask, by
             the path to it, or by its name alone when it holds it more than once.
     """
     transport = {"api_base": api_base, "api_key": api_key}
@@ -1657,7 +1671,7 @@ def refuse_masked(
         holding += paths if len(paths) < 2 else [name]
     if holding:
         listed = ", ".join(f"`{param}`" for param in holding)
-        raise ValueError(
+        raise MaskedParams(
             f"{MASK}, the mask a run's manifest saves in place of a credential, would "
             f"be sent: {advice}. Masked params: {listed}."
         )

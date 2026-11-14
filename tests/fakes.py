@@ -297,6 +297,15 @@ def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool
     )
 
 
+def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
+    """Every file in ``run_dir`` but those under ``asks/``, by path."""
+    return {
+        str(path.relative_to(run_dir)): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file() and path.relative_to(run_dir).parts[0] != "asks"
+    }
+
+
 def predating_resume(run_dir: Path) -> None:
     """``run_dir`` as a run folder from before resume leaves it: no ``documents.json``."""
     (run_dir / "documents.json").unlink()

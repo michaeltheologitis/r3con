@@ -1,8 +1,10 @@
 import contextlib
+import errno
 import json
 import logging
 import re
 import socket
+import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
@@ -13,6 +15,7 @@ import keyring
 import litellm
 import pytest
 import yaml
+from filelock import FileLock
 from keyring.backend import KeyringBackend
 from keyring.backends import fail
 from keyring.errors import KeyringLocked, PasswordDeleteError, PasswordSetError
@@ -23,6 +26,8 @@ from starlette.types import ASGIApp
 from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
+    CONTINUE_FAILED,
+    CONTINUE_REFUSALS,
     DEFAULT_RELEVANCE_ROUNDS,
     DIRECT_ONLY,
     ENCRYPTED_ZIP,
@@ -51,6 +56,7 @@ from r3con.app.server import (
 )
 from r3con.documents import _EXTRACTORS, TEXT_SUFFIXES, _PdfNoText, read_documents
 from r3con.masking import MASK
+from r3con.runs import run_lock
 from r3con.settings import CONFIGS_DIR
 from tests.documents import (
     CERTIFICATE_ENCRYPTION,
@@ -66,6 +72,8 @@ from tests.fakes import (
     FakeLLM,
     a_parse_citation_short,
     in_json,
+    stage_of,
+    the_runs_own_files,
 )
 
 litellm.suppress_debug_info = True
@@ -150,6 +158,16 @@ ANSWER = {
     "answer": "Northgate",
     "provenance_ids": {"summary_ids": [], "parse_ids": []},
 }
+PARSE = {"memos": [{"title": "Northgate", "lines": []}]}
+# What a continue's stream holds that a run's doesn't; and the events a run that failed
+# in parsing reports once continued: a run's, but the relevance and schema it reuses
+# are replayed, never started again.
+RESUMED = "run_resumed"
+CONTINUED_AFTER_PARSING = set(RUN_EVENTS) - {"relevance_started", "schema_started"}
+NEW_OPENAI_KEY = "sk-stored-openai-key-5678"
+NEW_SERVER_KEY = "other-endpoint-key-9012"
+# A key a request carries, which a continue never sends.
+REQUEST_KEY = "sk-carried-by-the-request-3456"
 SAVES = "/api/saves"
 IMPORTS = "/api/imports"
 # A server a crafted file's params would send an imported run's asks to, with its key.
@@ -251,7 +269,7 @@ def llm() -> FakeLLM:
     return FakeLLM().answers(
         relevance="A site memo.",
         schema=SCHEMA_REPLY,
-        parsing={"memos": [{"title": "Northgate", "lines": []}]},
+        parsing=PARSE,
         reasoning=ANSWER,
     )
 
@@ -1206,7 +1224,7 @@ def test_an_ask_that_would_send_a_masked_param_fails_naming_it_and_sends_nothing
         ("ask_failed", None)
     ]
     assert events[0]["error"] == (
-        "ValueError: REDACTED, the mask a run's manifest saves in place of a "
+        "MaskedParams: REDACTED, the mask a run's manifest saves in place of a "
         "credential, would be sent: pass the real value in `params`, which replaces "
         "all of the run's params. Masked params: `extra_headers.Authorization`."
     )
@@ -1230,6 +1248,363 @@ def test_an_ask_over_a_run_folder_it_cannot_read_fails_saying_why_and_sends_noth
     )
     assert llm.requests[sent:] == []
     assert not (run_dir / "asks").exists()
+
+
+def failed_run(
+    client: TestClient,
+    llm: FakeLLM,
+    model: str = MODEL,
+    endpoint: str | None = None,
+) -> tuple[str, Path]:
+    """A run whose parsing fails, after which ``llm`` parses again: its id and
+    folder."""
+    llm.answers(parsing=RuntimeError("the model is down"))
+    run_id = start_run(client, model, endpoint)
+    events = run_events(client, run_id)
+    assert (events[-1]["type"], events[-1]["stage"]) == ("run_failed", "parsing")
+    llm.answers(parsing=PARSE)
+    return run_id, Path(events[0]["run_dir"])
+
+
+def continue_run(
+    client: TestClient, run_id: str, body: dict[str, Any] | None = None, **request: Any
+) -> httpx2.Response:
+    body = {"documents": memos()} if body is None else body
+    return client.post(f"/api/runs/{run_id}/continue", json=body, **request)
+
+
+def continued_id(client: TestClient, run_id: str) -> str:
+    response = continue_run(client, run_id)
+    assert response.status_code == 202, response.text
+    return response.json()["run_id"]
+
+
+def continued_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
+    return run_events(client, continued_id(client, run_id))
+
+
+def refusal(response: httpx2.Response) -> tuple[int, dict[str, Any]]:
+    return response.status_code, response.json()
+
+
+def refused(code: str) -> dict[str, str]:
+    """A continue's refusal, as its answer gives it."""
+    return {"error": CONTINUE_REFUSALS[code], "code": code}
+
+
+def ends(events: list[dict[str, Any]]) -> list[tuple[Any, ...]]:
+    """Each of ``events`` that ended a stream, a refusal before it began among them, by
+    its type, stage, error and code."""
+    return [(e["type"], e.get("stage"), e.get("error"), e.get("code")) for e in events]
+
+
+def refused_in_stream(code: str) -> tuple[Any, ...]:
+    """A continue's refusal, as the event that ends its stream gives it."""
+    return ("run_failed", None, CONTINUE_REFUSALS[code], code)
+
+
+def stopped(client: TestClient, model: FakeLLM, run_id: str) -> dict[str, Any]:
+    """Stop the run ``run_id`` once ``model`` holds its call, then let that call
+    through: the run's last event."""
+    assert model.called.wait(GATE_TIMEOUT_SECONDS)
+    client.post(f"/api/runs/{run_id}/cancel")
+    model.gate.set()
+    return run_events(client, run_id)[-1]
+
+
+def test_a_failed_run_continues_in_its_folder_sending_only_what_it_lacks(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    sent = len(llm.requests)
+    continued = continued_id(client, run_id)
+    events = run_events(client, continued)
+    stages = [stage_of(request) for request in llm.requests[sent:]]
+    assert continued != run_id
+    assert [event["type"] for event in events[:2]] == ["run_started", RESUMED]
+    assert Path(events[0]["run_dir"]) == run_dir.resolve()
+    assert {event["type"] for event in events} == CONTINUED_AFTER_PARSING | {RESUMED}
+    assert stages == ["parsing"] * len(memos()) + ["reasoning"]
+
+
+def test_a_continued_run_is_asked_and_saved_like_any_other(
+    client: TestClient, llm: FakeLLM
+):
+    continued = continued_id(client, failed_run(client, llm)[0])
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
+    assert [event["type"] for event in ask_events(client, continued)] == ASK_EVENTS
+    assert imported(client, representation_of(client, continued))
+
+
+@pytest.mark.usefixtures("one_call_at_a_time")
+def test_a_stopped_run_continues_and_so_does_a_stopped_continue_each_call_sent_once(
+    client: TestClient, llm: FakeLLM
+):
+    finished_run(client)
+    whole = len(llm.requests)
+    llm.gate.clear()
+    llm.called.clear()
+    run_id = start_run(client)
+    first = stopped(client, llm, run_id)
+    llm.gate.clear()
+    llm.called.clear()
+    continued = continued_id(client, run_id)
+    second = stopped(client, llm, continued)
+    last = continued_events(client, continued)[-1]
+    assert ends([first, second, last]) == [
+        ("run_failed", "relevance", first["error"], None),
+        ("run_failed", "relevance", second["error"], None),
+        ("run_finished", None, None, None),
+    ]
+    assert len(llm.requests) == 2 * whole
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        lambda texts: texts[:-1],
+        lambda texts: [*texts[:-1], "Another memo."],
+        lambda texts: texts[::-1],
+    ],
+    ids=["missing", "changed", "reordered"],
+)
+def test_a_continue_over_other_files_is_refused_plainly_and_sends_nothing(
+    client: TestClient, llm: FakeLLM, other: Callable[[list[str]], list[str]]
+):
+    run_id, run_dir = failed_run(client, llm)
+    before, sent = the_runs_own_files(run_dir), len(llm.requests)
+    response = continue_run(client, run_id, {"documents": other(memos())})
+    assert refusal(response) == (422, refused("other_files"))
+    assert llm.requests[sent:] == []
+    assert the_runs_own_files(run_dir) == before
+
+
+def test_a_run_folder_outside_the_logs_dir_is_not_continued_and_the_log_says_why(
+    client: TestClient,
+    llm: FakeLLM,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    run_id, run_dir = failed_run(client, llm)
+    outside = tmp_path / "elsewhere"
+    run_dir.rename(outside)
+    run_dir.symlink_to(outside, target_is_directory=True)
+    before, sent = the_runs_own_files(outside), len(llm.requests)
+    with caplog.at_level(logging.WARNING, logger="r3con.app"):
+        response = continue_run(client, run_id)
+    assert refusal(response) == (409, refused("not_continuable"))
+    assert llm.requests[sent:] == []
+    assert the_runs_own_files(outside) == before
+    assert f"{run_dir} isn't a folder of {run_dir.parent}" in caplog.text
+
+
+def test_an_imported_run_has_finished_so_is_never_continued(
+    client: TestClient, llm: FakeLLM
+):
+    run_id = imported(client, representation_of(client, finished_run(client)))
+    sent = len(llm.requests)
+    assert refusal(continue_run(client, run_id)) == (409, refused("finished"))
+    assert llm.requests[sent:] == []
+
+
+def test_a_run_a_continue_finished_says_it_has_finished_when_continued_again(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    assert continued_events(client, run_id)[-1]["type"] == "run_finished"
+    assert refusal(continue_run(client, run_id)) == (409, refused("finished"))
+
+
+def test_a_run_refused_before_it_started_has_no_folder_to_continue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "0")
+    run_id = start_run(client)
+    assert run_events(client, run_id)[-1]["stage"] is None
+    assert refusal(continue_run(client, run_id)) == (409, refused("not_continuable"))
+
+
+@pytest.mark.parametrize(
+    ("model", "endpoint", "keys", "sent_with"),
+    [
+        (
+            MODEL,
+            None,
+            [STORED_OPENAI, {"provider": "openai", "key": NEW_OPENAI_KEY}],
+            {"api_key": NEW_OPENAI_KEY},
+        ),
+        (
+            SERVED_OPENAI_MODEL,
+            ENDPOINT,
+            [OTHER, {**OTHER, "key": NEW_SERVER_KEY}],
+            {"api_key": NEW_SERVER_KEY, "api_base": ENDPOINT},
+        ),
+    ],
+    ids=["provider", "server"],
+)
+def test_a_continue_runs_on_the_runs_server_with_the_key_stored_here_whatever_it_carries(
+    client: TestClient,
+    llm: FakeLLM,
+    model: str,
+    endpoint: str | None,
+    keys: list[dict[str, str]],
+    sent_with: dict[str, str],
+):
+    first, now = keys
+    client.post("/api/keys", json=first)
+    run_id, _ = failed_run(client, llm, model, endpoint)
+    client.post("/api/keys", json=now)
+    sent = len(llm.requests)
+    carried = {"documents": memos(), "api_key": REQUEST_KEY, "endpoint": ELSEWHERE}
+    carrying = continue_run(client, run_id, carried)
+    headers = {"X-Api-Key": REQUEST_KEY, "Api-Key": REQUEST_KEY}
+    response = continue_run(client, run_id, headers=headers)
+    last = run_events(client, response.json()["run_id"])[-1]
+    assert refusal(carrying) == (
+        422,
+        {
+            "error": (
+                "api_key: Extra inputs are not permitted; "
+                "endpoint: Extra inputs are not permitted"
+            )
+        },
+    )
+    assert last["type"] == "run_finished"
+    assert transport(llm)[sent:] == [sent_with] * (len(llm.requests) - sent)
+
+
+def test_a_continue_whose_config_sends_a_credential_its_folder_masked_ends_refused(
+    client: TestClient, llm: FakeLLM, tmp_path: Path
+):
+    config = yaml.safe_load((CONFIGS_DIR / "default.yaml").read_text())
+    params = {"extra_headers": {"X-Gateway-Key": GATE_KEY}}
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "default.yaml").write_text(
+        yaml.safe_dump({**config, "params": params})
+    )
+    run_id, _ = failed_run(client, llm)
+    sent = len(llm.requests)
+    assert ends(continued_events(client, run_id)) == [refused_in_stream("masked")]
+    assert llm.requests[sent:] == []
+
+
+def test_a_continue_while_a_job_on_its_folder_goes_is_going_before_any_read(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    first = continued_id(client, run_id)
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    other = continue_run(client, run_id, {"documents": ["Another memo."]})
+    llm.gate.set()
+    assert run_events(client, first)[-1]["type"] == "run_finished"
+    assert refusal(other) == (409, refused("going"))
+
+
+def test_a_continue_while_one_is_going_is_refused_as_still_going(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    first = continued_id(client, run_id)
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    second = continue_run(client, first)
+    again = continue_run(client, run_id)
+    llm.gate.set()
+    assert run_events(client, first)[-1]["type"] == "run_finished"
+    assert [refusal(r) for r in (second, again)] == [(409, refused("going"))] * 2
+
+
+def test_a_continue_sent_as_its_run_fails_waits_for_the_run_to_let_go_of_its_folder(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    letting_go = threading.Event()
+    release = FileLock.release
+
+    # The run's worker, having reported its failure, holds the folder until let go.
+    def held(lock: FileLock, force: bool = False) -> None:
+        if not force:
+            letting_go.wait(GATE_TIMEOUT_SECONDS)
+        release(lock, force)
+
+    monkeypatch.setattr(FileLock, "release", held)
+    run_id, _ = failed_run(client, llm)
+    holding = worker_of(run_id).is_alive()
+    continued = continued_id(client, run_id)
+    letting_go.set()
+    assert holding
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
+
+
+def test_a_continue_refused_while_another_program_holds_the_folder_continues_again(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    with run_lock(run_dir):
+        refused = continued_id(client, run_id)
+        events = run_events(client, refused)
+    assert ends(events) == [refused_in_stream("going")]
+    assert continued_events(client, refused)[-1]["type"] == "run_finished"
+
+
+def test_a_continue_that_fails_before_it_begins_is_a_failure_and_continues_again(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    run_id, _ = failed_run(client, llm)
+
+    def full_disk(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as disk:
+        disk.setattr(tempfile, "mkstemp", full_disk)
+        failed = continued_id(client, run_id)
+        events = run_events(client, failed)
+    assert ends(events) == [
+        ("run_failed", None, "OSError: [Errno 28] No space left on device", None)
+    ]
+    assert continued_events(client, failed)[-1]["type"] == "run_finished"
+
+
+def test_an_ask_over_a_run_whose_folder_a_continue_holds_is_refused_as_going(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    continued = continued_id(client, run_id)
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    asked = client.post(f"/api/runs/{run_id}/asks", json=ASK)
+    llm.gate.set()
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
+    assert refusal(asked) == (409, refused("going"))
+
+
+def test_a_run_folder_file_that_cannot_be_read_is_refused_plainly_with_no_code(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    (run_dir / "ids.json").unlink()
+    (run_dir / "ids.json").mkdir()
+    response = continue_run(client, run_id)
+    assert refusal(response) == (409, {"error": CONTINUE_FAILED})
+
+
+def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
+    held_llm: FakeLLM, logs_dir: Path
+):
+    with client_for(held_llm, logs_dir) as client:
+        run_id = start_run(client)
+        assert held_llm.called.wait(GATE_TIMEOUT_SECONDS)
+        going = continue_run(client, run_id)
+        held_llm.gate.set()
+        assert run_events(client, run_id)[-1]["type"] == "run_finished"
+        finished = continue_run(client, run_id)
+    assert [refusal(r) for r in (going, finished)] == [
+        (409, refused("going")),
+        (409, refused("finished")),
+    ]
 
 
 def representation_of(client: TestClient, run_id: str) -> dict[str, Any]:

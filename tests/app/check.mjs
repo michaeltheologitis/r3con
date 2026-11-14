@@ -217,6 +217,8 @@ const LIVE_RUN_MS = 30_000;
 const FAILS = '(the model is down)';
 const HANGS = '(the model hangs)';
 const STALLS = '(the model stalls)';
+const BREAKS = '(the parser breaks)';
+const PARSER_ERROR = "RuntimeError: the check's parser is down";
 const OFF_SCHEMA = '(the model answers off schema)';
 // fake_server.py's RELEASE: once it is in the logs dir, stalled calls answer.
 const RELEASE_FILE = 'release';
@@ -265,6 +267,12 @@ const STOPPED_IN_PARSING = '● stopped in parsing';
 const STOPPED_WHILE_READING = '● stopped while reading';
 const STOPPED_ASK = '● ask stopped in reasoning';
 const STOPPED = '● stopped';
+// A run that failed or was stopped offers to continue, on a line of its own under its log.
+const CONTINUE_LINE = 'continue · from where it left off';
+const CONTINUE_BUTTON = `${CHAT} .turn-body .run-btn`;
+const CONTINUING = 'continuing';
+const NOT_CONTINUED = "couldn't continue";
+const CONFLICT_LOG = 'Failed to load resource: the server responded with a status of 409';
 // A stopped ask's folded line.
 const STOPPED_ASK_LINE = 'stopped in reasoning';
 const CANCEL_REFUSED = 'no run with that id';
@@ -5342,7 +5350,8 @@ function startFakeServer(keys = {}, args = []) {
     rmSync(logsDir, { recursive: true, force: true });
   };
   const release = () => writeFileSync(join(logsDir, RELEASE_FILE), '');
-  return { url, stop, release, logsDir };
+  const hold = () => rmSync(join(logsDir, RELEASE_FILE));
+  return { url, stop, release, hold, logsDir };
 }
 
 async function withFakeServer(body, keys, args) {
@@ -6451,8 +6460,8 @@ async function liveFailure(url) {
     const stoppedName = "a failed run's unfinished nodes look and read as stopped, not as empty";
     check('live', stoppedName, readsStopped, stopped.map(([, name]) => name).join(' | '));
     const failedLog = await page.evaluate(logOf);
-    const inView = !failedLog.open && failedLog.mark === 'err' && failedLog.folded === 'failed in relevance' && isDeepStrictEqual(failedLog.after, [LIVE_ERROR]);
-    check('live', "a failed run's log ends on where it failed, its spinner gone, and its error is in view below it", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
+    const inView = !failedLog.open && failedLog.mark === 'err' && failedLog.folded === 'failed in relevance' && isDeepStrictEqual(failedLog.after, [LIVE_ERROR, CONTINUE_LINE]);
+    check('live', "a failed run's log ends on where it failed, its spinner gone, and its error is in view below it, then continue", inView, `${failedLog.folded}; ${failedLog.after.join(' | ')}`);
     const label = await page.textContent('#run-btn');
     const started = runPosted(page);
     await send(page, 'Which site logged the most incidents?');
@@ -7235,6 +7244,290 @@ async function liveStopEarly(url, server) {
   });
 }
 
+// In-page: the shown tab's last turn's log lines, folded or not, each by the node it links to, or else its text: a
+// document's line reads the same in each round.
+function loggedLines() {
+  const turn = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].at(-1);
+  return [...turn.querySelectorAll('.log-lines .line')].map((el) => el.dataset.node ?? el.querySelector('.t').textContent);
+}
+
+// The shown tab's panel and its run's log once a continue has ended: how many nodes, each once and none left working or
+// stopped, the lines its log holds more than once, and whether continue is still offered.
+async function continuedRun(page) {
+  const ids = await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id));
+  const lines = await page.evaluate(loggedLines);
+  return {
+    nodes: ids.length,
+    once: new Set(ids).size === ids.length,
+    unsettled: await count(page, '#world .node.working, #world .node.failed'),
+    repeated: lines.filter((text, i) => lines.indexOf(text) !== i),
+    offered: await count(page, CONTINUE_BUTTON),
+  };
+}
+
+// The parser breaks until the server releases it: the run fails in parsing, and continues once it is back.
+async function liveContinueFailed(url, server) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    const posts = postsOf(page);
+    await page.setInputFiles('#file-input', [...sampleMemos(), splitMemo()]);
+    await page.waitForFunction((n) => document.querySelectorAll('.node.doc').length === n, SAMPLE_DOCS + 1);
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    const offered = { after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
+    const offeredName = 'a run that failed offers continue once, under its error';
+    check('live', offeredName, failed && isDeepStrictEqual(offered, { after: [PARSER_ERROR, CONTINUE_LINE], buttons: 1 }), JSON.stringify(offered));
+    const split = await inspect(page, `r1-${SAMPLE_DOCS}`, '#inspector .insp-text');
+
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ended = await continuedRun(page);
+    const lines = await page.evaluate(loggedLines);
+    const same = (await inspect(page, `r1-${SAMPLE_DOCS}`, '#inspector .insp-text')) === split;
+    const expected = { nodes: SAMPLE_COUNTS.nodes + DOCUMENT_AND_PARSE + ROUNDS, once: true, unsettled: 0, repeated: [], offered: 0 };
+    const continues = posts.filter((path) => path.endsWith('/continue')).length;
+    const doneName = "continue carries the run on in its tab: its panel picks up where it was, each node once and settled, each log line once, a document read in parts as it read, and once it is done no continue";
+    check('live', doneName, done && same && continues === 1 && lines.includes(CONTINUING) && isDeepStrictEqual(ended, expected), `${JSON.stringify(ended)}; split the same ${same}`);
+
+    await send(page, 'Which memo is the registry?');
+    const asked = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    check('live', 'a continued run, once done, is asked over like any other', asked && /^\/api\/runs\/\w+\/asks$/.test(posts.at(-1)), posts.at(-1));
+  });
+}
+
+// Stalls the run until the server releases it, stops it, then stalls and stops its continue.
+async function liveContinueStopped(url, server) {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const posts = postsOf(page);
+    const runId = await stoppedRun(page, server);
+    const offered = { status: await page.textContent('#run-status'), after: (await page.evaluate(logOf)).after, buttons: await count(page, CONTINUE_BUTTON) };
+    const offeredExpected = { status: STOPPED_IN_RELEVANCE, after: [CONTINUE_LINE], buttons: 1 };
+    check('live', 'a stopped run offers continue once, under its log', isDeepStrictEqual(offered, offeredExpected), JSON.stringify(offered));
+
+    server.hold();
+    const continued = startedJob(page, '/continue');
+    await page.click(CONTINUE_BUTTON);
+    const continuedId = (await (await continued).json()).run_id;
+    const going = await becomes(page, () => document.querySelector('#world .node.working') !== null, null, LIVE_RUN_MS);
+    const whileGoing = { offered: await count(page, CONTINUE_BUTTON), stop: (await page.evaluate(composer)).stop, status: await page.textContent('#run-status') };
+    await pressStop(page);
+    await becomes(page, statusIs, STOPPING);
+    server.release();
+    const stoppedAgain = await becomes(page, statusMatches, '^● stopped in ', LIVE_RUN_MS);
+    const again = await count(page, CONTINUE_BUTTON);
+    const cancels = cancelsIn(posts);
+    const stops = going && whileGoing.offered === 0 && whileGoing.stop && whileGoing.status.startsWith('running · ') && stoppedAgain && again === 1;
+    const againName = 'a continued run goes on in its tab with stop offered and no continue; stopped, it offers continue again';
+    check('live', againName, stops && isDeepStrictEqual(cancels, [`/api/runs/${runId}/cancel`, `/api/runs/${continuedId}/cancel`]), `${JSON.stringify(whileGoing)}; ${cancels.join(' ')}`);
+
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const ended = await continuedRun(page);
+    const continues = posts.filter((path) => path.endsWith('/continue'));
+    const chained = isDeepStrictEqual(continues, [`/api/runs/${runId}/continue`, `/api/runs/${continuedId}/continue`]);
+    const expected = { nodes: SAMPLE_COUNTS.nodes, once: true, unsettled: 0, repeated: [CONTINUING], offered: 0 };
+    const doneName = "continued again it finishes in the same tab: each node once and settled, each log line once but one continuing per continue, and no continue";
+    check('live', doneName, done && chained && isDeepStrictEqual(ended, expected), `${JSON.stringify(ended)}; ${continues.join(' ')}`);
+  });
+}
+
+// The run's memos, continued around the page through r3con app's API: the new job's id.
+async function continueElsewhere(url, runId) {
+  const memos = sampleMemos();
+  const response = await fetch(new URL(`/api/runs/${runId}/continue`, url), {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ documents: memos.map((m) => m.buffer.toString()), names: memos.map((m) => m.name) }),
+  });
+  return (await response.json()).run_id;
+}
+
+// Reads the job's stream through r3con app's API to its end.
+async function streamedOut(url, runId) {
+  await (await fetch(new URL(`/api/runs/${runId}/events`, url), { headers: { Authorization: `Bearer ${tokenOf(url)}` } })).text();
+}
+
+// A run stalled until the server releases it, then stopped: its id, once it has stopped.
+async function stoppedRun(page, server) {
+  const started = startedJob(page, '/api/runs');
+  await send(page, `Which site logged the most incidents? ${STALLS}`);
+  const runId = (await (await started).json()).run_id;
+  await becomes(page, roundOneWorking, null, LIVE_RUN_MS);
+  await pressStop(page);
+  await becomes(page, statusIs, STOPPING);
+  server.release();
+  await becomes(page, statusIs, STOPPED_IN_RELEVANCE, LIVE_RUN_MS);
+  return runId;
+}
+
+// What r3con app answers the page's continue, once it is clicked: its status and body.
+async function continueAnswered(page) {
+  const answered = startedJob(page, '/continue');
+  await page.click(CONTINUE_BUTTON);
+  const response = await answered;
+  return { status: response.status(), body: await response.json() };
+}
+
+// The shown tab's run once a continue ended: how the log's head and the lines under it read, and whether continue is
+// offered again.
+async function afterContinue(page) {
+  const { folded, after } = await page.evaluate(logOf);
+  return { folded, after, offered: await count(page, CONTINUE_BUTTON) };
+}
+
+// A continue sent around the page holds the run's folder while the page's is refused, then finishes the run.
+async function liveContinueRefused(url, server) {
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [CONFLICT_LOG] }, async (page) => {
+    const runId = await stoppedRun(page, server);
+    server.hold();
+    const elsewhere = await continueElsewhere(url, runId);
+    const going = await continueAnswered(page);
+    const said = going.body.error;
+    const shown = await becomes(page, statusIs, `● ${said}`, LIVE_RUN_MS);
+    const whileGoing = await afterContinue(page);
+    const goingName = "a continue refused while another job holds the run's folder says so in one plain line, and offers continue again";
+    const goingExpected = { folded: NOT_CONTINUED, after: [said, CONTINUE_LINE], offered: 1 };
+    check('live', goingName, going.status === 409 && going.body.code === 'going' && shown && isDeepStrictEqual(whileGoing, goingExpected), JSON.stringify({ going, whileGoing }));
+
+    server.release();
+    await streamedOut(url, elsewhere);
+    const finished = await continueAnswered(page);
+    const refused = await becomes(page, statusIs, `● ${finished.body.error}`, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    const finishedName = 'a continue refused for good, its run finished meanwhile, says so in one plain line and offers no continue';
+    const endedExpected = { folded: NOT_CONTINUED, after: [said, finished.body.error], offered: 0 };
+    check('live', finishedName, finished.body.code === 'finished' && refused && isDeepStrictEqual(ended, endedExpected), JSON.stringify({ finished, ended }));
+  });
+}
+
+// The run's server is removed from settings, then added again: a refusal the user can fix.
+async function liveContinueFixable(url, server) {
+  const model = 'hosted_vllm/qwen3-32b';
+  const stored = { provider: 'other', endpoint: TEST_ENDPOINT };
+  const keys = (method) =>
+    fetch(new URL('/api/keys', url), { method, headers: { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' }, body: JSON.stringify(stored) });
+  await keys('POST');
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [REFUSED_LOG] }, async (page) => {
+    await page.selectOption('#model-pick', { label: 'other model on 10.0.0.7:8000…' });
+    await page.fill('#model-other', model);
+    await page.press('#model-other', 'Enter');
+    await stoppedRun(page, server);
+    await keys('DELETE');
+    const unknown = await continueAnswered(page);
+    const shown = await becomes(page, statusIs, `● ${unknown.body.error}`, LIVE_RUN_MS);
+    const refused = await afterContinue(page);
+    const refusedName = "a continue refused for a server no longer in settings says so, and offers continue again";
+    const refusedExpected = { folded: NOT_CONTINUED, after: [unknown.body.error, CONTINUE_LINE], offered: 1 };
+    check('live', refusedName, unknown.status === 422 && !unknown.body.code && shown && isDeepStrictEqual(refused, refusedExpected), JSON.stringify({ unknown, refused }));
+
+    await keys('POST');
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, `^● done · ${model} · `, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    check('live', 'with the server added again, continue carries the run on to its end', done && ended.offered === 0, JSON.stringify(ended));
+  });
+}
+
+// r3con app refuses every run before it starts; the page's stop is pressed before the run's id comes back.
+async function liveStoppedUnstarted(url) {
+  let letThrough;
+  const posted = new Promise((resolve) => (letThrough = resolve));
+  const before = (page) => page.route('**/api/runs', async (route) => {
+    await posted;
+    await route.continue();
+  });
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+    await send(page, 'Which site logged the most incidents?');
+    await becomes(page, () => !document.getElementById('stop-btn').hidden);
+    await pressStop(page);
+    letThrough();
+    const stopped = await becomes(page, statusIs, STOPPED, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    check('live', 'a run stopped before it started, and refused by r3con, has no folder to continue: none is offered', stopped && ended.offered === 0, JSON.stringify(ended));
+  });
+}
+
+// The run's first event, as its folder's events.jsonl holds it.
+function firstEventOf(server) {
+  const folder = readdirSync(server.logsDir).find((name) => existsSync(join(server.logsDir, name, 'events.jsonl')));
+  return JSON.parse(readFileSync(join(server.logsDir, folder, 'events.jsonl'), 'utf8').split('\n')[0]);
+}
+
+// A continue's answer and stream, served in r3con app's place: it starts the round-2 call of the first document again,
+// then fails before any stage, with no code, as a full disk would fail it.
+async function liveContinueRedrawn(url, server) {
+  const failure = 'OSError: [Errno 28] No space left on device';
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    const { document_ids: ids, rounds } = firstEventOf(server);
+    const cited = await page.$$eval('.edge.cite', (els) => els.map((el) => el.dataset.key).filter((key) => key.endsWith('>r2-0')));
+    const events = [
+      { type: 'run_started', document_ids: ids, rounds },
+      { type: 'run_resumed', reused: {} },
+      { type: 'relevance_started', round: 2, doc_id: ids[0] },
+      { type: 'run_failed', stage: null, error: failure },
+    ];
+    await page.route('**/api/runs/*/continue', (route) => route.fulfill({ status: 202, contentType: 'application/json', body: '{"run_id": "redrawn"}' }));
+    await page.route('**/api/runs/redrawn/events', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/event-stream', body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('') }),
+    );
+    await page.click(CONTINUE_BUTTON);
+    const failed = await becomes(page, statusIs, `● failed · ${failure}`, LIVE_RUN_MS);
+    const kinds = await page.$$eval('.edge', (els, keys) => els.filter((el) => keys.includes(el.dataset.key)).map((el) => el.classList.contains('cite')), cited);
+    const citesName = "a node a continue draws again keeps the lines its call cited, which the continue's other lines into it don't replace";
+    check('live', citesName, cited.length > 0 && kinds.length === cited.length && kinds.every(Boolean), `${cited.join(' ')}: ${kinds}`);
+    const ended = await afterContinue(page);
+    const failedName = 'a continue that fails before any stage, with no code, says why and offers continue again';
+    check('live', failedName, failed && isDeepStrictEqual(ended, { folded: 'failed', after: [PARSER_ERROR, failure, CONTINUE_LINE], offered: 1 }), JSON.stringify(ended));
+  });
+}
+
+// Holds the continue's POST back until stop has been pressed.
+async function liveContinueStopEarly(url, server) {
+  let letThrough;
+  const posted = new Promise((resolve) => (letThrough = resolve));
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    const posts = postsOf(page);
+    const runId = await stoppedRun(page, server);
+    server.hold();
+    await page.route('**/api/runs/*/continue', async (route) => {
+      await posted;
+      await route.continue();
+    });
+    const started = startedJob(page, '/continue');
+    await page.click(CONTINUE_BUTTON);
+    await becomes(page, () => !document.getElementById('stop-btn').hidden);
+    await pressStop(page);
+    const early = await page.waitForRequest(isCancel, { timeout: SETTLE_TIMEOUT_MS }).catch(() => null);
+    const cancelled = page.waitForRequest((request) => isCancel(request) && !request.url().includes(runId));
+    letThrough();
+    const continuedId = (await (await started).json()).run_id;
+    await cancelled;
+    server.release();
+    const stopped = await becomes(page, statusMatches, '^● stopped in ', LIVE_RUN_MS);
+    const cancels = cancelsIn(posts);
+    const name = "stop pressed before a continue's job answers cancels no earlier job, and cancels the continue's once it does";
+    const expected = [`/api/runs/${runId}/cancel`, `/api/runs/${continuedId}/cancel`];
+    check('live', name, early === null && stopped && isDeepStrictEqual(cancels, expected) && (await count(page, CONTINUE_BUTTON)) === 1, cancels.join(' '));
+  });
+}
+
+// The server goes away while a continue goes.
+async function liveContinueLost(url, server) {
+  await withPage('live', { url, sample: false, memos: true, expectedErrors: [CUT_STREAM_LOG] }, async (page) => {
+    await stoppedRun(page, server);
+    server.hold();
+    await page.click(CONTINUE_BUTTON);
+    await becomes(page, () => document.querySelector('#world .node.working') !== null, null, LIVE_RUN_MS);
+    await server.stop();
+    const lost = await becomes(page, statusIs, LOST_CONNECTION, LIVE_RUN_MS);
+    const ended = await afterContinue(page);
+    const lostName = 'a continue cut off from r3con app says the connection was lost, and offers continue again';
+    check('live', lostName, lost && isDeepStrictEqual(ended.after, [LOST_CONNECTION.slice(2), CONTINUE_LINE]) && ended.offered === 1, JSON.stringify(ended));
+  });
+}
+
 // Stalls two asks' calls until it releases them; their replies then miss their schema, so r3con would send again.
 async function liveStopAsk(url, server) {
   await withPage('live', { url, sample: false, memos: true }, async (page) => {
@@ -7459,6 +7752,7 @@ async function liveImport(url, server) {
     const openedName = "a saved tab's file dropped on the empty first tab opens there as it was saved: its panel, folders, icons and lit trail, its run's and ask's turns, and its files";
     const there = opened && !differ.length && (await tabCount(page)) === 1 && runFolders(server) === runs + 1;
     check('live', openedName, there, differ.map((key) => `${key}: ${JSON.stringify(shown[key]).slice(0, DETAIL_CHARS)}`).join(' | '));
+    check('live', 'a tab opened from a saved file offers no continue', (await count(page, CONTINUE_BUTTON)) === 0);
 
     await send(page, IMPORTED_ASK);
     const asked = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
@@ -7730,10 +8024,11 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
+  await withFakeServer(liveStoppedUnstarted, { R3CON_DOC_WORKERS: '0' });
   await withFakeServer(liveSaveDialog, {}, [SAVE_DIALOG]);
   await liveElsewhere();
 }
