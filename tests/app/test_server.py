@@ -1,8 +1,10 @@
 import contextlib
+import errno
 import json
 import logging
 import re
 import socket
+import tempfile
 import threading
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
@@ -24,6 +26,7 @@ from starlette.types import ASGIApp
 from r3con import r3con
 from r3con.app.server import (
     APP_KEY_SERVICE,
+    CONTINUE_FAILED,
     CONTINUE_REFUSALS,
     DEFAULT_RELEVANCE_ROUNDS,
     DIRECT_ONLY,
@@ -1546,24 +1549,46 @@ def test_a_continue_refused_while_another_program_holds_the_folder_continues_aga
     assert continued_events(client, refused)[-1]["type"] == "run_finished"
 
 
-def test_a_continue_r3con_refuses_once_started_ends_its_stream_on_one_plain_line(
+def test_a_continue_that_fails_before_it_begins_is_a_failure_and_continues_again(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    run_id, _ = failed_run(client, llm)
+
+    def full_disk(*args: Any, **kwargs: Any) -> Any:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as disk:
+        disk.setattr(tempfile, "mkstemp", full_disk)
+        failed = continued_id(client, run_id)
+        events = run_events(client, failed)
+    assert ends(events) == [
+        ("run_failed", None, "OSError: [Errno 28] No space left on device", None)
+    ]
+    assert continued_events(client, failed)[-1]["type"] == "run_finished"
+
+
+def test_an_ask_over_a_run_whose_folder_a_continue_holds_is_refused_as_going(
     client: TestClient, llm: FakeLLM
 ):
-    run_id, run_dir = failed_run(client, llm)
-    (run_dir / "relevance" / "result.json").write_text("not JSON")
-    assert ends(continued_events(client, run_id)) == [
-        refused_in_stream("not_continuable")
-    ]
+    run_id, _ = failed_run(client, llm)
+    llm.gate.clear()
+    llm.called.clear()
+    continued = continued_id(client, run_id)
+    assert llm.called.wait(GATE_TIMEOUT_SECONDS)
+    asked = client.post(f"/api/runs/{run_id}/asks", json=ASK)
+    llm.gate.set()
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
+    assert refusal(asked) == (409, refused("going"))
 
 
-def test_a_run_folder_file_that_cannot_be_read_is_refused_plainly(
+def test_a_run_folder_file_that_cannot_be_read_is_refused_plainly_with_no_code(
     client: TestClient, llm: FakeLLM
 ):
     run_id, run_dir = failed_run(client, llm)
     (run_dir / "ids.json").unlink()
     (run_dir / "ids.json").mkdir()
     response = continue_run(client, run_id)
-    assert refusal(response) == (409, refused("not_continuable"))
+    assert refusal(response) == (409, {"error": CONTINUE_FAILED})
 
 
 def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(

@@ -97,12 +97,16 @@ a reload reads.
   never one the request names, and must be in the logs dir; an imported run has
   finished. While a run or continue on the folder is going, it is refused before
   anything there is read; one that has ended but not yet let go of the folder is
-  waited for. A refusal of the continue itself answers ``{error, code}``, a plain line
-  and, for the page, why in a word of ``CONTINUE_REFUSALS``: 422 for ``other_files``,
-  409 for the others. One r3con makes once started, as for a folder another program
-  holds or a masked credential the run's config sends, ends the stream with a failure
-  event whose ``stage`` is ``null``, with that ``error`` and ``code``. A body that isn't
-  one, or a model whose server isn't in settings, is refused as for a run (422).
+  waited for. Each of r3con's refusals of a resume is declared by a code of
+  ``CONTINUE_REFUSALS`` beside its plain line: the answer is then ``{error, code}``,
+  422 for ``other_files`` and 409 for the others, or, for one r3con makes once the
+  continue has started (``going`` for a folder another program holds, ``masked``), a
+  failure event whose ``stage`` is ``null`` with that ``error`` and ``code``. Anything
+  else that stops a continue carries no code: before it starts, a folder file it
+  can't read or a setting out of range answers ``CONTINUE_FAILED`` (409), and after,
+  it fails as a run does. A body that isn't one, or a model whose server isn't in
+  settings, is refused as for a run (422). While a run or continue on a run's folder
+  is going, an ask over the run, and its representation, are refused with ``going``.
 - ``GET /api/runs/{run_id}/representation`` answers, for a run that has ended, what
   ``r3con.ask`` reads of its folder, each file in ``REPRESENTATION_FILES`` by its path
   there: what a tab saved as one file needs to ask again. Its manifest leaves out its
@@ -235,6 +239,7 @@ from r3con.pipeline import (
     RunFinished,
     read_representation,
     read_resume,
+    resumable_folder,
     resume_pipeline,
 )
 from r3con.runs import EventRecorder, RunFolderBusy, new_run_folder
@@ -353,9 +358,8 @@ NOT_ONE_INDEX_EACH = (
 # r3con's default config runs two rounds; each one more is another call per document.
 DEFAULT_RELEVANCE_ROUNDS = 2
 MAX_RELEVANCE_ROUNDS = 4
-# Each way a continue is refused, by the code the page decides by, and its plain line.
 CONTINUE_REFUSALS = {
-    "going": "This run is still going: continue it once it has stopped.",
+    "going": "This run is still going: try again once it has stopped.",
     "finished": "This run has finished: ask it a new question instead.",
     "other_files": "These aren't the files this run read.",
     "masked": (
@@ -364,8 +368,7 @@ CONTINUE_REFUSALS = {
     ),
     "not_continuable": "This run's folder isn't one R3Con can continue.",
 }
-# The code of r3con's refusals of a resume, by their class; any other's is
-# not_continuable.
+CONTINUE_FAILED = "This run couldn't be continued just now."
 CONTINUE_CODES: dict[type[Exception], str] = {
     RunFolderBusy: "going",
     RunFinished: "finished",
@@ -512,9 +515,7 @@ class ProviderKey(BaseModel):
     key: Secret
 
 
-class ContinueRefused(HTTPException):
-    """A continue refused, as ``CONTINUE_REFUSALS`` says by ``code``."""
-
+class Refused(HTTPException):
     def __init__(self, code: str) -> None:
         status = 422 if code == "other_files" else 409
         super().__init__(status, CONTINUE_REFUSALS[code])
@@ -749,17 +750,11 @@ def _relay(loop: asyncio.AbstractEventLoop, job: Job, event: dict[str, Any]) -> 
             raise
 
 
-def _failure(error: Exception) -> dict[str, str]:
-    """What a failure event says of ``error``: its masked line."""
-    return {"error": one_line(error)}
-
-
 def _work(
     job: Job,
     loop: asyncio.AbstractEventLoop,
     call: Callable[..., Any],
     failed: str,
-    said: Callable[[Exception], dict[str, str]],
 ) -> None:
     on_event = partial(_relay, loop, job)
     try:
@@ -770,7 +765,7 @@ def _work(
         # A cancel was asked for, by the user or by the server stopping: no error.
         log = logger.info if isinstance(error, r3con.Cancelled) else logger.error
         log("%s: %s", failed, line)
-        EventRecorder(on_event, None)(failed, stage=None, **said(error))
+        EventRecorder(on_event, None)(failed, stage=None, error=line)
 
 
 def _start(
@@ -778,17 +773,14 @@ def _start(
     kind: Kind,
     call: Callable[..., Any],
     job: Job | None = None,
-    said: Callable[[Exception], dict[str, str]] = _failure,
 ) -> str:
     """Run ``call`` on a thread of its own, its events landing in ``job``, a new job of
-    ``kind`` by default; returns the job's id. Refused once the server is stopping.
-    Should ``call`` raise before r3con reports its failure, the job's last event says
-    what ``said`` makes of the error."""
+    ``kind`` by default; returns the job's id. Refused once the server is stopping."""
     if state.stopping:
         raise HTTPException(503, "The server is stopping.")
     job_id = secrets.token_hex(ID_BYTES)
     state.jobs[kind][job_id] = job = job or Job()
-    args = (job, asyncio.get_running_loop(), call, f"{kind}_failed", said)
+    args = (job, asyncio.get_running_loop(), call, f"{kind}_failed")
     job.worker = threading.Thread(
         target=_work, args=args, name=f"r3con-app-{job_id}", daemon=True
     )
@@ -980,60 +972,81 @@ def _folder_to_continue(job: Job) -> Path:
     """The folder a continue of ``job``, a run's or a continue's, carries on; refused
     once its run has finished, an imported one among them, or if it never had one."""
     if job.events and job.events[-1]["type"] == "run_finished":
-        raise ContinueRefused("finished")
+        raise Refused("finished")
     if job.run_dir is None:
-        raise ContinueRefused("not_continuable" if _ended(job) else "going")
+        raise Refused("not_continuable" if _ended(job) else "going")
     return job.run_dir
 
 
-def _refusal_code(error: Exception) -> str:
+def _refusal_code(error: Exception) -> str | None:
     return next(
         (code for kind, code in CONTINUE_CODES.items() if isinstance(error, kind)),
-        "not_continuable",
+        None,
     )
 
 
-def _continue_failed(error: Exception) -> dict[str, str]:
-    """What a continue's stream says of ``error``, raised before it began."""
-    code = _refusal_code(error)
-    return {"error": CONTINUE_REFUSALS[code], "code": code}
+def _refused(error: Exception, code: str | None) -> HTTPException:
+    logger.warning("A continue is refused: %s", one_line(error))
+    return HTTPException(409, CONTINUE_FAILED) if code is None else Refused(code)
 
 
 def _resumable(
     logs_dir: Path, run_dir: Path, documents: dict[str, str] | list[str]
 ) -> Resumable:
     """The run in ``run_dir``, a folder of ``logs_dir``, that a continue over
-    ``documents`` carries on (:func:`r3con.pipeline.read_resume`); refused otherwise in
-    a plain line, the log saying why."""
+    ``documents`` carries on (:func:`r3con.pipeline.read_resume`); refused otherwise,
+    with a code only for one of r3con's refusals, or a folder no continue can read."""
     try:
         if run_dir.resolve().parent != logs_dir.resolve():
-            raise ValueError(f"{run_dir} isn't a folder of {logs_dir}")
-        return read_resume(run_dir, documents)
+            raise FileNotFoundError(f"{run_dir} isn't a folder of {logs_dir}")
+        folder = resumable_folder(run_dir)
     except (OSError, ValueError) as error:
-        logger.warning("A continue is refused: %s", one_line(error))
-        raise ContinueRefused(_refusal_code(error)) from None
+        code = "not_continuable" if isinstance(error, FileNotFoundError) else None
+        raise _refused(error, code or _refusal_code(error)) from None
+    try:
+        return read_resume(folder, documents)
+    except (OSError, ValueError) as error:
+        raise _refused(error, _refusal_code(error)) from None
+
+
+def _refuse_going(state: ServerState, run_dir: Path) -> None:
+    if any(
+        job.run_dir == run_dir and job.worker and job.worker.is_alive()
+        for job in state.jobs["run"].values()
+        if not _ended(job)
+    ):
+        raise Refused("going")
 
 
 def _exiting(state: ServerState, run_dir: Path) -> list[threading.Thread]:
-    """The workers of the jobs on ``run_dir`` that have ended but not yet exited, and so
-    may still hold it; refused while one of them is going."""
-    alive = [
-        job
+    """The workers of the jobs on ``run_dir`` that have ended but may still hold it."""
+    return [
+        job.worker
         for job in state.jobs["run"].values()
         if job.run_dir == run_dir and job.worker and job.worker.is_alive()
     ]
-    if not all(_ended(job) for job in alive):
-        raise ContinueRefused("going")
-    return [job.worker for job in alive if job.worker]
 
 
 def _resume_after(
-    workers: list[threading.Thread], resumable: Resumable, **options: Any
+    workers: list[threading.Thread],
+    resumable: Resumable,
+    *,
+    on_event: Callable[[dict[str, Any]], None],
+    **options: Any,
 ) -> Any:
-    """Carry ``resumable`` on once ``workers`` have exited, and let go of its folder."""
+    """Carry ``resumable`` on once ``workers`` have exited and let go of its folder. Of
+    what stops it, only r3con's refusals of a resume end it with their code."""
     for worker in workers:
         worker.join()
-    return resume_pipeline(resumable, **options)
+    try:
+        return resume_pipeline(resumable, on_event=on_event, **options)
+    except Exception as error:
+        code = _refusal_code(error)
+        if code is None:
+            raise
+        logger.warning("A continue is refused: %s", one_line(error))
+        line = CONTINUE_REFUSALS[code]
+        EventRecorder(on_event, None)("run_failed", stage=None, error=line, code=code)
 
 
 async def continue_run(request: Request) -> Response:
@@ -1041,7 +1054,7 @@ async def continue_run(request: Request) -> Response:
     job = _job(state.jobs["run"], request.path_params["run_id"], "run")
     run_dir = _folder_to_continue(job)
     # Before reading the folder, which a job going there may be writing.
-    _exiting(state, run_dir)
+    _refuse_going(state, run_dir)
     body = await _read(request, ContinueRequest.model_validate_json)
     # Reading the folder and every document's fingerprint: off the event loop.
     resumable = await run_in_threadpool(
@@ -1049,10 +1062,10 @@ async def continue_run(request: Request) -> Response:
     )
     options = _model_options(state, resumable.config.model, job.endpoint)
     # Again, with nothing awaited after it, so that no job on the folder starts meanwhile.
-    workers = _exiting(state, run_dir)
+    _refuse_going(state, run_dir)
+    resume = partial(_resume_after, _exiting(state, run_dir), resumable, **options)
     continued = Job(run_dir=resumable.run_dir, endpoint=job.endpoint)
-    resume = partial(_resume_after, workers, resumable, **options)
-    run_id = _start(state, "run", resume, continued, said=_continue_failed)
+    run_id = _start(state, "run", resume, continued)
     return JSONResponse({"run_id": run_id}, status_code=202)
 
 
@@ -1064,7 +1077,10 @@ def _run_dir(state: ServerState, run_id: str) -> Path:
     started = run.events[0]
     if started["type"] != "run_started":
         raise HTTPException(409, "This run never started, so it has no folder to ask.")
-    return Path(started["run_dir"])
+    run_dir = Path(started["run_dir"])
+    # A continue may be writing there.
+    _refuse_going(state, run_dir.resolve())
+    return run_dir
 
 
 def _imported(logs_dir: Path, run: ImportedRun) -> Path:
@@ -1205,7 +1221,7 @@ async def _error(request: Request, error: Exception) -> Response:
     # Starlette types every handler as taking any Exception; this one is HTTPException's.
     assert isinstance(error, HTTPException)
     body = {"error": error.detail}
-    if isinstance(error, ContinueRefused):
+    if isinstance(error, Refused):
         body["code"] = error.code
     return JSONResponse(body, error.status_code, headers=error.headers)
 
