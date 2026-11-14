@@ -910,14 +910,18 @@ def resume_pipeline(
         )
 
 
+class RunFinished(ValueError):
+    """A resume was asked of a run that has finished (:func:`read_resume`)."""
+
+
 def _refuse_finished(run_dir: Path) -> None:
     """Refuse to resume the run in ``run_dir`` once it has finished.
 
     Raises:
-        ValueError: if its reasoning finished.
+        RunFinished: if its reasoning finished.
     """
     if (run_dir / "reasoning" / "result.json").is_file():
-        raise ValueError(
+        raise RunFinished(
             f"{run_dir}: this run finished; ask it a new question instead (r3con ask, "
             "or r3con.ask)."
         )

@@ -1,9 +1,7 @@
 import contextlib
 import json
 import logging
-import os
 import re
-import shutil
 import socket
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -15,6 +13,7 @@ import keyring
 import litellm
 import pytest
 import yaml
+from filelock import FileLock
 from keyring.backend import KeyringBackend
 from keyring.backends import fail
 from keyring.errors import KeyringLocked, PasswordDeleteError, PasswordSetError
@@ -27,7 +26,7 @@ from r3con.app.server import (
     APP_KEY_SERVICE,
     CONTINUE_FINISHED,
     CONTINUE_GOING,
-    CONTINUE_IMPORTED,
+    CONTINUE_MASKED,
     CONTINUE_OTHER_FILES,
     CONTINUE_REFUSED,
     DEFAULT_RELEVANCE_ROUNDS,
@@ -58,6 +57,7 @@ from r3con.app.server import (
 )
 from r3con.documents import _EXTRACTORS, TEXT_SUFFIXES, _PdfNoText, read_documents
 from r3con.masking import MASK
+from r3con.runs import run_lock
 from r3con.settings import CONFIGS_DIR
 from tests.documents import (
     CERTIFICATE_ENCRYPTION,
@@ -74,6 +74,7 @@ from tests.fakes import (
     a_parse_citation_short,
     in_json,
     stage_of,
+    the_runs_own_files,
 )
 
 litellm.suppress_debug_info = True
@@ -1273,10 +1274,24 @@ def continue_run(
     return client.post(f"/api/runs/{run_id}/continue", json=body, **request)
 
 
-def continued_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
+def continued_id(client: TestClient, run_id: str) -> str:
     response = continue_run(client, run_id)
     assert response.status_code == 202, response.text
-    return run_events(client, response.json()["run_id"])
+    return response.json()["run_id"]
+
+
+def continued_events(client: TestClient, run_id: str) -> list[dict[str, Any]]:
+    return run_events(client, continued_id(client, run_id))
+
+
+def refusal(response: httpx2.Response) -> tuple[int, str]:
+    return response.status_code, response.json()["error"]
+
+
+def ends(events: list[dict[str, Any]]) -> list[tuple[str, str | None, str | None]]:
+    """Each of ``events`` that ended its stream, a refusal before it began among them,
+    by its type, its stage and its error."""
+    return [(e["type"], e.get("stage"), e.get("error")) for e in events]
 
 
 def stopped(client: TestClient, model: FakeLLM, run_id: str) -> dict[str, Any]:
@@ -1288,28 +1303,26 @@ def stopped(client: TestClient, model: FakeLLM, run_id: str) -> dict[str, Any]:
     return run_events(client, run_id)[-1]
 
 
-def files_in(folder: Path) -> dict[str, bytes]:
-    return {
-        str(path.relative_to(folder)): path.read_bytes()
-        for path in folder.rglob("*")
-        if path.is_file()
-    }
-
-
-def test_a_failed_run_continues_in_its_folder_sending_only_what_it_lacks_then_is_asked_and_saved(
+def test_a_failed_run_continues_in_its_folder_sending_only_what_it_lacks(
     client: TestClient, llm: FakeLLM
 ):
     run_id, run_dir = failed_run(client, llm)
     sent = len(llm.requests)
-    response = continue_run(client, run_id)
-    continued = response.json()["run_id"]
+    continued = continued_id(client, run_id)
     events = run_events(client, continued)
     stages = [stage_of(request) for request in llm.requests[sent:]]
-    assert response.status_code == 202 and continued != run_id
+    assert continued != run_id
     assert [event["type"] for event in events[:2]] == ["run_started", RESUMED]
     assert Path(events[0]["run_dir"]) == run_dir.resolve()
     assert {event["type"] for event in events} == CONTINUED_AFTER_PARSING | {RESUMED}
     assert stages == ["parsing"] * len(memos()) + ["reasoning"]
+
+
+def test_a_continued_run_is_asked_and_saved_like_any_other(
+    client: TestClient, llm: FakeLLM
+):
+    continued = continued_id(client, failed_run(client, llm)[0])
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
     assert [event["type"] for event in ask_events(client, continued)] == ASK_EVENTS
     assert imported(client, representation_of(client, continued))
 
@@ -1326,14 +1339,13 @@ def test_a_stopped_run_continues_and_so_does_a_stopped_continue_each_call_sent_o
     first = stopped(client, llm, run_id)
     llm.gate.clear()
     llm.called.clear()
-    continued = continue_run(client, run_id).json()["run_id"]
+    continued = continued_id(client, run_id)
     second = stopped(client, llm, continued)
     last = continued_events(client, continued)[-1]
-    ends = [(event["type"], event.get("stage")) for event in (first, second, last)]
-    assert ends == [
-        ("run_failed", "relevance"),
-        ("run_failed", "relevance"),
-        ("run_finished", None),
+    assert ends([first, second, last]) == [
+        ("run_failed", "relevance", first["error"]),
+        ("run_failed", "relevance", second["error"]),
+        ("run_finished", None, None),
     ]
     assert len(llm.requests) == 2 * whole
 
@@ -1351,14 +1363,11 @@ def test_a_continue_over_other_files_is_refused_plainly_and_sends_nothing(
     client: TestClient, llm: FakeLLM, other: Callable[[list[str]], list[str]]
 ):
     run_id, run_dir = failed_run(client, llm)
-    before, sent = files_in(run_dir), len(llm.requests)
+    before, sent = the_runs_own_files(run_dir), len(llm.requests)
     response = continue_run(client, run_id, {"documents": other(memos())})
-    assert (response.status_code, response.json()) == (
-        422,
-        {"error": CONTINUE_OTHER_FILES},
-    )
+    assert refusal(response) == (422, CONTINUE_OTHER_FILES)
     assert llm.requests[sent:] == []
-    assert files_in(run_dir) == before
+    assert the_runs_own_files(run_dir) == before
 
 
 def test_a_run_folder_outside_the_logs_dir_is_not_continued_and_the_log_says_why(
@@ -1371,66 +1380,39 @@ def test_a_run_folder_outside_the_logs_dir_is_not_continued_and_the_log_says_why
     outside = tmp_path / "elsewhere"
     run_dir.rename(outside)
     run_dir.symlink_to(outside, target_is_directory=True)
-    before, sent = files_in(outside), len(llm.requests)
+    before, sent = the_runs_own_files(outside), len(llm.requests)
     with caplog.at_level(logging.WARNING, logger="r3con.app"):
         response = continue_run(client, run_id)
-    assert (response.status_code, response.json()) == (409, {"error": CONTINUE_REFUSED})
+    assert refusal(response) == (409, CONTINUE_REFUSED)
     assert llm.requests[sent:] == []
-    assert files_in(outside) == before
+    assert the_runs_own_files(outside) == before
     assert f"{run_dir} isn't a folder of {run_dir.parent}" in caplog.text
 
 
-def test_an_imported_run_is_never_continued(client: TestClient, llm: FakeLLM):
+def test_an_imported_run_has_finished_so_is_never_continued(
+    client: TestClient, llm: FakeLLM
+):
     run_id = imported(client, representation_of(client, finished_run(client)))
     sent = len(llm.requests)
-    response = continue_run(client, run_id)
-    assert (response.status_code, response.json()) == (
-        409,
-        {"error": CONTINUE_IMPORTED},
-    )
+    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_FINISHED)
     assert llm.requests[sent:] == []
 
 
-def moved_out(run_dir: Path, outside: Path, path: str) -> None:
-    """``path`` in ``run_dir`` moved to ``outside``, a symbolic link to it in its
-    place."""
-    shutil.move(run_dir / path, outside / Path(path).name)
-    (run_dir / path).symlink_to(outside / Path(path).name)
-
-
-# Each way a link in a run folder could have a resume read or write outside it.
-LINKS_OUT = {
-    "a-file-read-and-appended-to": lambda run_dir, outside: moved_out(
-        run_dir, outside, "events.jsonl"
-    ),
-    "a-finished-stages-folder": lambda run_dir, outside: moved_out(
-        run_dir, outside, "structuring/schema"
-    ),
-    "a-folder-not-there-yet": lambda run_dir, outside: (
-        run_dir / "reasoning"
-    ).symlink_to(outside / "reasoning"),
-    "a-hard-link": lambda run_dir, outside: os.link(
-        run_dir / "events.jsonl", outside / "events.jsonl"
-    ),
-}
-
-
-@pytest.mark.parametrize("plant", LINKS_OUT.values(), ids=LINKS_OUT.keys())
-def test_a_run_folder_holding_a_link_that_reaches_outside_is_not_continued(
-    client: TestClient,
-    llm: FakeLLM,
-    tmp_path: Path,
-    plant: Callable[[Path, Path], None],
+def test_a_run_a_continue_finished_says_it_has_finished_when_continued_again(
+    client: TestClient, llm: FakeLLM
 ):
-    run_id, run_dir = failed_run(client, llm)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    plant(run_dir, outside)
-    before, sent = files_in(outside), len(llm.requests)
-    response = continue_run(client, run_id)
-    assert (response.status_code, response.json()) == (409, {"error": CONTINUE_REFUSED})
-    assert llm.requests[sent:] == []
-    assert files_in(outside) == before
+    run_id, _ = failed_run(client, llm)
+    assert continued_events(client, run_id)[-1]["type"] == "run_finished"
+    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_FINISHED)
+
+
+def test_a_run_refused_before_it_started_has_no_folder_to_continue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "0")
+    run_id = start_run(client)
+    assert run_events(client, run_id)[-1]["stage"] is None
+    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_REFUSED)
 
 
 @pytest.mark.parametrize(
@@ -1469,30 +1451,87 @@ def test_a_continue_runs_on_the_runs_server_with_the_key_stored_here_whatever_it
     headers = {"X-Api-Key": REQUEST_KEY, "Api-Key": REQUEST_KEY}
     response = continue_run(client, run_id, headers=headers)
     last = run_events(client, response.json()["run_id"])[-1]
-    assert refused.status_code == 422
-    assert refused.json()["error"] == (
-        "api_key: Extra inputs are not permitted; "
-        "endpoint: Extra inputs are not permitted"
+    assert refusal(refused) == (
+        422,
+        (
+            "api_key: Extra inputs are not permitted; "
+            "endpoint: Extra inputs are not permitted"
+        ),
     )
     assert last["type"] == "run_finished"
     assert transport(llm)[sent:] == [sent_with] * (len(llm.requests) - sent)
 
 
-def test_a_second_continue_while_the_first_holds_the_folder_ends_on_one_plain_line(
+def test_a_run_whose_config_sends_a_credential_its_folder_masked_is_not_continued(
+    client: TestClient, llm: FakeLLM, tmp_path: Path
+):
+    config = yaml.safe_load((CONFIGS_DIR / "default.yaml").read_text())
+    params = {"extra_headers": {"X-Gateway-Key": GATE_KEY}}
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "default.yaml").write_text(
+        yaml.safe_dump({**config, "params": params})
+    )
+    run_id, _ = failed_run(client, llm)
+    sent = len(llm.requests)
+    assert refusal(continue_run(client, run_id)) == (409, CONTINUE_MASKED)
+    assert llm.requests[sent:] == []
+
+
+def test_a_continue_while_one_is_going_is_refused_as_still_going(
     client: TestClient, llm: FakeLLM
 ):
     run_id, _ = failed_run(client, llm)
     llm.gate.clear()
     llm.called.clear()
-    first = continue_run(client, run_id).json()["run_id"]
+    first = continued_id(client, run_id)
     assert llm.called.wait(GATE_TIMEOUT_SECONDS)
-    second = continued_events(client, run_id)
+    second = continue_run(client, first)
+    again = continue_run(client, run_id)
     llm.gate.set()
-    last = run_events(client, first)[-1]
-    assert [(e["type"], e["stage"], e["error"]) for e in second] == [
-        ("run_failed", None, CONTINUE_GOING)
+    assert run_events(client, first)[-1]["type"] == "run_finished"
+    assert [refusal(r) for r in (second, again)] == [(409, CONTINUE_GOING)] * 2
+
+
+def test_a_continue_sent_as_its_run_fails_waits_for_the_run_to_let_go_of_its_folder(
+    client: TestClient, llm: FakeLLM, monkeypatch: pytest.MonkeyPatch
+):
+    letting_go = threading.Event()
+    release = FileLock.release
+
+    # The run's worker, having reported its failure, holds the folder until let go.
+    def held(lock: FileLock, force: bool = False) -> None:
+        if not force:
+            letting_go.wait(GATE_TIMEOUT_SECONDS)
+        release(lock, force)
+
+    monkeypatch.setattr(FileLock, "release", held)
+    run_id, _ = failed_run(client, llm)
+    holding = worker_of(run_id).is_alive()
+    continued = continued_id(client, run_id)
+    letting_go.set()
+    assert holding
+    assert run_events(client, continued)[-1]["type"] == "run_finished"
+
+
+def test_a_continue_refused_while_another_program_holds_the_folder_continues_again(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    with run_lock(run_dir):
+        refused = continued_id(client, run_id)
+        events = run_events(client, refused)
+    assert ends(events) == [("run_failed", None, CONTINUE_GOING)]
+    assert continued_events(client, refused)[-1]["type"] == "run_finished"
+
+
+def test_a_continue_r3con_refuses_once_started_ends_its_stream_on_one_plain_line(
+    client: TestClient, llm: FakeLLM
+):
+    run_id, run_dir = failed_run(client, llm)
+    (run_dir / "relevance" / "result.json").write_text("not JSON")
+    assert ends(continued_events(client, run_id)) == [
+        ("run_failed", None, CONTINUE_REFUSED)
     ]
-    assert last["type"] == "run_finished"
 
 
 def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
@@ -1505,9 +1544,9 @@ def test_a_continue_of_a_run_still_going_or_finished_is_refused_plainly(
         held_llm.gate.set()
         assert run_events(client, run_id)[-1]["type"] == "run_finished"
         finished = continue_run(client, run_id)
-    assert [(r.status_code, r.json()) for r in (going, finished)] == [
-        (409, {"error": CONTINUE_GOING}),
-        (409, {"error": CONTINUE_FINISHED}),
+    assert [refusal(r) for r in (going, finished)] == [
+        (409, CONTINUE_GOING),
+        (409, CONTINUE_FINISHED),
     ]
 
 
