@@ -274,9 +274,9 @@ jobs:
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
       # At INFO, so that the log shows Sparkle's updater started. Briefcase's stub sends
       # Python's stdout and stderr, where uvicorn logs each request and r3con its lines,
-      # to the system log, where they can come out unreadable, as "<compose failure
-      # [UUID]>". OS_ACTIVITY_DT_MODE has the app also write each line it logs to its own
-      # stderr: here, app.log.
+      # to the system log, which at times can't show them: "<compose failure [UUID]>".
+      # OS_ACTIVITY_DT_MODE has the app also write each line it logs to its own stderr,
+      # here app.log.
       - name: Open the app's window
         run: |
           app_log="$RUNNER_TEMP/app.log"
@@ -341,18 +341,15 @@ jobs:
             echo "::error::The app ended on a quit without stopping its server."
             exit 1
           fi
-          # Temporary, to size app.log: its lines, and those Python wrote.
-          wc -l < "$app_log"
-          grep -c 'INFO' "$app_log" || true
-          grep -m 15 -F 'INFO' "$app_log" || true
       # An app that writes into its own bundle breaks its signature.
       - name: Check that running the app left its signature intact
         run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
+      # app.log has the app's own lines; the system log also has WebKit's, the page's load.
       - name: The app's log
         if: failure()
         run: |
           if [ -f "$RUNNER_TEMP/app.log" ]; then
-            tail -n 300 "$RUNNER_TEMP/app.log"
+            cat "$RUNNER_TEMP/app.log"
           fi
           log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
       - name: The app's identity, signature and sizes
