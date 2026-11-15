@@ -2384,7 +2384,7 @@
     return cites;
   }
 
-  // As r3con does, it cites only non-empty final-round summaries and parses with records; its trail goes one hop.
+  // As r3con does, it cites only non-empty summaries of contextRound and parses with records; its trail goes one hop.
   /** @param {Pick<Run, 'docs' | 'ids' | 'indexes' | 'rounds' | 'parsed' | 'pruned'>} run @param {string} question @param {number} shift @returns {Pick<Answer, 'text' | 'provenance'>} */
   function madeUpAnswer(run, question, shift) {
     /** @param {number} stride @param {(i: number) => boolean} citable */
@@ -4926,8 +4926,6 @@
   /** @param {RunTab} tab @param {Narrator} narr @param {ServerEvent} event */
   function drawEvent(tab, narr, event) {
     const { run } = tab;
-    // r3con's schema of no field, when it pruned every document, structures nothing worth drawing.
-    if (event.type.startsWith('schema_') && allPruned(run)) return;
     // An event names a document of its own run.
     /** @param {string} id */
     const doc = (id) => /** @type {number} */ (docIndex(run, id));

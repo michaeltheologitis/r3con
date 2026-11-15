@@ -10,6 +10,7 @@ message: a rejection has to say *what* was wrong precisely enough to act on.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from r3con.stages.relevance import Snippet, render_relevance
 from r3con.stages.structuring.parsing import SchemaError, check_schema
 
 _log = get_logger("structuring.schema")
+NO_FIELDS = "class Parse(BaseModel):\n    pass\n"
 
 
 # The schema prompts instruct the model to wrap the Python schema source
@@ -117,11 +119,11 @@ class ProposalResult:
     attempts: list[ProposalAttempt] = field(default_factory=list)
 
 
+@functools.cache
 def no_fields_schema() -> ProposalResult:
     """A schema of no field, its ``Parse`` holding nothing, proposed without a call:
     the schema when there is nothing to structure."""
-    code = "class Parse(BaseModel):\n    pass\n"
-    return ProposalResult(schema_code=code, parse_cls=check_schema(code))
+    return ProposalResult(schema_code=NO_FIELDS, parse_cls=check_schema(NO_FIELDS))
 
 
 def _retry_prompt(task: str, prev_code: str, error: str) -> str:

@@ -299,6 +299,7 @@ def _system_prompt(
     samples_block: str,
     parse_block: str,
     structured: bool,
+    summarized: bool,
 ) -> str:
     """The system prompt of ``stage`` (``reasoning/direct`` or ``reasoning/coding``) at
     ``version``, from the variables a reasoning prompt version may use, a user's overlay
@@ -311,7 +312,8 @@ def _system_prompt(
     - ``parse_json``: the whole parse as JSON;
     - ``read_in_parts``: whether a snippet is one part of a document read in parts;
     - ``structured``: whether the parse has a field, which it lacks when there was
-      nothing to structure.
+      nothing to structure;
+    - ``summarized``: whether a relevance snippet says anything.
     """
     return load_prompt(
         stage,
@@ -324,6 +326,7 @@ def _system_prompt(
         parse_block=parse_block,
         read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
         structured=structured,
+        summarized=summarized,
     )
 
 
@@ -532,6 +535,7 @@ def reason(
         parse_json=parse_json,
         samples_block=_sample_record_per_field(parse_dict),
         structured=bool(parse_dict),
+        summarized=bool(citable["summary_ids"]),
     )
     user_message = f"Input:\n<task>\n{task}\n</task>"
     with_code = functools.partial(

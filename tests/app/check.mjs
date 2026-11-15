@@ -5848,13 +5848,13 @@ async function liveFromRound1(url, server) {
     const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
     const ran = {
       pruned: events.filter((e) => e.type === 'documents_pruned').map((e) => [e.round, e.doc_ids]),
-      parsed: events.filter((e) => e.type.startsWith('parsing_')).length,
+      structured: events.filter((e) => /^(schema|parsing)_/.test(e.type)).length,
       nodes: await page.evaluate(stageNodes),
       cites: await citesInto(page, 'answer-0'),
       lit: await litTrail(page),
     };
-    const ranExpected = { pruned: [[FADING_PRUNED_AFTER, ids]], parsed: 0, nodes: FROM_ROUND_1_NODES, cites: fromRound1(0), lit };
-    const ranName = "a run r3con prunes every memo of parses none, draws no structure nor parse, and its answer's lines and lit trail come from round 1's notes to the memos";
+    const ranExpected = { pruned: [[FADING_PRUNED_AFTER, ids]], structured: 0, nodes: FROM_ROUND_1_NODES, cites: fromRound1(0), lit };
+    const ranName = "a run r3con prunes every memo of reports no schema nor parse, draws no structure nor parse, and its answer's lines and lit trail come from round 1's notes to the memos";
     check('live', ranName, done && isDeepStrictEqual(ran, ranExpected), JSON.stringify(ran));
 
     await page.focus('.log-toggle');

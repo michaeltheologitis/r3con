@@ -919,7 +919,7 @@ def test_with_every_memo_pruned_nothing_is_structured(pruned_everything):
     pruned = read_json(logger, "relevance/result")["pruned_after"]
     assert sorted(pruned) == sorted(result.document_ids)
     assert llm.requests_for("schema") == llm.requests_for("parsing") == []
-    assert not [e for e in events if e["type"].startswith("parsing")]
+    assert not [e for e in events if e["type"].startswith(("schema", "parsing"))]
     assert result.schema_code == no_fields_schema().schema_code
     assert result.structured_context == {}
     schema = read_json(logger, "structuring/schema/result")
@@ -974,10 +974,17 @@ def test_with_round_1_empty_too_an_all_pruned_run_answers_from_no_notes(
     result = answer(llm, documents=THREE)
     assert llm.requests_for("schema") == llm.requests_for("parsing") == []
     [prompt] = system_prompts(llm, "reasoning")
-    shown = sections(prompt)["## Document summaries"]
+    shown = sections(prompt)
+    assert list(shown) == [
+        "## The task",
+        "## Document summaries",
+        "## Rules",
+        "## Output",
+    ]
+    assert "nothing relevant to it was found in them" in shown["## The task"]
     nothing = "(no relevant summary for this task)"
     headed = [f"### Document ID: {id_}\n{nothing}" for id_ in result.document_ids]
-    assert shown.endswith("\n\n".join(headed))
+    assert shown["## Document summaries"].endswith("\n\n".join(headed))
     assert result.provenance["summary_ids"] == []
 
 

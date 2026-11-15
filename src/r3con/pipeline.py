@@ -455,7 +455,8 @@ def run_pipeline(
       One without ``round``, as r3context 0.6.26 to 0.6.28 wrote it, is not read: a
       resume of such a run, as of one from before pruning, prunes nothing it reuses.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
-      ``thought``.
+      ``thought``. Neither when no schema is proposed, there being nothing to
+      structure (:attr:`~r3con.stages.relevance.RelevantContext.context_round`).
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
       ``doc_id``; finished adds ``n_records``, the document's ``parse`` as JSON
       (each field of ``Parse`` and its records, a document read in parts with its
@@ -651,7 +652,15 @@ def _build_and_answer(
     _log.info("stage 2/3 · structuring · proposing the schema")
     proposal = saved.proposal
     if proposal is None:
-        emit("schema_started")
+        nothing_to_structure = relevance.all_pruned
+        if nothing_to_structure:
+            _log.info(
+                "every document was pruned, so nothing relevant is left in the end: "
+                "no schema is proposed, nothing is parsed, and reasoning answers from "
+                "round 1's snippets"
+            )
+        else:
+            emit("schema_started")
         with _recorded_stage(
             task_logger,
             "structuring/schema",
@@ -661,15 +670,18 @@ def _build_and_answer(
             cancel=cancel,
             resumed=resumed,
         ) as record:
-            proposal = _schema_for(
-                relevance,
-                task=task,
-                relevance_snippets=relevance_snippets,
-                model=model,
-                prompt_version=config.prompts["structuring/schema"],
-                max_attempts=caps["schema_max_attempts"],
-                run=record.run,
-                **llm_kwargs,
+            proposal = (
+                no_fields_schema()
+                if nothing_to_structure
+                else propose_schema(
+                    task=task,
+                    relevance_snippets=relevance_snippets,
+                    model=model,
+                    prompt_version=config.prompts["structuring/schema"],
+                    max_attempts=caps["schema_max_attempts"],
+                    run=record.run,
+                    **llm_kwargs,
+                )
             )
             record.result = {
                 "schema_code": proposal.schema_code,
@@ -684,11 +696,12 @@ def _build_and_answer(
                 ],
             }
         stage_runs.append(record.run)
-        emit(
-            "schema_finished",
-            schema_code=proposal.schema_code,
-            thought=record.result["thought"],
-        )
+        if not nothing_to_structure:
+            emit(
+                "schema_finished",
+                schema_code=proposal.schema_code,
+                thought=record.result["thought"],
+            )
 
     # --- Stage 2b: structuring — parse every document but the pruned, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing")
@@ -787,19 +800,6 @@ def _build_and_answer(
         names=names,
         run_dir=run_dir,
     )
-
-
-def _schema_for(relevance: RelevantContext, **proposing: Any) -> ProposalResult:
-    """The schema :func:`propose_schema` proposes with ``proposing``, or, when
-    ``relevance`` pruned every document, which leaves nothing to structure, one of no
-    field, without a call (:func:`no_fields_schema`)."""
-    if not relevance.all_pruned:
-        return propose_schema(**proposing)
-    _log.info(
-        "every document was pruned, so nothing relevant is left in the end: no schema "
-        "is proposed, nothing is parsed, and reasoning answers from round 1's snippets"
-    )
-    return no_fields_schema()
 
 
 class Resumable(NamedTuple):

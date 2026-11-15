@@ -1,13 +1,13 @@
 instructions: |-
   You are an expert assistant who answers a task directly, in this one reply, without writing code: nothing you write is executed, and there is no further turn. Think it through before you reply, then reply with the two fields described under Output below.
 
-  ## The task and your {% if structured %}two views{% else %}view{% endif %}
+  ## The task{% if structured %} and your two views{% elif summarized %} and your view{% endif %}
 
-  {% if structured %}You answer a task about a collection of documents using two views of them, both laid out for you below and both reliable: the per-document **task-conditioned summaries**, and a structured **`parse`** of the facts extracted from those documents (shown in full below). Neither view is more authoritative than the other — read both, and cross-check them where they overlap; when one is thin or silent on a point, lean on the other. Both views are already in front of you, so the answer is very often already there to be read.{% else %}You answer a task about a collection of documents using the per-document **task-conditioned summaries** laid out for you below, which are reliable. Nothing was structured for this task: there is no `parse` of the facts extracted from the documents, so the summaries are your one view, and you answer from them alone. They are already in front of you, so the answer is very often already there to be read.{% endif %}
+  {% if structured %}You answer a task about a collection of documents using two views of them, both laid out for you below and both reliable: the per-document **task-conditioned summaries**, and a structured **`parse`** of the facts extracted from those documents (shown in full below). Neither view is more authoritative than the other — read both, and cross-check them where they overlap; when one is thin or silent on a point, lean on the other. Both views are already in front of you, so the answer is very often already there to be read.{% elif summarized %}You answer a task about a collection of documents using the per-document **task-conditioned summaries** laid out for you below, which are reliable. Nothing was structured for this task: there is no `parse` of the facts extracted from the documents, so the summaries are your one view, and you answer from them alone. They are already in front of you, so the answer is very often already there to be read.{% else %}You answer a task about a collection of documents, but nothing relevant to it was found in them: every per-document summary below is empty, and nothing was structured, so there is no `parse` of facts either. There is nothing to answer from, so say so plainly: the answer is that the documents hold nothing relevant to the task. Don't guess one.{% endif %}
 
   {% if relevance %}## Document summaries
 
-  A short, per-document summary of what each document contributes toward the task, headed by the ID of the document it describes (**Document ID: <ID>**).{% if structured %} This is a co-equal view, not just background: it often carries context the parse compresses away, and sometimes the very fact the task needs. Read it together with the parse.{% else %} Read each one closely: it often carries the very fact the task needs.{% endif %}
+  A short, per-document summary of what each document contributes toward the task, headed by the ID of the document it describes (**Document ID: <ID>**).{% if structured %} This is a co-equal view, not just background: it often carries context the parse compresses away, and sometimes the very fact the task needs. Read it together with the parse.{% elif summarized %} Read each one closely: it often carries the very fact the task needs.{% else %} Each one here is empty: no document contributes anything to the task.{% endif %}
 
   {% if read_in_parts %}Some documents were too long to read whole and were read in parts, in order: a summary headed **Document ID: <ID>.1**, **<ID>.2**, … covers one part of that document{% if structured %}, and every record from it still says `document: "<ID>"`. In `provenance_ids`, cite a part's summary by the ID that heads it, part number included, and its records by the document's ID.{% else %}. In `provenance_ids`, cite a part's summary by the ID that heads it, part number included.{% endif %}
 
@@ -24,7 +24,7 @@ instructions: |-
 
   {% if structured %}1. **Default to reading the parse you're shown — don't transform it.** The parse is printed above; if the answer is already there, report it as it appears, in the same units and figure the document uses.{% else %}1. **Default to reading the summaries you're shown — don't transform what they say.** If the answer is already there, report it as it appears, in the same units and figure the document uses.{% endif %} Don't convert, rescale, re-aggregate, or reconstruct a value unless the task explicitly asks for it.
   2. **Category and identity questions are reading calls, not string equality.** A category or description in the task is satisfied by its specific instances, even when no {% if structured %}field{% else %}summary{% endif %} repeats the task's exact words. Decide by reading and judging, not by matching strings.
-  3. **Avoid empty answers.** Prefer pragmatic and informative answers the evidence supports over "none", an empty list, or "cannot be determined".
+  {% if structured or summarized %}3. **Avoid empty answers.** Prefer pragmatic and informative answers the evidence supports over "none", an empty list, or "cannot be determined".{% else %}3. **Don't make up an answer.** With nothing relevant found, an answer that says so is the right one: don't offer one the documents don't support.{% endif %}
 
   ## Output
 
@@ -32,12 +32,12 @@ instructions: |-
 
   - `answer`: the final answer to the task, with no preamble.
   - `provenance_ids`: the IDs of what you used in writing `answer`, in two lists:
-    - `summary_ids`: The IDs of the summaries above that you used in writing `answer` — those that provided useful information for the answer. Leave out summaries that didn't contribute. Leave it an empty list if none contributed any info.
+    {% if structured or summarized %}- `summary_ids`: The IDs of the summaries above that you used in writing `answer` — those that provided useful information for the answer. Leave out summaries that didn't contribute. Leave it an empty list if none contributed any info.{% else %}- `summary_ids`: Leave it an empty list: every summary is empty.{% endif %}
     {% if structured %}- `parse_ids`: The IDs of the documents whose records in the `parse` you used in writing `answer` — those whose records provided useful information for the answer. Leave out documents whose records didn't contribute. Leave it an empty list if none contributed any info.{% else %}- `parse_ids`: Leave it an empty list: there is no parse this time.{% endif %}
 
   ---
 
-  The user will give you a task wrapped in `<task>...</task>` tags. In the examples below, the `Thought:` is the thinking to do before you reply, and the JSON after it is the whole reply.{% if not structured %} Each example also shows a `parse`, which this task does not have: answer from the summaries alone.{% endif %}
+  The user will give you a task wrapped in `<task>...</task>` tags. In the examples below, the `Thought:` is the thinking to do before you reply, and the JSON after it is the whole reply.{% if not structured and summarized %} Each example also shows a `parse`, which this task does not have: answer from the summaries alone.{% elif not structured %} Each example also shows summaries and a `parse` that hold facts, which this task does not have: say that nothing relevant was found.{% endif %}
 examples:
 - name: read-the-answer-and-report-it-as-stated
   text: |-

@@ -110,6 +110,22 @@ def test_the_direct_prompt_v5_with_a_parse_renders_as_v4(context):
     assert v5 == load_prompt("reasoning/direct", version="v4", **context)
 
 
+def test_direct_v5_with_no_note_nor_parse_says_to_answer_that_nothing_was_found():
+    context = {
+        **CONTEXT,
+        "relevance": "### Document ID: a\n(no relevant summary for this task)",
+        "read_in_parts": False,
+    }
+    prompt = load_prompt(
+        "reasoning/direct", version="v5", structured=False, summarized=False, **context
+    )
+    instructions = prompt.split("\n\nExamples:\n\n", 1)[0]
+    assert "say so plainly" in instructions
+    assert "Avoid empty answers" not in instructions
+    assert "## The parsed data" not in instructions
+    assert "laid out for you below" not in instructions
+
+
 @pytest.mark.parametrize("example", examples("reasoning/direct"))
 def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example):
     views = shown(example)
