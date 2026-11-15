@@ -271,6 +271,7 @@ def quoted_whole(document: str) -> dict:
         "text": document,
         "start": 0,
         "end": len(document),
+        "document_text": document,
         "match": "exact",
         "score": None,
     }

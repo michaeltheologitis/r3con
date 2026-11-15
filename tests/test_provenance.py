@@ -15,7 +15,7 @@ def snippet(id_: str, *quotes: dict, cites: tuple[str, ...] = ()) -> SnippetReco
 
 
 def quoted(document: str, start: int, end: int, text: str) -> dict:
-    """A quote behind an answer, as its provenance gives it."""
+    """A quote behind an answer found exactly, as its provenance gives it."""
     name = NAMES[document]
     return {
         "document": document,
@@ -23,6 +23,9 @@ def quoted(document: str, start: int, end: int, text: str) -> dict:
         "start": start,
         "end": end,
         "text": text,
+        "document_text": text,
+        "match": "exact",
+        "score": None,
     }
 
 
@@ -260,7 +263,7 @@ def test_a_quote_not_found_in_its_document_is_left_out():
     assert places(quotes) == [("a", 0, 5)]
 
 
-def test_a_place_quoted_more_than_once_is_given_once_as_the_latest_round_copied_it():
+def test_a_place_matched_alike_more_than_once_is_given_once_as_the_latest_round_copied_it():
     first = [
         snippet("a", quote("As round 1 copied it.", 0, 9, "exact")),
         snippet("b"),
@@ -276,6 +279,48 @@ def test_a_place_quoted_more_than_once_is_given_once_as_the_latest_round_copied_
         quoted("a", 0, 9, "As round 2 copied it."),
         quoted("b", 0, 9, "B said y."),
     ]
+
+
+WORDS = "A said x."
+"""What document a says from 0 to 9."""
+
+
+def copied(text: str, match: str, score: float | None = None) -> dict:
+    """A quote of a's ``WORDS`` as ``text``, found by ``match``."""
+    return quote(text, 0, 9, match, WORDS, score)
+
+
+EXACT = copied(WORDS, "exact")
+NORMALIZED = copied("a said X.", "normalized")
+ELIDED = copied("A said … x.", "elided")
+FUZZY_91 = copied("A said y.", "fuzzy", 91.0)
+FUZZY_96 = copied("A says x.", "fuzzy", 96.0)
+
+
+@pytest.mark.parametrize(
+    ("round_1", "round_2", "kept"),
+    [
+        (EXACT, FUZZY_96, EXACT),
+        (NORMALIZED, ELIDED, NORMALIZED),
+        (ELIDED, FUZZY_96, ELIDED),
+        (FUZZY_96, FUZZY_91, FUZZY_96),
+        (FUZZY_96, NORMALIZED, NORMALIZED),
+    ],
+    ids=[
+        "exact-over-fuzzy",
+        "normalized-over-elided",
+        "elided-over-fuzzy",
+        "the-higher-fuzzy-score",
+        "a-later-better-match",
+    ],
+)
+def test_a_place_quoted_more_than_once_is_given_once_as_it_was_best_matched(
+    round_1, round_2, kept
+):
+    first = [snippet("a", round_1), snippet("b"), snippet("c")]
+    second = [snippet("a", round_2), snippet("b", cites=("a",)), snippet("c")]
+    quotes = provenance_of([first, second], summary_ids=["a", "b"])["quotes"]
+    assert quotes == [{"document": "a", "name": NAMES["a"], **kept}]
 
 
 def test_quotes_come_in_document_order_then_by_where_they_start():

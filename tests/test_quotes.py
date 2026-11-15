@@ -136,6 +136,7 @@ def test_a_quote_is_placed_in_the_original_text_by_the_first_tier_that_finds_it(
         "text": quote,
         "start": start,
         "end": end,
+        "document_text": located,
         "match": match,
         "score": None,
     }
@@ -179,6 +180,7 @@ def test_markup_on_either_side_is_ignored_once_normalized(text, quote, located):
         "text": quote,
         "start": start,
         "end": start + len(located),
+        "document_text": located,
         "match": "normalized",
         "score": None,
     }
@@ -241,6 +243,7 @@ def test_a_quote_the_model_altered_is_located_as_fuzzy_only_at_the_minimum_score
         "text": quote,
         "start": start,
         "end": end,
+        "document_text": located,
         "match": match,
         "score": score,
     }
@@ -298,10 +301,21 @@ def test_quotes_in_a_part_are_placed_in_its_whole_document():
         "Transit stands",
         "a “leaner” budget",
     ]
+    assert [q["document_text"] for q in found] == [
+        "Transit stands",
+        "a “leaner” budget",
+        None,
+    ]
     assert [q["match"] for q in found] == ["exact", "normalized", None]
 
 
-NOT_FOUND = {"start": None, "end": None, "match": None, "score": None}
+NOT_FOUND = {
+    "start": None,
+    "end": None,
+    "document_text": None,
+    "match": None,
+    "score": None,
+}
 
 
 @pytest.mark.parametrize(

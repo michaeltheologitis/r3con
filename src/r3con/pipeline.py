@@ -45,7 +45,7 @@ import traceback
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from operator import itemgetter
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
@@ -918,7 +918,9 @@ def resume_pipeline(
         _refuse_finished(run_dir)
         document_ids = list(resumable.names)
         with _readable(run_dir):
-            saved = _read_saved(run_dir, document_ids, config.relevance_rounds, splits)
+            saved = _read_saved(
+                run_dir, document_ids, resumable.texts, config.relevance_rounds, splits
+            )
         task_logger = TaskLogger(run_dir.name, root=run_dir.parent)
         reopen_for_resume(task_logger, resumable.caps)
         splits.log_to(task_logger)
@@ -1039,10 +1041,15 @@ def _refuse_moved_prompts(
 
 
 def _read_saved(
-    run_dir: Path, document_ids: list[str], rounds: int, splits: Splits
+    run_dir: Path,
+    document_ids: list[str],
+    texts: Sequence[str],
+    rounds: int,
+    splits: Splits,
 ) -> _Saved:
     """What the earlier attempts at the run in ``run_dir`` left that a resume reuses,
-    ``splits`` giving how many parts each call read a document in.
+    ``texts`` being its documents' texts and ``splits`` giving how many parts each call
+    read a document in.
 
     A finished stage's results are its ``result.json``'s. An unfinished one's come from
     ``events.jsonl`` (:func:`r3con.runs.read_events`), each event checked as it is read
@@ -1056,10 +1063,11 @@ def _read_saved(
     its ``result.json``, an unfinished relevance's ``documents_pruned`` among them; a
     finished one's pruning is replayed from its ``result.json`` (:func:`_pruning_of`).
     The lines and results it skips, which the resume computes again, are counted in one
-    warning.
+    warning. Each quote of a snippet it reuses has its ``document_text`` from ``texts``
+    (:func:`_with_document_text`).
     """
     events, unreadable = read_events(run_dir)
-    found = _saved_snippets(events, document_ids, rounds, splits)
+    found = _saved_snippets(events, document_ids, texts, rounds, splits)
     snippets, skipped = found.snippets, found.skipped
     parse_events, unfit = _validated(
         events, "parsing_finished", _ParseEvent, document_ids
@@ -1083,7 +1091,12 @@ def _read_saved(
         replayed += found.pruned_at
     else:
         index = {id_: doc for doc, id_ in enumerate(document_ids)}
-        saved.relevance = _relevance(relevance_result, index)
+        relevance = _relevance(relevance_result, index)
+        relevance.records = [
+            [_with_document_text(parts, texts[doc]) for doc, parts in enumerate(round_)]
+            for round_ in relevance.records
+        ]
+        saved.relevance = relevance
         replayed += [
             at
             for (k, doc), (records, ats) in snippets.items()
@@ -1181,6 +1194,8 @@ class _Quote(BaseModel):
     text: str
     start: StrictInt | None
     end: StrictInt | None
+    # Events written before quotes kept document_text lack it: a resume fills it in.
+    document_text: str | None = None
     match: Match | None
     score: float | None
 
@@ -1238,15 +1253,17 @@ class _SavedRounds(NamedTuple):
 def _saved_snippets(
     events: list[dict[str, Any]],
     document_ids: list[str],
+    texts: Sequence[str],
     rounds: int,
     splits: Splits,
 ) -> _SavedRounds:
     """Each document's snippet in each round that ``events`` hold whole, by round and
-    document index, with the positions of the events that reported its parts: each of
-    the parts that round read it in, as ``splits`` records them; and kept only while
-    every earlier round's snippets are all there, since a round reads the one before,
-    and only when written after them. Also how many of those events or snippets it
-    leaves out.
+    document index, its quotes' ``document_text`` from ``texts``
+    (:func:`_with_document_text`), with the positions of the events that reported its
+    parts: each of the parts that round read it in, as ``splits`` records them; and
+    kept only while every earlier round's snippets are all there, since a round reads
+    the one before, and only when written after them. Also how many of those events or
+    snippets it leaves out.
 
     Once a round from 2 on is whole, the documents the run pruned after it are those the
     first ``documents_pruned`` of that round written after it names, none without one
@@ -1264,8 +1281,9 @@ def _saved_snippets(
         ids = part_ids(document_ids[doc], splits.parts_read(doc, relevance_call(k)))
         if 1 <= k <= rounds and parts.keys() == set(ids):
             reported = [parts[id_] for id_ in ids]
+            records = [_snippet(id_, event) for id_, (_, event) in zip(ids, reported)]
             whole[(k, doc)] = (
-                [_snippet(id_, event) for id_, (_, event) in zip(ids, reported)],
+                _with_document_text(records, texts[doc]),
                 [at for at, _ in reported],
             )
     # A round's snippets hold only while the round before is whole, and only those
@@ -1322,13 +1340,28 @@ def _pruning_events(
 
 def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
     """The snippet ``event`` reports, as its document's part ``id_``."""
-    quotes = [
-        Quote(text=q.text, start=q.start, end=q.end, match=q.match, score=q.score)
-        for q in event.quotes
-    ]
+    quotes = [Quote(**q.model_dump()) for q in event.quotes]
     return SnippetRecord(
         id=id_, summary=event.summary, quotes=quotes, provenance=event.provenance
     )
+
+
+def _with_document_text(
+    records: list[SnippetRecord], document: str
+) -> list[SnippetRecord]:
+    """A document's ``records``, as a resume reuses them, each quote's
+    ``document_text`` read again: its words in ``document``, the document's text, from
+    ``start`` to ``end``. A run begun before quotes kept it saved none, and a resume
+    has the documents, checked to be the run's."""
+
+    def words(quote: Quote) -> str | None:
+        start = quote["start"]
+        return None if start is None else document[start : quote["end"]]
+
+    return [
+        replace(record, quotes=[q | {"document_text": words(q)} for q in record.quotes])
+        for record in records
+    ]
 
 
 def _last_reporting(

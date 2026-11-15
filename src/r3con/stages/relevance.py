@@ -31,9 +31,10 @@ still cite its snippet of the round before, so the answer's trail can reach it t
 them.
 
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
-and kept with its position in the whole document, or with none when it is not found; a
-null or empty summary keeps no quotes. Later stages read the summaries alone; the quotes
-are kept for inspection and for the quotes behind an answer (:mod:`r3con.provenance`).
+and kept with its position in the whole document and the document's words there, or
+with neither when it is not found; a null or empty summary keeps no quotes. Later stages
+read the summaries alone; the quotes are kept for inspection and for the quotes behind
+an answer (:mod:`r3con.provenance`).
 
 Every document has an id for the run (:func:`draw_document_ids`), and each snippet
 carries its document's id, or ``<id>.<k>`` for part ``k`` of a document read in parts in

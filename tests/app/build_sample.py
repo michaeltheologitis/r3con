@@ -17,13 +17,14 @@ unedited from the ``logs/`` r3con wrote it to:
   log?" on ``openai/gpt-6-luna``.
 
 Building calls no model: each document's name, text and size come from
-``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder, and
-every other value is read from the folder as it is. Each quote names the snippet it is
-from, so the app can match it to the trail. Every document in this run was read whole,
-and this handles only that. A sample with a document read in parts would need part
-handling: joining its parts' summaries as the app does, counting its ``<id>.<k>``
-snippets as the document, and fitting its several calls into the page's one call per
-node.
+``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder, each
+quote's ``document_text``, which the run predates, its memo's words from ``start`` to
+``end``, and every other value is read from the folder as it is. Each quote names the
+snippet it is from, so the app can match it to the trail. Every document in this run
+was read whole, and this handles only that. A sample with a document read in parts
+would need part handling: joining its parts' summaries as the app does, counting its
+``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
+one call per node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
 keeping its name (``r3con.trace`` finds an ask's run by it), set ``RUN_FOLDER``, and run
@@ -57,15 +58,29 @@ def load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def provenance(folder: Path, saved: dict[str, Any]) -> dict[str, Any]:
-    """The provenance of the answer saved in ``folder``, as r3con.trace gives it. Before
-    0.6.5, r3con saved only its citations; it saves its quotes since, and its trail
-    since 0.6.9."""
-    traced = dict(r3con.trace(folder))
+def memo_texts(run: Path, memos: Path) -> dict[str, str]:
+    """The text of each of ``memos`` by its document id in ``run``."""
+    files = sorted(memos.glob("*.txt"))
+    ids = load(run / "ids.json")
+    return {id_: files[i].read_text(encoding="utf-8") for id_, i in ids.items()}
+
+
+def provenance(
+    folder: Path, saved: dict[str, Any], texts: dict[str, str]
+) -> dict[str, Any]:
+    """The provenance of the answer saved in ``folder``, as r3con.trace gives it, each
+    quote's document_text read from its document's text in ``texts``. Before 0.6.5,
+    r3con saved only its citations; it saves its quotes since, and its trail since
+    0.6.9. The recorded run predates document_text, which trace then gives as None."""
+    traced = r3con.trace(folder)
     assert saved.items() <= traced.items(), (
         f"{folder.name}: trace gives the saved provenance"
     )
-    return traced
+    quotes = [
+        {**q, "document_text": texts[q["document"]][q["start"] : q["end"]]}
+        for q in traced["quotes"]
+    ]
+    return {**traced, "quotes": quotes}
 
 
 def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
@@ -170,7 +185,9 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         ],
         "answer": {
             "text": reasoning["answer"],
-            "provenance": provenance(run, reasoning["provenance"]),
+            "provenance": provenance(
+                run, reasoning["provenance"], memo_texts(run, memos)
+            ),
         },
         "calls": call_costs(run),
         "totals": run_totals(run),
@@ -186,7 +203,10 @@ def ask_entry(folder: Path) -> dict[str, Any]:
         "folder": folder.name,
         "created": manifest["created"],
         "text": result["answer"],
-        "provenance": provenance(folder, result["provenance"]),
+        # An ask's run is the folder that holds its asks/.
+        "provenance": provenance(
+            folder, result["provenance"], memo_texts(folder.parent.parent, MEMOS)
+        ),
         "totals": {
             "tokens": result["totals"]["tokens"]["total"],
             "usd": result["totals"]["usd"],

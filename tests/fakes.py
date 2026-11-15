@@ -424,9 +424,25 @@ def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in provenance.items() if key != "trail"}
 
 
-def quote(text: str, start: int | None, end: int | None, match: str | None) -> dict:
-    """A snippet's quote of ``text``, found from ``start`` to ``end`` by ``match``."""
-    return {"text": text, "start": start, "end": end, "match": match, "score": None}
+def quote(
+    text: str,
+    start: int | None,
+    end: int | None,
+    match: str | None,
+    document_text: str | None = None,
+    score: float | None = None,
+) -> dict:
+    """A snippet's quote of ``text``, found from ``start`` to ``end`` by ``match``,
+    where the document says ``document_text``: ``text`` itself for an ``exact`` match,
+    given for any other, and ``None`` for one not found."""
+    return {
+        "text": text,
+        "start": start,
+        "end": end,
+        "document_text": text if match == "exact" else document_text,
+        "match": match,
+        "score": score,
+    }
 
 
 def memo_line(document_ids: Sequence[str], i: int, k: int) -> dict[str, Any]:
@@ -441,6 +457,9 @@ def memo_line(document_ids: Sequence[str], i: int, k: int) -> dict[str, Any]:
         "start": start,
         "end": start + len(text),
         "text": text,
+        "document_text": text,
+        "match": "exact",
+        "score": None,
     }
 
 
