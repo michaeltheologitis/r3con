@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import TypedDict
 
-from r3con.quotes import Match, Quote
+from r3con.quotes import TIERS, Match, Quote
 from r3con.stages.relevance import RelevantContext
 
 ANSWER = "answer"
@@ -74,9 +74,12 @@ class NamedQuote(TypedDict):
     match, score}``: the id and the name of the document it is in; where it is there
     (``documents[i][start:end]`` for the document whose id is ``document``); ``text``,
     the model's copy of it, and ``document_text``, the document's own words, that
-    slice, which differ from the copy for every match but an ``exact`` one, and are
-    ``None`` in a run folder written before r3con kept them; and ``match``, the tier
-    that found it, with the ``score`` of a ``fuzzy`` one (:class:`r3con.quotes.Quote`).
+    slice, which differ from the copy for every match but an ``exact`` one; and
+    ``match``, the tier that found it, with the ``score`` of a ``fuzzy`` one
+    (:class:`r3con.quotes.Quote`). A run and a resume always give ``document_text``.
+    It is ``None`` only when a run folder written before quotes kept it is read without
+    its documents: by :func:`r3con.trace` (:func:`r3con.pipeline.read_answer`) or
+    :func:`r3con.ask`.
     """
 
     document: str
@@ -136,8 +139,9 @@ def build_provenance(
     ``rule`` over its graph (:func:`build_graph`).
 
     Its quotes are those the trail's ``summarizes`` edges carry, each place once, as
-    the first summary quoting it in the graph's order copied it, so the latest round's
-    copy, in document order, then by ``start``.
+    the summary that matched it best copied it: by tier, ``exact``, ``normalized``,
+    ``elided``, then ``fuzzy``, a fuzzy one by its score, and among equals the first in
+    the graph's order, so the latest round's; in document order, then by ``start``.
 
     Raises:
         ValueError: if no rule is named ``rule``.
@@ -262,6 +266,12 @@ def _found(quotes: Iterable[Quote], document: str, name: str) -> list[NamedQuote
     ]
 
 
+def _rank(quote: NamedQuote) -> tuple[int, float]:
+    """How well ``quote`` was matched, the best lowest: its tier, in the order
+    :func:`r3con.quotes.locate_quotes` tries them, then a fuzzy one's score."""
+    return TIERS.index(quote["match"]), -(quote["score"] or 0)
+
+
 def _quotes(graph: Graph, trail: Trail) -> list[NamedQuote]:
     """The quotes the ``summarizes`` edges ``trail`` followed carry, as
     :func:`build_provenance` gives them."""
@@ -270,7 +280,7 @@ def _quotes(graph: Graph, trail: Trail) -> list[NamedQuote]:
         quotes for summary, quotes in graph.quotes.items() if summary in summaries
     )
     by_place: dict[tuple[str, int, int], NamedQuote] = {}
-    for quote in carried:
+    for quote in sorted(carried, key=_rank):
         by_place.setdefault((quote["document"], quote["start"], quote["end"]), quote)
     order = {id_: i for i, id_ in enumerate(graph.documents)}
     return sorted(by_place.values(), key=lambda q: (order[q["document"]], q["start"]))

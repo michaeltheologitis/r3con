@@ -430,19 +430,18 @@ def quote(
     end: int | None,
     match: str | None,
     document_text: str | None = None,
+    score: float | None = None,
 ) -> dict:
     """A snippet's quote of ``text``, found from ``start`` to ``end`` by ``match``,
-    where the document says ``document_text``, or ``text`` itself when that is not
-    given and it was found."""
-    if document_text is None and start is not None:
-        document_text = text
+    where the document says ``document_text``: ``text`` itself for an ``exact`` match,
+    given for any other, and ``None`` for one not found."""
     return {
         "text": text,
         "start": start,
         "end": end,
-        "document_text": document_text,
+        "document_text": text if match == "exact" else document_text,
         "match": match,
-        "score": None,
+        "score": score,
     }
 
 

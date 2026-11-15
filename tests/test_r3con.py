@@ -1773,28 +1773,48 @@ def test_an_event_that_differs_from_the_result_reused_is_not_replayed(
     assert replayed.count("relevance_finished") == len(MEMOS_BY_NAME) * 2
 
 
-def test_a_run_begun_before_quotes_kept_document_text_resumes_reusing_its_snippets(
-    answering_llm, one_worker, shown_ids, events_in, tmp_path
-):
-    quoting = quoting_its_first_line_and_citing_all_shown(shown_ids)
-    llm = answering_llm.answers(
-        relevance=failing_once(reading("Calder memo", later_round=True), quoting)
-    )
-    run_dir = failed_run(llm, tmp_path)
-    events = events_in(run_dir)
+def predating_document_text(run_dir: Path) -> None:
+    """``run_dir`` as r3context 0.6.29 wrote it: no quote in its events, or in its
+    relevance's ``result.json`` once relevance finished, has ``document_text``."""
+    lines = (run_dir / "events.jsonl").read_text().split("\n")
+    events = [json.loads(line) for line in lines if line]
     for event in events:
         for quote in event.get("quotes", []):
             del quote["document_text"]
     rewritten(run_dir, [json.dumps(event) for event in events])
-    _, requests = resumed(llm, run_dir)
-    assert [r for r in requests if r[0] == "relevance"] == [
-        ("relevance", line) for line in LAST_THREE
-    ]
-    rounds = json.loads((run_dir / "relevance/result.json").read_text())["rounds"]
-    assert [
-        [q["document_text"] for s in round_["snippets"] for q in s["quotes"]]
-        for round_ in rounds
-    ] == [[None] * len(MEMOS_BY_NAME), [None, None, *LAST_THREE]]
+    if (run_dir / "relevance" / "result.json").is_file():
+        in_json("relevance/result.json", quotes_without_document_text)(run_dir)
+
+
+@pytest.mark.parametrize(
+    ("stage", "when", "sent"),
+    [
+        ("relevance", reading("Calder memo", later_round=True), LAST_THREE),
+        ("parsing", reading("Calder memo"), []),
+    ],
+    ids=["stopped-in-relevance", "stopped-after-relevance"],
+)
+def test_a_run_begun_before_quotes_kept_document_text_resumes_with_it_replaying_all(
+    answering_llm, one_worker, shown_ids, tmp_path, stage, when, sent
+):
+    replies = {
+        "relevance": quoting_its_first_line_and_citing_all_shown(shown_ids),
+        "parsing": ANSWERING["parsing"],
+        "reasoning": citing("Halloran memo", slice(1)),
+    }
+    llm = answering_llm.answers(
+        **{**replies, stage: failing_once(when, replies[stage])}
+    )
+    run_dir = failed_run(llm, tmp_path)
+    predating_document_text(run_dir)
+    seen = []
+    answer, requests = resumed(llm, run_dir, on_event=seen.append)
+    assert [line for kind, line in requests if kind == "relevance"] == sent
+    reported = [e for e in seen if e["type"] == "relevance_finished"]
+    assert len(reported) == 2 * len(MEMOS_BY_NAME)
+    # The answer cites Halloran's round-2 summary, which cites every other round-1 one.
+    quoted = [q["document_text"] for q in answer.provenance["quotes"]]
+    assert quoted == list(MEMOS_BY_NAME.values())
 
 
 def test_a_killed_run_resumes_from_its_events_and_reads_a_line_cut_short_again(

@@ -39,7 +39,7 @@ import functools
 import re
 import unicodedata
 from collections.abc import Callable, Iterable
-from typing import Literal, NamedTuple, TypedDict
+from typing import Literal, NamedTuple, TypedDict, get_args
 
 from rapidfuzz import fuzz
 
@@ -48,6 +48,8 @@ FUZZY_MIN_SCORE = 90
 _SCORE_DIGITS = 1
 
 Match = Literal["exact", "normalized", "elided", "fuzzy"]
+TIERS: tuple[Match, ...] = get_args(Match)
+"""The tiers in the order :func:`locate_quotes` tries them, the most faithful first."""
 _Span = tuple[int, int]
 
 _DOTS = r"(?:\.(?: ?\.){2,}|…)"
