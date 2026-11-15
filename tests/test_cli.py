@@ -716,7 +716,7 @@ def carrying_on(run_dir: Path, *sources: str, options: tuple = ()) -> str:
 
 
 def test_a_stopped_run_says_how_to_carry_on_and_the_command_pasted_finishes_it(
-    answering, tmp_path, capsys
+    answering, one_worker, tmp_path, capsys
 ):
     sources = tmp_path / "q3 memos"
     shutil.copytree(MEMOS, sources)
@@ -732,8 +732,8 @@ def test_a_stopped_run_says_how_to_carry_on_and_the_command_pasted_finishes_it(
     out, err = capsys.readouterr()
     assert out == f"{ANSWER}\n"
     assert path_after("artifacts: ", err) == run_dir.resolve()
-    # Riverside's parse and reasoning.
-    assert len(answering.requests) - sent == 2
+    # Riverside's parse, the two after it, which were never sent, and reasoning.
+    assert len(answering.requests) - sent == 4
 
 
 def test_the_command_to_carry_on_keeps_its_options_and_names_but_hides_the_key(

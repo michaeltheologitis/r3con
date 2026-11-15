@@ -231,6 +231,13 @@ def answering_llm(llm: FakeLLM) -> FakeLLM:
 
 
 @pytest.fixture
+def one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documents read one after another, so a failure leaves those before it done and
+    those after it unsent."""
+    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
+
+
+@pytest.fixture
 def window(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], str]:
     """Maps a model with an input window of ``tokens`` in litellm's model map and
     returns its name. litellm caches its lookup per name, so the name carries the
