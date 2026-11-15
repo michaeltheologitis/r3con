@@ -272,11 +272,15 @@ jobs:
       # Without its icon, Briefcase falls back to its placeholder and only says so.
       - name: Check that the app's icon is icons/r3con.icns
         run: cmp icons/r3con.icns "$APP/Contents/Resources/$(plutil -extract CFBundleIconFile raw "$APP/Contents/Info.plist")"
-      # At INFO, so that the log shows Sparkle's updater started.
+      # At INFO, so that the log shows Sparkle's updater started. Briefcase's stub sends
+      # Python's stdout and stderr, where uvicorn logs each request and r3con its lines,
+      # to the system log, where they can come out unreadable, as "<compose failure
+      # [UUID]>". OS_ACTIVITY_DT_MODE has the app also write each line it logs to its own
+      # stderr: here, app.log.
       - name: Open the app's window
         run: |
-          launched=$(date '+%Y-%m-%d %H:%M:%S')
-          R3CON_LOG_LEVEL=INFO "$APP/Contents/MacOS/R3Con" &
+          app_log="$RUNNER_TEMP/app.log"
+          R3CON_LOG_LEVEL=INFO OS_ACTIVITY_DT_MODE=YES "$APP/Contents/MacOS/R3Con" > "$app_log" 2>&1 &
           pid=$!
           port=
           for _ in $(seq 60); do
@@ -301,22 +305,18 @@ jobs:
             exit 1
           fi
           curl -fsS "http://127.0.0.1:$port/" | grep "<title>"
-          # Only the window's page asks for /api/keys with the token. The app's stdout and
-          # stderr, where uvicorn logs each request and r3con its lines, go to the
-          # system log: here, all of it since the launch.
+          # Only the window's page asks for /api/keys with the token.
           keys='"GET /api/keys HTTP/1.1" 200'
-          logged=
           for _ in $(seq 30); do
-            logged=$(log show --start "$launched" --style compact --predicate 'process == "R3Con"')
-            grep -qF "$keys" <<< "$logged" && break
+            grep -qF "$keys" "$app_log" && break
             sleep 2
           done
-          if ! grep -F "$keys" <<< "$logged"; then
+          if ! grep -F "$keys" "$app_log"; then
             echo "::error::The window's page never asked the server for /api/keys with the token."
             exit 1
           fi
           # Before the page loads: Sparkle's error when its updater can't start, then r3con's line.
-          if ! grep -F "Sparkle's updater started" <<< "$logged" || grep -F 'Fatal updater error' <<< "$logged"; then
+          if ! grep -F "Sparkle's updater started" "$app_log" || grep -F 'Fatal updater error' "$app_log"; then
             echo "::error::The app didn't start Sparkle's updater."
             exit 1
           fi
@@ -336,24 +336,25 @@ jobs:
             exit 1
           fi
           wait "$pid" || true
-          # uvicorn's last line once its shutdown is done; the log store can lag behind.
-          stopped=
-          for _ in $(seq 15); do
-            stopped=$(log show --last 5m --style compact --predicate 'process == "R3Con"' | grep -F 'Finished server process' || true)
-            [ -n "$stopped" ] && break
-            sleep 2
-          done
-          if [ -z "$stopped" ]; then
+          # uvicorn's last line once its shutdown is done.
+          if ! grep -F 'Finished server process' "$app_log"; then
             echo "::error::The app ended on a quit without stopping its server."
             exit 1
           fi
-          echo "$stopped"
+          # Temporary, to size app.log: its lines, and those Python wrote.
+          wc -l < "$app_log"
+          grep -c 'INFO' "$app_log" || true
+          grep -m 15 -F 'INFO' "$app_log" || true
       # An app that writes into its own bundle breaks its signature.
       - name: Check that running the app left its signature intact
         run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
       - name: The app's log
         if: failure()
-        run: log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
+        run: |
+          if [ -f "$RUNNER_TEMP/app.log" ]; then
+            tail -n 300 "$RUNNER_TEMP/app.log"
+          fi
+          log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
       - name: The app's identity, signature and sizes
         env:
           SIGNED_BY: ${{ steps.identity.outputs.name }}
