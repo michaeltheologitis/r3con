@@ -12,11 +12,10 @@ Each node of the graph is a string:
 
 Each edge is ``[from, to, kind]``, of three kinds:
 
-- ``cites``: from the answer to each summary of the relevant context and each parse it
-  cites, from a parse to each summary of the relevant context it cites, the summaries
-  of the final round, or of round 1 when every document was pruned
-  (:attr:`~r3con.stages.relevance.RelevantContext.context_round`), and from a summary of
-  round k to each summary of round k-1 it cites;
+- ``cites``: from the answer to each summary of the relevant context
+  (:attr:`~r3con.stages.relevance.RelevantContext.context_round`) and each parse it
+  cites, from a parse to each summary of the relevant context it cites, and from a
+  summary of round k to each summary of round k-1 it cites;
 - ``summarizes``: from every summary to its document, carrying the summary's quotes
   found there;
 - ``parses``: from every parse to its document.

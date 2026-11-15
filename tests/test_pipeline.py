@@ -8,7 +8,6 @@ import threading
 import time
 from collections import Counter
 from pathlib import Path
-from typing import NamedTuple
 
 import litellm
 import pytest
@@ -22,13 +21,13 @@ from r3con.config import (
     RunConfig,
     load_config,
 )
-from r3con.pipeline import Answer, read_answer, run_pipeline
+from r3con.pipeline import read_answer, run_pipeline
 from r3con.provenance import DEFAULT_RULE
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
+from r3con.stages.structuring.schema import no_fields_schema
 from tests.fakes import (
     TWO_LINE_MEMOS,
-    FakeLLM,
     citable_lists,
     citing,
     first_line,
@@ -71,7 +70,7 @@ CONFIG = {
         "relevance/later-rounds": "v3",
         "structuring/schema": "v2",
         "structuring/parsing": "v4",
-        "reasoning/direct": "v4",
+        "reasoning/direct": "v5",
         "reasoning/coding": "v4",
     },
 }
@@ -761,7 +760,6 @@ def test_nothing_is_pruned_with_fewer_than_two_rounds(answering_llm, tmp_path, r
     assert parsed_memos == sorted(THREE)
     assert "documents_pruned" not in [e["type"] for e in events]
     assert read_json(logger, "relevance/result")["pruned_after"] == {}
-    assert read_json(logger, "reasoning/result")["context_round"] == rounds
 
 
 @pytest.mark.parametrize(("rounds", "empty_from"), [(2, 2), (3, 2), (4, 3), (4, 4)])
@@ -874,43 +872,34 @@ def test_a_pruned_documents_round_1_note_cited_in_round_2_still_leads_the_trail_
     assert read_answer(logger.dir, DEFAULT_RULE) == result.provenance
 
 
-class PrunedRun(NamedTuple):
-    llm: FakeLLM
-    logger: TaskLogger
-    result: Answer
-    events: list[dict]
-
-
-def noting_each_read():
-    """A relevance reply naming which read of its document it answers, one a round,
-    and quoting the document's first line."""
-    reads = Counter()
-
-    def note(request) -> dict:
-        first = first_line(request)
-        reads[first] += 1
-        reply = {"summary": f"Read {reads[first]} of {first}.", "quotes": [first]}
-        return {**reply, "provenance_ids": []} if is_later_round(request) else reply
-
-    return note
+def noting_round_1_apart(request) -> dict:
+    """A relevance reply quoting the document's first line, its note saying whether it
+    is round 1's."""
+    first = first_line(request)
+    if not is_later_round(request):
+        return {"summary": f"Round 1 notes on {first}.", "quotes": [first]}
+    return {
+        "summary": f"Later notes on {first}.",
+        "quotes": [first],
+        "provenance_ids": [],
+    }
 
 
 @pytest.fixture(
     params=[(2, [2, 2, 2]), (3, [2, 3, 3])],
     ids=["after-round-2", "after-rounds-2-and-3"],
 )
-def pruned_everything(request, answering_llm, tmp_path, caplog) -> PrunedRun:
+def pruned_everything(request, answering_llm, tmp_path):
     """A run over ``TWO_LINE_MEMOS`` whose relevance prunes every memo, each after the
     round its notes go empty in, as ``request.param`` gives them, and whose answer
-    cites every summary it is shown; its log captured from INFO."""
+    cites every summary it is shown: its ``llm``, ``logger``, result and events."""
     rounds, empty_from = request.param
-    caplog.set_level(logging.INFO, logger="r3con.pipeline")
     quiet = [
         reading_in_round(memo, k, or_later=True)
         for memo, k in zip(THREE, empty_from, strict=True)
     ]
     llm = answering_llm.answers(
-        relevance=silent_when(lambda r: any(q(r) for q in quiet), noting_each_read()),
+        relevance=silent_when(lambda r: any(q(r) for q in quiet), noting_round_1_apart),
         reasoning=citing("Each memo logs two sites.", summaries=slice(None)),
     )
     logger = TaskLogger("run", root=tmp_path)
@@ -922,7 +911,7 @@ def pruned_everything(request, answering_llm, tmp_path, caplog) -> PrunedRun:
         relevance_rounds=rounds,
         on_event=events.append,
     )
-    return PrunedRun(llm, logger, result, events)
+    return llm, logger, result, events
 
 
 def test_with_every_memo_pruned_nothing_is_structured(pruned_everything):
@@ -930,31 +919,35 @@ def test_with_every_memo_pruned_nothing_is_structured(pruned_everything):
     pruned = read_json(logger, "relevance/result")["pruned_after"]
     assert sorted(pruned) == sorted(result.document_ids)
     assert llm.requests_for("schema") == llm.requests_for("parsing") == []
-    assert not [e for e in events if e["type"].startswith(("schema", "parsing"))]
-    assert (result.schema_code, result.structured_context) == ("", {})
+    assert not [e for e in events if e["type"].startswith("parsing")]
+    assert result.schema_code == no_fields_schema().schema_code
+    assert result.structured_context == {}
     schema = read_json(logger, "structuring/schema/result")
     parsing = read_json(logger, "structuring/parsing/result")
-    assert (schema["schema_code"], schema["attempts"]) == ("", [])
+    assert (schema["schema_code"], schema["attempts"]) == (result.schema_code, [])
     assert (parsing["parsed"], parsing["provenance"]) == ({}, [[], [], []])
     assert schema["totals"]["n_steps"] == parsing["totals"]["n_steps"] == 0
 
 
-def test_with_every_memo_pruned_reasoning_is_shown_round_1s_notes(
-    pruned_everything, reasoning_sections, caplog
+def test_with_every_memo_pruned_reasoning_is_shown_round_1s_notes_and_no_parse(
+    pruned_everything, sections
 ):
-    llm, logger, result, _ = pruned_everything
+    llm, _, result, _ = pruned_everything
     [prompt] = system_prompts(llm, "reasoning")
-    shown = reasoning_sections(prompt, "direct")["## Document summaries"]
-    notes = [f"Read 1 of {memo}." for memo in THREE]
+    shown = sections(prompt)
+    assert list(shown) == [
+        "## The task and your view",
+        "## Document summaries",
+        "## Rules",
+        "## Output",
+    ]
+    notes = [f"Round 1 notes on {memo}." for memo in THREE]
     headed = [
         f"### Document ID: {id_}\n{note}"
         for id_, note in zip(result.document_ids, notes, strict=True)
     ]
-    assert shown.endswith("\n\n".join(headed))
+    assert shown["## Document summaries"].endswith("\n\n".join(headed))
     assert result.relevant_context == notes
-    assert read_json(logger, "reasoning/result")["context_round"] == 1
-    logged = [r.getMessage() for r in caplog.get_records("setup")]
-    assert any("reasoning answers from round 1's snippets" in m for m in logged)
 
 
 def test_with_every_memo_pruned_the_answer_cites_round_1s_notes_back_to_each_memo(
@@ -972,22 +965,20 @@ def test_with_every_memo_pruned_the_answer_cites_round_1s_notes_back_to_each_mem
 
 
 def test_with_round_1_empty_too_an_all_pruned_run_answers_from_no_notes(
-    answering_llm, tmp_path, reasoning_sections
+    answering_llm, sections
 ):
     llm = answering_llm.answers(
         relevance=silent_when(lambda request: True),
         reasoning=citing("No memo says.", summaries=slice(None)),
     )
-    logger = TaskLogger("run", root=tmp_path)
-    result = answer(llm, logger, documents=THREE)
+    result = answer(llm, documents=THREE)
     assert llm.requests_for("schema") == llm.requests_for("parsing") == []
     [prompt] = system_prompts(llm, "reasoning")
-    shown = reasoning_sections(prompt, "direct")["## Document summaries"]
+    shown = sections(prompt)["## Document summaries"]
     nothing = "(no relevant summary for this task)"
     headed = [f"### Document ID: {id_}\n{nothing}" for id_ in result.document_ids]
     assert shown.endswith("\n\n".join(headed))
     assert result.provenance["summary_ids"] == []
-    assert read_json(logger, "reasoning/result")["context_round"] == 1
 
 
 def test_the_configs_params_are_in_every_request(answering_llm):

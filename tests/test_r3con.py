@@ -805,8 +805,6 @@ def test_an_ask_over_a_run_that_pruned_every_memo_reads_its_round_1_notes(
     edges = asked.provenance["trail"]["edges"]
     assert ["answer", f"summary:1:{halloran}", "cites"] in edges
     assert asked.relevant_context == [f"Notes on {doc}." for doc in DOCS]
-    folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
-    assert folder["context_round"] == 1
 
 
 def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_nothing(
@@ -1916,7 +1914,7 @@ def test_a_finished_relevances_pruning_is_replayed_from_its_result_round_by_roun
         assert max(before) <= k < min(after, default=k + 1)
 
 
-def test_a_resumed_run_that_pruned_every_memo_answers_from_round_1_unstructured(
+def test_a_resumed_all_pruned_run_reuses_its_structuring_and_answers_from_round_1(
     answering_llm, one_worker, tmp_path
 ):
     every_note = citing("Every memo.", summaries=slice(None))
@@ -1934,8 +1932,8 @@ def test_a_resumed_run_that_pruned_every_memo_answers_from_round_1_unstructured(
         (e["round"], e["doc_ids"]) for e in seen if e["type"] == "documents_pruned"
     ]
     assert pruning == [(2, ids)]
-    result = json.loads((run_dir / "reasoning" / "result.json").read_text())
-    assert result["context_round"] == 1
+    [resumed_event] = [e for e in seen if e["type"] == "run_resumed"]
+    assert resumed_event["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 5}
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

@@ -117,6 +117,13 @@ class ProposalResult:
     attempts: list[ProposalAttempt] = field(default_factory=list)
 
 
+def no_fields_schema() -> ProposalResult:
+    """A schema of no field, its ``Parse`` holding nothing, proposed without a call:
+    the schema when there is nothing to structure."""
+    code = "class Parse(BaseModel):\n    pass\n"
+    return ProposalResult(schema_code=code, parse_cls=check_schema(code))
+
+
 def _retry_prompt(task: str, prev_code: str, error: str) -> str:
     """Build the next user prompt after a rejected attempt.
 

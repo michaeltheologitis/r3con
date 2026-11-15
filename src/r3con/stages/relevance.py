@@ -44,10 +44,9 @@ Round k reads the *frozen* round-(k-1) set, so within a round the per-document c
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`); a provider that signs in on its first
 call gets one call at a time until one has signed in (:mod:`r3con.runtime.llm`).
-Downstream stages consume the relevant context (``RelevantContext.snippets``): the
-**final-round** snippets, or, when every document was pruned, so that nothing relevant
-is left in the end, round 1's, which reasoning answers from, with nothing to structure;
-earlier rounds are kept for inspection and for the answer's trail back through them
+Downstream stages consume the relevant context, the snippets of
+:attr:`RelevantContext.context_round` (``RelevantContext.snippets``); earlier rounds are
+kept for inspection and for the answer's trail back through them
 (:mod:`r3con.provenance`).
 """
 
@@ -127,16 +126,18 @@ class RelevantContext:
 
     @property
     def all_pruned(self) -> bool:
-        """Whether the run pruned every document, so that nothing relevant is left in
-        the end."""
+        """Whether the run pruned every document (:attr:`context_round`)."""
         n_docs = len(self.records[0]) if self.records else 0
         return 0 < n_docs == len(self.pruned_after)
 
     @property
     def context_round(self) -> int:
-        """The round, from 1, whose snippets are the relevant context: the final one,
-        or round 1 when the run pruned every document, so that the answer reads what
-        the first reads found rather than nothing; 0 when no round ran."""
+        """The round, from 1, whose snippets are the relevant context, which every
+        later stage reads: the final one, or round 1 when the run pruned every
+        document. Nothing relevant is then left in the end, so there is nothing to
+        structure: the schema is one of no field, proposed without a call, nothing is
+        parsed, and reasoning answers from what the first reads found rather than from
+        nothing. 0 when no round ran."""
         return 1 if self.all_pruned else len(self.records)
 
     @property

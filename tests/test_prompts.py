@@ -92,6 +92,24 @@ def test_the_coding_prompt_renders_as_the_old_reasoning_v2(context):
     assert coding == load_prompt("reasoning", version="v2", **context)
 
 
+@pytest.mark.parametrize(
+    "context",
+    [
+        {**CONTEXT, "parse_block": '{"rows": []}'},
+        {**CONTEXT, "relevance": "### Document ID: a\nA note.", "read_in_parts": False},
+        {
+            **CONTEXT,
+            "relevance": "### Document ID: a.1\nA part.",
+            "read_in_parts": True,
+        },
+    ],
+    ids=["no-summaries", "summaries", "a-part"],
+)
+def test_the_direct_prompt_v5_with_a_parse_renders_as_v4(context):
+    v5 = load_prompt("reasoning/direct", version="v5", structured=True, **context)
+    assert v5 == load_prompt("reasoning/direct", version="v4", **context)
+
+
 @pytest.mark.parametrize("example", examples("reasoning/direct"))
 def test_each_direct_example_replies_in_json_its_reply_schema_takes(llm, example):
     views = shown(example)
