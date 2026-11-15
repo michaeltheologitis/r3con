@@ -1589,12 +1589,6 @@ class Parse(BaseModel):
 </schema>"""
 
 
-@pytest.fixture
-def one_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Documents read one after another, so a failure leaves those before it done."""
-    monkeypatch.setenv("R3CON_DOC_WORKERS", "1")
-
-
 def failed_run(llm, tmp_path: Path, documents=MEMOS_BY_NAME, **options) -> Path:
     """The folder of a run over ``documents`` that ``llm`` fails."""
     with pytest.raises(litellm.AuthenticationError):
