@@ -45,6 +45,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass, field
+from operator import itemgetter
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
@@ -82,7 +83,6 @@ from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
 from r3con.stages.relevance import (
-    PRUNED_AFTER_ROUND,
     RelevantContext,
     SnippetRecord,
     citable_ids,
@@ -439,13 +439,13 @@ def run_pipeline(
       ``quotes`` as the snippet record holds them, and the ids of the previous round's
       snippets it used, ``provenance``. A part refused as too long and cut further is
       no event.
-    - ``documents_pruned``, from a run that prunes, one of 2 or more ``rounds``, once
-      its round 2 is in: ``doc_ids``, the documents relevance pruned
+    - ``documents_pruned``, once a round from 2 on that prunes is in: ``round``, and
+      ``doc_ids``, the documents relevance pruned after it
       (:attr:`~r3con.stages.relevance.RelevantContext.pruned`), in document order,
-      possibly none, which get no later ``relevance_*`` event and no ``parsing_*``
-      one. A resume replays the one its run recorded, and emits one only when it reads
-      round 2 itself; a run from before pruning recorded none, and its resume prunes
-      nothing.
+      which get no later ``relevance_*`` event and no ``parsing_*`` one. A resume
+      replays those its run recorded, and emits one only for a round it reads itself.
+      One without ``round``, as r3context 0.6.26 to 0.6.28 wrote it, is not read: a
+      resume of such a run, as of one from before pruning, prunes nothing it reuses.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
       ``thought``.
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
@@ -526,15 +526,17 @@ def run_pipeline(
 class _Saved:
     """What earlier attempts at a run left that a resume reuses (:func:`_read_saved`):
     each finished stage's results, from its ``result.json``, with its ``totals``; an
-    unfinished stage's results document by document; the documents the run pruned, as it
-    recorded them, once its round 2 is reused whole (``None`` until then); the events
-    that reported them, in the order written; and how many there are of each stage's,
-    as ``run_resumed`` gives them."""
+    unfinished stage's results document by document, an unfinished relevance's pruning
+    among them: each document it pruned, by index, mapped to the round after which it
+    did, as it recorded it for every round up to ``recorded_through``; the events that
+    reported them, in the order written; and how many there are of each stage's, as
+    ``run_resumed`` gives them."""
 
     reused: dict[str, Any] = field(default_factory=dict)
     relevance: RelevantContext | None = None
     snippets: dict[tuple[int, int], list[SnippetRecord]] = field(default_factory=dict)
-    pruned: frozenset[int] | None = None
+    pruned: dict[int, int] = field(default_factory=dict)
+    recorded_through: int = 1
     proposal: ProposalResult | None = None
     extraction: ParseResult | None = None
     parses: dict[int, tuple[BaseModel, list[str]]] = field(default_factory=dict)
@@ -614,13 +616,17 @@ def _build_and_answer(
                 splits=splits,
                 emit=emit,
                 saved=saved.snippets,
-                pruned=saved.pruned,
+                recorded=saved.pruned,
+                recorded_through=saved.recorded_through,
                 **llm_kwargs,
             )
             record.result = {
                 "n_rounds": rounds,
                 "n_docs": len(texts),
-                "pruned": [document_ids[i] for i in sorted(relevance.pruned)],
+                "pruned_after": {
+                    document_ids[d]: k
+                    for d, k in sorted(relevance.pruned_after.items())
+                },
                 "rounds": [
                     {
                         "round": k + 1,
@@ -1022,11 +1028,13 @@ def _read_saved(
     the events hold each of its parts, as many as that round read it in, and only while
     every earlier round's are all there (:func:`_saved_snippets`); a parse when the
     schema finished and the parse fits it. What the run pruned is what it recorded: a
-    finished relevance's ``result.json`` lists it, and an unfinished one's
-    ``documents_pruned`` event, once its round 2 is whole. The events kept to replay are
-    those that reported a result reused, a finished stage's when they match its
-    ``result.json``, ``documents_pruned`` among them. The lines and results it skips,
-    which the resume computes again, are counted in one warning.
+    finished relevance's ``result.json`` maps it, and an unfinished one's
+    ``documents_pruned`` events, after each round that is whole. The events kept to
+    replay are those that reported a result reused, a finished stage's when they match
+    its ``result.json``, an unfinished relevance's ``documents_pruned`` among them; a
+    finished one's pruning is replayed from its ``result.json`` (:func:`_pruning_of`).
+    The lines and results it skips, which the resume computes again, are counted in one
+    warning.
     """
     events, unreadable = read_events(run_dir)
     found = _saved_snippets(events, document_ids, rounds, splits)
@@ -1045,23 +1053,22 @@ def _read_saved(
     finished = [r for r in (relevance_result, schema_result, parsing_result) if r]
     saved = _Saved(totals=[result["totals"] for result in finished])
     replayed: list[int] = []
+    rebuilt: list[tuple[float, dict[str, Any]]] = []
     if relevance_result is None:
         saved.snippets = {key: records for key, (records, _) in snippets.items()}
-        saved.pruned = found.pruned
+        saved.pruned, saved.recorded_through = found.pruned, found.recorded_through
         replayed += [at for _, ats in snippets.values() for at in ats]
         replayed += found.pruned_at
     else:
         index = {id_: doc for doc, id_ in enumerate(document_ids)}
         saved.relevance = _relevance(relevance_result, index)
-        saved.pruned = saved.relevance.pruned
         replayed += [
             at
             for (k, doc), (records, ats) in snippets.items()
             if records == saved.relevance.records[k - 1][doc]
             for at in ats
         ]
-        pruned = [document_ids[doc] for doc in sorted(saved.pruned)]
-        replayed += _last_reporting(events, "documents_pruned", doc_ids=pruned)
+        rebuilt = _pruning_of(events, saved.relevance.pruned_after, document_ids)
         skipped = 0
     if schema_result is None:
         skipped += unfit + len(reported)
@@ -1089,13 +1096,16 @@ def _read_saved(
             unreadable,
             skipped,
         )
-    saved.events = [events[at] for at in sorted(replayed)]
+    in_order = sorted(
+        [(at, events[at]) for at in replayed] + rebuilt, key=itemgetter(0)
+    )
+    saved.events = [event for _, event in in_order]
     n = len(document_ids)
-    pruned = saved.pruned or frozenset()
+    pruned = saved.pruned if saved.relevance is None else saved.relevance.pruned_after
     # A pruned document counts as reused in each round and stage that skips it.
     read = Counter(k for k, _ in saved.snippets)
-    read.update(dict.fromkeys(range(PRUNED_AFTER_ROUND + 1, rounds + 1), len(pruned)))
-    parsed = saved.parses.keys() | pruned
+    read.update(r for k in pruned.values() for r in range(k + 1, rounds + 1))
+    parsed = saved.parses.keys() | pruned.keys()
     saved.reused = {
         "relevance": [
             n if saved.relevance is not None else read[r] for r in range(1, rounds + 1)
@@ -1104,6 +1114,31 @@ def _read_saved(
         "parsing": n if saved.extraction is not None else len(parsed),
     }
     return saved
+
+
+def _pruning_of(
+    events: list[dict[str, Any]],
+    pruned_after: Mapping[int, int],
+    document_ids: list[str],
+) -> list[tuple[float, dict[str, Any]]]:
+    """A ``documents_pruned`` for each round ``pruned_after`` prunes after, as a finished
+    relevance's ``result.json`` records them: each placed, by a position among
+    ``events``, just after the last ``relevance_finished`` of its round or an earlier
+    one, or the first event without one, and timed as that event."""
+    last: dict[int, int] = {}
+    for at, event in enumerate(events):
+        if event["type"] == "relevance_finished" and isinstance(
+            event.get("round"), int
+        ):
+            last[event["round"]] = at
+    rebuilt: list[tuple[float, dict[str, Any]]] = []
+    for k in sorted(set(pruned_after.values())):
+        after = max((at for r, at in last.items() if r <= k), default=0)
+        ids = [document_ids[d] for d, j in sorted(pruned_after.items()) if j == k]
+        time = events[after].get("time") if events else None
+        event = {"type": "documents_pruned", "time": time, "round": k, "doc_ids": ids}
+        rebuilt.append((after + 0.5, event))
+    return rebuilt
 
 
 def _finished(run_dir: Path, stage: str) -> dict[str, Any] | None:
@@ -1167,11 +1202,13 @@ def _validated(
 
 
 class _SavedRounds(NamedTuple):
-    """What :func:`_saved_snippets` finds: the snippets, the documents pruned and the
-    position of the event that recorded them, and how many it leaves out."""
+    """What :func:`_saved_snippets` finds: the snippets; each document pruned after a
+    round up to ``recorded_through``, mapped to that round, and the positions of the
+    events that recorded them; and how many it leaves out."""
 
     snippets: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]]
-    pruned: frozenset[int] | None
+    pruned: dict[int, int]
+    recorded_through: int
     pruned_at: list[int]
     skipped: int
 
@@ -1189,9 +1226,10 @@ def _saved_snippets(
     and only when written after them. Also how many of those events or snippets it
     leaves out.
 
-    Once round 2 is whole, the documents the run pruned are those the
-    ``documents_pruned`` written after it names (:func:`_recorded_pruning`), and count
-    as there in every later round, which does not read them; ``None`` before."""
+    Once a round from 2 on is whole, the documents the run pruned after it are those the
+    first ``documents_pruned`` of that round written after it names, none without one
+    (:func:`_pruning_events`), and count as there in every later round, which does not
+    read them."""
     read, unusable = _validated(
         events, "relevance_finished", _SnippetEvent, document_ids
     )
@@ -1212,45 +1250,52 @@ def _saved_snippets(
     # written after it: an earlier attempt's were read over a round since redone.
     kept: dict[tuple[int, int], tuple[list[SnippetRecord], list[int]]] = {}
     latest = -1
-    pruned: frozenset[int] | None = None
+    pruning = _pruning_events(events, document_ids)
+    pruned: dict[int, int] = {}
     pruned_at: list[int] = []
+    recorded_through = 1
     for k in range(1, rounds + 1):
-        skipped = pruned or frozenset()
         this = {
             key: g
             for key, g in whole.items()
-            if key[0] == k and key[1] not in skipped and min(g[1]) > latest
+            if key[0] == k and key[1] not in pruned and min(g[1]) > latest
         }
         kept.update(this)
-        if len(this) + len(skipped) < len(document_ids):
+        if len(this) + len(pruned) < len(document_ids):
             break
         latest = max((at for _, ats in this.values() for at in ats), default=latest)
-        if k == PRUNED_AFTER_ROUND:
-            pruned, pruned_at = _recorded_pruning(events, document_ids, latest)
-    return _SavedRounds(kept, pruned, pruned_at, unusable + len(found) - len(kept))
+        first = [(at, docs) for at, j, docs in pruning if j == k and at > latest][:1]
+        for at, docs in first:
+            pruned |= dict.fromkeys(docs, k)
+            pruned_at.append(at)
+        recorded_through = k
+    skipped = unusable + len(found) - len(kept)
+    return _SavedRounds(kept, pruned, recorded_through, pruned_at, skipped)
 
 
 class _PrunedEvent(BaseModel):
+    round: StrictInt
     doc_ids: list[str]
 
 
-def _recorded_pruning(
-    events: list[dict[str, Any]], document_ids: list[str], after: int
-) -> tuple[frozenset[int], list[int]]:
-    """The documents, by index, that the first ``documents_pruned`` among ``events``
-    after position ``after`` names, and its position; none, and no position, without
-    one, as in a run folder from before pruning."""
+def _pruning_events(
+    events: list[dict[str, Any]], document_ids: list[str]
+) -> list[tuple[int, int, list[int]]]:
+    """Each ``documents_pruned`` among ``events`` that names its round and documents of
+    ``document_ids``, in order: its position, its round, and its documents by index."""
     index = {id_: doc for doc, id_ in enumerate(document_ids)}
-    for at in range(after + 1, len(events)):
-        if events[at]["type"] != "documents_pruned":
+    read: list[tuple[int, int, list[int]]] = []
+    for at, event in enumerate(events):
+        if event["type"] != "documents_pruned":
             continue
         try:
-            ids = _PrunedEvent.model_validate(events[at]).doc_ids
+            checked = _PrunedEvent.model_validate(event)
         except ValidationError:
             continue
-        if index.keys() >= set(ids):
-            return frozenset(index[id_] for id_ in ids), [at]
-    return frozenset(), []
+        if index.keys() >= set(checked.doc_ids):
+            docs = [index[id_] for id_ in checked.doc_ids]
+            read.append((at, checked.round, docs))
+    return read
 
 
 def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
@@ -1481,8 +1526,8 @@ def _names(run_dir: Path, ids: Mapping[str, int]) -> dict[str, str]:
 def _relevance(result: Mapping[str, Any], ids: dict[str, int]) -> RelevantContext:
     """What relevance's ``result.json``, ``result``, holds: every round, each document's
     snippets in a list, one per part, a snippet without quotes, as r3context 0.6.4 wrote
-    one, quoting nothing; and the documents it pruned, none for a run from before
-    pruning."""
+    one, quoting nothing; and the documents it pruned, each with its round, none for a
+    run that recorded them otherwise or not at all."""
     records: list[list[list[SnippetRecord]]] = []
     for round_ in result["rounds"]:
         per_document: list[list[SnippetRecord]] = [[] for _ in ids]
@@ -1490,8 +1535,8 @@ def _relevance(result: Mapping[str, Any], ids: dict[str, int]) -> RelevantContex
             document = ids[snippet["id"].partition(".")[0]]
             per_document[document].append(SnippetRecord(**{"quotes": [], **snippet}))
         records.append(per_document)
-    pruned = frozenset(ids[id_] for id_ in result.get("pruned", []))
-    return RelevantContext(records=records, pruned=pruned)
+    pruned = {ids[id_]: k for id_, k in result.get("pruned_after", {}).items()}
+    return RelevantContext(records=records, pruned_after=pruned)
 
 
 def _in_one_line(error: Exception) -> str:

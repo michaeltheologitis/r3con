@@ -1,6 +1,5 @@
 import errno
 import importlib.metadata
-import itertools
 import json
 import logging
 import os
@@ -45,6 +44,7 @@ from tests.fakes import (
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
     reading,
+    reading_in_round,
     reading_moved_prompts,
     silent_when,
     snippets_without_quotes,
@@ -1708,64 +1708,90 @@ def test_a_snippet_holding_other_line_separators_is_reused(
     ]
 
 
-def reading_in_round(line: str, round_: int):
-    """Whether a relevance request reads the document whose first line is ``line`` in
-    round ``round_``, from 2, counting its reads in later rounds as they come."""
-    later = itertools.count(2)
-    return lambda request: (
-        reading(line, later_round=True)(request) and next(later) == round_
-    )
-
-
 UNPRUNED = [line for line in MEMOS_BY_NAME.values() if line != "Dunmore memo"]
-DUNMORE_SILENT_AFTER_ROUND_1 = silent_when(reading("Dunmore memo", later_round=True))
+DUNMORE_LATE = reading("Dunmore memo", later_round=True)
+RESENT_IN_PARSING = [
+    ("parsing", "Calder memo"),
+    ("parsing", "Easton memo"),
+    ("reasoning", None),
+]
+RESENT_IN_RELEVANCE = [
+    ("relevance", "Calder memo"),
+    ("relevance", "Easton memo"),
+    ("schema", None),
+    *[("parsing", line) for line in UNPRUNED],
+    ("reasoning", None),
+]
 
 
-def as_left_before_pruning(result: dict) -> None:
-    """Relevance's ``result.json`` over MEMOS_BY_NAME as r3context 0.6.25 wrote it:
-    no pruned documents listed, and Dunmore's memo, empty in round 2, read again in
-    round 3."""
-    del result["pruned"]
+def as_left_by_0_6_25(run_dir: Path, events: list[dict]) -> None:
+    """``run_dir`` over MEMOS_BY_NAME as r3context 0.6.25 left it over ``events``, its
+    own: no ``documents_pruned``, and relevance's ``result.json``, if written, listing
+    no pruned documents, Dunmore's memo, empty in round 2, read again in round 3."""
+    kept = [e for e in events if e["type"] != "documents_pruned"]
+    rewritten(run_dir, [json.dumps(event) for event in kept])
+    if (run_dir / "relevance" / "result.json").is_file():
+        in_json("relevance/result.json", read_again_in_round_3)(run_dir)
+
+
+def read_again_in_round_3(result: dict) -> None:
+    del result["pruned_after"]
     result["rounds"][2]["snippets"][3]["summary"] = "Notes on Dunmore memo."
 
 
+def as_left_by_0_6_28(run_dir: Path, events: list[dict]) -> None:
+    """``run_dir`` as r3context 0.6.28 left it over ``events``, its own: its
+    ``documents_pruned`` without a round, and relevance's ``result.json``, if written,
+    listing the pruned documents flat."""
+    unrounded = [
+        {k: v for k, v in e.items() if e["type"] != "documents_pruned" or k != "round"}
+        for e in events
+    ]
+    rewritten(run_dir, [json.dumps(event) for event in unrounded])
+    if (run_dir / "relevance" / "result.json").is_file():
+        in_json("relevance/result.json", flat_pruned)(run_dir)
+
+
+def flat_pruned(result: dict) -> None:
+    result["pruned"] = list(result.pop("pruned_after"))
+
+
 @pytest.mark.parametrize(
-    ("rounds", "stage", "when", "resent"),
+    ("rounds", "dunmore_late", "stage", "when", "resent"),
     [
         (
             2,
+            lambda: DUNMORE_LATE,
             "parsing",
-            reading("Calder memo"),
-            [
-                ("parsing", "Calder memo"),
-                ("parsing", "Easton memo"),
-                ("reasoning", None),
-            ],
+            lambda: reading("Calder memo"),
+            RESENT_IN_PARSING,
         ),
         (
             4,
+            lambda: DUNMORE_LATE,
             "relevance",
-            reading_in_round("Calder memo", 4),
-            [
-                ("relevance", "Calder memo"),
-                ("relevance", "Easton memo"),
-                ("schema", None),
-                *[("parsing", line) for line in UNPRUNED],
-                ("reasoning", None),
-            ],
+            lambda: reading_in_round("Calder memo", 4),
+            RESENT_IN_RELEVANCE,
+        ),
+        (
+            4,
+            lambda: reading_in_round("Dunmore memo", 3, or_later=True),
+            "relevance",
+            lambda: reading_in_round("Calder memo", 4),
+            RESENT_IN_RELEVANCE,
         ),
     ],
-    ids=["in-parsing", "in-relevance-round-4"],
+    ids=["in-parsing", "in-round-4-pruned-after-2", "in-round-4-pruned-after-3"],
 )
 def test_a_resume_prunes_what_the_run_pruned_and_never_reads_or_parses_it(
-    answering_llm, one_worker, tmp_path, rounds, stage, when, resent
+    answering_llm, one_worker, tmp_path, rounds, dunmore_late, stage, when, resent
 ):
-    llm = answering_llm.answers(relevance=DUNMORE_SILENT_AFTER_ROUND_1)
+    llm = answering_llm.answers(relevance=silent_when(dunmore_late()))
     whole = finished_run(
         llm, tmp_path / "whole", MEMOS_BY_NAME, relevance_rounds=rounds
     )
-    replies = {**ANSWERING, "relevance": DUNMORE_SILENT_AFTER_ROUND_1}
-    llm.answers(**{stage: failing_once(when, replies[stage])})
+    replies = {**ANSWERING, "relevance": silent_when(dunmore_late())}
+    llm.answers(**{**replies, stage: failing_once(when(), replies[stage])})
     run_dir = failed_run(llm, tmp_path / "failed", relevance_rounds=rounds)
     answer, requests = resumed(llm, run_dir)
     assert requests == resent
@@ -1773,17 +1799,18 @@ def test_a_resume_prunes_what_the_run_pruned_and_never_reads_or_parses_it(
     assert answer.answer == "; ".join(UNPRUNED)
 
 
-def test_a_run_from_before_pruning_resumes_parsing_every_document(
-    answering_llm, one_worker, events_in, tmp_path
+@pytest.mark.parametrize(
+    "left_by", [as_left_by_0_6_25, as_left_by_0_6_28], ids=["0.6.25", "0.6.28"]
+)
+def test_a_run_whose_pruning_goes_unread_resumes_parsing_every_document(
+    answering_llm, one_worker, events_in, tmp_path, left_by
 ):
     llm = answering_llm.answers(
         relevance=silent_when(reading_in_round("Dunmore memo", 2)),
         parsing=failing_once(reading("Calder memo"), ANSWERING["parsing"]),
     )
     run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
-    events = [e for e in events_in(run_dir) if e["type"] != "documents_pruned"]
-    rewritten(run_dir, [json.dumps(event) for event in events])
-    in_json("relevance/result.json", as_left_before_pruning)(run_dir)
+    left_by(run_dir, events_in(run_dir))
     answer, requests = resumed(llm, run_dir)
     assert requests == [
         *[("parsing", line) for line in LAST_THREE],
@@ -1792,8 +1819,11 @@ def test_a_run_from_before_pruning_resumes_parsing_every_document(
     assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
 
 
-def test_a_run_from_before_pruning_stopped_in_round_3_resumes_pruning_nothing(
-    answering_llm, one_worker, events_in, tmp_path
+@pytest.mark.parametrize(
+    "left_by", [as_left_by_0_6_25, as_left_by_0_6_28], ids=["0.6.25", "0.6.28"]
+)
+def test_a_run_whose_pruning_goes_unread_stopped_in_round_3_resumes_pruning_nothing(
+    answering_llm, one_worker, events_in, tmp_path, left_by
 ):
     failing = failing_once(
         reading_in_round("Calder memo", 3),
@@ -1801,8 +1831,7 @@ def test_a_run_from_before_pruning_stopped_in_round_3_resumes_pruning_nothing(
     )
     llm = answering_llm.answers(relevance=failing)
     run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
-    events = [e for e in events_in(run_dir) if e["type"] != "documents_pruned"]
-    rewritten(run_dir, [json.dumps(event) for event in events])
+    left_by(run_dir, events_in(run_dir))
     seen = []
     answer, requests = resumed(llm, run_dir, on_event=seen.append)
     assert requests == [
@@ -1812,26 +1841,58 @@ def test_a_run_from_before_pruning_stopped_in_round_3_resumes_pruning_nothing(
         ("reasoning", None),
     ]
     assert answer.answer == "; ".join(MEMOS_BY_NAME.values())
-    written = [e["type"] for e in events_in(run_dir)]
-    assert "documents_pruned" not in [e["type"] for e in seen] + written
+    pruning = [e for e in seen + events_in(run_dir) if e["type"] == "documents_pruned"]
+    assert [e for e in pruning if "round" in e] == []
 
 
-def test_a_resume_after_round_2_replays_its_pruning_once_before_the_later_rounds(
+def test_a_resume_replays_each_rounds_pruning_once_before_the_round_after_it(
     answering_llm, one_worker, events_in, tmp_path
 ):
-    failing = failing_once(
-        reading_in_round("Calder memo", 3), DUNMORE_SILENT_AFTER_ROUND_1
+    easton_late = reading_in_round("Easton memo", 3, or_later=True)
+    silent = silent_when(lambda r: DUNMORE_LATE(r) or easton_late(r))
+    llm = answering_llm.answers(
+        relevance=failing_once(reading_in_round("Calder memo", 4), silent)
     )
-    llm = answering_llm.answers(relevance=failing)
-    run_dir = failed_run(llm, tmp_path, relevance_rounds=3)
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=4)
     seen = []
     resume(run_dir, MEMOS_BY_NAME, completion=llm, on_event=seen.append)
     steps = [(e["type"], e.get("round")) for e in seen]
-    pruning = ("documents_pruned", None)
-    assert steps.count(pruning) == 1
-    assert steps.index(pruning) < steps.index(("relevance_finished", 3))
+    for k in (2, 3):
+        assert steps.count(("documents_pruned", k)) == 1
+        assert steps.index(("documents_pruned", k)) < steps.index(
+            ("relevance_finished", k + 1)
+        )
     written = [e["type"] for e in events_in(run_dir)]
-    assert written.count("documents_pruned") == 1
+    assert written.count("documents_pruned") == 2
+
+
+def test_a_finished_relevances_pruning_is_replayed_from_its_result_round_by_round(
+    answering_llm, one_worker, events_in, tmp_path
+):
+    easton_late = reading_in_round("Easton memo", 3, or_later=True)
+    llm = answering_llm.answers(
+        relevance=silent_when(lambda r: DUNMORE_LATE(r) or easton_late(r)),
+        parsing=failing_once(reading("Calder memo"), ANSWERING["parsing"]),
+    )
+    run_dir = failed_run(llm, tmp_path, relevance_rounds=4)
+    events = events_in(run_dir)
+    ids = events[0]["document_ids"]
+    lines = [json.dumps(event) for event in events]
+    torn = line_of(events, "documents_pruned", round=2)
+    lines[torn] = lines[torn][:TORN_CHARS]
+    rewritten(run_dir, lines)
+    seen = []
+    resume(run_dir, MEMOS_BY_NAME, completion=llm, on_event=seen.append)
+    pruning = [
+        (e["round"], e["doc_ids"]) for e in seen if e["type"] == "documents_pruned"
+    ]
+    assert pruning == [(2, [ids[3]]), (3, [ids[4]])]
+    steps = [(e["type"], e.get("round")) for e in seen]
+    for k in (2, 3):
+        at = steps.index(("documents_pruned", k))
+        before = {r for kind, r in steps[:at] if kind == "relevance_finished"}
+        after = {r for kind, r in steps[at:] if kind == "relevance_finished"}
+        assert max(before) <= k < min(after, default=k + 1)
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

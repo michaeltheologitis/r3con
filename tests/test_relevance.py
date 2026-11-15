@@ -1,6 +1,9 @@
+import copy
 import logging
+import pickle
 import re
 from collections import Counter
+from dataclasses import asdict
 
 import pytest
 from pydantic import ValidationError
@@ -244,6 +247,17 @@ def test_a_parts_later_round_sees_the_other_documents_notes_but_never_its_own_pa
         "### Summary ID: 1b1b1b.1\nN(P0,r1)\n\n### Summary ID: 1b1b1b.2\nN(P10,r1)"
     ) in round_2["DOC0"]["content"]
     assert not any("### Document" in prompt["content"] for prompt in round_2.values())
+
+
+def test_a_relevant_context_with_pruning_copies_pickles_and_turns_into_a_dict():
+    pruned_after = {1: 2}
+    round_ = [[SnippetRecord("a", "Notes.", [], [])], [SnippetRecord("b", "", [], [])]]
+    context = RelevantContext(records=[round_, round_], pruned_after=pruned_after)
+    pruned_after[0] = 2
+    assert (context.pruned_after, context.pruned) == ({1: 2}, frozenset({1}))
+    assert copy.deepcopy(context) == context
+    assert pickle.loads(pickle.dumps(context)) == context
+    assert asdict(context)["pruned_after"] == {1: 2}
 
 
 def test_drawn_document_ids_are_distinct_codes_of_six_hex_characters():

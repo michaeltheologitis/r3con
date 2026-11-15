@@ -366,7 +366,9 @@ def resume(
             ``relevance_finished``, ``documents_pruned``, ``schema_finished`` and
             ``parsing_finished`` events that reported the results it reuses, as the
             folder saved them, their ``time`` the original's, in the order written,
-            which ``events.jsonl`` does not get twice; then the events of what it
+            which ``events.jsonl`` does not get twice, a finished relevance's
+            ``documents_pruned`` made again from its ``result.json``, each after its
+            round's events and timed as the last; then the events of what it
             computes, as a run's.
         cancel: as in :func:`run`; a cancelled resume can be resumed in turn.
 

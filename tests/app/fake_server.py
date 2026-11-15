@@ -7,8 +7,11 @@ panel: each summary is its document's first line that is not ``QUIET`` (none if 
 are), quoting that line, and each parse its first line as a memo's title, its other
 lines nested under it, or nothing for a document holding ``UNPARSED``; each round
 after the first cites the first summary it is shown, each parse its own document's
-note, and the answer the first two documents' summaries and parses. It refuses a
-document over ``PART_CHARS`` as too long, so that r3con reads it in parts.
+note, and the answer the first two documents' summaries and parses. A document
+holding ``FADES`` gets no summary from its ``FADES_FROM_READ``-th read on, its reads
+counted from the server's start, so that a check reading it whole once a round, with
+text of its own, has its note go empty in that round. It refuses a document over
+``PART_CHARS`` as too long, so that r3con reads it in parts.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, one holding ``BREAKS``
@@ -31,6 +34,7 @@ import json
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +64,8 @@ OFF_SCHEMA = "(the model answers off schema)"
 EMPTY_REPLY = "{}"
 QUIET = "(nothing relevant here)"
 UNPARSED = "(nothing to parse here)"
+FADES = "(nothing relevant from round 3 on)"
+FADES_FROM_READ = 3
 PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
@@ -69,6 +75,8 @@ SAVED = "saved"
 CANCELS_SAVE = "cancel-the-save"
 NO_ROOM = "no-room-to-save"
 never = threading.Event()
+reads: Counter[str] = Counter()
+reads_lock = threading.Lock()
 
 
 def citable(schema: Any, name: str) -> list[str]:
@@ -94,6 +102,16 @@ def summary_of(text: str) -> str:
     return next((line for line in lines if line.strip() and QUIET not in line), "")
 
 
+def faded(text: str) -> bool:
+    """Whether ``text`` holds ``FADES`` and has been read ``FADES_FROM_READ`` times,
+    this read included."""
+    if FADES not in text:
+        return False
+    with reads_lock:
+        reads[text] += 1
+        return reads[text] >= FADES_FROM_READ
+
+
 def content(request: dict[str, Any]) -> str:
     """The reply to ``request``, by the stage that sent it."""
     user = request["messages"][-1]["content"]
@@ -105,7 +123,7 @@ def content(request: dict[str, Any]) -> str:
         raise unscripted(request)
     schema = request["response_format"]["json_schema"]["schema"]
     if stage == "relevance":
-        summary = summary_of(user)
+        summary = "" if faded(user) else summary_of(user)
         reply = {
             "summary": summary,
             "quotes": [summary] if summary else [],

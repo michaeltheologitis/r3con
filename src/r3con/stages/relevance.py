@@ -21,13 +21,14 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
   the whole history. The reply adds ``provenance_ids``, the ids of the shown snippets
   it used. With nothing to show, the first-round prompt is used instead.
 
-A document whose round-2 snippet is empty, every part's, is **pruned**
-(:attr:`RelevantContext.pruned`): no later round reads it, its snippet there empty, and
-parsing does not parse it (:mod:`r3con.stages.structuring.parsing`). An empty round-1
-snippet alone prunes nothing, since round 2 may bring the document back once the
-others are known; with fewer than two rounds nothing is pruned. The other documents'
-round-2 snippets may still cite its round-1 snippet, so the answer's trail can reach it
-through them.
+After each round from 2 on, a document whose snippet in it is empty, every part's, is
+**pruned** (:attr:`RelevantContext.pruned`): no later round reads it, its snippet there
+empty, and parsing does not parse it (:mod:`r3con.stages.structuring.parsing`), the
+final round's included. An empty round-1 snippet alone prunes nothing, since round 2
+may bring the document back once the others are known; with fewer than two rounds
+nothing is pruned. The other documents' snippets in the round it went empty in may
+still cite its snippet of the round before, so the answer's trail can reach it through
+them.
 
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document, or with none when it is not found; a
@@ -51,7 +52,7 @@ earlier rounds are kept for inspection and for the answer's trail back through t
 from __future__ import annotations
 
 import random
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -78,7 +79,6 @@ _log = get_logger("relevance")
 
 _ID_HEX_DIGITS = 6
 _REWRITE = "Write the summary of the same document again"
-PRUNED_AFTER_ROUND = 2
 
 Snippet = str | list[str]
 """A document's relevance snippet, or, for a document read in parts, one per part."""
@@ -107,12 +107,21 @@ class RelevantContext:
     ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
     (one for a document read whole). Earlier rounds are kept for inspection and for
     the answer's trail (:mod:`r3con.provenance`); the final round is what downstream
-    stages consume, as :attr:`snippets`. ``pruned`` holds the documents the run pruned,
-    by index (the module's rule): empty with fewer than two rounds.
+    stages consume, as :attr:`snippets`. ``pruned_after`` maps each document the run
+    pruned, by index, to the round after which it was pruned (the module's rule), a
+    copy of the mapping given: empty with fewer than two rounds.
     """
 
     records: list[list[list[SnippetRecord]]]
-    pruned: frozenset[int] = field(default_factory=frozenset)
+    pruned_after: dict[int, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.pruned_after = dict(self.pruned_after)
+
+    @property
+    def pruned(self) -> frozenset[int]:
+        """The documents the run pruned, by index."""
+        return frozenset(self.pruned_after)
 
     @property
     def snippets(self) -> list[Snippet]:
@@ -138,11 +147,11 @@ class RelevantContext:
         return self.records[-1] if self.records else []
 
 
-def _pruned(round_2: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
-    """The documents ``round_2``'s snippets prune, by index: those whose snippet there is
+def _pruned(round_: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
+    """The documents ``round_``'s snippets prune, by index: those whose snippet there is
     empty, every part's."""
     return frozenset(
-        d for d, parts in enumerate(round_2) if not any(r.summary for r in parts)
+        d for d, parts in enumerate(round_) if not any(r.summary for r in parts)
     )
 
 
@@ -399,7 +408,8 @@ def surface_relevance(
     max_attempts: int | None = None,
     emit: Emit = no_events,
     saved: Mapping[tuple[int, int], list[SnippetRecord]] = MappingProxyType({}),
-    pruned: frozenset[int] | None = None,
+    recorded: Mapping[int, int] = MappingProxyType({}),
+    recorded_through: int = 1,
     **llm_kwargs: Any,
 ) -> RelevantContext:
     """Surface the relevant context over ``rounds`` synchronous rounds.
@@ -426,16 +436,16 @@ def surface_relevance(
     nothing.
 
     ``emit`` reports ``relevance_started`` before each document is read in a round, and
-    ``relevance_finished`` for each of its final parts once it is read; once round 2 is
-    in, ``documents_pruned``, unless ``pruned`` is given
-    (:func:`r3con.pipeline.run_pipeline` lists their fields). It is called from worker
-    threads. With no documents or rounds, it reports nothing.
+    ``relevance_finished`` for each of its final parts once it is read; once a round
+    that prunes is in, ``documents_pruned`` (:func:`r3con.pipeline.run_pipeline` lists
+    their fields). It is called from worker threads.
 
     ``saved`` holds snippets an earlier attempt at the run read, by round and document
     index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
-    that round, and reports nothing. ``pruned``, when ``saved`` holds that attempt's
-    whole round 2, is what it pruned, as it recorded it: those documents are pruned,
-    whatever their snippets say, and ``documents_pruned`` is not reported again.
+    that round, and reports nothing. ``recorded`` maps each document that attempt
+    pruned after a round up to ``recorded_through`` to that round, as it recorded it:
+    up to that round, those are the documents pruned, whatever their snippets say, and
+    no ``documents_pruned`` is reported again.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -458,7 +468,7 @@ def surface_relevance(
     reader = splits if splits is not None else Splits(documents, model=model)
 
     def run_round(
-        prev: list[list[SnippetRecord]], round_idx: int, skipped: frozenset[int]
+        prev: list[list[SnippetRecord]], round_idx: int, skipped: Collection[int]
     ) -> list[list[SnippetRecord]]:
         """Rewrite every document's relevance snippet in parallel, but the ``skipped``
         ones'. ``prev`` is the frozen previous-round set (no snippets in round 1)."""
@@ -523,14 +533,16 @@ def surface_relevance(
         )
         return result
 
-    skipped: frozenset[int] = frozenset()
-    records = [run_round([[] for _ in documents], 1, skipped)]
+    pruned: dict[int, int] = {}
+    records = [run_round([[] for _ in documents], 1, pruned.keys())]
     for r in range(2, rounds + 1):
         # only the previous round feeds in
-        records.append(run_round(records[-1], r, skipped))
-        if r == PRUNED_AFTER_ROUND and pruned is not None:
-            skipped = pruned
-        elif r == PRUNED_AFTER_ROUND:
-            skipped = _pruned(records[-1])
-            emit("documents_pruned", doc_ids=[document_ids[i] for i in sorted(skipped)])
-    return RelevantContext(records=records, pruned=skipped)
+        records.append(run_round(records[-1], r, pruned.keys()))
+        if r <= recorded_through:
+            pruned |= {d: k for d, k in recorded.items() if k == r}
+            continue
+        newly = sorted(_pruned(records[-1]) - pruned.keys())
+        if newly:
+            emit("documents_pruned", round=r, doc_ids=[document_ids[i] for i in newly])
+        pruned |= dict.fromkeys(newly, r)
+    return RelevantContext(records=records, pruned_after=pruned)
