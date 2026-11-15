@@ -214,11 +214,9 @@ model wrote `...` for words it left out) or `fuzzy` (some words differ), and a
 
 ```python
 quote = result.provenance["quotes"][0]
-print(quote["name"], quote["match"], quote["score"])  # q3/ardent.pdf fuzzy 95.1
-print(quote["text"])
-# Ardent missed eight delivery windows in Q3, mainly in August.
-print(quote["document_text"])
-# Ardent missed eight delivery windows in Q3, mostly in August.
+print(quote["name"], quote["match"], quote["score"])  # q3/ardent.pdf fuzzy 94.1
+print(quote["text"])  # Ardent missed 8 delivery windows, mainly in August.
+print(quote["document_text"])  # Ardent missed 8 delivery windows, mostly in August.
 ```
 
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
