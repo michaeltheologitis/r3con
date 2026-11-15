@@ -41,12 +41,16 @@ Layout per ``logs/<run-folder>/``:
   there (``exact``, ``normalized`` or ``elided``, verbatim, or ``fuzzy``, only like the
   text, with its ``score``; all ``None`` when it was not: :mod:`r3con.quotes`), and the
   ids of the previous round's snippets it used; the last round's summaries are the
-  relevant context that feeds downstream) + ``calls.json`` (one per
-  ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
+  relevant context that feeds downstream, or round 1's when every document was pruned
+  (:attr:`r3con.stages.relevance.RelevantContext.context_round`)) + ``calls.json``
+  (one per ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
   ``relevance-r{round}-d{doc}c{part}`` for a part, and ``-retry-{n}`` added to the n-th
   resend of a reply that did not fit its schema).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
+  When relevance pruned every document, nothing is left to structure: this step and
+  parsing make no call and write only their ``result.json``, of an empty
+  ``schema_code`` and no attempt, and of nothing parsed.
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
   (``{parsed, source_docs, source_ids, provenance, totals}`` — for each list field of
   ``parsed``, the 0-based index and the id of the document each record came from, a
@@ -55,11 +59,14 @@ Layout per ``logs/<run-folder>/``:
   ``parse-d{doc}`` call, or ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to
   a resend).
 - ``reasoning/`` (stage 3) — ``result.json`` (``{answer, provenance, path, fallback,
-  terminated_by, n_turns, turns, totals}`` — ``provenance`` is ``{summary_ids,
-  parse_ids, quotes, trail}``, as :attr:`r3con.pipeline.Answer.provenance` says, the
+  context_round, terminated_by, n_turns, turns, totals}`` — ``provenance`` is
+  ``{summary_ids, parse_ids, quotes, trail}``, as
+  :attr:`r3con.pipeline.Answer.provenance` says, the
   trail ``{rule, nodes, edges}`` (:mod:`r3con.provenance`), ``path`` is
-  ``direct`` or ``coding``, and ``fallback`` says why the coding path ran when the
-  config asked for direct, else ``null``) + ``calls.json`` + ``transcript.yaml``.
+  ``direct`` or ``coding``, ``fallback`` says why the coding path ran when the
+  config asked for direct, else ``null``, and ``context_round`` is the relevance round
+  whose snippets it was shown, the last, or 1 when every document was pruned) +
+  ``calls.json`` + ``transcript.yaml``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.

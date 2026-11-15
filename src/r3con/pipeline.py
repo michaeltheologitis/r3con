@@ -7,7 +7,9 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    rounds; from round 2 on, each document is re-read in light of the *other* documents'
    previous snippets, but those it prunes
    (:attr:`~r3con.stages.relevance.RelevantContext.pruned`). The collection of them is
-   the **relevant context**, and it is what every later stage reads.
+   the **relevant context**, and it is what every later stage reads: the final round's,
+   or, when every document is pruned, round 1's, which reasoning then answers from,
+   with nothing left to structure.
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
    from the task and the relevant context
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document but the
@@ -49,7 +51,7 @@ from operator import itemgetter
 from pathlib import Path
 from typing import Any, NamedTuple, TypeVar
 
-from pydantic import BaseModel, StrictInt, ValidationError
+from pydantic import BaseModel, StrictInt, ValidationError, create_model
 
 from r3con.config import (
     PromptStage,
@@ -102,6 +104,8 @@ _BUILT_STAGES = ("relevance", "structuring/schema", "structuring/parsing")
 # What reading a run folder raises when its files are not as this r3con writes them:
 # a pydantic ValidationError and a file that is not JSON among the ValueErrors.
 _UNREADABLE = (FileNotFoundError, KeyError, TypeError, ValueError)
+# The parse of a run that structures nothing.
+_NO_FIELDS = create_model("Parse")
 # How an ask refused for a masked param gets past it in Python (:func:`refuse_masked`).
 PARAMS_ADVICE = (
     "pass the real value in `params`, which replaces all of the run's params"
@@ -204,9 +208,9 @@ class Answer:
 
     - ``answer`` — the answer text.
     - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
-      the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of a
-      document read in parts), ``provenance["parse_ids"]``, those of the documents
-      whose records in ``structured_context`` it used (an id can be in both),
+      the relevance snippets of ``relevant_context`` it used (``<id>.<k>`` for part
+      ``k`` of a document read in parts), ``provenance["parse_ids"]``, those of the
+      documents whose records in ``structured_context`` it used (an id can be in both),
       ``provenance["trail"]``, the answer's trail under the default rule
       (:class:`~r3con.provenance.Trail`): the snippets and parses it cites, the
       snippets they cite, round by round back, and the documents those snippets
@@ -215,17 +219,19 @@ class Answer:
       naming its document by id and by name (:class:`~r3con.provenance.Provenance`).
       :func:`r3con.trace` builds it again from the run folder, under any rule.
     - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
-      of each document, aligned 1:1 with the ``documents`` you passed in
-      (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
-      name is ``list(documents.values())[i]``); a document read in parts has
-      its parts' notes joined. A document that contributes nothing is an empty string,
+      of each document, or, when relevance pruned every document, its round-1 snippet,
+      which reasoning then answered from, aligned 1:1 with the ``documents`` you passed
+      in (``relevant_context[i]`` describes ``documents[i]``, which for documents given
+      by name is ``list(documents.values())[i]``); a document read in parts has its
+      parts' notes joined. A document that contributes nothing is an empty string,
       which is a real result rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every
       document parsed, as plain JSON-able data. Each record carries a ``document`` key
       naming the id of the document it came from, as reasoning saw it.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
       most characteristic artifact of the method: it is what the question was decided to
-      be *about*.
+      be *about*. Empty when relevance pruned every document, which leaves nothing to
+      structure.
     - ``source_docs`` — for each list field of the parse, the 0-based source-document
       index of each record, positionally aligned with it.
     - ``run_dir`` — the folder holding the full artifacts (for :func:`r3con.ask`, the
@@ -240,15 +246,15 @@ class Answer:
       names were recorded; recorded in the run folder's ``names.json``.
     - ``relevance_provenance`` — for each document, aligned 1:1 with
       ``relevant_context``, the ids of the previous round's relevance snippets its
-      final-round snippet used: each a document's id, or ``<id>.<k>`` for part ``k`` of
+      snippet there used: each a document's id, or ``<id>.<k>`` for part ``k`` of
       a document read in parts in that previous round. A document read in parts has its
       parts' ids combined, in order, without repeats.
     - ``parsing_provenance`` — for each document, aligned 1:1 with ``documents``, the
-      ids of the final-round relevance snippets its parse used, its own document's
-      among them when it helped: each a document's id, or ``<id>.<k>`` for part ``k``
-      of a document read in parts in that round, combined across a document's parts
-      as in ``relevance_provenance``; none for a document relevance pruned, which is
-      not parsed.
+      ids of the relevance snippets of ``relevant_context`` its parse used, its own
+      document's among them when it helped: each a document's id, or ``<id>.<k>`` for
+      part ``k`` of a document read in parts in that round, combined across a
+      document's parts as in ``relevance_provenance``; none for a document relevance
+      pruned, which is not parsed.
     - ``source_ids`` — read-only, derived from ``source_docs`` and ``document_ids``:
       ``source_docs`` with each index replaced by that document's id, so it lines up
       with ``source_docs`` by position. A record parsed from one part of a document read
@@ -638,11 +644,18 @@ def _build_and_answer(
         stage_runs.append(record.run)
     # the relevant context feeds every later stage
     relevance_snippets = relevance.snippets
+    if relevance.all_pruned:
+        _log.info(
+            "every document was pruned, so nothing relevant is left in the end: "
+            "nothing is structured, and reasoning answers from round 1's snippets"
+        )
+        proposal, extraction = _nothing_structured(task_logger, document_ids)
+    else:
+        proposal, extraction = saved.proposal, saved.extraction
 
     # --- Stage 2a: structuring — propose the schema (task + relevant context). ---
-    _log.info("stage 2/3 · structuring · proposing the schema")
-    proposal = saved.proposal
     if proposal is None:
+        _log.info("stage 2/3 · structuring · proposing the schema")
         emit("schema_started")
         with _recorded_stage(
             task_logger,
@@ -662,18 +675,7 @@ def _build_and_answer(
                 run=record.run,
                 **llm_kwargs,
             )
-            record.result = {
-                "schema_code": proposal.schema_code,
-                "thought": proposal.attempts[-1].thought if proposal.attempts else None,
-                "attempts": [
-                    {
-                        "schema_code": a.schema_code,
-                        "error": a.error,
-                        "thought": a.thought,
-                    }
-                    for a in proposal.attempts
-                ],
-            }
+            record.result = _schema_result(proposal)
         stage_runs.append(record.run)
         emit(
             "schema_finished",
@@ -682,9 +684,8 @@ def _build_and_answer(
         )
 
     # --- Stage 2b: structuring — parse every document but the pruned, in parallel. ---
-    _log.info("stage 2/3 · structuring · parsing")
-    extraction = saved.extraction
     if extraction is None:
+        _log.info("stage 2/3 · structuring · parsing")
         with _recorded_stage(
             task_logger,
             "structuring/parsing",
@@ -712,12 +713,7 @@ def _build_and_answer(
                 pruned=relevance.pruned,
                 **llm_kwargs,
             )
-            record.result = {
-                "parsed": extraction.parse,
-                "source_docs": extraction.source_docs,
-                "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
-                "provenance": extraction.provenance,
-            }
+            record.result = _parsing_result(extraction, document_ids)
         stage_runs.append(record.run)
     parsed = extraction.parse
 
@@ -763,7 +759,7 @@ def _build_and_answer(
             parsing_provenance=extraction.provenance,
             names=names,
         )
-        record.result = _reasoning_record(result, provenance)
+        record.result = _reasoning_record(result, provenance, relevance)
     stage_runs.append(record.run)
     emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs, saved.totals))
@@ -778,6 +774,45 @@ def _build_and_answer(
         names=names,
         run_dir=run_dir,
     )
+
+
+def _nothing_structured(
+    task_logger: TaskLogger | None, document_ids: list[str]
+) -> tuple[ProposalResult, ParseResult]:
+    """No schema and no parse, for a run whose relevance pruned every document, which
+    leaves nothing to structure; each step's ``result.json`` records them as the step
+    records its own, without a call."""
+    proposal = ProposalResult(schema_code="", parse_cls=_NO_FIELDS)
+    extraction = ParseResult(parse=_NO_FIELDS(), provenance=[[] for _ in document_ids])
+    if task_logger is not None:
+        totals = {"totals": call_totals([])}
+        schema = {**_schema_result(proposal), **totals}
+        task_logger.write_json("structuring/schema/result", schema)
+        parsing = {**_parsing_result(extraction, document_ids), **totals}
+        task_logger.write_json("structuring/parsing/result", parsing)
+    return proposal, extraction
+
+
+def _schema_result(proposal: ProposalResult) -> dict[str, Any]:
+    """The fields of the schema step's ``result.json``, but its totals."""
+    return {
+        "schema_code": proposal.schema_code,
+        "thought": proposal.attempts[-1].thought if proposal.attempts else None,
+        "attempts": [
+            {"schema_code": a.schema_code, "error": a.error, "thought": a.thought}
+            for a in proposal.attempts
+        ],
+    }
+
+
+def _parsing_result(extraction: ParseResult, document_ids: list[str]) -> dict[str, Any]:
+    """The fields of the parsing step's ``result.json``, but its totals."""
+    return {
+        "parsed": extraction.parse,
+        "source_docs": extraction.source_docs,
+        "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
+        "provenance": extraction.provenance,
+    }
 
 
 class Resumable(NamedTuple):
@@ -1027,8 +1062,9 @@ def _read_saved(
     and the last one written for a result winning: a document's snippet in a round when
     the events hold each of its parts, as many as that round read it in, and only while
     every earlier round's are all there (:func:`_saved_snippets`); a parse when the
-    schema finished and the parse fits it. What the run pruned is what it recorded: a
-    finished relevance's ``result.json`` maps it, and an unfinished one's
+    schema finished and the parse fits it, and neither once relevance finished pruning
+    every document, which leaves nothing to structure. What the run pruned is what it
+    recorded: a finished relevance's ``result.json`` maps it, and an unfinished one's
     ``documents_pruned`` events, after each round that is whole. The events kept to
     replay are those that reported a result reused, a finished stage's when they match
     its ``result.json``, an unfinished relevance's ``documents_pruned`` among them; a
@@ -1044,9 +1080,10 @@ def _read_saved(
     )
     reported = {doc: (at, event) for at, doc, event in parse_events}
     relevance_result = _finished(run_dir, "relevance")
-    schema_result = (
-        _finished(run_dir, "structuring/schema") if relevance_result else None
-    )
+    index = {id_: doc for doc, id_ in enumerate(document_ids)}
+    relevance = _relevance(relevance_result, index) if relevance_result else None
+    structured = relevance is not None and not relevance.all_pruned
+    schema_result = _finished(run_dir, "structuring/schema") if structured else None
     parsing_result = (
         _finished(run_dir, "structuring/parsing") if schema_result else None
     )
@@ -1054,14 +1091,13 @@ def _read_saved(
     saved = _Saved(totals=[result["totals"] for result in finished])
     replayed: list[int] = []
     rebuilt: list[tuple[float, dict[str, Any]]] = []
-    if relevance_result is None:
+    if relevance is None:
         saved.snippets = {key: records for key, (records, _) in snippets.items()}
         saved.pruned, saved.recorded_through = found.pruned, found.recorded_through
         replayed += [at for _, ats in snippets.values() for at in ats]
         replayed += found.pruned_at
     else:
-        index = {id_: doc for doc, id_ in enumerate(document_ids)}
-        saved.relevance = _relevance(relevance_result, index)
+        saved.relevance = relevance
         replayed += [
             at
             for (k, doc), (records, ats) in snippets.items()
@@ -1385,9 +1421,9 @@ def read_representation(run_dir: Path) -> Representation:
 
 
 def _cites_all(built: Representation) -> Citations:
-    """Citations of every final-round snippet an answer over ``built`` can cite, and
-    of every document's parse: whatever an answer cites, its trail reaches no further
-    than theirs."""
+    """Citations of every snippet of the relevant context an answer over ``built`` can
+    cite, and of every document's parse: whatever an answer cites, its trail reaches no
+    further than theirs."""
     document_ids = list(built.names)
     return Citations(
         summary_ids=citable_ids(built.relevance.snippets, document_ids),
@@ -1642,7 +1678,7 @@ def ask_pipeline(
             **llm_kwargs,
         )
         provenance = _provenance_over(built, result.citations)
-        record.result = _reasoning_record(result, provenance)
+        record.result = _reasoning_record(result, provenance, built.relevance)
     emit("reasoning_finished", **_reasoning_outcome(result, provenance))
     emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
     return _answer(
@@ -1752,11 +1788,14 @@ def _reasoning_outcome(
 
 
 def _reasoning_record(
-    result: reasoning.ReasoningResult, provenance: Provenance
+    result: reasoning.ReasoningResult,
+    provenance: Provenance,
+    relevance: RelevantContext,
 ) -> dict[str, Any]:
-    """The fields of the reasoning stage's ``result.json``."""
+    """The fields of the reasoning stage's ``result.json``, over ``relevance``."""
     return {
         **_reasoning_outcome(result, provenance),
+        "context_round": relevance.context_round,
         "terminated_by": result.terminated_by,
         "n_turns": len(result.turns),
         "turns": [

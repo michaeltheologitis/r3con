@@ -59,7 +59,7 @@
   /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
   /** @typedef {{ code: string, thought: string }} Schema */
   /**
-   * An answer's provenance: the documents whose final-round summaries and parses it cites, by index, and its trail.
+   * An answer's provenance: the documents whose summaries (contextRound's) and parses it cites, by index, and its trail.
    * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail }} Provenance
    */
   /**
@@ -1662,6 +1662,7 @@
   const MAX_ROUNDS = 4;
   // The first round r3con prunes after: an empty round-1 note alone prunes nothing.
   const FIRST_PRUNING_ROUND = 2;
+  const FROM_ROUND_1 = "nothing relevant in the end · answered from round 1's notes";
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -2058,9 +2059,15 @@
   const emptyRounds = (rounds) => range(rounds).map(() => []);
   /** @param {number} rounds */
   const roundKinds = (rounds) => range(rounds).map((k) => roundKind(k + 1));
-  // The final round's summaries are what the structure, the parses and the answers are shown.
+  // The final round's summaries are what the structure and the parses are shown.
   /** @param {Pick<Run, 'rounds'>} run */
   const finalRound = (run) => roundKind(run.rounds.length);
+  // r3con pruned every document, so nothing relevant is left in the end: it structures nothing.
+  /** @param {Pick<Run, 'docs' | 'pruned'>} run */
+  const allPruned = (run) => run.docs.length > 0 && run.pruned.size === run.docs.length;
+  // An answer is shown the final round's summaries, or round 1's when r3con pruned every document.
+  /** @param {Pick<Run, 'rounds' | 'docs' | 'pruned'>} run */
+  const contextRound = (run) => (allPruned(run) ? roundKind(1) : finalRound(run));
   // A round's summaries have a hole for a document not read in it: not yet, live, or ever, if r3con pruned it.
   /** @param {Pick<Run, 'rounds'>} run @param {RoundKind} kind */
   const summariesIn = (run, kind) => run.rounds[roundOf(kind) - 1];
@@ -2476,17 +2483,16 @@
   /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
-  // An answer and a parse cite final-round summaries, and a summary of round k, those of round k - 1.
+  // An answer cites contextRound's summaries, a parse the final round's, and a summary of round k, those of round k - 1.
   /** @param {Run} run @param {string} id */
   function cites(run, id) {
     const [kind, i] = splitId(id);
-    const final = finalRound(run);
     if (kind === 'answer') {
       // Only an answer that has landed is asked what it cites.
       const { summary_ids, parse_ids } = /** @type {Provenance} */ (answerAt(run, id).provenance);
-      return [...summary_ids.map((d) => `${final}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
+      return [...summary_ids.map((d) => `${contextRound(run)}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
     }
-    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${final}-${d}`);
+    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${finalRound(run)}-${d}`);
     if (!isRound(kind)) return [];
     const previous = previousRound(kind);
     return previous ? summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`) : [];
@@ -3702,15 +3708,14 @@
     /** @param {number} d */
     const opened = (d) => fold.opened.has(d) && !fold.relevant.has(d);
     if (isPerDocument(kind) && opened(i)) return [];
-    const final = finalRound(run);
     /** @param {PerDocumentKind} step @param {(docs: number[]) => boolean} [keep] */
     const eachRow = (step, keep = () => true) =>
       fold.rows.flatMap((row) => {
         if ('doc' in row) return !opened(row.doc) && keep([row.doc]) ? [`${step}-${row.doc}`] : [];
         return !row.open && keep(foldDocs(row)) ? [foldId(step, row)] : [];
       });
-    if (kind === 'parsed' || kind === 'schema') return eachRow(final);
-    if (kind === 'answer') return [...eachRow(final), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
+    if (kind === 'parsed' || kind === 'schema') return eachRow(finalRound(run));
+    if (kind === 'answer') return [...eachRow(contextRound(run)), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
     const previous = previousRound(kind);
     if (!previous) return [];
     const shown = [...fold.relevant].filter((j) => j !== i && summariesIn(run, previous)[j]?.summary);
@@ -4663,9 +4668,8 @@
     const [kind, i] = splitId(id);
     /** @param {string} step @param {(j: number) => unknown} [keep] */
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
-    const final = finalRound(run);
-    if (kind === 'parsed' || kind === 'schema') return every(final);
-    if (kind === 'answer') return [...every(final), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
+    if (kind === 'parsed' || kind === 'schema') return every(finalRound(run));
+    if (kind === 'answer') return [...every(contextRound(run)), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
     const previous = previousRound(kind);
     return previous ? every(previous, (j) => j !== i && summariesIn(run, previous)[j]?.summary) : [];
   }
@@ -4803,6 +4807,11 @@
   }
 
   /** @param {RunTab} tab @param {Narrator} narr */
+  function sayFromRound1(tab, narr) {
+    if (allPruned(tab.run)) narr.logAs('from-round-1', 'sub', FROM_ROUND_1);
+  }
+
+  /** @param {RunTab} tab @param {Narrator} narr */
   function finishRun(tab, narr) {
     const { run } = tab;
     sayReady(narr, run.answers[0].model, run.simulated, run.totals);
@@ -4867,21 +4876,24 @@
       at(t, () => sayPruned(tab, narr, roundOf(kind)));
     }
 
-    t += TIMING.phaseGap;
-    at(t, () => {
-      beginStage(tab, narr, 'schema');
-      appear(tab, 'schema');
-    });
-    t += TIMING.schemaWork;
-    at(t, () => settle(tab, narr, 'schema'));
+    if (!allPruned(run)) {
+      t += TIMING.phaseGap;
+      at(t, () => {
+        beginStage(tab, narr, 'schema');
+        appear(tab, 'schema');
+      });
+      t += TIMING.schemaWork;
+      at(t, () => settle(tab, narr, 'schema'));
 
-    t += TIMING.phaseGap;
-    at(t, () => beginStage(tab, narr, 'parsed'));
-    t = perDocument(t, 'parsed');
+      t += TIMING.phaseGap;
+      at(t, () => beginStage(tab, narr, 'parsed'));
+      t = perDocument(t, 'parsed');
+    }
 
     t += TIMING.phaseGap;
     at(t, () => {
       beginStage(tab, narr, 'answer');
+      sayFromRound1(tab, narr);
       appear(tab, RUN_ANSWER);
     });
     t += TIMING.answerWork;
@@ -4940,6 +4952,7 @@
         break;
       case 'reasoning_started':
         beginStage(tab, narr, 'answer');
+        sayFromRound1(tab, narr);
         appear(tab, RUN_ANSWER);
         break;
       case 'schema_finished':

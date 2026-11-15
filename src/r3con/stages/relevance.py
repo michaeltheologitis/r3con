@@ -44,7 +44,9 @@ Round k reads the *frozen* round-(k-1) set, so within a round the per-document c
 are independent and fan out in parallel (bounded by
 :func:`r3con.settings.active_doc_workers`); a provider that signs in on its first
 call gets one call at a time until one has signed in (:mod:`r3con.runtime.llm`).
-Downstream stages consume the **final-round** snippets (``RelevantContext.snippets``);
+Downstream stages consume the relevant context (``RelevantContext.snippets``): the
+**final-round** snippets, or, when every document was pruned, so that nothing relevant
+is left in the end, round 1's, which reasoning answers from, with nothing to structure;
 earlier rounds are kept for inspection and for the answer's trail back through them
 (:mod:`r3con.provenance`).
 """
@@ -106,10 +108,10 @@ class RelevantContext:
 
     ``records[k][d]`` is document ``d``'s snippet in round ``k+1``, one record per part
     (one for a document read whole). Earlier rounds are kept for inspection and for
-    the answer's trail (:mod:`r3con.provenance`); the final round is what downstream
-    stages consume, as :attr:`snippets`. ``pruned_after`` maps each document the run
-    pruned, by index, to the round after which it was pruned (the module's rule), a
-    copy of the mapping given: empty with fewer than two rounds.
+    the answer's trail (:mod:`r3con.provenance`); the round of :attr:`context_round` is
+    what downstream stages consume, as :attr:`snippets`. ``pruned_after`` maps each
+    document the run pruned, by index, to the round after which it was pruned (the
+    module's rule), a copy of the mapping given: empty with fewer than two rounds.
     """
 
     records: list[list[list[SnippetRecord]]]
@@ -124,27 +126,41 @@ class RelevantContext:
         return frozenset(self.pruned_after)
 
     @property
+    def all_pruned(self) -> bool:
+        """Whether the run pruned every document, so that nothing relevant is left in
+        the end."""
+        n_docs = len(self.records[0]) if self.records else 0
+        return 0 < n_docs == len(self.pruned_after)
+
+    @property
+    def context_round(self) -> int:
+        """The round, from 1, whose snippets are the relevant context: the final one,
+        or round 1 when the run pruned every document, so that the answer reads what
+        the first reads found rather than nothing; 0 when no round ran."""
+        return 1 if self.all_pruned else len(self.records)
+
+    @property
     def snippets(self) -> list[Snippet]:
-        """The final round's snippet of each document, aligned 1:1 with the input
-        ``documents``: its text, or, for a document read in parts, one per part. Empty
-        when no round ran."""
+        """The relevant context: each document's snippet in :attr:`context_round`,
+        aligned 1:1 with the input ``documents``: its text, or, for a document read in
+        parts, one per part. Empty when no round ran."""
         return [
             parts[0].summary if len(parts) == 1 else [part.summary for part in parts]
-            for parts in self._final_round()
+            for parts in self._context()
         ]
 
     @property
     def provenance(self) -> list[list[str]]:
-        """The ids each document's final-round snippet used, aligned with
+        """The ids each document's snippet in :attr:`context_round` used, aligned with
         :attr:`snippets`, a document read in parts having its parts' ids combined
         (:func:`combine_parts`)."""
         return [
             combine_parts(part.provenance for part in parts)
-            for parts in self._final_round()
+            for parts in self._context()
         ]
 
-    def _final_round(self) -> list[list[SnippetRecord]]:
-        return self.records[-1] if self.records else []
+    def _context(self) -> list[list[SnippetRecord]]:
+        return self.records[self.context_round - 1] if self.records else []
 
 
 def _pruned(round_: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
@@ -188,8 +204,8 @@ def render_relevance(
     relevance_snippets: Sequence[Snippet] | None,
     document_ids: Sequence[str] | None = None,
 ) -> str:
-    """Render the final-round relevance snippets into the labeled block a prompt embeds
-    as the relevant context.
+    """Render the relevance snippets into the labeled block a prompt embeds as the
+    relevant context.
 
     Each document gets a ``### Document N`` heading, and each part of a document read in
     parts a ``### Document N.k`` heading, ``k`` from 1. With ``document_ids``, one per

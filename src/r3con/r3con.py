@@ -339,7 +339,8 @@ def resume(
     they are. An unfinished one reuses each document's result the run saved in
     ``events.jsonl`` (each relevance snippet a round wrote, all its parts there, and
     each parse) and computes the rest, as the run would have, under its question,
-    config and document ids; reasoning always runs. The folder keeps one record of the
+    config and document ids; reasoning always runs, and, when relevance pruned every
+    document, structuring never does, as in the run. The folder keeps one record of the
     whole run: an unfinished stage's ``calls.json`` keeps the earlier calls before the
     new ones, ``events.jsonl`` adds the resume's events, the manifest lists each resume
     under ``resumes``, and ``run_finished`` totals every stage. A call the run had made

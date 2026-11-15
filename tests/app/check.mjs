@@ -5808,6 +5808,98 @@ async function livePruned(url, server) {
   });
 }
 
+// fake_server.py's REASONING_BREAKS: a question holding it has every reasoning call raise until the check releases it.
+const REASONING_BREAKS = '(the reasoning breaks)';
+const REASONING_ERROR = "RuntimeError: the check's reasoning is down";
+// What a run's log says once r3con pruned every memo, so that it answers from round 1's notes.
+const FROM_ROUND_1 = "nothing relevant in the end · answered from round 1's notes";
+// Two fading memos of a run's own `tag`: read whole once a round, both say nothing in round FADING_PRUNED_AFTER.
+const fadingMemos = (tag) => [1, 2].map((k) => memo(`0${k}_fading_memo.txt`, `Fading memo ${k}, ${tag}: the Eastfield site logged a late incident.\n${FADES}\n`));
+// Their run's nodes but the documents', as stageNodes gives them: each memo's path ends empty in its last round, with
+// no structure and no parse.
+const FROM_ROUND_1_NODES = ['answer-0', 'r1-0', 'r1-1', 'r2-0', 'r2-1', 'r3-0 · empty', 'r3-1 · empty'];
+// In-page: the solid lines into answer `id`, from what it cites.
+const citesInto = (page, id) => page.$$eval('.edge.cite', (els, to) => els.map((el) => el.dataset.key).filter((key) => key.endsWith(`>${to}`)).sort(), id);
+// The lit trail, each document's node named `doc`: a tab opened again draws them under ids of its own.
+async function litTrail(page) {
+  const { nodes, edges } = await litOnPanel(page);
+  const named = (ids) => ids.map((id) => id.replace(/doc-\d+/, 'doc')).sort();
+  return { nodes: named(nodes), edges: named(edges) };
+}
+// In-page: every line of the shown tab's logs, its run's and its asks', folded or not.
+const allLoggedLines = () => [...document.querySelectorAll('.transcript:not([hidden]) .log-lines .line .t')].map((el) => el.textContent);
+
+// Over two memos r3con prunes both of after round FADING_PRUNED_AFTER, it answers from their round-1 notes: no
+// structure nor parse is drawn, the answer's lines come from round 1, its trail lights through round 1 to the memos,
+// and the log says so once, in the live run, an ask over it, the tab saved and opened again and an ask over that, and
+// a run continued after it failed in reasoning.
+async function liveFromRound1(url, server) {
+  const lit = { nodes: ['answer-0', 'doc', 'doc', 'r1-0', 'r1-1'], edges: ['doc>r1-0', 'doc>r1-1', 'r1-0>answer-0', 'r1-1>answer-0'] };
+  const fromRound1 = (k) => [`r1-0>answer-${k}`, `r1-1>answer-${k}`];
+  const saidOnce = (lines) => lines.filter((text) => text === FROM_ROUND_1).length === 1;
+  let html;
+  let asked;
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, question: true, before }, async (page) => {
+    await page.setInputFiles('#file-input', fadingMemos('read live'));
+    await filesCounted(page, 2);
+    await pickRounds(page, FADING_PRUNED_AFTER);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const events = await page.evaluate(() => window.events);
+    const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
+    const ran = {
+      pruned: events.filter((e) => e.type === 'documents_pruned').map((e) => [e.round, e.doc_ids]),
+      structured: events.filter((e) => /^(schema|parsing)_/.test(e.type)).length,
+      nodes: await page.evaluate(stageNodes),
+      cites: await citesInto(page, 'answer-0'),
+      lit: await litTrail(page),
+    };
+    const ranExpected = { pruned: [[FADING_PRUNED_AFTER, ids]], structured: 0, nodes: FROM_ROUND_1_NODES, cites: fromRound1(0), lit };
+    const ranName = "a run r3con prunes every memo of draws no structure nor parse, and its answer's lines and lit trail come from round 1's notes to the memos";
+    check('live', ranName, done && isDeepStrictEqual(ran, ranExpected), JSON.stringify(ran));
+
+    await page.focus('.log-toggle');
+    await page.keyboard.press('Enter');
+    const steps = (await page.evaluate(logOf)).steps.map(({ step, nested }) => [step, nested]);
+    const reasoning = steps.find(([step]) => step === 'reasoning')?.[1] ?? [];
+    const logged = { said: reasoning.includes(FROM_ROUND_1), structured: steps.some(([step]) => step === 'proposing a structure' || step.startsWith('parsing ')) };
+    check('live', "its log says, under reasoning, that it answered from round 1's notes, and has no structuring step", isDeepStrictEqual(logged, { said: true, structured: false }), JSON.stringify(steps));
+
+    await send(page, SAVED_ASK);
+    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    asked = await page.evaluate(stageNodes);
+    const askedCites = await citesInto(page, 'answer-1');
+    check('live', "an ask over that run lands with its lines from round 1's notes", landed && isDeepStrictEqual(askedCites, fromRound1(1)), JSON.stringify(askedCites));
+    html = await savedHtml(page);
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = { nodes: await page.evaluate(stageNodes), cites: [...(await citesInto(page, 'answer-0')), ...(await citesInto(page, 'answer-1'))], said: saidOnce(await page.evaluate(allLoggedLines)) };
+    const shownExpected = { nodes: asked, cites: [...fromRound1(0), ...fromRound1(1)], said: true };
+    check('live', "saved and opened again, it draws the same nodes and lines from round 1, and its log says so once", opened && isDeepStrictEqual(shown, shownExpected), JSON.stringify(shown));
+    await send(page, NEW_QUESTION);
+    const again = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
+    const againCites = await citesInto(page, 'answer-2');
+    check('live', "an ask over the tab opened again lands with its lines from round 1's notes", again && isDeepStrictEqual(againCites, fromRound1(2)), JSON.stringify(againCites));
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', fadingMemos('continued'));
+    await filesCounted(page, 2);
+    await pickRounds(page, FADING_PRUNED_AFTER);
+    await send(page, `Which site logged the most incidents? ${REASONING_BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in reasoning · ${REASONING_ERROR}`, LIVE_RUN_MS);
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const continued = { nodes: await page.evaluate(stageNodes), cites: await citesInto(page, 'answer-0'), lit: await litTrail(page), said: saidOnce(await page.evaluate(allLoggedLines)) };
+    const continuedExpected = { nodes: FROM_ROUND_1_NODES, cites: fromRound1(0), lit, said: true };
+    const continuedName = "a run that failed in reasoning after pruning every memo continues to an answer from round 1's notes, its log saying so once";
+    check('live', continuedName, failed && done && isDeepStrictEqual(continued, continuedExpected), JSON.stringify(continued));
+  });
+}
+
 // fake_server.py's UNPARSED: a document holding it parses to nothing.
 const UNPARSED = '(nothing to parse here)';
 // Enough quiet paragraphs that fake_server.py refuses the memo whole, past PART_CHARS, so r3con reads it in parts.
@@ -8100,7 +8192,7 @@ async function live() {
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
   });
-  const stateful = [livePruned, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
