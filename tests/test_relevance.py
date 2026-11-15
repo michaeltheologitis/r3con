@@ -645,12 +645,12 @@ def test_each_rounds_quotes_are_kept_where_they_are_in_the_document_they_quote(l
     assert by_round(result, "quotes") == [
         [
             [[quote("Revenue rose to $5M.", 0, 20, "exact")]],
-            [[quote('Sales were "flat" - at $3M.', 0, 27, "normalized")]],
+            [[quote('Sales were "flat" - at $3M.', 0, 27, "normalized", documents[1])]],
         ],
         [
             [
                 [
-                    quote("costs fell.", 21, 32, "normalized"),
+                    quote("costs fell.", 21, 32, "normalized", "Costs fell."),
                     quote("Profit doubled.", *NONE),
                 ]
             ],

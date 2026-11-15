@@ -15,7 +15,7 @@ def snippet(id_: str, *quotes: dict, cites: tuple[str, ...] = ()) -> SnippetReco
 
 
 def quoted(document: str, start: int, end: int, text: str) -> dict:
-    """A quote behind an answer, as its provenance gives it."""
+    """A quote behind an answer found exactly, as its provenance gives it."""
     name = NAMES[document]
     return {
         "document": document,
@@ -23,6 +23,9 @@ def quoted(document: str, start: int, end: int, text: str) -> dict:
         "start": start,
         "end": end,
         "text": text,
+        "document_text": text,
+        "match": "exact",
+        "score": None,
     }
 
 

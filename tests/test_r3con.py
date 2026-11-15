@@ -143,6 +143,14 @@ def snippets_as_plain_text(result: dict) -> None:
         round_["snippets"] = [s["summary"] for s in round_["snippets"]]
 
 
+def quotes_without_document_text(result: dict) -> None:
+    """As r3context 0.6.29 wrote them."""
+    for round_ in result["rounds"]:
+        for snippet in round_["snippets"]:
+            for quote in snippet["quotes"]:
+                del quote["document_text"]
+
+
 def without_provenance(result: dict) -> None:
     del result["provenance"]
 
@@ -774,6 +782,9 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         "start": 0,
         "end": 11,
         "text": "Merrow memo",
+        "document_text": "Merrow memo",
+        "match": "exact",
+        "score": None,
     }
     assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
@@ -915,6 +926,83 @@ def test_trace_of_a_folder_whose_snippets_have_no_quotes_quotes_nothing(cited_ru
     assert cited_run.provenance["quotes"]
     in_json("relevance/result.json", snippets_without_quotes)(cited_run.run_dir)
     assert trace(cited_run.run_dir) == {**cited_run.provenance, "quotes": []}
+
+
+ARDENT = (
+    "Ardent missed eight delivery windows in Q3, mostly in August. "
+    "It blamed the “port strike” for most of them. "
+    "Penalties were waived by the board in October, after a long review. "
+    "Its contract renews in March."
+)
+# Each quote the model copies from ARDENT, the words of ARDENT it is found at, how it
+# is found there, and the score of a fuzzy match.
+ARDENT_QUOTES = [
+    (
+        "Ardent missed eight delivery windows in Q3, mainly in August.",
+        "Ardent missed eight delivery windows in Q3, mostly in August.",
+        "fuzzy",
+        95.1,
+    ),
+    (
+        'It blamed the "port strike" for most of them.',
+        "It blamed the “port strike” for most of them.",
+        "normalized",
+        None,
+    ),
+    (
+        "Penalties were waived … after a long review.",
+        "Penalties were waived by the board in October, after a long review.",
+        "elided",
+        None,
+    ),
+    ("Its contract renews in March.", "Its contract renews in March.", "exact", None),
+]
+
+
+@pytest.fixture
+def ardent_run(answering_llm, tmp_path) -> Answer:
+    """A finished run over ARDENT whose summary quotes ``ARDENT_QUOTES`` and a sentence
+    ARDENT does not hold, and whose answer cites that summary; ``answering_llm``
+    answering so from then on."""
+    quoted = ["Ardent paid no penalty.", *(text for text, *_ in ARDENT_QUOTES)]
+    answering_llm.answers(
+        relevance={"summary": "Notes on Ardent.", "quotes": quoted},
+        reasoning=citing("Ardent", slice(1)),
+    )
+    return finished_run(answering_llm, tmp_path, {"q3/ardent.txt": ARDENT})
+
+
+def test_each_answer_quote_gives_the_documents_own_words_and_how_they_were_found(
+    answering_llm, ardent_run
+):
+    [ardent] = ardent_run.document_ids
+    found = [
+        {
+            "document": ardent,
+            "name": "q3/ardent.txt",
+            "start": ARDENT.index(words),
+            "end": ARDENT.index(words) + len(words),
+            "text": text,
+            "document_text": words,
+            "match": match,
+            "score": score,
+        }
+        for text, words, match, score in ARDENT_QUOTES
+    ]
+    assert ardent_run.provenance["quotes"] == found
+    assert trace(ardent_run.run_dir)["quotes"] == found
+    asked = ask(ardent_run, "Who else?", completion=answering_llm)
+    assert asked.provenance["quotes"] == found
+
+
+def test_a_run_folder_whose_quotes_have_no_document_text_gives_none_for_it(
+    answering_llm, ardent_run
+):
+    in_json("relevance/result.json", quotes_without_document_text)(ardent_run.run_dir)
+    as_saved = [{**q, "document_text": None} for q in ardent_run.provenance["quotes"]]
+    assert trace(ardent_run.run_dir)["quotes"] == as_saved
+    asked = ask(ardent_run, "Who else?", completion=answering_llm)
+    assert asked.provenance["quotes"] == as_saved
 
 
 def pinning_a_missing_prompt(manifest: dict) -> None:
@@ -1683,6 +1771,30 @@ def test_an_event_that_differs_from_the_result_reused_is_not_replayed(
     replayed = [event["type"] for event in seen]
     assert "schema_finished" not in replayed
     assert replayed.count("relevance_finished") == len(MEMOS_BY_NAME) * 2
+
+
+def test_a_run_begun_before_quotes_kept_document_text_resumes_reusing_its_snippets(
+    answering_llm, one_worker, shown_ids, events_in, tmp_path
+):
+    quoting = quoting_its_first_line_and_citing_all_shown(shown_ids)
+    llm = answering_llm.answers(
+        relevance=failing_once(reading("Calder memo", later_round=True), quoting)
+    )
+    run_dir = failed_run(llm, tmp_path)
+    events = events_in(run_dir)
+    for event in events:
+        for quote in event.get("quotes", []):
+            del quote["document_text"]
+    rewritten(run_dir, [json.dumps(event) for event in events])
+    _, requests = resumed(llm, run_dir)
+    assert [r for r in requests if r[0] == "relevance"] == [
+        ("relevance", line) for line in LAST_THREE
+    ]
+    rounds = json.loads((run_dir / "relevance/result.json").read_text())["rounds"]
+    assert [
+        [q["document_text"] for s in round_["snippets"] for q in s["quotes"]]
+        for round_ in rounds
+    ] == [[None] * len(MEMOS_BY_NAME), [None, None, *LAST_THREE]]
 
 
 def test_a_killed_run_resumes_from_its_events_and_reads_a_line_cut_short_again(

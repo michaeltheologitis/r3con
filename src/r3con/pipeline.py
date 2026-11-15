@@ -1181,6 +1181,8 @@ class _Quote(BaseModel):
     text: str
     start: StrictInt | None
     end: StrictInt | None
+    # Events written before quotes kept document_text lack it; a resume reuses them.
+    document_text: str | None = None
     match: Match | None
     score: float | None
 
@@ -1323,7 +1325,14 @@ def _pruning_events(
 def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
     """The snippet ``event`` reports, as its document's part ``id_``."""
     quotes = [
-        Quote(text=q.text, start=q.start, end=q.end, match=q.match, score=q.score)
+        Quote(
+            text=q.text,
+            start=q.start,
+            end=q.end,
+            document_text=q.document_text,
+            match=q.match,
+            score=q.score,
+        )
         for q in event.quotes
     ]
     return SnippetRecord(

@@ -204,12 +204,21 @@ reasoning step.
 #### Provenance
 
 `result.provenance["quotes"]` lists the sentences the answer is based on.
-Each has the document's `name`, the quoted `text`, and its `start` and `end`
-characters in that document:
+Each has the document's `name`, `text` as the AI model quoted it, and
+`document_text`, the document's own words, from its `start` to its `end`
+character in that document. The two differ when the model changed the
+wording. `match` says how the sentence was found: `exact`, `normalized`
+(only spacing, case, quotation marks, dashes or markup differ), `elided` (the
+model wrote `...` for words it left out) or `fuzzy` (some words differ), and a
+`fuzzy` one has a `score` out of 100:
 
 ```python
 quote = result.provenance["quotes"][0]
-print(quote["name"], quote["text"])  # q3/ardent.pdf Ardent missed 8 delivery windows.
+print(quote["name"], quote["match"], quote["score"])  # q3/ardent.pdf fuzzy 95.1
+print(quote["text"])
+# Ardent missed eight delivery windows in Q3, mainly in August.
+print(quote["document_text"])
+# Ardent missed eight delivery windows in Q3, mostly in August.
 ```
 
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)

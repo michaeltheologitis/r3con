@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from itertools import chain
 from typing import TypedDict
 
-from r3con.quotes import Quote
+from r3con.quotes import Match, Quote
 from r3con.stages.relevance import RelevantContext
 
 ANSWER = "answer"
@@ -70,16 +70,23 @@ class Citations(TypedDict):
 
 
 class NamedQuote(TypedDict):
-    """A quote behind an answer, ``{document, start, end, text, name}``: the id of the
-    document it is in, where it is there (``documents[i][start:end]`` for the document
-    whose id is ``document``), the model's copy of it, which for a ``fuzzy`` match
-    differs slightly from that slice, and the document's name."""
+    """A quote behind an answer, ``{document, name, start, end, text, document_text,
+    match, score}``: the id and the name of the document it is in; where it is there
+    (``documents[i][start:end]`` for the document whose id is ``document``); ``text``,
+    the model's copy of it, and ``document_text``, the document's own words, that
+    slice, which differ from the copy for every match but an ``exact`` one, and are
+    ``None`` in a run folder written before r3con kept them; and ``match``, the tier
+    that found it, with the ``score`` of a ``fuzzy`` one (:class:`r3con.quotes.Quote`).
+    """
 
     document: str
+    name: str
     start: int
     end: int
     text: str
-    name: str
+    document_text: str | None
+    match: Match
+    score: float | None
 
 
 class Trail(TypedDict):
@@ -238,10 +245,20 @@ def _found(quotes: Iterable[Quote], document: str, name: str) -> list[NamedQuote
     """The ``quotes`` found in ``document``, named ``name``."""
     return [
         NamedQuote(
-            document=document, start=start, end=end, text=quote["text"], name=name
+            document=document,
+            name=name,
+            start=start,
+            end=end,
+            text=quote["text"],
+            # A run folder written before quotes kept document_text has none.
+            document_text=quote.get("document_text"),
+            match=match,
+            score=quote["score"],
         )
         for quote in quotes
-        if (start := quote["start"]) is not None and (end := quote["end"]) is not None
+        if (start := quote["start"]) is not None
+        and (end := quote["end"]) is not None
+        and (match := quote["match"]) is not None
     ]
 
 

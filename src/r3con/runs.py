@@ -36,11 +36,12 @@ Layout per ``logs/<run-folder>/``:
   (:attr:`r3con.stages.relevance.RelevantContext.pruned`); within
   a round every relevance snippet in document order, a document read in parts as one
   per part, each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that
-  round), its quotes, each ``{text, start, end, match, score}``: the sentence the
-  snippet says it is based on, where it is in the whole document and how it was found
-  there (``exact``, ``normalized`` or ``elided``, verbatim, or ``fuzzy``, only like the
-  text, with its ``score``; all ``None`` when it was not: :mod:`r3con.quotes`), and the
-  ids of the previous round's snippets it used; the summaries of
+  round), its quotes, each ``{text, start, end, document_text, match, score}``: the
+  sentence the snippet says it is based on, where it is in the whole document, the
+  document's own words there, and how it was found there (``exact``, ``normalized`` or
+  ``elided``, verbatim, or ``fuzzy``, only like the text, with its ``score``; all
+  ``None`` when it was not: :mod:`r3con.quotes`), and the ids of the previous round's
+  snippets it used; the summaries of
   :attr:`r3con.stages.relevance.RelevantContext.context_round` are the relevant context
   that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
   ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a part,

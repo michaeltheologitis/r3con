@@ -60,13 +60,15 @@ _FORMAT = "Cf"
 
 
 class Quote(TypedDict):
-    """A quote and where it is in its document: ``start`` and ``end`` as a slice, and
-    the tier that found it, all ``None`` when no tier did; and for a ``fuzzy`` one
-    only, its ``score``, to one decimal."""
+    """A quote and where it is in its document: ``start`` and ``end`` as a slice, the
+    document's own words there, ``document_text``, and the tier that found it, all
+    ``None`` when no tier did; and for a ``fuzzy`` one only, its ``score``, to one
+    decimal."""
 
     text: str
     start: int | None
     end: int | None
+    document_text: str | None
     match: Match | None
     score: float | None
 
@@ -92,6 +94,7 @@ def locate_quotes(quotes: Iterable[str], text: str, offset: int = 0) -> list[Quo
                 text=quote,
                 start=None if span is None else span[0] + offset,
                 end=None if span is None else span[1] + offset,
+                document_text=None if span is None else text[span[0] : span[1]],
                 match=match,
                 score=score,
             )
