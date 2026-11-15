@@ -25,6 +25,7 @@ from r3con.pipeline import read_answer, run_pipeline
 from r3con.provenance import DEFAULT_RULE
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
+from r3con.stages.structuring.schema import no_fields_schema
 from tests.fakes import (
     TWO_LINE_MEMOS,
     citable_lists,
@@ -69,7 +70,7 @@ CONFIG = {
         "relevance/later-rounds": "v3",
         "structuring/schema": "v2",
         "structuring/parsing": "v4",
-        "reasoning/direct": "v4",
+        "reasoning/direct": "v5",
         "reasoning/coding": "v4",
     },
 }
@@ -869,6 +870,122 @@ def test_a_pruned_documents_round_1_note_cited_in_round_2_still_leads_the_trail_
     assert f"document:{halloran}" in trail["nodes"]
     assert memo_line(result.document_ids, 0, 0) in result.provenance["quotes"]
     assert read_answer(logger.dir, DEFAULT_RULE) == result.provenance
+
+
+def noting_round_1_apart(request) -> dict:
+    """A relevance reply quoting the document's first line, its note saying whether it
+    is round 1's."""
+    first = first_line(request)
+    if not is_later_round(request):
+        return {"summary": f"Round 1 notes on {first}.", "quotes": [first]}
+    return {
+        "summary": f"Later notes on {first}.",
+        "quotes": [first],
+        "provenance_ids": [],
+    }
+
+
+@pytest.fixture(
+    params=[(2, [2, 2, 2]), (3, [2, 3, 3])],
+    ids=["after-round-2", "after-rounds-2-and-3"],
+)
+def pruned_everything(request, answering_llm, tmp_path):
+    """A run over ``TWO_LINE_MEMOS`` whose relevance prunes every memo, each after the
+    round its notes go empty in, as ``request.param`` gives them, and whose answer
+    cites every summary it is shown: its ``llm``, ``logger``, result and events."""
+    rounds, empty_from = request.param
+    quiet = [
+        reading_in_round(memo, k, or_later=True)
+        for memo, k in zip(THREE, empty_from, strict=True)
+    ]
+    llm = answering_llm.answers(
+        relevance=silent_when(lambda r: any(q(r) for q in quiet), noting_round_1_apart),
+        reasoning=citing("Each memo logs two sites.", summaries=slice(None)),
+    )
+    logger = TaskLogger("run", root=tmp_path)
+    events = []
+    result = answer(
+        llm,
+        logger,
+        documents=TWO_LINE_MEMOS,
+        relevance_rounds=rounds,
+        on_event=events.append,
+    )
+    return llm, logger, result, events
+
+
+def test_with_every_memo_pruned_nothing_is_structured(pruned_everything):
+    llm, logger, result, events = pruned_everything
+    pruned = read_json(logger, "relevance/result")["pruned_after"]
+    assert sorted(pruned) == sorted(result.document_ids)
+    assert llm.requests_for("schema") == llm.requests_for("parsing") == []
+    assert not [e for e in events if e["type"].startswith(("schema", "parsing"))]
+    assert result.schema_code == no_fields_schema().schema_code
+    assert result.structured_context == {}
+    schema = read_json(logger, "structuring/schema/result")
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert (schema["schema_code"], schema["attempts"]) == (result.schema_code, [])
+    assert (parsing["parsed"], parsing["provenance"]) == ({}, [[], [], []])
+    assert schema["totals"]["n_steps"] == parsing["totals"]["n_steps"] == 0
+
+
+def test_with_every_memo_pruned_reasoning_is_shown_round_1s_notes_and_no_parse(
+    pruned_everything, sections
+):
+    llm, _, result, _ = pruned_everything
+    [prompt] = system_prompts(llm, "reasoning")
+    shown = sections(prompt)
+    assert list(shown) == [
+        "## The task and your view",
+        "## Document summaries",
+        "## Rules",
+        "## Output",
+    ]
+    notes = [f"Round 1 notes on {memo}." for memo in THREE]
+    headed = [
+        f"### Document ID: {id_}\n{note}"
+        for id_, note in zip(result.document_ids, notes, strict=True)
+    ]
+    assert shown["## Document summaries"].endswith("\n\n".join(headed))
+    assert result.relevant_context == notes
+
+
+def test_with_every_memo_pruned_the_answer_cites_round_1s_notes_back_to_each_memo(
+    pruned_everything,
+):
+    _, logger, result, _ = pruned_everything
+    ids = result.document_ids
+    assert result.provenance["summary_ids"] == ids
+    edges = result.provenance["trail"]["edges"]
+    for id_ in ids:
+        assert ["answer", f"summary:1:{id_}", "cites"] in edges
+        assert [f"summary:1:{id_}", f"document:{id_}", "summarizes"] in edges
+    assert result.provenance["quotes"] == [memo_line(ids, i, 0) for i in range(3)]
+    assert read_answer(logger.dir, DEFAULT_RULE) == result.provenance
+
+
+def test_with_round_1_empty_too_an_all_pruned_run_answers_from_no_notes(
+    answering_llm, sections
+):
+    llm = answering_llm.answers(
+        relevance=silent_when(lambda request: True),
+        reasoning=citing("No memo says.", summaries=slice(None)),
+    )
+    result = answer(llm, documents=THREE)
+    assert llm.requests_for("schema") == llm.requests_for("parsing") == []
+    [prompt] = system_prompts(llm, "reasoning")
+    shown = sections(prompt)
+    assert list(shown) == [
+        "## The task",
+        "## Document summaries",
+        "## Rules",
+        "## Output",
+    ]
+    assert "nothing relevant to it was found in them" in shown["## The task"]
+    nothing = "(no relevant summary for this task)"
+    headed = [f"### Document ID: {id_}\n{nothing}" for id_ in result.document_ids]
+    assert shown["## Document summaries"].endswith("\n\n".join(headed))
+    assert result.provenance["summary_ids"] == []
 
 
 def test_the_configs_params_are_in_every_request(answering_llm):

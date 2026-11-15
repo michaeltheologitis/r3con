@@ -12,9 +12,10 @@ Each node of the graph is a string:
 
 Each edge is ``[from, to, kind]``, of three kinds:
 
-- ``cites``: from the answer to each final-round summary and each parse it cites, from
-  a parse to each final-round summary it cites, and from a summary of round k to each
-  summary of round k-1 it cites;
+- ``cites``: from the answer to each summary of the relevant context
+  (:attr:`~r3con.stages.relevance.RelevantContext.context_round`) and each parse it
+  cites, from a parse to each summary of the relevant context it cites, and from a
+  summary of round k to each summary of round k-1 it cites;
 - ``summarizes``: from every summary to its document, carrying the summary's quotes
   found there;
 - ``parses``: from every parse to its document.
@@ -156,18 +157,21 @@ def build_graph(
     parsing_provenance: Sequence[Sequence[str]],
     names: Mapping[str, str],
 ) -> Graph:
-    """The provenance graph of an answer that cites the final-round summaries and the
-    parses ``citations`` lists, over its run's ``relevance``, each document's parse
-    citing the final-round summaries its ``parsing_provenance`` lists, ``names`` giving
-    each document's name by its id, in document order."""
-    last = len(relevance.records)
-    edges = [[ANSWER, _summary(last, id_), CITES] for id_ in citations["summary_ids"]]
+    """The provenance graph of an answer that cites the summaries of the relevant
+    context and the parses ``citations`` lists, over its run's ``relevance``, each
+    document's parse citing the summaries of the relevant context its
+    ``parsing_provenance`` lists, ``names`` giving each document's name by its id, in
+    document order."""
+    context = relevance.context_round
+    edges = [
+        [ANSWER, _summary(context, id_), CITES] for id_ in citations["summary_ids"]
+    ]
     edges += [[ANSWER, _parse(id_), CITES] for id_ in citations["parse_ids"]]
     for document, cited in zip(names, parsing_provenance, strict=True):
-        edges += [[_parse(document), _summary(last, id_), CITES] for id_ in cited]
+        edges += [[_parse(document), _summary(context, id_), CITES] for id_ in cited]
         edges.append([_parse(document), _document(document), PARSES])
     quotes: dict[str, list[NamedQuote]] = {}
-    for round_ in range(last, 0, -1):
+    for round_ in range(len(relevance.records), 0, -1):
         for record in chain.from_iterable(relevance.records[round_ - 1]):
             summary = _summary(round_, record.id)
             document = record.id.partition(".")[0]

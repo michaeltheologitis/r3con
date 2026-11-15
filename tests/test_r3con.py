@@ -788,6 +788,25 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
     assert finished["provenance"] == asked.provenance
 
 
+def test_an_ask_over_a_run_that_pruned_every_memo_reads_its_round_1_notes(
+    answering_llm, tmp_path
+):
+    answering_llm.answers(
+        relevance=silent_when(is_later_round),
+        reasoning=citing("Halloran memo", slice(1)),
+    )
+    result = finished_run(answering_llm, tmp_path)
+    asked = ask(result.run_dir, "Who else?", completion=answering_llm)
+    ran, asked_request = answering_llm.requests_for("reasoning")
+    assert asked_request["messages"][0] == ran["messages"][0]
+    assert all(f"Notes on {doc}." in ran["messages"][0]["content"] for doc in DOCS)
+    halloran = result.document_ids[0]
+    assert asked.provenance["summary_ids"] == [halloran]
+    edges = asked.provenance["trail"]["edges"]
+    assert ["answer", f"summary:1:{halloran}", "cites"] in edges
+    assert asked.relevant_context == [f"Notes on {doc}." for doc in DOCS]
+
+
 def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_nothing(
     answering_llm, quoted_run
 ):
@@ -1893,6 +1912,28 @@ def test_a_finished_relevances_pruning_is_replayed_from_its_result_round_by_roun
         before = {r for kind, r in steps[:at] if kind == "relevance_finished"}
         after = {r for kind, r in steps[at:] if kind == "relevance_finished"}
         assert max(before) <= k < min(after, default=k + 1)
+
+
+def test_a_resumed_all_pruned_run_reuses_its_structuring_and_answers_from_round_1(
+    answering_llm, one_worker, tmp_path
+):
+    every_note = citing("Every memo.", summaries=slice(None))
+    llm = answering_llm.answers(
+        relevance=silent_when(is_later_round), reasoning=[bad_key(), every_note]
+    )
+    run_dir = failed_run(llm, tmp_path)
+    seen = []
+    answer, requests = resumed(llm, run_dir, on_event=seen.append)
+    assert requests == [("reasoning", None)]
+    ids = answer.document_ids
+    assert answer.provenance["summary_ids"] == ids
+    assert answer.relevant_context == [f"Notes on {m}." for m in MEMOS_BY_NAME.values()]
+    pruning = [
+        (e["round"], e["doc_ids"]) for e in seen if e["type"] == "documents_pruned"
+    ]
+    assert pruning == [(2, ids)]
+    [resumed_event] = [e for e in seen if e["type"] == "run_resumed"]
+    assert resumed_event["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 5}
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

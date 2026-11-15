@@ -7,7 +7,8 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    rounds; from round 2 on, each document is re-read in light of the *other* documents'
    previous snippets, but those it prunes
    (:attr:`~r3con.stages.relevance.RelevantContext.pruned`). The collection of them is
-   the **relevant context**, and it is what every later stage reads.
+   the **relevant context**, and it is what every later stage reads
+   (:attr:`~r3con.stages.relevance.RelevantContext.context_round`).
 2. **structuring** — two steps that are one idea: propose a per-task Pydantic schema
    from the task and the relevant context
    (:mod:`r3con.stages.structuring.schema`), then **parse** every document but the
@@ -93,7 +94,11 @@ from r3con.stages.relevance import (
     surface_relevance,
 )
 from r3con.stages.structuring.parsing import ParseResult, check_schema, parse_documents
-from r3con.stages.structuring.schema import ProposalResult, propose_schema
+from r3con.stages.structuring.schema import (
+    ProposalResult,
+    no_fields_schema,
+    propose_schema,
+)
 
 _log = get_logger("pipeline")
 
@@ -204,9 +209,9 @@ class Answer:
 
     - ``answer`` — the answer text.
     - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
-      the final-round relevance snippets it used (``<id>.<k>`` for part ``k`` of a
-      document read in parts), ``provenance["parse_ids"]``, those of the documents
-      whose records in ``structured_context`` it used (an id can be in both),
+      the relevance snippets of ``relevant_context`` it used (``<id>.<k>`` for part
+      ``k`` of a document read in parts), ``provenance["parse_ids"]``, those of the
+      documents whose records in ``structured_context`` it used (an id can be in both),
       ``provenance["trail"]``, the answer's trail under the default rule
       (:class:`~r3con.provenance.Trail`): the snippets and parses it cites, the
       snippets they cite, round by round back, and the documents those snippets
@@ -214,8 +219,10 @@ class Answer:
       trail's snippets are based on (:class:`~r3con.provenance.NamedQuote`), each
       naming its document by id and by name (:class:`~r3con.provenance.Provenance`).
       :func:`r3con.trace` builds it again from the run folder, under any rule.
-    - ``relevant_context`` — the **relevant context**: the final-round relevance snippet
-      of each document, aligned 1:1 with the ``documents`` you passed in
+    - ``relevant_context`` — the **relevant context**: the relevance snippet of each
+      document in the round of
+      :attr:`~r3con.stages.relevance.RelevantContext.context_round`, aligned 1:1 with
+      the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
       name is ``list(documents.values())[i]``); a document read in parts has
       its parts' notes joined. A document that contributes nothing is an empty string,
@@ -225,7 +232,8 @@ class Answer:
       naming the id of the document it came from, as reasoning saw it.
     - ``schema_code`` — the Pydantic schema that was proposed *for this question*. The
       most characteristic artifact of the method: it is what the question was decided to
-      be *about*.
+      be *about*. A ``Parse`` of no field when there was nothing to structure
+      (:attr:`~r3con.stages.relevance.RelevantContext.context_round`).
     - ``source_docs`` — for each list field of the parse, the 0-based source-document
       index of each record, positionally aligned with it.
     - ``run_dir`` — the folder holding the full artifacts (for :func:`r3con.ask`, the
@@ -240,11 +248,11 @@ class Answer:
       names were recorded; recorded in the run folder's ``names.json``.
     - ``relevance_provenance`` — for each document, aligned 1:1 with
       ``relevant_context``, the ids of the previous round's relevance snippets its
-      final-round snippet used: each a document's id, or ``<id>.<k>`` for part ``k`` of
+      snippet there used: each a document's id, or ``<id>.<k>`` for part ``k`` of
       a document read in parts in that previous round. A document read in parts has its
       parts' ids combined, in order, without repeats.
     - ``parsing_provenance`` — for each document, aligned 1:1 with ``documents``, the
-      ids of the final-round relevance snippets its parse used, its own document's
+      ids of the snippets of ``relevant_context`` its parse used, its own document's
       among them when it helped: each a document's id, or ``<id>.<k>`` for part ``k``
       of a document read in parts in that round, combined across a document's parts
       as in ``relevance_provenance``; none for a document relevance pruned, which is
@@ -447,7 +455,8 @@ def run_pipeline(
       One without ``round``, as r3context 0.6.26 to 0.6.28 wrote it, is not read: a
       resume of such a run, as of one from before pruning, prunes nothing it reuses.
     - ``schema_started`` / ``schema_finished``: finished has ``schema_code`` and
-      ``thought``.
+      ``thought``. Neither when no schema is proposed, there being nothing to
+      structure (:attr:`~r3con.stages.relevance.RelevantContext.context_round`).
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
       ``doc_id``; finished adds ``n_records``, the document's ``parse`` as JSON
       (each field of ``Parse`` and its records, a document read in parts with its
@@ -643,7 +652,15 @@ def _build_and_answer(
     _log.info("stage 2/3 · structuring · proposing the schema")
     proposal = saved.proposal
     if proposal is None:
-        emit("schema_started")
+        nothing_to_structure = relevance.all_pruned
+        if nothing_to_structure:
+            _log.info(
+                "every document was pruned, so nothing relevant is left in the end: "
+                "no schema is proposed, nothing is parsed, and reasoning answers from "
+                "round 1's snippets"
+            )
+        else:
+            emit("schema_started")
         with _recorded_stage(
             task_logger,
             "structuring/schema",
@@ -653,14 +670,18 @@ def _build_and_answer(
             cancel=cancel,
             resumed=resumed,
         ) as record:
-            proposal = propose_schema(
-                task=task,
-                relevance_snippets=relevance_snippets,
-                model=model,
-                prompt_version=config.prompts["structuring/schema"],
-                max_attempts=caps["schema_max_attempts"],
-                run=record.run,
-                **llm_kwargs,
+            proposal = (
+                no_fields_schema()
+                if nothing_to_structure
+                else propose_schema(
+                    task=task,
+                    relevance_snippets=relevance_snippets,
+                    model=model,
+                    prompt_version=config.prompts["structuring/schema"],
+                    max_attempts=caps["schema_max_attempts"],
+                    run=record.run,
+                    **llm_kwargs,
+                )
             )
             record.result = {
                 "schema_code": proposal.schema_code,
@@ -675,11 +696,12 @@ def _build_and_answer(
                 ],
             }
         stage_runs.append(record.run)
-        emit(
-            "schema_finished",
-            schema_code=proposal.schema_code,
-            thought=record.result["thought"],
-        )
+        if not nothing_to_structure:
+            emit(
+                "schema_finished",
+                schema_code=proposal.schema_code,
+                thought=record.result["thought"],
+            )
 
     # --- Stage 2b: structuring — parse every document but the pruned, in parallel. ---
     _log.info("stage 2/3 · structuring · parsing")
@@ -1385,9 +1407,9 @@ def read_representation(run_dir: Path) -> Representation:
 
 
 def _cites_all(built: Representation) -> Citations:
-    """Citations of every final-round snippet an answer over ``built`` can cite, and
-    of every document's parse: whatever an answer cites, its trail reaches no further
-    than theirs."""
+    """Citations of every snippet of the relevant context an answer over ``built`` can
+    cite, and of every document's parse: whatever an answer cites, its trail reaches no
+    further than theirs."""
     document_ids = list(built.names)
     return Citations(
         summary_ids=citable_ids(built.relevance.snippets, document_ids),

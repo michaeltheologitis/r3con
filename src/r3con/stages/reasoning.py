@@ -20,7 +20,10 @@ from among those the prompt shows (:func:`_cited`).
 A direct run whose prompt does not fit the model's window, because ``Splits`` estimates
 it over the line or the provider refuses it as too long, takes the coding path instead,
 starting from one sample record per field. So does one whose every reply fails its
-schema, starting from whichever view of the parse the coding path picks.
+schema, starting from whichever view of the parse the coding path picks. A parse of no
+field, as when there was nothing to structure
+(:attr:`~r3con.stages.relevance.RelevantContext.context_round`), is answered on the
+direct path, whatever path is asked: code over it would read nothing.
 
 Either way it reasons over the parse *together with* the relevant context from stage 1 —
 the two are co-equal views, and the parse alone is lossy. It never sees the source
@@ -295,6 +298,8 @@ def _system_prompt(
     parse_json: str,
     samples_block: str,
     parse_block: str,
+    structured: bool,
+    summarized: bool,
 ) -> str:
     """The system prompt of ``stage`` (``reasoning/direct`` or ``reasoning/coding``) at
     ``version``, from the variables a reasoning prompt version may use, a user's overlay
@@ -305,7 +310,10 @@ def _system_prompt(
     - ``parse_block``: the whole parse, or samples and a note;
     - ``samples_block``: one sample record per field;
     - ``parse_json``: the whole parse as JSON;
-    - ``read_in_parts``: whether a snippet is one part of a document read in parts.
+    - ``read_in_parts``: whether a snippet is one part of a document read in parts;
+    - ``structured``: whether the parse has a field, which it lacks when there was
+      nothing to structure;
+    - ``summarized``: whether a relevance snippet says anything.
     """
     return load_prompt(
         stage,
@@ -317,6 +325,8 @@ def _system_prompt(
         samples_block=samples_block,
         parse_block=parse_block,
         read_in_parts=any(isinstance(s, list) for s in relevance_snippets or ()),
+        structured=structured,
+        summarized=summarized,
     )
 
 
@@ -469,7 +479,8 @@ def reason(
     splits: Splits | None = None,
     **llm_kwargs: Any,
 ) -> ReasoningResult:
-    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``.
+    """Answer ``task`` over ``parsed`` and the relevant context, on ``path``, or, for a
+    ``parsed`` of no field, on the direct path.
 
     ``prompts`` and ``path`` are a run config's ``prompts`` and ``reasoning``.
     ``document_ids`` is each document's id for the run
@@ -523,6 +534,8 @@ def reason(
         document_ids=document_ids,
         parse_json=parse_json,
         samples_block=_sample_record_per_field(parse_dict),
+        structured=bool(parse_dict),
+        summarized=bool(citable["summary_ids"]),
     )
     user_message = f"Input:\n<task>\n{task}\n</task>"
     with_code = functools.partial(
@@ -542,7 +555,7 @@ def reason(
         run=run,
         **llm_kwargs,
     )
-    if path == "coding":
+    if path == "coding" and parse_dict:
         return with_code()
     outcome = _reason_directly(
         render=functools.partial(

@@ -40,13 +40,15 @@ Layout per ``logs/<run-folder>/``:
   snippet says it is based on, where it is in the whole document and how it was found
   there (``exact``, ``normalized`` or ``elided``, verbatim, or ``fuzzy``, only like the
   text, with its ``score``; all ``None`` when it was not: :mod:`r3con.quotes`), and the
-  ids of the previous round's snippets it used; the last round's summaries are the
-  relevant context that feeds downstream) + ``calls.json`` (one per
-  ``relevance_snippet`` call, tagged ``relevance-r{round}-d{doc}``, or
-  ``relevance-r{round}-d{doc}c{part}`` for a part, and ``-retry-{n}`` added to the n-th
-  resend of a reply that did not fit its schema).
+  ids of the previous round's snippets it used; the summaries of
+  :attr:`r3con.stages.relevance.RelevantContext.context_round` are the relevant context
+  that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
+  ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a part,
+  and ``-retry-{n}`` added to the n-th resend of a reply that did not fit its schema).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
-  (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``.
+  (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``;
+  with nothing to structure, a schema of no field and no call
+  (:attr:`r3con.stages.relevance.RelevantContext.context_round`).
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
   (``{parsed, source_docs, source_ids, provenance, totals}`` — for each list field of
   ``parsed``, the 0-based index and the id of the document each record came from, a

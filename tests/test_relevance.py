@@ -260,6 +260,35 @@ def test_a_relevant_context_with_pruning_copies_pickles_and_turns_into_a_dict():
     assert asdict(context)["pruned_after"] == {1: 2}
 
 
+def two_notes(a: str, b: str) -> list[list[SnippetRecord]]:
+    """A round's notes on two documents, ``a`` and ``b``, each read whole."""
+    return [[SnippetRecord("a", a, [], [])], [SnippetRecord("b", b, [], [])]]
+
+
+@pytest.mark.parametrize(
+    ("round_3", "pruned_after", "context_round", "snippets"),
+    [
+        (two_notes("a3", "b3"), {}, 3, ["a3", "b3"]),
+        (two_notes("a3", ""), {1: 3}, 3, ["a3", ""]),
+        (two_notes("", ""), {0: 3, 1: 3}, 1, ["a1", "b1"]),
+    ],
+    ids=["none-pruned", "one-pruned", "every-one-pruned"],
+)
+def test_the_relevant_context_is_the_final_rounds_unless_every_document_was_pruned(
+    round_3, pruned_after, context_round, snippets
+):
+    records = [two_notes("a1", "b1"), two_notes("a2", "b2"), round_3]
+    context = RelevantContext(records=records, pruned_after=pruned_after)
+    assert (context.context_round, context.snippets) == (context_round, snippets)
+    assert context.all_pruned == (context_round == 1)
+
+
+def test_a_relevant_context_of_no_round_is_of_round_0_and_has_no_snippets():
+    context = RelevantContext(records=[])
+    assert (context.context_round, context.snippets) == (0, [])
+    assert not context.all_pruned
+
+
 def test_drawn_document_ids_are_distinct_codes_of_six_hex_characters():
     ids = draw_document_ids(5_000)
     assert len(set(ids)) == 5_000

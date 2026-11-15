@@ -327,6 +327,31 @@ def test_an_empty_answer_is_sent_again_with_the_validators_error(llm, tmp_path):
     )
 
 
+# A parse of no field, as when relevance pruned every document, and one note to cite.
+NOTHING_STRUCTURED = {
+    "relevance_snippets": ["Halloran logged 5."],
+    "parsed": {},
+    "document_ids": IDS[:1],
+}
+
+
+def test_a_parse_of_no_field_is_answered_directly_even_on_the_coding_path(llm):
+    result = cite(
+        llm, "coding", citing("direct", [IDS[0]]), documents=NOTHING_STRUCTURED
+    )
+    assert (result.answer, result.path) == ("ok", "direct")
+    assert result.citations == {"summary_ids": [IDS[0]], "parse_ids": []}
+    assert len(llm.requests) == 1
+
+
+def test_a_parse_of_no_field_whose_direct_replies_never_fit_is_answered_with_code(llm):
+    bad = [{"provenance_ids": NO_IDS}, "not JSON", EMPTY_ANSWER]
+    replies = [*bad, citing("coding", [IDS[0]])]
+    result = cite(llm, "direct", *replies, documents=NOTHING_STRUCTURED)
+    assert (result.answer, result.path) == ("ok", "coding")
+    assert result.citations == {"summary_ids": [IDS[0]], "parse_ids": []}
+
+
 @pytest.mark.parametrize(
     ("flood_guard", "whole"), [(16_000, True), (1_000, False)], ids=["whole", "samples"]
 )

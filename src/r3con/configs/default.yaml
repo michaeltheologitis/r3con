@@ -22,7 +22,7 @@ prompts:
   relevance/later-rounds: v3
   structuring/schema: v2
   structuring/parsing: v4
-  reasoning/direct: v4
+  reasoning/direct: v5
   reasoning/coding: v4
 
 # Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
