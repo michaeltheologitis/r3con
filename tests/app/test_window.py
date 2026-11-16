@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx2
 import pytest
 import toga
+from toga.constants import WindowState
 
 from r3con.app import updates, window
 from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen, serve
@@ -24,6 +25,7 @@ from tests.fakes import (
     FakeCommands,
     FakeKeyring,
     FakeLLM,
+    FakeNSSize,
     FakeObjC,
 )
 
@@ -37,12 +39,18 @@ CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 # AppKit's NSTerminateNow: what Toga answers a Dock Quit or a logout with.
 NS_TERMINATE_NOW = 1
-# AppKit's style mask of the window Toga makes (titled, closable, miniaturizable and
-# resizable), the bit that runs its content under its title bar, and a title's states.
+# AppKit's values, and the style mask and least size of the window Toga makes.
 TOGA_STYLE_MASK = 0b1111
+TOGA_MIN_SIZE = FakeNSSize(100, 100)
 NS_FULL_SIZE_CONTENT_VIEW = 1 << 15
 NS_WINDOW_TITLE_VISIBLE = 0
 NS_WINDOW_TITLE_HIDDEN = 1
+NS_LEFT_MOUSE_DOWN = 1
+NS_LEFT_MOUSE_UP = 2
+NS_LEFT_MOUSE_DRAGGED = 6
+# The page's least width: narrower, it stacks its chat under its panel.
+PAGE_WIDE_LAYOUT_PX = 761
+TOGGLE_FULL_SCREEN = "document.documentElement.classList.toggle"
 HELD_RUN = {
     "question": "Which memo?",
     "model": "openai/held-model",
@@ -55,10 +63,14 @@ WINDOW_THREAD = "window"
 
 class FakeWebView:
     """Toga's web view: its WKWebView keeps each script message handler by its name,
-    in ``handlers``, and it keeps the scripts it is asked to run, in ``scripts``."""
+    in ``handlers``, unless it ``takes_handlers`` not, and it keeps the scripts it is
+    asked to run, in ``scripts``."""
 
-    def __init__(self, *, url: str) -> None:
+    takes_handlers = True
+
+    def __init__(self, *, url: str | None = None) -> None:
         self.url = url
+        self.on_webview_load: Callable[..., None] | None = None
         self.handlers: dict[str, Any] = {}
         self.scripts: list[str] = []
         contents = SimpleNamespace(addScriptMessageHandler=self._add_handler)
@@ -68,7 +80,17 @@ class FakeWebView:
         )
 
     def _add_handler(self, handler: Any, *, name: str) -> None:
+        if not self.takes_handlers:
+            raise AttributeError(
+                "WKUserContentController has no addScriptMessageHandler"
+            )
         self.handlers[name] = handler
+
+    def post(self, body: object, native: "FakeNSWindow") -> None:
+        """Post ``body`` to the window's handler, as the page in ``native`` would."""
+        message = SimpleNamespace(body=body, webView=SimpleNamespace(window=native))
+        handler = self.handlers["window"]
+        handler.userContentController_didReceiveScriptMessage_(None, message)
 
     def evaluate_javascript(self, javascript: str) -> None:
         self.scripts.append(javascript)
@@ -76,10 +98,11 @@ class FakeWebView:
 
 class FakeNSWindow:
     """AppKit's window under Toga's, its title bar shown: it keeps each drag, by its
-    event, and each zoom it is asked for, in ``moves``."""
+    event, and each zoom and minimize it is asked for, in ``moves``."""
 
     def __init__(self) -> None:
         self.styleMask = TOGA_STYLE_MASK
+        self.minSize = TOGA_MIN_SIZE
         self.titlebarAppearsTransparent = False
         self.titleVisibility = NS_WINDOW_TITLE_VISIBLE
         self.moves: list[tuple[str, object]] = []
@@ -89,6 +112,9 @@ class FakeNSWindow:
 
     def performZoom(self, sender: object) -> None:
         self.moves.append(("zoom", sender))
+
+    def performMiniaturize(self, sender: object) -> None:
+        self.moves.append(("minimize", sender))
 
 
 def fake_save_file_dialog(
@@ -107,6 +133,8 @@ class FakeWindow:
     def __init__(self) -> None:
         self.size = TOGA_WINDOW_SIZE
         self._impl = SimpleNamespace(native=FakeNSWindow())
+        self.state = WindowState.NORMAL
+        self.on_resize: Callable[..., None] | None = None
         self.hidden = False
         self.dialogs: list[tuple[str, str, threading.Thread]] = []
         self.opened = threading.Event()
@@ -167,6 +195,7 @@ class FakeApp:
         self.loop = asyncio.get_running_loop()
         self.main_thread = threading.current_thread()
         self.webview = self.startup(self)
+        assert self.webview.url is not None, "the window loaded no page"
         self.url = self.webview.url
         reading = asyncio.create_task(asyncio.to_thread(self.read_page))
         if self.quits_mid_save:
@@ -336,7 +365,7 @@ def test_the_window_opens_at_its_size(opened: list[FakeApp]):
     assert [shown.size for shown in app.windows] == [window.WINDOW_SIZE]
 
 
-def test_the_window_hides_its_title_bar_and_its_page_takes_the_top_row(
+def test_the_window_hides_its_title_bar_and_opens_its_page_saying_so(
     opened: list[FakeApp],
 ):
     window.main()
@@ -345,49 +374,128 @@ def test_the_window_hides_its_title_bar_and_its_page_takes_the_top_row(
     assert native.titlebarAppearsTransparent
     assert native.titleVisibility == NS_WINDOW_TITLE_HIDDEN
     assert native.styleMask == TOGA_STYLE_MASK | NS_FULL_SIZE_CONTENT_VIEW
+    assert native.minSize.width >= PAGE_WIDE_LAYOUT_PX
+    assert native.minSize.height == TOGA_MIN_SIZE.height
     assert launch_of(app)["titlebar"] == ["hidden"]
-    assert app.keys.status_code == 200
+
+
+def test_a_window_that_cant_hide_its_title_bar_keeps_it_and_the_page_its_top_row(
+    opened: list[FakeApp],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    monkeypatch.setattr(FakeWebView, "takes_handlers", False)
+    window.main()
+    (app,) = opened
+    native = app.main_window._impl.native
+    shown = (native.titlebarAppearsTransparent, native.styleMask, native.minSize)
+    assert shown == (False, TOGA_STYLE_MASK, TOGA_MIN_SIZE)
+    assert launch_of(app).keys() == {"token", "save"}
+    assert app.page.status_code == 200
+    assert (
+        "The window keeps its title bar: hiding it failed." in capsys.readouterr().err
+    )
+
+
+@pytest.fixture
+def titled(objc: FakeObjC) -> tuple[FakeWindow, FakeWebView]:
+    """A window whose title bar its web view's page has taken the place of."""
+    shown, webview = FakeWindow(), FakeWebView()
+    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
+    return shown, webview
 
 
 @pytest.mark.parametrize(
-    ("body", "moves"),
+    ("body", "event", "moves"),
     [
-        ("drag", ["drag"]),
-        ("zoom", ["zoom"]),
-        ("close", []),
-        ("", []),
-        ({"drag": True}, []),
+        ("drag", NS_LEFT_MOUSE_DOWN, ["drag"]),
+        ("drag", NS_LEFT_MOUSE_DRAGGED, ["drag"]),
+        ("drag", NS_LEFT_MOUSE_UP, []),
+        ("drag", None, []),
+        ("zoom", None, ["zoom"]),
+        ("close", NS_LEFT_MOUSE_DOWN, []),
+        ("", NS_LEFT_MOUSE_DOWN, []),
+        ({"drag": True}, NS_LEFT_MOUSE_DOWN, []),
     ],
-    ids=["drag", "zoom", "other", "empty", "not a string"],
+    ids=["press", "dragged", "release", "no event", "zoom", "other", "empty", "object"],
 )
-def test_the_pages_messages_drag_or_zoom_the_window_and_nothing_else(
-    opened: list[FakeApp], objc: FakeObjC, body: object, moves: list[str]
+def test_the_page_drags_the_window_from_a_left_press_and_zooms_it_and_nothing_else(
+    titled: tuple[FakeWindow, FakeWebView],
+    objc: FakeObjC,
+    body: object,
+    event: int | None,
+    moves: list[str],
 ):
-    window.main()
-    (app,) = opened
-    handler = app.webview.handlers["window"]
-    message = SimpleNamespace(body=body)
-    handler.userContentController_didReceiveScriptMessage_(None, message)
-    native = app.main_window._impl.native
-    senders = {"drag": objc.event, "zoom": None}
+    shown, webview = titled
+    current = None if event is None else SimpleNamespace(type=event)
+    objc.application.currentEvent = current
+    native = shown._impl.native
+    webview.post(body, native)
+    senders = {"drag": current, "zoom": None}
     assert native.moves == [(move, senders[move]) for move in moves]
 
 
-def test_the_page_knows_while_the_window_is_in_full_screen(
-    opened: list[FakeApp], objc: FakeObjC
+@pytest.mark.parametrize(
+    ("setting", "moves"),
+    [
+        (None, ["zoom"]),
+        ("Maximize", ["zoom"]),
+        ("Minimize", ["minimize"]),
+        ("None", []),
+    ],
+    ids=["unset", "zoom", "minimize", "do nothing"],
+)
+def test_a_double_click_on_the_row_does_what_the_users_title_bar_setting_says(
+    titled: tuple[FakeWindow, FakeWebView],
+    objc: FakeObjC,
+    setting: str | None,
+    moves: list[str],
 ):
-    window.main()
-    (app,) = opened
-    native = app.main_window._impl.native
-    objc.center.post("NSWindowDidEnterFullScreenNotification", native)
-    objc.center.post("NSWindowDidExitFullScreenNotification", native)
-    # Another window's full screen is not this one's.
-    objc.center.post("NSWindowDidEnterFullScreenNotification", FakeNSWindow())
-    toggle = "document.documentElement.classList.toggle"
-    assert app.webview.scripts == [
-        f'{toggle}("full-screen", true)',
-        f'{toggle}("full-screen", false)',
+    if setting is not None:
+        objc.defaults["AppleActionOnDoubleClick"] = setting
+    shown, webview = titled
+    native = shown._impl.native
+    webview.post("zoom", native)
+    assert native.moves == [(move, None) for move in moves]
+
+
+def test_a_message_the_window_cant_act_on_is_logged_never_raised_into_appkit(
+    titled: tuple[FakeWindow, FakeWebView],
+    objc: FakeObjC,
+    caplog: pytest.LogCaptureFixture,
+):
+    del objc.classes["NSApplication"]
+    shown, webview = titled
+    webview.post("drag", shown._impl.native)
+    assert [record.getMessage() for record in caplog.records] == [
+        "The window couldn't do the page's 'drag'."
     ]
+
+
+def test_the_page_knows_while_the_window_is_in_full_screen_and_after_a_reload(
+    titled: tuple[FakeWindow, FakeWebView],
+):
+    shown, webview = titled
+    assert shown.on_resize is not None and webview.on_webview_load is not None
+    for state in (WindowState.FULLSCREEN, WindowState.NORMAL):
+        shown.state = state
+        shown.on_resize(shown)
+    shown.state = WindowState.FULLSCREEN
+    webview.on_webview_load(webview)
+    assert webview.scripts == [
+        f'{TOGGLE_FULL_SCREEN}("full-screen", true)',
+        f'{TOGGLE_FULL_SCREEN}("full-screen", false)',
+        f'{TOGGLE_FULL_SCREEN}("full-screen", true)',
+    ]
+
+
+def test_hiding_two_title_bars_defines_the_handlers_objective_c_class_once(
+    titled: tuple[FakeWindow, FakeWebView],
+):
+    _, first = titled
+    second = FakeWebView()
+    window.hide_title_bar(FakeWindow(), second)  # pyright: ignore[reportArgumentType]
+    assert type(first.handlers["window"]) is type(second.handlers["window"])
 
 
 def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(

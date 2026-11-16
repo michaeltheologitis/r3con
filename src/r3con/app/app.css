@@ -128,22 +128,26 @@ p { margin: 0; }
   .topbar { flex-wrap: wrap; row-gap: 0.1em; }
   .status { order: 3; flex-basis: 100%; }
 }
-/* In the Mac app the tab row is the window's top row (:root.titlebar): the frame runs to the window's edges, the brand
-   gives way, the top actions end the chat's header, and both rows are as tall as the title bar they replace, the tab
-   row leaving room at its left for the window's traffic lights, but in full screen, which hides them. */
+/* The Mac app, whose tab row is the window's title bar, the traffic lights at its left. */
 :root.titlebar {
   --tab-row-height: 28px;
   --traffic-lights-width: 70px;
+  --grab-width: 48px;
 }
-.titlebar .app, .titlebar .topbar { padding: 0; }
-.titlebar .brand { display: none; }
+.titlebar .app { padding: 0; grid-template-rows: minmax(0, 1fr); }
+.titlebar .topbar { display: none; }
 .titlebar .frame { border: 0; border-radius: 0; }
-.titlebar .tab-row { padding-left: var(--traffic-lights-width); }
+.titlebar .tab-row { padding: 0 var(--grab-width) 0 var(--traffic-lights-width); }
 .titlebar.full-screen .tab-row { padding-left: 0; }
-.titlebar :is(.run-tabs, .run-tab) { padding-block: 0; }
-.side-head { display: flex; flex-wrap: wrap; min-height: var(--tab-row-height); border-bottom: 1px solid var(--line); }
-.side-head .tabs { flex: 1; min-height: 0; border-bottom: 0; }
+.titlebar .run-tabs { padding-block: 0; }
+.tab-row .status { padding-left: 2ch; }
+.side-head { container-type: inline-size; display: flex; min-height: var(--tab-row-height); border-bottom: 1px solid var(--line); }
+.side-head .tabs { flex: 1; min-width: 0; min-height: 0; padding-right: 0; border-bottom: 0; }
 .side-head .top-actions { align-items: center; padding-right: 2ch; }
+@container (width < 44ch) {
+  .side-head .tabs { gap: 2ch; }
+  .theme-name { display: none; }
+}
 
 /* ---- panel ---- */
 .board { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

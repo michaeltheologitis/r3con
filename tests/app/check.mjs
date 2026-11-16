@@ -8207,13 +8207,11 @@ async function liveSaveDialog(url, server) {
   });
 }
 
-// r3con app's Mac window shows no title bar but its traffic lights, and opens the page with this: the tab row is the
-// window's top row, the lights at its left, its empty stretches moving the window by a message to the window.
+// What r3con app's Mac window opens the page with: its tab row is the window's title bar.
 const TITLE_BAR = 'titlebar=hidden';
-// The title bar's height, which the row takes, the room it keeps for the lights, and the class the window puts on the
-// page's root while it is in full screen, where the lights are hidden.
 const TITLE_BAR_PX = 28;
 const TRAFFIC_LIGHTS_PX = 70;
+// The class the window puts on the page's root while it is in full screen, which hides the traffic lights.
 const FULL_SCREEN = 'full-screen';
 
 // In-page, before the page's own script: the Mac window's message handler, keeping what the page posts it.
@@ -8222,28 +8220,39 @@ function windowHandler() {
   window.webkit = { messageHandlers: { window: { postMessage: (message) => window.posted.push(message) } } };
 }
 
-// What the page has posted the window since the last read.
 const postedSince = (page) => page.evaluate(() => window.posted.splice(0));
 
 function titleBarRow() {
   const box = (selector) => document.querySelector(selector).getBoundingClientRect();
-  const [row, head, panel, pane, plus] = ['#tab-row', '.side-head', '#panel', '#chat-pane', '#new-tab-btn'].map(box);
-  const [files, settings, theme, status] = ['#tab-files', '#settings-btn', '#theme-btn', '#run-status'].map(box);
+  const [row, head, panel, pane, plus, tabs] = ['#tab-row', '.side-head', '#panel', '#chat-pane', '#new-tab-btn', '#run-tabs'].map(box);
+  const [files, settings, theme] = ['#tab-files', '#settings-btn', '#theme-btn'].map(box);
   const actions = document.getElementById('top-actions');
+  const mid = (r) => (r.top + r.bottom) / 2;
   return {
     rows: [row.top, row.bottom, head.top, head.bottom],
     content: [panel.top, pane.top],
     brand: document.querySelector('.brand').checkVisibility() || document.body.innerText.includes('❀ r3con'),
     actions: actions.parentElement.matches('.side-head') && files.right < settings.left && settings.right < theme.left,
     actionsEnd: head.right - theme.right - parseFloat(getComputedStyle(actions).paddingRight),
-    actionsTop: [settings.top, theme.top].every((top) => top >= head.top && top < head.bottom),
+    oneLine: [files, settings, theme].every((r) => r.top >= head.top && r.bottom <= head.bottom),
+    theme: document.getElementById('theme-btn').innerText,
     inset: parseFloat(getComputedStyle(document.getElementById('tab-row')).paddingLeft),
-    statusBox: [status.width, status.height],
-    stretches: { tabRow: { x: (plus.right + row.right) / 2, y: (row.top + row.bottom) / 2 }, chatHead: { x: (files.right + settings.left) / 2, y: (head.top + head.bottom) / 2 } },
+    stretches: {
+      afterPlus: { x: (plus.right + row.right) / 2, y: mid(row) },
+      tabList: { x: tabs.left + 4, y: mid(row) },
+      chatHead: { x: (files.right + settings.left) / 2, y: mid(head) },
+    },
   };
 }
 
-// In the Mac app, the tab row is the window's top row, and its empty stretches drag and zoom the window.
+function statusShown() {
+  const [status, plusButton, tabRow] = ['run-status', 'new-tab-btn', 'tab-row'].map((id) => document.getElementById(id));
+  const [box, plus, row] = [status, plusButton, tabRow].map((el) => el.getBoundingClientRect());
+  const inRow = status.parentElement === tabRow && box.left >= plus.right && box.top >= row.top && box.bottom <= row.bottom;
+  return { text: status.textContent, title: status.title, shown: box.width > 1 && box.height > 1, inRow };
+}
+
+// In the Mac app, the tab row is the window's title bar, and its empty stretches drag and zoom the window.
 async function liveTitleBar(url) {
   await withPage('live', { url: `${url}&${TITLE_BAR}`, sample: false, before: (page) => page.addInitScript(windowHandler) }, async (page) => {
     await page.setInputFiles('#file-input', sampleMemos());
@@ -8253,13 +8262,22 @@ async function liveTitleBar(url) {
     const oneRow = isDeepStrictEqual(row.rows, [0, TITLE_BAR_PX, 0, TITLE_BAR_PX]) && isDeepStrictEqual(row.content, [TITLE_BAR_PX, TITLE_BAR_PX]);
     check('live', "in the Mac app, one row of the title bar's height is above the panel and the chat: the tab row and the chat's header", oneRow, JSON.stringify(row));
     check('live', 'in the Mac app, no ❀ r3con is shown', !row.brand);
-    const atEnd = row.actions && Math.abs(row.actionsEnd) < 1 && row.actionsTop;
-    check('live', "in the Mac app, settings and theme sit at the right end of the chat's header, after files", atEnd, JSON.stringify(row));
+    const atEnd = row.actions && Math.abs(row.actionsEnd) < 1 && row.oneLine && row.theme === 'theme · light';
+    check('live', "in the Mac app, settings and theme · light sit at the right end of the chat's header, after files", atEnd, JSON.stringify(row));
     check('live', "in the Mac app, the tab row leaves room at its left for the window's traffic lights", row.inset === TRAFFIC_LIGHTS_PX, `${row.inset}`);
-    const status = await page.textContent('#run-status');
-    const heard = (await page.locator('#run-status').ariaSnapshot()).includes(status);
-    const statusName = "in the Mac app, the run's status line is hidden, but screen readers still have it";
-    check('live', statusName, Boolean(status) && heard && row.statusBox.every((px) => px <= 1), `${status}; ${JSON.stringify(row.statusBox)}`);
+
+    const routine = await page.evaluate(statusShown);
+    const heard = (await page.locator('#run-status').ariaSnapshot()).includes(routine.text);
+    check('live', "in the Mac app, the run's routine status is hidden, but screen readers still have it", Boolean(routine.text) && heard && !routine.shown, JSON.stringify(routine));
+    await page.selectOption('#model-pick', '');
+    await page.fill('#question', NEW_QUESTION);
+    await page.click('#run-btn');
+    const refused = await page.evaluate(statusShown);
+    const refusedName = 'in the Mac app, a refusal shows in the tab row after +, its whole text on hover';
+    check('live', refusedName, isDeepStrictEqual(refused, { text: TYPE_A_MODEL, title: TYPE_A_MODEL, shown: true, inRow: true }), JSON.stringify(refused));
+    await page.selectOption('#model-pick', DEFAULT_MODEL);
+    await page.fill('#question', '');
+    check('live', 'in the Mac app, the routine status after a refusal is hidden again', !(await page.evaluate(statusShown)).shown);
 
     const moved = {};
     for (const [name, { x, y }] of Object.entries(row.stretches)) {
@@ -8268,15 +8286,26 @@ async function liveTitleBar(url) {
       await page.mouse.dblclick(x, y);
       moved[name] = [pressed, await postedSince(page)];
     }
-    const movesName = "in the Mac app, a press on the row's empty stretch after + or before settings drags the window, and a double click there zooms it, its second press dragging nothing";
+    const movesName = "in the Mac app, a press on the row off its controls, after +, around the tabs or before settings, drags the window, and a double click there zooms it, its second press dragging nothing";
     const moves = [['drag'], ['drag', 'zoom']];
-    check('live', movesName, isDeepStrictEqual(moved, { tabRow: moves, chatHead: moves }), JSON.stringify(moved));
+    check('live', movesName, isDeepStrictEqual(moved, { afterPlus: moves, tabList: moves, chatHead: moves }), JSON.stringify(moved));
     for (const selector of ['.run-tab', '#tab-files', '#tab-chat', '#theme-btn', '#theme-btn', '#settings-btn', '#new-tab-btn']) {
       await page.keyboard.press('Escape');
       await page.click(selector);
     }
     const controls = await postedSince(page);
     check('live', 'in the Mac app, a press on a tab, + or a button in the row moves no window', !controls.length && (await tabCount(page)) === 2, JSON.stringify(controls));
+    const close = await page.locator('.tab-close').first().boundingBox();
+    const closeName = `in the Mac app, a tab's × is still at least ${MIN_TARGET_PX} px each way, inside the row`;
+    check('live', closeName, close.width >= MIN_TARGET_PX && close.height >= MIN_TARGET_PX && close.y >= 0 && close.y + close.height <= TITLE_BAR_PX, JSON.stringify(close));
+
+    await page.focus('#resizer');
+    await page.keyboard.press('Home');
+    const narrow = await page.evaluate(titleBarRow);
+    const narrowWidth = await page.evaluate(() => document.getElementById('side').getBoundingClientRect().width);
+    const narrowName = "with the chat at its narrowest, the chat's header is still one line of the title bar's height, theme shortened";
+    const fits = narrowWidth === SIDE_MIN_PX && isDeepStrictEqual(narrow.rows, row.rows) && narrow.actions && narrow.oneLine && narrow.theme === 'theme';
+    check('live', narrowName, fits, JSON.stringify({ narrowWidth, ...narrow }));
 
     const insets = [];
     for (const full of [true, false]) {

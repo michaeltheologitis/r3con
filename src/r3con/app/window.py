@@ -12,14 +12,10 @@ app's menu or in the Dock, or logging out hides it, then stops the server as
 ``serve``'s stop does, for up to ``QUIT_SECONDS``, and ends the process: a model call
 still in flight is cut off, and its run folder left without ``run_failed``. If Toga
 can't start the app, the server stops before the error goes on. Its web view has no
-downloads, so a tab is saved through a Save dialog on the window. The window shows no
-title bar but its traffic lights, over the left of the page's tab row, which the page,
-opened with ``TITLE_BAR_HIDDEN``, makes the window's top row: it drags the window by
-posting ``DRAG`` to its ``WINDOW_MESSAGES`` handler and zooms it by ``ZOOM``, and has
-``FULL_SCREEN`` on its root while the window is in full screen, where the lights are
-hidden. It updates itself through Sparkle (:mod:`r3con.app.updates`), and opens
-without updates whatever stops them. Toga is the Mac app's own: neither r3con nor its
-``app`` extra installs it.
+downloads, so a tab is saved through a Save dialog on the window. The page's tab row
+takes the place of the window's title bar (``hide_title_bar``). It updates itself
+through Sparkle (:mod:`r3con.app.updates`), and opens without updates whatever stops
+them. Toga is the Mac app's own: neither r3con nor its ``app`` extra installs it.
 """
 
 from __future__ import annotations
@@ -28,17 +24,20 @@ import asyncio
 import json
 import os
 from concurrent.futures import CancelledError, Future
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
 import toga
+from toga.constants import WindowState
 
 from r3con.app import updates
-from r3con.app.server import MAC_APP_KEY_SERVICE, QUIT_SECONDS, serve
+from r3con.app.server import MAC_APP_KEY_SERVICE, QUIT_SECONDS, SAVE_DIALOG, serve
 from r3con.logging_setup import configure_logging, get_logger
 
 WINDOW_SIZE = (1280, 820)
+# Wider than the page's narrow layout, up to 760px, which stacks its chat below.
+MIN_WINDOW_WIDTH = 800
 # Below macOS's ephemeral ports, 49152 and up; a new one would lose the page's settings.
 PORT = 47313
 SAVE_DIALOG_TITLE = "Save this tab"
@@ -46,13 +45,18 @@ TITLE_BAR_HIDDEN = "titlebar=hidden"
 # AppKit's NSWindowStyleMaskFullSizeContentView and NSWindowTitleHidden.
 FULL_SIZE_CONTENT_VIEW = 1 << 15
 TITLE_HIDDEN = 1
+# AppKit's NSEventTypeLeftMouseDown and NSEventTypeLeftMouseDragged.
+LEFT_MOUSE_DOWN = 1
+LEFT_MOUSE_DRAGGED = 6
+# The user's choice of what double-clicking a title bar does, and two that don't zoom.
+DOUBLE_CLICK_ACTION = "AppleActionOnDoubleClick"
+MINIMIZE = "Minimize"
+NO_ACTION = "None"
 # The page's window.webkit.messageHandlers.window, and what it posts there.
 WINDOW_MESSAGES = "window"
 DRAG = "drag"
 ZOOM = "zoom"
 FULL_SCREEN = "full-screen"
-ENTERED_FULL_SCREEN = "NSWindowDidEnterFullScreenNotification"
-EXITED_FULL_SCREEN = "NSWindowDidExitFullScreenNotification"
 
 logger = get_logger("app")
 
@@ -81,54 +85,72 @@ async def _save_dialog(window: toga.Window, name: str) -> Path | None:
 
 
 def hide_title_bar(window: toga.Window, webview: toga.WebView) -> None:
-    """Hide ``window``'s title bar but its traffic lights, which then sit over the top
-    of ``webview``, and let its page drag and zoom the window, and know when the
-    window is in full screen. Call it once, in the app's startup."""
-    # Toga's bridge to Objective-C, which only the Mac app has.
-    from rubicon.objc import (  # pyright: ignore[reportMissingImports]
-        SEL,
-        NSObject,
-        ObjCClass,
-        objc_method,
-    )
+    """Make ``webview``'s top row ``window``'s title bar, hiding the bar itself last."""
+    from rubicon.objc import NSSize  # pyright: ignore[reportMissingImports]
 
     native = window._impl.native
+    contents = webview._impl.native.configuration.userContentController
+    contents.addScriptMessageHandler(
+        _window_messages().alloc().init(), name=WINDOW_MESSAGES
+    )
+    native.minSize = NSSize(MIN_WINDOW_WIDTH, native.minSize.height)
+
+    def show_full_screen(widget: object, **kwargs: Any) -> None:
+        full = window.state == WindowState.FULLSCREEN
+        webview.evaluate_javascript(
+            "document.documentElement.classList.toggle("
+            f"{json.dumps(FULL_SCREEN)}, {json.dumps(full)})"
+        )
+
+    window.on_resize = show_full_screen
+    webview.on_webview_load = show_full_screen
     native.titlebarAppearsTransparent = True
     native.titleVisibility = TITLE_HIDDEN
     native.styleMask |= FULL_SIZE_CONTENT_VIEW
-    application = ObjCClass("NSApplication").sharedApplication
+
+
+@cache
+def _window_messages() -> Any:
+    """The page's message handler's class, made once: Objective-C keeps it by name."""
+    from rubicon.objc import (  # pyright: ignore[reportMissingImports]
+        NSObject,
+        objc_method,
+    )
 
     class R3ConWindowMessages(NSObject):
         @objc_method
         def userContentController_didReceiveScriptMessage_(
             self, controller, message
         ) -> None:
-            _move_window(native, application.currentEvent, str(message.body))
+            _on_message(message.webView.window, str(message.body))
 
-        @objc_method
-        def fullScreenChanged_(self, notification) -> None:
-            full = str(notification.name) == ENTERED_FULL_SCREEN
-            webview.evaluate_javascript(
-                "document.documentElement.classList.toggle("
-                f"{json.dumps(FULL_SCREEN)}, {json.dumps(full)})"
-            )
-
-    messages = R3ConWindowMessages.alloc().init()
-    contents = webview._impl.native.configuration.userContentController
-    contents.addScriptMessageHandler(messages, name=WINDOW_MESSAGES)
-    center = ObjCClass("NSNotificationCenter").defaultCenter
-    for name in (ENTERED_FULL_SCREEN, EXITED_FULL_SCREEN):
-        center.addObserver(
-            messages, selector=SEL("fullScreenChanged:"), name=name, object=native
-        )
+    return R3ConWindowMessages
 
 
-def _move_window(native: Any, event: Any, message: str) -> None:
-    """Drag the NSWindow ``native`` from the mouse-down ``event`` on ``DRAG``, or zoom
-    it on ``ZOOM``, as its title bar would; ignore any other ``message``."""
-    if message == DRAG:
+def _on_message(native: Any, message: str) -> None:
+    """Drag the NSWindow ``native`` on ``DRAG``; on ``ZOOM``, double-click its title."""
+    from rubicon.objc import ObjCClass  # pyright: ignore[reportMissingImports]
+
+    try:
+        if message == DRAG:
+            _drag(native, ObjCClass("NSApplication").sharedApplication.currentEvent)
+        elif message == ZOOM:
+            defaults = ObjCClass("NSUserDefaults").standardUserDefaults
+            _double_click(native, defaults.stringForKey(DOUBLE_CLICK_ACTION))
+    except Exception:
+        logger.exception("The window couldn't do the page's %r.", message)
+
+
+def _drag(native: Any, event: Any) -> None:
+    if event is not None and event.type in (LEFT_MOUSE_DOWN, LEFT_MOUSE_DRAGGED):
         native.performWindowDragWithEvent(event)
-    elif message == ZOOM:
+
+
+def _double_click(native: Any, action: Any) -> None:
+    chosen = "" if action is None else str(action)
+    if chosen == MINIMIZE:
+        native.performMiniaturize(None)
+    elif chosen != NO_ACTION:
         native.performZoom(None)
 
 
@@ -158,8 +180,14 @@ def main() -> None:
             updates.start(app)
         except Exception:
             logger.exception("Sparkle's updater failed: %s.", updates.NO_UPDATES)
-        webview = toga.WebView(url=f"{url}&{TITLE_BAR_HIDDEN}")
-        hide_title_bar(cast("toga.Window", app.main_window), webview)
+        webview = toga.WebView()
+        flags = [SAVE_DIALOG]
+        try:
+            hide_title_bar(cast("toga.Window", app.main_window), webview)
+            flags.append(TITLE_BAR_HIDDEN)
+        except Exception:
+            logger.exception("The window keeps its title bar: hiding it failed.")
+        webview.url = "&".join([url, *flags])
         return webview
 
     def hide(app: toga.App, **kwargs: Any) -> bool:

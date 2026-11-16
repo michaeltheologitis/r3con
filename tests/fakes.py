@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal, Self
+from typing import Any, Literal, NamedTuple, Self
 
 import litellm
 import toga
@@ -668,23 +668,11 @@ class FakeUpdaterController:
         self.checks += 1
 
 
-class FakeNotificationCenter:
-    """Foundation's NSNotificationCenter: ``post`` calls each observer added for the
-    notification's name and object, by its selector, as Objective-C would."""
+class FakeNSSize(NamedTuple):
+    """rubicon.objc's ``NSSize``."""
 
-    def __init__(self) -> None:
-        self.observers: list[tuple[Any, str, str, object]] = []
-
-    def addObserver(
-        self, observer: Any, *, selector: str, name: str, object: object
-    ) -> None:
-        self.observers.append((observer, selector, name, object))
-
-    def post(self, name: str, sender: object) -> None:
-        notification = SimpleNamespace(name=name, object=sender)
-        for observer, selector, observed, source in self.observers:
-            if observed == name and source is sender:
-                getattr(observer, selector.replace(":", "_"))(notification)
+    width: float
+    height: float
 
 
 class FakeNSObject:
@@ -706,23 +694,24 @@ class FakeObjC:
     False, which makes its updater controller found unless ``has_controller`` is False.
     Each controller made is in ``controllers``; one answers its init with nil if
     ``initializes`` is False, and its updater fails to start if ``starts`` is False.
-    The app's current event is ``event``, and its notification center ``center``."""
+    The app's current event, none at first, is ``application.currentEvent``, and the
+    user's defaults are ``defaults``."""
 
     def __init__(self, frameworks: Path) -> None:
         self.frameworks = frameworks
         self.loads = self.has_controller = self.initializes = self.starts = True
         self.controllers: list[FakeUpdaterController] = []
-        self.event = object()
-        self.center = FakeNotificationCenter()
+        self.application = SimpleNamespace(currentEvent=None)
+        self.defaults: dict[str, str] = {}
         main_bundle = SimpleNamespace(privateFrameworksPath=str(frameworks))
         self.classes: dict[str, SimpleNamespace] = {
             "NSBundle": SimpleNamespace(
                 mainBundle=main_bundle, bundleWithPath=self._bundle_with_path
             ),
-            "NSApplication": SimpleNamespace(
-                sharedApplication=SimpleNamespace(currentEvent=self.event)
+            "NSApplication": SimpleNamespace(sharedApplication=self.application),
+            "NSUserDefaults": SimpleNamespace(
+                standardUserDefaults=SimpleNamespace(stringForKey=self.defaults.get)
             ),
-            "NSNotificationCenter": SimpleNamespace(defaultCenter=self.center),
         }
 
     def ObjCClass(self, name: str) -> SimpleNamespace:

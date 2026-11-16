@@ -5,7 +5,7 @@ from types import ModuleType
 import pytest
 
 from r3con.app.server import KEY_VARIABLES
-from tests.fakes import FakeNSObject, FakeObjC
+from tests.fakes import FakeNSObject, FakeNSSize, FakeObjC
 
 
 # In place of the root's: no fake model or recorded resend waits, as the server's
@@ -22,12 +22,11 @@ def objc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeObjC:
     which only the Mac app has: its bundle's Frameworks folder has no Sparkle."""
     runtime = FakeObjC(tmp_path / "Frameworks")
     bridge = ModuleType("rubicon.objc")
-    # A class defined on NSObject keeps its methods; a selector is its name.
     vars(bridge).update(
         ObjCClass=runtime.ObjCClass,
         NSObject=FakeNSObject,
         objc_method=lambda method: method,
-        SEL=str,
+        NSSize=FakeNSSize,
     )
     monkeypatch.setitem(sys.modules, "rubicon", ModuleType("rubicon"))
     monkeypatch.setitem(sys.modules, "rubicon.objc", bridge)
