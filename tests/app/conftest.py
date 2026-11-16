@@ -5,7 +5,7 @@ from types import ModuleType
 import pytest
 
 from r3con.app.server import KEY_VARIABLES
-from tests.fakes import FakeNSObject, FakeNSSize, FakeObjC
+from tests.fakes import FakeNSPoint, FakeNSRect, FakeObjC
 
 
 # In place of the root's: no fake model or recorded resend waits, as the server's
@@ -24,9 +24,11 @@ def objc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeObjC:
     bridge = ModuleType("rubicon.objc")
     vars(bridge).update(
         ObjCClass=runtime.ObjCClass,
-        NSObject=FakeNSObject,
+        ObjCInstance=object,
+        NSPoint=FakeNSPoint,
+        NSMakeRect=FakeNSRect,
         objc_method=lambda method: method,
-        NSSize=FakeNSSize,
+        objc_property=lambda *types, **options: None,
     )
     monkeypatch.setitem(sys.modules, "rubicon", ModuleType("rubicon"))
     monkeypatch.setitem(sys.modules, "rubicon.objc", bridge)

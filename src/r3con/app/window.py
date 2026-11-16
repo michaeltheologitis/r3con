@@ -12,13 +12,12 @@ app's menu or in the Dock, or logging out hides it, then stops the server as
 ``serve``'s stop does, for up to ``QUIT_SECONDS``, and ends the process: a model call
 still in flight is cut off, and its run folder left without ``run_failed``. If Toga
 can't start the app, the server stops before the error goes on. Its web view has no
-downloads, so a tab is saved through a Save dialog on the window. The page's tab row
-takes the place of the window's title bar (``hide_title_bar``). It updates itself
+downloads, so a tab is saved through a Save dialog on the window. Its title bar is
+hidden but its traffic lights, which sit in the page's top row (``hide_title_bar``).
+It updates itself
 through Sparkle (:mod:`r3con.app.updates`), and opens without updates whatever stops
 them. Toga is the Mac app's own: neither r3con nor its ``app`` extra installs it.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
@@ -36,27 +35,25 @@ from r3con.app.server import MAC_APP_KEY_SERVICE, QUIT_SECONDS, SAVE_DIALOG, ser
 from r3con.logging_setup import configure_logging, get_logger
 
 WINDOW_SIZE = (1280, 820)
-# Wider than the page's narrow layout, up to 760px, which stacks its chat below.
-MIN_WINDOW_WIDTH = 800
 # Below macOS's ephemeral ports, 49152 and up; a new one would lose the page's settings.
 PORT = 47313
 SAVE_DIALOG_TITLE = "Save this tab"
 TITLE_BAR_HIDDEN = "titlebar=hidden"
+# The default title bar's height on macOS 11 and later, which the page's top row takes.
+TITLE_BAR_HEIGHT = 28
 # AppKit's NSWindowStyleMaskFullSizeContentView and NSWindowTitleHidden.
 FULL_SIZE_CONTENT_VIEW = 1 << 15
 TITLE_HIDDEN = 1
-# AppKit's NSEventTypeLeftMouseDown and NSEventTypeLeftMouseDragged.
-LEFT_MOUSE_DOWN = 1
-LEFT_MOUSE_DRAGGED = 6
+# AppKit's NSViewWidthSizable and NSViewMaxYMargin: in a flipped view, the top's width.
+WIDTH_SIZABLE = 1 << 1
+MAX_Y_MARGIN = 1 << 5
+DOUBLE_CLICK = 2
 # The user's choice of what double-clicking a title bar does, and two that don't zoom.
 DOUBLE_CLICK_ACTION = "AppleActionOnDoubleClick"
 MINIMIZE = "Minimize"
 NO_ACTION = "None"
-# The page's window.webkit.messageHandlers.window, and what it posts there.
-WINDOW_MESSAGES = "window"
-DRAG = "drag"
-ZOOM = "zoom"
 FULL_SCREEN = "full-screen"
+CONTROLS_QUERY = "r3conTitleBarControls()"
 
 logger = get_logger("app")
 
@@ -85,65 +82,89 @@ async def _save_dialog(window: toga.Window, name: str) -> Path | None:
 
 
 def hide_title_bar(window: toga.Window, webview: toga.WebView) -> None:
-    """Make ``webview``'s top row ``window``'s title bar, hiding the bar itself last."""
-    from rubicon.objc import NSSize  # pyright: ignore[reportMissingImports]
+    """Hide ``window``'s title bar, the bar itself last, and let the page's top row drag
+    the window but where the page says it has a control."""
+    from rubicon.objc import NSMakeRect  # pyright: ignore[reportMissingImports]
 
     native = window._impl.native
-    contents = webview._impl.native.configuration.userContentController
-    contents.addScriptMessageHandler(
-        _window_messages().alloc().init(), name=WINDOW_MESSAGES
-    )
-    native.minSize = NSSize(MIN_WINDOW_WIDTH, native.minSize.height)
+    band = _drag_band().alloc().init()
+    band.autoresizingMask = WIDTH_SIZABLE | MAX_Y_MARGIN
 
-    def show_full_screen(widget: object, **kwargs: Any) -> None:
+    async def refresh(widget: object, **kwargs: Any) -> None:
+        # Once Toga has put the web view in the window: over it.
+        if band.superview is None:
+            width = native.contentView.frame.size.width
+            band.frame = NSMakeRect(0, 0, width, TITLE_BAR_HEIGHT)
+            native.contentView.addSubview(band)
         full = window.state == WindowState.FULLSCREEN
         webview.evaluate_javascript(
             "document.documentElement.classList.toggle("
             f"{json.dumps(FULL_SCREEN)}, {json.dumps(full)})"
         )
+        answer = await webview.evaluate_javascript(CONTROLS_QUERY)
+        band.controls = [tuple(map(float, rect)) for rect in json.loads(answer)]
 
-    window.on_resize = show_full_screen
-    webview.on_webview_load = show_full_screen
+    window.on_resize = refresh
+    # Toga runs a coroutine handler as a task, which its type leaves out.
+    webview.on_webview_load = refresh  # pyright: ignore[reportAttributeAccessIssue]
     native.titlebarAppearsTransparent = True
     native.titleVisibility = TITLE_HIDDEN
     native.styleMask |= FULL_SIZE_CONTENT_VIEW
 
 
 @cache
-def _window_messages() -> Any:
-    """The page's message handler's class, made once: Objective-C keeps it by name."""
+def _drag_band() -> Any:
+    """The class of the view over the top row, made once: Objective-C keeps classes
+    by name."""
     from rubicon.objc import (  # pyright: ignore[reportMissingImports]
-        NSObject,
+        NSPoint,
+        ObjCClass,
+        ObjCInstance,
         objc_method,
+        objc_property,
     )
 
-    class R3ConWindowMessages(NSObject):
+    class R3ConDragBand(ObjCClass("NSView")):
+        controls = objc_property(object)
+
         @objc_method
-        def userContentController_didReceiveScriptMessage_(
-            self, controller, message
-        ) -> None:
-            _on_message(message.webView.window, str(message.body))
+        def acceptsFirstMouse_(self, event) -> bool:
+            return True
 
-    return R3ConWindowMessages
+        @objc_method
+        def hitTest_(self, point: NSPoint) -> ObjCInstance:
+            return self if _in_drag_area(self.controls, point.x, point.y) else None
+
+        @objc_method
+        def mouseDown_(self, event) -> None:
+            _press(self.window, event)
+
+    return R3ConDragBand
 
 
-def _on_message(native: Any, message: str) -> None:
-    """Drag the NSWindow ``native`` on ``DRAG``; on ``ZOOM``, double-click its title."""
+def _in_drag_area(controls: list[tuple[float, ...]] | None, x: float, y: float) -> bool:
+    """Whether the page's point ``x``, ``y`` is on its top row, off its ``controls``'
+    rects; with none known yet, nowhere is."""
+    if controls is None or not 0 <= y < TITLE_BAR_HEIGHT:
+        return False
+    return not any(
+        left <= x < right and top <= y < bottom for left, top, right, bottom in controls
+    )
+
+
+def _press(native: Any, event: Any) -> None:
+    """Drag the NSWindow ``native`` from the press ``event``, or on a double click do
+    what the user's title bar does; log, never raise into AppKit."""
     from rubicon.objc import ObjCClass  # pyright: ignore[reportMissingImports]
 
     try:
-        if message == DRAG:
-            _drag(native, ObjCClass("NSApplication").sharedApplication.currentEvent)
-        elif message == ZOOM:
-            defaults = ObjCClass("NSUserDefaults").standardUserDefaults
-            _double_click(native, defaults.stringForKey(DOUBLE_CLICK_ACTION))
+        if event.clickCount != DOUBLE_CLICK:
+            native.performWindowDragWithEvent(event)
+            return
+        defaults = ObjCClass("NSUserDefaults").standardUserDefaults
+        _double_click(native, defaults.stringForKey(DOUBLE_CLICK_ACTION))
     except Exception:
-        logger.exception("The window couldn't do the page's %r.", message)
-
-
-def _drag(native: Any, event: Any) -> None:
-    if event is not None and event.type in (LEFT_MOUSE_DOWN, LEFT_MOUSE_DRAGGED):
-        native.performWindowDragWithEvent(event)
+        logger.exception("The window couldn't take a press on its top row.")
 
 
 def _double_click(native: Any, action: Any) -> None:

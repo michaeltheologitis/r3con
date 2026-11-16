@@ -128,26 +128,15 @@ p { margin: 0; }
   .topbar { flex-wrap: wrap; row-gap: 0.1em; }
   .status { order: 3; flex-basis: 100%; }
 }
-/* The Mac app, whose tab row is the window's title bar, the traffic lights at its left. */
+/* The Mac app: the top row is the window's title bar, its traffic lights at the row's left. */
 :root.titlebar {
-  --tab-row-height: 28px;
+  --title-bar-height: 28px;
   --traffic-lights-width: 70px;
-  --grab-width: 48px;
 }
-.titlebar .app { padding: 0; grid-template-rows: minmax(0, 1fr); }
-.titlebar .topbar { display: none; }
-.titlebar .frame { border: 0; border-radius: 0; }
-.titlebar .tab-row { padding: 0 var(--grab-width) 0 var(--traffic-lights-width); }
-.titlebar.full-screen .tab-row { padding-left: 0; }
-.titlebar .run-tabs { padding-block: 0; }
-.tab-row .status { padding-left: 2ch; }
-.side-head { container-type: inline-size; display: flex; min-height: var(--tab-row-height); border-bottom: 1px solid var(--line); }
-.side-head .tabs { flex: 1; min-width: 0; min-height: 0; padding-right: 0; border-bottom: 0; }
-.side-head .top-actions { align-items: center; padding-right: 2ch; }
-@container (width < 44ch) {
-  .side-head .tabs { gap: 2ch; }
-  .theme-name { display: none; }
-}
+.titlebar .topbar { padding: 0 0 0 calc(var(--traffic-lights-width) - var(--gutter)); line-height: var(--title-bar-height); }
+.titlebar.full-screen .topbar { padding-left: 0; }
+/* One box for both its labels, so the controls stay where the window last heard they are. */
+.titlebar #theme-btn { min-width: 13ch; }
 
 /* ---- panel ---- */
 .board { display: flex; flex-direction: column; min-width: 0; min-height: 0; }

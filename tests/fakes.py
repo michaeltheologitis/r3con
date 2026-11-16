@@ -668,16 +668,28 @@ class FakeUpdaterController:
         self.checks += 1
 
 
-class FakeNSSize(NamedTuple):
-    """rubicon.objc's ``NSSize``."""
+class FakeNSPoint(NamedTuple):
+    """rubicon.objc's ``NSPoint``."""
 
+    x: float
+    y: float
+
+
+class FakeNSRect(NamedTuple):
+    """rubicon.objc's ``NSMakeRect``, and what it makes."""
+
+    x: float
+    y: float
     width: float
     height: float
 
 
-class FakeNSObject:
-    """rubicon.objc's ``NSObject``, for a class defined on it: ``alloc().init()``
-    makes one."""
+class FakeNSView:
+    """AppKit's NSView, for a class defined on it: ``alloc().init()`` makes one, in no
+    view or window until a view adds it."""
+
+    superview: Any = None
+    window: Any = None
 
     @classmethod
     def alloc(cls) -> Self:
@@ -694,27 +706,25 @@ class FakeObjC:
     False, which makes its updater controller found unless ``has_controller`` is False.
     Each controller made is in ``controllers``; one answers its init with nil if
     ``initializes`` is False, and its updater fails to start if ``starts`` is False.
-    The app's current event, none at first, is ``application.currentEvent``, and the
-    user's defaults are ``defaults``."""
+    The user's defaults are ``defaults``."""
 
     def __init__(self, frameworks: Path) -> None:
         self.frameworks = frameworks
         self.loads = self.has_controller = self.initializes = self.starts = True
         self.controllers: list[FakeUpdaterController] = []
-        self.application = SimpleNamespace(currentEvent=None)
         self.defaults: dict[str, str] = {}
         main_bundle = SimpleNamespace(privateFrameworksPath=str(frameworks))
-        self.classes: dict[str, SimpleNamespace] = {
+        self.classes: dict[str, Any] = {
             "NSBundle": SimpleNamespace(
                 mainBundle=main_bundle, bundleWithPath=self._bundle_with_path
             ),
-            "NSApplication": SimpleNamespace(sharedApplication=self.application),
+            "NSView": FakeNSView,
             "NSUserDefaults": SimpleNamespace(
                 standardUserDefaults=SimpleNamespace(stringForKey=self.defaults.get)
             ),
         }
 
-    def ObjCClass(self, name: str) -> SimpleNamespace:
+    def ObjCClass(self, name: str) -> Any:
         try:
             return self.classes[name]
         except KeyError:

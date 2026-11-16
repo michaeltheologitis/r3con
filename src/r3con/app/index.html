@@ -11,7 +11,7 @@
   <header class="topbar">
     <span class="brand">❀ r3con</span>
     <span class="status" id="run-status" aria-live="polite"></span>
-    <nav class="top-actions" id="top-actions" aria-label="Run controls">
+    <nav class="top-actions" aria-label="Run controls">
       <button class="btn" id="replay-btn" type="button" hidden>replay</button>
       <button class="btn" id="settings-btn" type="button" popovertarget="settings">settings</button>
       <button class="btn" id="theme-btn" type="button">theme · light</button>
@@ -47,7 +47,7 @@
 
   <div class="frame" id="frame">
     <main class="board" aria-label="Run panel">
-      <div class="tab-row" id="tab-row">
+      <div class="tab-row">
         <div class="run-tabs" id="run-tabs" role="tablist" aria-label="tabs"></div>
         <button class="btn new-tab" id="new-tab-btn" type="button" aria-label="new tab" title="new tab">+</button>
         <button class="btn save-tab" id="save-btn" type="button" popovertarget="save-note" hidden>save</button>
@@ -73,7 +73,7 @@
 
     <div class="resizer" id="resizer" role="separator" tabindex="0" aria-orientation="vertical" aria-label="chat width" aria-controls="side"></div>
     <aside class="side" id="side">
-      <div class="tabs" id="side-tabs" role="tablist" aria-label="Chat and files">
+      <div class="tabs" role="tablist" aria-label="Chat and files">
         <button class="btn tab" id="tab-chat" type="button" role="tab" aria-selected="true" aria-controls="chat-pane">chat</button>
         <button class="btn tab" id="tab-files" type="button" role="tab" aria-selected="false" aria-controls="files-pane">files <span class="count" id="files-count"></span></button>
       </div>

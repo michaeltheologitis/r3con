@@ -1,0 +1,75 @@
+// Drags R3Con's window by its top row, then double-clicks there, with synthetic mouse events, for
+// .github/workflows/mac-app.yml: swift tests/app/window_drag_check.swift PID
+// It fails if the window doesn't follow the drag, or doesn't zoom where a title bar double-click zooms;
+// where the runner drops synthetic events, it warns that the drag is untested.
+import CoreGraphics
+import Foundation
+
+let pid = pid_t(CommandLine.arguments[1])!
+// In the top row, past the traffic lights and the brand, on the status: where a press drags.
+let pressAt = CGPoint(x: 160, y: 14)
+let dragBy = CGPoint(x: 120, y: 80)
+let dragSteps = 6
+let slack: CGFloat = 4
+
+func windowFrame() -> CGRect? {
+    let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+    let window = windows.first {
+        ($0[kCGWindowOwnerPID as String] as? pid_t) == pid && ($0[kCGWindowLayer as String] as? Int) == 0
+    }
+    guard let bounds = window?[kCGWindowBounds as String] as? NSDictionary else { return nil }
+    return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+}
+
+func post(_ type: CGEventType, at point: CGPoint, clicks: Int64 = 1) {
+    let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)!
+    event.setIntegerValueField(.mouseEventClickState, value: clicks)
+    event.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.05)
+}
+
+func finish(_ level: String, _ message: String, failing: Bool = false) -> Never {
+    print("::\(level)::\(message)")
+    exit(failing ? 1 : 0)
+}
+
+// For the page's first answer of where its controls are, which the drag needs.
+Thread.sleep(forTimeInterval: 2)
+guard let before = windowFrame() else { finish("error", "R3Con has no window on screen.", failing: true) }
+let start = CGPoint(x: before.minX + pressAt.x, y: before.minY + pressAt.y)
+post(.mouseMoved, at: start)
+let pointer = CGEvent(source: nil)?.location ?? .zero
+if abs(pointer.x - start.x) > 1 || abs(pointer.y - start.y) > 1 {
+    finish("warning", "This runner drops synthetic mouse events (the pointer stayed at \(pointer)): the drag is untested.")
+}
+
+post(.leftMouseDown, at: start)
+// As a hand holds a press before it moves.
+Thread.sleep(forTimeInterval: 0.3)
+for step in 1...dragSteps {
+    let share = CGFloat(step) / CGFloat(dragSteps)
+    post(.leftMouseDragged, at: CGPoint(x: start.x + dragBy.x * share, y: start.y + dragBy.y * share))
+}
+post(.leftMouseUp, at: CGPoint(x: start.x + dragBy.x, y: start.y + dragBy.y))
+Thread.sleep(forTimeInterval: 0.5)
+guard let after = windowFrame() else { finish("error", "R3Con's window is gone after a drag.", failing: true) }
+let moved = CGPoint(x: after.minX - before.minX, y: after.minY - before.minY)
+if abs(moved.x - dragBy.x) > slack || abs(moved.y - dragBy.y) > slack {
+    finish("error", "A drag of \(dragBy) on the window's top row moved it by \(moved).", failing: true)
+}
+print("A drag of \(dragBy) on the window's top row moved it by \(moved).")
+
+let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") ?? "Maximize"
+if action == "Minimize" || action == "None" {
+    finish("notice", "A title bar double-click here is set to \(action): the zoom is untested.")
+}
+let again = CGPoint(x: after.minX + pressAt.x, y: after.minY + pressAt.y)
+for clicks: Int64 in [1, 2] {
+    post(.leftMouseDown, at: again, clicks: clicks)
+    post(.leftMouseUp, at: again, clicks: clicks)
+}
+Thread.sleep(forTimeInterval: 1)
+guard let zoomed = windowFrame(), zoomed != after else {
+    finish("error", "A double-click on the window's top row left it at \(after).", failing: true)
+}
+print("A double-click on the window's top row zoomed it from \(after) to \(zoomed).")

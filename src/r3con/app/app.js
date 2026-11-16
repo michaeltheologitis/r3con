@@ -2021,7 +2021,7 @@
   const launch = live ? takeLaunch() : new URLSearchParams();
   // The Mac app's web view has no downloads, so r3con app there opens the page with this, and saves a tab itself.
   const saveDialog = launch.get('save') === 'dialog';
-  // The Mac app's window has no title bar: the tab row takes its place.
+  // The Mac app's window has no title bar: its traffic lights sit in the top row.
   const titleBar = launch.get('titlebar') === 'hidden';
   const token = launch.get('token');
 
@@ -4704,21 +4704,14 @@
   // The status is a live region, so rewriting it unchanged, as on each keystroke, would talk over the user.
   /** @param {...(string | Node)} content */
   function setStatus(...content) {
-    const status = $('run-status');
     const text = content.map((part) => (typeof part === 'string' ? part : part.textContent)).join('');
-    if (status.textContent !== text) status.replaceChildren(...content);
-    if (!titleBar) return;
-    // The Mac app's top row shows only a refusal or an error.
-    status.classList.toggle('vh', !status.querySelector('.err, .refused'));
-    status.title = text;
+    if ($('run-status').textContent !== text) $('run-status').replaceChildren(...content);
   }
 
   /** @param {string} text */
   const errorLine = (text) => [h('span', { class: 'err' }, '● '), text];
   /** @param {string} text */
   const errorStatus = (text) => setStatus(...errorLine(text));
-  /** @param {string} text */
-  const refusedStatus = (text) => setStatus(h('span', { class: 'refused' }, text));
   /** @param {Narrator} narr @param {string} model @param {boolean} simulated @param {Totals | null | undefined} totals */
   function sayReady(narr, model, simulated, totals) {
     // The cost alone, or the tokens where it is unknown, keeps the line short.
@@ -4813,7 +4806,7 @@
     // An ask needs only the run's representation; a run needs files.
     const refused = asks || state.shown.files.length ? refusal(question, asks) : null;
     if (refused) {
-      refusedStatus(refused);
+      setStatus(refused);
       if (refused === TYPE_A_MODEL) modelOther.focus();
       return;
     }
@@ -5544,7 +5537,7 @@
   function closeTab(tab) {
     if (state.tabs.length === 1) return;
     // Only Delete gets here for a busy tab: its × is disabled, and hidden from assistive tech.
-    if (tabBusy(tab)) return refusedStatus(tabStillGoing(tab));
+    if (tabBusy(tab)) return setStatus(tabStillGoing(tab));
     cancelTimers(tab);
     const i = state.tabs.indexOf(tab);
     state.tabs.splice(i, 1);
@@ -5925,7 +5918,7 @@
   }
 
   function updateThemeLabel() {
-    $('theme-btn').replaceChildren('theme', h('span', { class: 'theme-name' }, ` · ${currentTheme()}`));
+    $('theme-btn').textContent = `theme · ${currentTheme()}`;
   }
 
   function toggleTheme() {
@@ -7193,47 +7186,18 @@
 
   const mode = live ? liveMode : savedBlock ? savedMode : prototypeMode;
 
-  // A no-op outside the Mac app, which has no handler.
-  /** @param {'drag' | 'zoom'} message */
-  function toWindow(message) {
-    const host = /** @type {{ webkit?: { messageHandlers?: { window?: { postMessage(message: string): void } } } }} */ (/** @type {unknown} */ (window));
-    host.webkit?.messageHandlers?.window?.postMessage(message);
-  }
-
-  const WINDOW_CONTROLS = 'button, a, input, select, label, [role=tab]';
-
-  /** @param {MouseEvent} e */
-  function onWindowControl(e) {
-    const target = /** @type {HTMLElement} */ (e.target);
-    return Boolean(target.closest(WINDOW_CONTROLS)) || (target.id === 'run-tabs' && e.offsetY >= target.clientHeight);
-  }
-
-  /** @param {MouseEvent} e */
-  function dragWindow(e) {
-    // A double click's second press starts no drag, so its dblclick reaches the page.
-    if (e.button !== 0 || e.detail > 1 || onWindowControl(e)) return;
-    e.preventDefault();
-    toWindow('drag');
-  }
-
-  /** @param {MouseEvent} e */
-  function zoomWindow(e) {
-    if (!onWindowControl(e)) toWindow('zoom');
-  }
-
-  function hideTitleBar() {
-    root.classList.add('titlebar');
-    $('new-tab-btn').after($('run-status'));
-    const head = h('div', { class: 'side-head' }, $('side-tabs'), $('top-actions'));
-    side.prepend(head);
-    for (const row of [$('tab-row'), head]) {
-      row.addEventListener('mousedown', dragWindow);
-      row.addEventListener('dblclick', zoomWindow);
-    }
+  // The Mac app's window asks where the top row's controls are, and lets presses on them through to the page.
+  function titleBarControls() {
+    const controls = [...document.querySelectorAll('.topbar :is(button, a, input, select, label)')].filter((el) => el.checkVisibility());
+    const rects = controls.map((el) => el.getBoundingClientRect());
+    return JSON.stringify(rects.map(({ left, top, right, bottom }) => [left, top, right, bottom]));
   }
 
   function init() {
-    if (titleBar) hideTitleBar();
+    if (titleBar) {
+      root.classList.add('titlebar');
+      Object.assign(window, { r3conTitleBarControls: titleBarControls });
+    }
     restoreTheme();
     resizer.ariaValueMin = String(SIDE_MIN_PX);
     fitSideToFrame();
