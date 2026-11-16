@@ -8207,6 +8207,97 @@ async function liveSaveDialog(url, server) {
   });
 }
 
+// r3con app's Mac window shows no title bar but its traffic lights, and opens the page with this: the tab row is the
+// window's top row, the lights at its left, its empty stretches moving the window by a message to the window.
+const TITLE_BAR = 'titlebar=hidden';
+// The title bar's height, which the row takes, the room it keeps for the lights, and the class the window puts on the
+// page's root while it is in full screen, where the lights are hidden.
+const TITLE_BAR_PX = 28;
+const TRAFFIC_LIGHTS_PX = 70;
+const FULL_SCREEN = 'full-screen';
+
+// In-page, before the page's own script: the Mac window's message handler, keeping what the page posts it.
+function windowHandler() {
+  window.posted = [];
+  window.webkit = { messageHandlers: { window: { postMessage: (message) => window.posted.push(message) } } };
+}
+
+// What the page has posted the window since the last read.
+const postedSince = (page) => page.evaluate(() => window.posted.splice(0));
+
+function titleBarRow() {
+  const box = (selector) => document.querySelector(selector).getBoundingClientRect();
+  const [row, head, panel, pane, plus] = ['#tab-row', '.side-head', '#panel', '#chat-pane', '#new-tab-btn'].map(box);
+  const [files, settings, theme, status] = ['#tab-files', '#settings-btn', '#theme-btn', '#run-status'].map(box);
+  const actions = document.getElementById('top-actions');
+  return {
+    rows: [row.top, row.bottom, head.top, head.bottom],
+    content: [panel.top, pane.top],
+    brand: document.querySelector('.brand').checkVisibility() || document.body.innerText.includes('❀ r3con'),
+    actions: actions.parentElement.matches('.side-head') && files.right < settings.left && settings.right < theme.left,
+    actionsEnd: head.right - theme.right - parseFloat(getComputedStyle(actions).paddingRight),
+    actionsTop: [settings.top, theme.top].every((top) => top >= head.top && top < head.bottom),
+    inset: parseFloat(getComputedStyle(document.getElementById('tab-row')).paddingLeft),
+    statusBox: [status.width, status.height],
+    stretches: { tabRow: { x: (plus.right + row.right) / 2, y: (row.top + row.bottom) / 2 }, chatHead: { x: (files.right + settings.left) / 2, y: (head.top + head.bottom) / 2 } },
+  };
+}
+
+// In the Mac app, the tab row is the window's top row, and its empty stretches drag and zoom the window.
+async function liveTitleBar(url) {
+  await withPage('live', { url: `${url}&${TITLE_BAR}`, sample: false, before: (page) => page.addInitScript(windowHandler) }, async (page) => {
+    await page.setInputFiles('#file-input', sampleMemos());
+    await filesCounted(page, SAMPLE_DOCS);
+    await page.click('#tab-chat');
+    const row = await page.evaluate(titleBarRow);
+    const oneRow = isDeepStrictEqual(row.rows, [0, TITLE_BAR_PX, 0, TITLE_BAR_PX]) && isDeepStrictEqual(row.content, [TITLE_BAR_PX, TITLE_BAR_PX]);
+    check('live', "in the Mac app, one row of the title bar's height is above the panel and the chat: the tab row and the chat's header", oneRow, JSON.stringify(row));
+    check('live', 'in the Mac app, no ❀ r3con is shown', !row.brand);
+    const atEnd = row.actions && Math.abs(row.actionsEnd) < 1 && row.actionsTop;
+    check('live', "in the Mac app, settings and theme sit at the right end of the chat's header, after files", atEnd, JSON.stringify(row));
+    check('live', "in the Mac app, the tab row leaves room at its left for the window's traffic lights", row.inset === TRAFFIC_LIGHTS_PX, `${row.inset}`);
+    const status = await page.textContent('#run-status');
+    const heard = (await page.locator('#run-status').ariaSnapshot()).includes(status);
+    const statusName = "in the Mac app, the run's status line is hidden, but screen readers still have it";
+    check('live', statusName, Boolean(status) && heard && row.statusBox.every((px) => px <= 1), `${status}; ${JSON.stringify(row.statusBox)}`);
+
+    const moved = {};
+    for (const [name, { x, y }] of Object.entries(row.stretches)) {
+      await page.mouse.click(x, y);
+      const pressed = await postedSince(page);
+      await page.mouse.dblclick(x, y);
+      moved[name] = [pressed, await postedSince(page)];
+    }
+    const movesName = "in the Mac app, a press on the row's empty stretch after + or before settings drags the window, and a double click there zooms it, its second press dragging nothing";
+    const moves = [['drag'], ['drag', 'zoom']];
+    check('live', movesName, isDeepStrictEqual(moved, { tabRow: moves, chatHead: moves }), JSON.stringify(moved));
+    for (const selector of ['.run-tab', '#tab-files', '#tab-chat', '#theme-btn', '#theme-btn', '#settings-btn', '#new-tab-btn']) {
+      await page.keyboard.press('Escape');
+      await page.click(selector);
+    }
+    const controls = await postedSince(page);
+    check('live', 'in the Mac app, a press on a tab, + or a button in the row moves no window', !controls.length && (await tabCount(page)) === 2, JSON.stringify(controls));
+
+    const insets = [];
+    for (const full of [true, false]) {
+      await page.evaluate(([name, on]) => document.documentElement.classList.toggle(name, on), [FULL_SCREEN, full]);
+      insets.push((await page.evaluate(titleBarRow)).inset);
+    }
+    check('live', 'in full screen, which hides the traffic lights, the tab row drops its room for them, and keeps it again after', isDeepStrictEqual(insets, [0, TRAFFIC_LIGHTS_PX]), JSON.stringify(insets));
+    // As ⌘R does in the Mac app.
+    await page.reload();
+    const reloaded = await page.evaluate(titleBarRow);
+    check('live', 'after a reload, the Mac app still has the one row', isDeepStrictEqual(reloaded.rows, row.rows) && !reloaded.brand, JSON.stringify(reloaded.rows));
+  });
+  await withPage('live', { url, sample: false, before: (page) => page.addInitScript(windowHandler) }, async (page) => {
+    const row = await page.evaluate(() => document.getElementById('tab-row').getBoundingClientRect());
+    await page.mouse.dblclick(row.right - 10, row.top + row.height / 2);
+    const posted = await postedSince(page);
+    const name = 'opened without it, as in a browser, the page keeps its own top row, ❀ r3con and all, and its tab row moves no window';
+    check('live', name, (await page.isVisible('.brand')) && !posted.length && !(await page.evaluate(() => document.documentElement.classList.contains('titlebar'))), JSON.stringify(posted));
+  });
+}
+
 // The prototype sends nothing, so a saved tab's file is a web page there, which it has no r3con app to read.
 async function prototypeImports() {
   const html = '<!doctype html><title>A saved tab</title><script type="application/json" id="r3con-tab">{"version":1}</script>\n';
@@ -8269,6 +8360,7 @@ async function live() {
     await liveRemoveWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
+    await liveTitleBar(url);
   });
   const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);

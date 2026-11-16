@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -36,6 +37,12 @@ CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 # AppKit's NSTerminateNow: what Toga answers a Dock Quit or a logout with.
 NS_TERMINATE_NOW = 1
+# AppKit's style mask of the window Toga makes (titled, closable, miniaturizable and
+# resizable), the bit that runs its content under its title bar, and a title's states.
+TOGA_STYLE_MASK = 0b1111
+NS_FULL_SIZE_CONTENT_VIEW = 1 << 15
+NS_WINDOW_TITLE_VISIBLE = 0
+NS_WINDOW_TITLE_HIDDEN = 1
 HELD_RUN = {
     "question": "Which memo?",
     "model": "openai/held-model",
@@ -47,8 +54,41 @@ WINDOW_THREAD = "window"
 
 
 class FakeWebView:
+    """Toga's web view: its WKWebView keeps each script message handler by its name,
+    in ``handlers``, and it keeps the scripts it is asked to run, in ``scripts``."""
+
     def __init__(self, *, url: str) -> None:
         self.url = url
+        self.handlers: dict[str, Any] = {}
+        self.scripts: list[str] = []
+        contents = SimpleNamespace(addScriptMessageHandler=self._add_handler)
+        configuration = SimpleNamespace(userContentController=contents)
+        self._impl = SimpleNamespace(
+            native=SimpleNamespace(configuration=configuration)
+        )
+
+    def _add_handler(self, handler: Any, *, name: str) -> None:
+        self.handlers[name] = handler
+
+    def evaluate_javascript(self, javascript: str) -> None:
+        self.scripts.append(javascript)
+
+
+class FakeNSWindow:
+    """AppKit's window under Toga's, its title bar shown: it keeps each drag, by its
+    event, and each zoom it is asked for, in ``moves``."""
+
+    def __init__(self) -> None:
+        self.styleMask = TOGA_STYLE_MASK
+        self.titlebarAppearsTransparent = False
+        self.titleVisibility = NS_WINDOW_TITLE_VISIBLE
+        self.moves: list[tuple[str, object]] = []
+
+    def performWindowDragWithEvent(self, event: object) -> None:
+        self.moves.append(("drag", event))
+
+    def performZoom(self, sender: object) -> None:
+        self.moves.append(("zoom", sender))
 
 
 def fake_save_file_dialog(
@@ -66,6 +106,7 @@ class FakeWindow:
 
     def __init__(self) -> None:
         self.size = TOGA_WINDOW_SIZE
+        self._impl = SimpleNamespace(native=FakeNSWindow())
         self.hidden = False
         self.dialogs: list[tuple[str, str, threading.Thread]] = []
         self.opened = threading.Event()
@@ -125,7 +166,8 @@ class FakeApp:
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.main_thread = threading.current_thread()
-        self.url = self.startup(self).url
+        self.webview = self.startup(self)
+        self.url = self.webview.url
         reading = asyncio.create_task(asyncio.to_thread(self.read_page))
         if self.quits_mid_save:
             await asyncio.to_thread(self.main_window.opened.wait, TIMEOUT_SECONDS)
@@ -210,6 +252,11 @@ def refuses(url: str) -> bool:
     return False
 
 
+def launch_of(app: FakeApp) -> dict[str, list[str]]:
+    """What the window opens its page with, in its URL's fragment."""
+    return parse_qs(urlsplit(app.url).fragment)
+
+
 def test_the_window_opens_the_page_this_launch_serves_with_its_token(
     opened: list[FakeApp],
 ):
@@ -273,7 +320,7 @@ def test_the_window_opens_whatever_stops_the_apps_updates(
     opened: list[FakeApp], objc: FakeObjC, capsys: pytest.CaptureFixture[str]
 ):
     # A runtime without NSBundle, which updates.start does not expect.
-    objc.classes.clear()
+    del objc.classes["NSBundle"]
     window.main()
     (app,) = opened
     assert app.page.status_code == 200
@@ -289,6 +336,60 @@ def test_the_window_opens_at_its_size(opened: list[FakeApp]):
     assert [shown.size for shown in app.windows] == [window.WINDOW_SIZE]
 
 
+def test_the_window_hides_its_title_bar_and_its_page_takes_the_top_row(
+    opened: list[FakeApp],
+):
+    window.main()
+    (app,) = opened
+    native = app.main_window._impl.native
+    assert native.titlebarAppearsTransparent
+    assert native.titleVisibility == NS_WINDOW_TITLE_HIDDEN
+    assert native.styleMask == TOGA_STYLE_MASK | NS_FULL_SIZE_CONTENT_VIEW
+    assert launch_of(app)["titlebar"] == ["hidden"]
+    assert app.keys.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("body", "moves"),
+    [
+        ("drag", ["drag"]),
+        ("zoom", ["zoom"]),
+        ("close", []),
+        ("", []),
+        ({"drag": True}, []),
+    ],
+    ids=["drag", "zoom", "other", "empty", "not a string"],
+)
+def test_the_pages_messages_drag_or_zoom_the_window_and_nothing_else(
+    opened: list[FakeApp], objc: FakeObjC, body: object, moves: list[str]
+):
+    window.main()
+    (app,) = opened
+    handler = app.webview.handlers["window"]
+    message = SimpleNamespace(body=body)
+    handler.userContentController_didReceiveScriptMessage_(None, message)
+    native = app.main_window._impl.native
+    senders = {"drag": objc.event, "zoom": None}
+    assert native.moves == [(move, senders[move]) for move in moves]
+
+
+def test_the_page_knows_while_the_window_is_in_full_screen(
+    opened: list[FakeApp], objc: FakeObjC
+):
+    window.main()
+    (app,) = opened
+    native = app.main_window._impl.native
+    objc.center.post("NSWindowDidEnterFullScreenNotification", native)
+    objc.center.post("NSWindowDidExitFullScreenNotification", native)
+    # Another window's full screen is not this one's.
+    objc.center.post("NSWindowDidEnterFullScreenNotification", FakeNSWindow())
+    toggle = "document.documentElement.classList.toggle"
+    assert app.webview.scripts == [
+        f'{toggle}("full-screen", true)',
+        f'{toggle}("full-screen", false)',
+    ]
+
+
 def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -297,7 +398,7 @@ def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     monkeypatch.setattr(FakeWindow, "chooses", chosen)
     window.main()
     (app,) = opened
-    assert app.url.endswith("&save=dialog")
+    assert launch_of(app)["save"] == ["dialog"]
     assert app.saved.status_code == 204
     shown = [(window.SAVE_DIALOG_TITLE, SAVED_NAME, app.main_thread)]
     assert app.main_window.dialogs == shown

@@ -2021,6 +2021,9 @@
   const launch = live ? takeLaunch() : new URLSearchParams();
   // The Mac app's web view has no downloads, so r3con app there opens the page with this, and saves a tab itself.
   const saveDialog = launch.get('save') === 'dialog';
+  // The Mac app's window shows no title bar but its traffic lights, so r3con app there opens the page with this, and
+  // the tab row takes the title bar's place.
+  const titleBar = launch.get('titlebar') === 'hidden';
   const token = launch.get('token');
 
   function takeLaunch() {
@@ -7184,7 +7187,41 @@
 
   const mode = live ? liveMode : savedBlock ? savedMode : prototypeMode;
 
+  // To the Mac app's window, which moves itself; anywhere else no handler is there, and the message goes nowhere.
+  /** @param {'drag' | 'zoom'} message */
+  function toWindow(message) {
+    const host = /** @type {{ webkit?: { messageHandlers?: { window?: { postMessage(message: string): void } } } }} */ (/** @type {unknown} */ (window));
+    host.webkit?.messageHandlers?.window?.postMessage(message);
+  }
+
+  // A press on an empty stretch of the top row, not on a control in it, drags the window, as its title bar would; a
+  // double click's second press doesn't, so that its release, and so the dblclick, reach the page.
+  /** @param {MouseEvent} e */
+  function dragWindow(e) {
+    if (e.target !== e.currentTarget || e.button !== 0 || e.detail > 1) return;
+    e.preventDefault();
+    toWindow('drag');
+  }
+
+  /** @param {MouseEvent} e */
+  function zoomWindow(e) {
+    if (e.target === e.currentTarget) toWindow('zoom');
+  }
+
+  // The tab row as the window's top row: the status's line gives way to it, kept for screen readers, as the chat
+  // narrates the run, and the top actions end the chat's header.
+  function hideTitleBar() {
+    root.classList.add('titlebar');
+    $('run-status').classList.add('vh');
+    side.prepend(h('div', { class: 'side-head' }, $('side-tabs'), $('top-actions')));
+    for (const area of [$('tab-row'), $('side-tabs'), $('top-actions')]) {
+      area.addEventListener('mousedown', dragWindow);
+      area.addEventListener('dblclick', zoomWindow);
+    }
+  }
+
   function init() {
+    if (titleBar) hideTitleBar();
     restoreTheme();
     resizer.ariaValueMin = String(SIDE_MIN_PX);
     fitSideToFrame();

@@ -128,6 +128,22 @@ p { margin: 0; }
   .topbar { flex-wrap: wrap; row-gap: 0.1em; }
   .status { order: 3; flex-basis: 100%; }
 }
+/* In the Mac app the tab row is the window's top row (:root.titlebar): the frame runs to the window's edges, the brand
+   gives way, the top actions end the chat's header, and both rows are as tall as the title bar they replace, the tab
+   row leaving room at its left for the window's traffic lights, but in full screen, which hides them. */
+:root.titlebar {
+  --tab-row-height: 28px;
+  --traffic-lights-width: 70px;
+}
+.titlebar .app, .titlebar .topbar { padding: 0; }
+.titlebar .brand { display: none; }
+.titlebar .frame { border: 0; border-radius: 0; }
+.titlebar .tab-row { padding-left: var(--traffic-lights-width); }
+.titlebar.full-screen .tab-row { padding-left: 0; }
+.titlebar :is(.run-tabs, .run-tab) { padding-block: 0; }
+.side-head { display: flex; flex-wrap: wrap; min-height: var(--tab-row-height); border-bottom: 1px solid var(--line); }
+.side-head .tabs { flex: 1; min-height: 0; border-bottom: 0; }
+.side-head .top-actions { align-items: center; padding-right: 2ch; }
 
 /* ---- panel ---- */
 .board { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
