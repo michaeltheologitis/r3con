@@ -321,7 +321,7 @@ def check_prompts(config: RunConfig) -> None:
     Raises:
         ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned, or the
             config is document-level and a relevance prompt it pins has no
-            document-level form (its template does not read ``quotes``).
+            document-level form (its template does not read ``evidence_level``).
         FileNotFoundError: if a pinned version has no file on the prompt search path.
     """
     missing = [s for s in PROMPT_STAGES if s not in config.prompts]
@@ -335,9 +335,9 @@ def check_prompts(config: RunConfig) -> None:
         return
     for stage in _RELEVANCE_STAGES:
         version = config.prompts[stage]
-        if "quotes" not in prompt_variables(stage, version):
+        if "evidence_level" not in prompt_variables(stage, version):
             raise ValueError(
-                f"config {config.name!r} is document-level, but its prompt for stage "
-                f"{stage!r} version {version!r} has no document-level form: pin a "
-                "version that has one."
+                f"this run is document-level, but config {config.name!r} pins {stage} "
+                f"{version}, which has no document-level form: pin a version that "
+                "has one, or run at the sentence level."
             )

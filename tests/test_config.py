@@ -374,10 +374,10 @@ def test_a_document_level_config_pinning_a_prompt_without_that_form_is_refused(
     with pytest.raises(ValueError) as refused:
         load_config(name, **overrides)
     assert str(refused.value) == (
-        f"config {name!r} is document-level, but its prompt for stage {stage!r} "
-        f"version {version!r} has no document-level form: pin a version that has one."
+        f"this run is document-level, but config {name!r} pins {stage} {version}, "
+        "which has no document-level form: pin a version that has one, or run at the "
+        "sentence level."
     )
-    assert load_config("sentence").evidence_level == "sentence"
 
 
 def test_an_unknown_config_is_refused_by_name():

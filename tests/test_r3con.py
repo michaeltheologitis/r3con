@@ -33,6 +33,7 @@ from tests.fakes import (
     TWO_LINE_MEMOS,
     USAGE,
     a_parse_citation_short,
+    asks_for_quotes,
     bad_key,
     cited_documents,
     citing,
@@ -375,9 +376,6 @@ def test_the_evidence_level_is_chosen_per_run_and_recorded(
     manifest = json.loads((result.run_dir / "manifest.json").read_text())
     assert manifest["config"]["evidence_level"] == level
     assert manifest["config"]["overrides"] == {"evidence_level": level}
-    for request in answering_llm.requests_for("relevance"):
-        schema = request["response_format"]["json_schema"]["schema"]
-        assert ("quotes" in schema["properties"]) == (level == "sentence")
 
 
 def test_a_document_level_run_pinning_no_document_form_is_refused_before_any_request(
@@ -390,7 +388,7 @@ def test_a_document_level_run_pinning_no_document_form_is_refused_before_any_req
             "prompts": {**default.prompts, "relevance/first-round": "v2"},
         }
     )
-    with pytest.raises(ValueError, match="'relevance/first-round' version 'v2' has no"):
+    with pytest.raises(ValueError, match="pins relevance/first-round v2, which has no"):
         run("Who?", ["memo"], config=config, completion=llm, logs_dir=tmp_path)
     assert llm.requests == []
     assert list(tmp_path.iterdir()) == []
@@ -1760,8 +1758,7 @@ def test_a_resume_reads_at_the_evidence_level_its_run_recorded(
     assert [first_line(request) for request in resent] == LAST_THREE
     for request in resent:
         assert is_later_round(request)
-        schema = request["response_format"]["json_schema"]["schema"]
-        assert ("quotes" in schema["properties"]) == quoted
+        assert asks_for_quotes(request) == quoted
         assert ("quote" in request["messages"][0]["content"].lower()) == quoted
 
 

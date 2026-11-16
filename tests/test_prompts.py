@@ -7,17 +7,17 @@ import pytest
 import yaml
 
 from r3con import settings
-from r3con.config import PROMPT_STAGES, load_config
+from r3con.config import EVIDENCE_LEVELS, PROMPT_STAGES, load_config
 from r3con.prompts import load_prompt, prompt_search_path
 from r3con.stages.reasoning import reason
 from r3con.stages.relevance import relevance_snippet
 from r3con.stages.structuring.parsing import check_schema, parse_one_document
+from tests.fakes import asks_for_quotes
 
 MODEL = "openai/gpt-6-luna"
 PINNED = load_config("default").prompts
 FIRST_ROUND = "relevance/first-round"
 LATER_ROUNDS = "relevance/later-rounds"
-RELEVANCE_CONTEXT = {"task": "T", "other_snippets": "### Summary ID: a1b2c3\nA note."}
 
 # Enough to render any stage's template; Jinja ignores the names it does not use.
 CONTEXT = {
@@ -31,15 +31,12 @@ CONTEXT = {
 }
 
 
-def examples(stage: str, **context) -> list:
+def examples(stage: str) -> list:
     """The text of each example of the prompt the default config pins for ``stage``,
-    rendered with ``context`` as its prompt is, under its name."""
+    under its name."""
     path = settings.PROMPTS_DIR / stage / f"{PINNED[stage]}.yaml"
     prompt = yaml.safe_load(path.read_text())
-    return [
-        pytest.param(jinja2.Template(e["text"]).render(**context), id=e["name"])
-        for e in prompt["examples"]
-    ]
+    return [pytest.param(e["text"], id=e["name"]) for e in prompt["examples"]]
 
 
 def shown(example: str) -> dict:
@@ -178,13 +175,12 @@ def test_each_parsing_example_replies_in_json_its_reply_schema_takes(llm, exampl
     assert len(llm.requests) == 1
 
 
-@pytest.mark.parametrize(
-    "example",
-    [*examples(FIRST_ROUND, quotes=True), *examples(LATER_ROUNDS, quotes=True)],
-)
-def test_each_relevance_example_replies_in_its_schema_quoting_its_document_exactly(
-    llm, example
+@pytest.mark.parametrize("level", EVIDENCE_LEVELS)
+@pytest.mark.parametrize("example", [*examples(FIRST_ROUND), *examples(LATER_ROUNDS)])
+def test_each_relevance_example_replies_in_its_levels_schema_quoting_exactly(
+    llm, example, level
 ):
+    example = jinja2.Template(example).render(evidence_level=level)
     others = re.findall(r"^### Summary ID: (\w+)\n(.+)$", example, re.MULTILINE)
     document = example.split("\nDocument:\n", 1)[1].rsplit("\n\nOutput", 1)[0]
     reply = json.loads(example.rsplit("\n", 1)[1])
@@ -194,71 +190,52 @@ def test_each_relevance_example_replies_in_its_schema_quoting_its_document_exact
         other_snippets=dict(others),
         model=MODEL,
         prompts=PINNED,
+        evidence_level=level,
         completion=llm.replies(reply),
     )
     [request] = llm.requests
     assert list(reply) == list(
         request["response_format"]["json_schema"]["schema"]["properties"]
     )
+    assert (
+        asks_for_quotes(request) == bool(reply.get("quotes")) == (level == "sentence")
+    )
     assert (summary, provenance) == (reply["summary"], reply.get("provenance_ids", []))
-    assert reply["quotes"]
     assert [(q["text"], q["match"]) for q in quotes] == [
-        (text, "exact") for text in reply["quotes"]
+        (text, "exact") for text in reply.get("quotes", [])
     ]
 
 
 @pytest.mark.parametrize(
-    "example",
-    [*examples(FIRST_ROUND, quotes=False), *examples(LATER_ROUNDS, quotes=False)],
-)
-def test_each_document_level_relevance_example_replies_in_its_schema_quoting_nothing(
-    llm, example
-):
-    others = re.findall(r"^### Summary ID: (\w+)\n(.+)$", example, re.MULTILINE)
-    document = example.split("\nDocument:\n", 1)[1].rsplit("\n\nOutput", 1)[0]
-    reply = json.loads(example.rsplit("\n", 1)[1])
-    summary, quotes, provenance = relevance_snippet(
-        task="?",
-        document=document,
-        other_snippets=dict(others),
-        model=MODEL,
-        prompts=PINNED,
-        evidence_level="document",
-        completion=llm.replies(reply),
-    )
-    [request] = llm.requests
-    assert list(reply) == list(
-        request["response_format"]["json_schema"]["schema"]["properties"]
-    )
-    assert (summary, quotes, provenance) == (
-        reply["summary"],
-        [],
-        reply.get("provenance_ids", []),
-    )
-
-
-@pytest.mark.parametrize(
-    ("stage", "version", "quotes", "renders_as"),
+    ("stage", "version", "context", "renders_as"),
     [
-        (FIRST_ROUND, "v3", True, "v2"),
-        (LATER_ROUNDS, "v4", True, "v3"),
-        (LATER_ROUNDS, "v4", False, "v2"),
+        (FIRST_ROUND, "v3", {}, "v2"),
+        (FIRST_ROUND, "v3", {"evidence_level": "sentence"}, "v2"),
+        (LATER_ROUNDS, "v4", {}, "v3"),
+        (LATER_ROUNDS, "v4", {"evidence_level": "sentence"}, "v3"),
+        (LATER_ROUNDS, "v4", {"evidence_level": "document"}, "v2"),
     ],
-    ids=["first-round-quoting", "later-rounds-quoting", "later-rounds-not-quoting"],
+    ids=[
+        "first-round-no-level",
+        "first-round-sentence",
+        "later-rounds-no-level",
+        "later-rounds-sentence",
+        "later-rounds-document",
+    ],
 )
-def test_a_relevance_prompt_with_both_levels_renders_as_the_version_of_its_level(
-    stage, version, quotes, renders_as
+def test_a_two_level_relevance_prompt_renders_as_its_levels_version_sentence_if_unset(
+    stage, version, context, renders_as
 ):
-    both = load_prompt(stage, version=version, quotes=quotes, **RELEVANCE_CONTEXT)
-    assert both == load_prompt(stage, version=renders_as, **RELEVANCE_CONTEXT)
+    both = load_prompt(stage, version=version, **CONTEXT, **context)
+    assert both == load_prompt(stage, version=renders_as, **CONTEXT)
 
 
 @pytest.mark.parametrize(
     ("stage", "version"), [(FIRST_ROUND, "v3"), (LATER_ROUNDS, "v4")]
 )
 def test_a_relevance_prompts_document_level_form_never_mentions_quotes(stage, version):
-    rendered = load_prompt(stage, version=version, quotes=False, **RELEVANCE_CONTEXT)
-    assert "quote" not in rendered.lower()
+    document = load_prompt(stage, version=version, evidence_level="document", **CONTEXT)
+    assert "quote" not in document.lower()
 
 
 @pytest.mark.parametrize("example", examples("reasoning/coding"))

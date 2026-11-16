@@ -278,15 +278,13 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
-def _reply_schema(
-    citable: Sequence[str] | None, evidence_level: EvidenceLevel
-) -> type[BaseModel]:
-    """A reply's schema: its ``summary``, or null, then, at the sentence level, its
+def _reply_schema(citable: Sequence[str] | None, quotes: bool) -> type[BaseModel]:
+    """A reply's schema: its ``summary``, or null, then, with ``quotes``, its
     ``quotes`` (:func:`lenient_list` of strings), then, unless ``citable`` is ``None``,
     its ``provenance_ids`` of those ids."""
-    quotes = {"quotes": lenient_list(str)} if evidence_level == "sentence" else {}
+    quoted = {"quotes": lenient_list(str)} if quotes else {}
     return citing_schema(
-        "RelevanceSummary", citable, summary=(str | None, ...), **quotes
+        "RelevanceSummary", citable, summary=(str | None, ...), **quoted
     )
 
 
@@ -307,18 +305,18 @@ def _request(
             "relevance/first-round",
             version=prompts["relevance/first-round"],
             task=task,
-            quotes=quotes,
+            evidence_level=evidence_level,
         )
-        return CitingRequest(prompt, _reply_schema(None, evidence_level), [])
+        return CitingRequest(prompt, _reply_schema(None, quotes), [])
     prompt = load_prompt(
         "relevance/later-rounds",
         version=prompts["relevance/later-rounds"],
         task=task,
         other_snippets=_render_other_snippets(shown),
-        quotes=quotes,
+        evidence_level=evidence_level,
     )
     ids = list(shown)
-    return CitingRequest(prompt, _reply_schema(ids, evidence_level), ids)
+    return CitingRequest(prompt, _reply_schema(ids, quotes), ids)
 
 
 def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:

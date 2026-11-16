@@ -140,9 +140,6 @@ def test_the_evidence_level_flag_reaches_the_config_and_the_label(answering, cap
         (path_after("artifacts: ", err) / "manifest.json").read_text()
     )
     assert manifest["config"]["evidence_level"] == "document"
-    for request in answering.requests_for("relevance"):
-        schema = request["response_format"]["json_schema"]["schema"]
-        assert "quotes" not in schema["properties"]
 
 
 def finished_run(capsys) -> Path:

@@ -16,7 +16,7 @@ instructions: |-
   {{ other_snippets }}
 
   ## Output
-  {% if quotes -%}
+  {% if evidence_level != "document" -%}
   Reply in three fields:
 
   - `summary`: the task-conditioned summary of this document only — no preamble, no restating the task. If this document contributes nothing relevant to the task, set it to null.
@@ -55,7 +55,7 @@ examples:
       Parks. I support the downtown bike-lane pilot, funded from the parks reserve — not from transit.
 
       Output:
-      {% if quotes -%}
+      {% if evidence_level != "document" -%}
       {"summary": "A candidate's platform paper (Councilmember Dana Reyes). She proposes cutting transit by Lee's cut ($15M) plus a quarter of the $20M fare-subsidy line ($5M): $20M in total. Her bike-lane support is not a transit cut.", "quotes": ["I will match Councilmember Lee's proposed transit cut, and on top of it trim a quarter of the fare-subsidy line.", "I support the downtown bike-lane pilot, funded from the parks reserve — not from transit."], "provenance_ids": ["a3c9e1", "5b72d0"]}
       {%- else -%}
       {"summary": "A candidate's platform paper (Councilmember Dana Reyes). She proposes cutting transit by Lee's cut ($15M) plus a quarter of the $20M fare-subsidy line ($5M): $20M in total. Her bike-lane support is not a transit cut.", "provenance_ids": ["a3c9e1", "5b72d0"]}
@@ -80,7 +80,7 @@ examples:
       Transit. I propose a $9 million reduction in the transit budget, achieved by consolidating the two least-used bus routes.
 
       Output:
-      {% if quotes -%}
+      {% if evidence_level != "document" -%}
       {"summary": "A candidate's budget paper (Councilmember Priya Okafor). She proposes cutting the transit budget by $9M by consolidating two bus routes.", "quotes": ["I propose a $9 million reduction in the transit budget, achieved by consolidating the two least-used bus routes."], "provenance_ids": []}
       {%- else -%}
       {"summary": "A candidate's budget paper (Councilmember Priya Okafor). She proposes cutting the transit budget by $9M by consolidating two bus routes.", "provenance_ids": []}

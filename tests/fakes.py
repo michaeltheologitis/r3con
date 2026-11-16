@@ -384,6 +384,12 @@ def is_later_round(request: Request) -> bool:
     return "provenance_ids" in schema["properties"]
 
 
+def asks_for_quotes(request: Request) -> bool:
+    """Whether a relevance ``request``'s reply schema asks for quotes."""
+    schema = request["response_format"]["json_schema"]["schema"]
+    return "quotes" in schema["properties"]
+
+
 def citable_lists(request: Request) -> dict[str, Any]:
     """The JSON schema of each list of ids a direct reasoning reply may cite."""
     schema = request["response_format"]["json_schema"]["schema"]

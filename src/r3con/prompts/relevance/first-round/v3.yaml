@@ -10,7 +10,7 @@ instructions: |-
   </task>
 
   ## Output
-  {% if quotes -%}
+  {% if evidence_level != "document" -%}
   Reply in two fields:
 
   - `summary`: the task-conditioned summary of this document only — no preamble, no restating the task. If this document contributes nothing relevant to the task, set it to null.
@@ -44,7 +44,7 @@ examples:
       Closing. These choices reflect one principle: spend where residents see the result.
 
       Output (task-conditioned summary):
-      {% if quotes -%}
+      {% if evidence_level != "document" -%}
       {"summary": "A candidate's campaign platform paper (Councilmember Dana Reyes). Relevant to the task: Reyes proposes cutting the city transit budget by $12M (from $80M), reallocating it to road maintenance. Her hiring freeze, consulting cut, and bike-lane pilot are not transit cuts. As just one candidate's paper, it gives only Reyes's proposed cut — not enough on its own to say who proposes the largest.", "quotes": ["The current transit budget stands at $80 million.", "I propose reducing the transit budget by $12 million and redirecting those savings to road maintenance, where our backlog of potholes and failing bridges is now a genuine safety issue.", "I will impose a hiring freeze at City Hall and cut the outside-consulting budget by 30%.", "I support a modest downtown bike-lane pilot, funded from the parks capital reserve — not from transit."]}
       {%- else -%}
       {"summary": "A candidate's campaign platform paper (Councilmember Dana Reyes). Relevant to the task: Reyes proposes cutting the city transit budget by $12M (from $80M), reallocating it to road maintenance. Her hiring freeze, consulting cut, and bike-lane pilot are not transit cuts. As just one candidate's paper, it gives only Reyes's proposed cut — not enough on its own to say who proposes the largest."}
