@@ -1849,6 +1849,10 @@
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
   const MAX_ROUNDS = 4;
+  // The evidence level r3con's default config records, and a run's until the other is chosen in the settings.
+  const DEFAULT_EVIDENCE = 'sentence';
+  /** @type {EvidenceLevel[]} */
+  const EVIDENCE_LEVELS = [DEFAULT_EVIDENCE, 'document'];
   // The first round r3con prunes after: an empty round-1 note alone prunes nothing.
   const FIRST_PRUNING_ROUND = 2;
   const FROM_ROUND_1 = "nothing relevant in the end · answered from round 1's notes";
@@ -2001,7 +2005,7 @@
   const modelOther = $('model-other', HTMLInputElement);
   const modelRemove = $('model-remove', HTMLButtonElement);
   const roundsPick = $('rounds', HTMLSelectElement);
-  const evidenceBox = $('evidence', HTMLInputElement);
+  const evidencePick = $('evidence', HTMLSelectElement);
   const frame = $('frame');
   const trash = $('trash');
   const removeAllButtons = [$('files-remove-all'), $('panel-remove-all')];
@@ -6206,14 +6210,15 @@
   }
 
   const pickedRounds = () => Number(roundsPick.value);
-  /** @returns {EvidenceLevel} */
-  const pickedEvidence = () => (evidenceBox.checked ? 'sentence' : 'document');
+  const pickedEvidence = () => /** @type {EvidenceLevel} */ (evidencePick.value);
 
   function buildSettings() {
     fill($('keys'), keyRows());
     fill(roundsPick, range(MAX_ROUNDS).map((k) => h('option', { value: k + 1 }, k + 1 === DEFAULT_ROUNDS ? `${k + 1} · default` : String(k + 1))));
     roundsPick.value = String(readRounds());
-    evidenceBox.checked = readStored(EVIDENCE_KEY) !== 'document';
+    const evidence = readStored(EVIDENCE_KEY);
+    fill(evidencePick, EVIDENCE_LEVELS.map((level) => h('option', { value: level }, level === DEFAULT_EVIDENCE ? `${level} · default` : level)));
+    evidencePick.value = EVIDENCE_LEVELS.find((level) => level === evidence) ?? DEFAULT_EVIDENCE;
   }
 
   // The groups typed in and not yet saved: a provider's key, or a server's URL and key together.
@@ -6686,7 +6691,7 @@
     });
     modelRemove.addEventListener('click', removeSavedModel);
     roundsPick.addEventListener('change', () => writeStored(ROUNDS_KEY, roundsPick.value));
-    evidenceBox.addEventListener('change', () => writeStored(EVIDENCE_KEY, pickedEvidence()));
+    evidencePick.addEventListener('change', () => writeStored(EVIDENCE_KEY, evidencePick.value));
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
