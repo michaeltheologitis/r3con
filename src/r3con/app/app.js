@@ -106,6 +106,7 @@
    * @property {Map<string, number>} indexes each document id's index
    * @property {Map<number, number>} pruned each document r3con pruned, mapped to the round after which it did: read in no later round, nor parsed
    * @property {string | null} [lit]
+   * @property {EvidenceLevel} [evidence] a live run's, as sent
    */
   /**
    * @typedef {object} RecordedRun
@@ -131,6 +132,7 @@
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
   /** @typedef {[string, string, EdgeKind, ('draw' | 'fade')?]} Line A line to draw: from, to, its kind, and how it enters. */
   /** @typedef {'working' | 'done' | 'failed'} CallState */
+  /** @typedef {'sentence' | 'document'} EvidenceLevel r3con's: whether relevance summaries quote their sentences, or only reach their documents. */
   /** @typedef {{ start: number, end: number }} DocRange Documents start to end, inclusive. */
   /** @typedef {DocRange & { name: string, path: string, items: (Folder | DocRange)[] }} Folder Its documents, kept together. */
   /** @typedef {DocRange & { open: boolean, depth: number, folder?: Folder }} FoldRow A fold's or a folder's documents as one row. */
@@ -1806,6 +1808,7 @@
   const THEME_KEY = 'r3con-proto-theme';
   const MODEL_KEY = 'r3con-proto-model';
   const ROUNDS_KEY = 'r3con-proto-rounds';
+  const EVIDENCE_KEY = 'r3con-proto-evidence';
   const SIDE_WIDTH_KEY = 'r3con-proto-side-width';
   // In sessionStorage: what r3con app opened this tab with, for a reload.
   const LAUNCH_KEY = 'r3con-launch';
@@ -1998,6 +2001,7 @@
   const modelOther = $('model-other', HTMLInputElement);
   const modelRemove = $('model-remove', HTMLButtonElement);
   const roundsPick = $('rounds', HTMLSelectElement);
+  const evidenceBox = $('evidence', HTMLInputElement);
   const frame = $('frame');
   const trash = $('trash');
   const removeAllButtons = [$('files-remove-all'), $('panel-remove-all')];
@@ -2624,11 +2628,11 @@
 
   // Filled in by r3con app's events as they arrive; events carry no per-call tokens or cost, so it has no calls.
   // It is planned for the rounds it asks for, unless its run_started event says it has others.
-  /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @param {number} rounds @returns {Run} */
-  function liveRun(question, model, endpoint, docs, rounds) {
+  /** @param {string} question @param {string} model @param {string | null} endpoint @param {LoadedFile[]} docs @param {number} rounds @param {EvidenceLevel} evidence @returns {Run} */
+  function liveRun(question, model, endpoint, docs, rounds, evidence) {
     /** @type {Pick<Run, 'rounds' | 'schema' | 'parsed' | 'pruned' | 'calls' | 'totals'>} */
     const empty = { rounds: emptyRounds(rounds), schema: null, parsed: [], pruned: new Map(), calls: null, totals: null };
-    return { simulated: false, id: null, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
+    return { simulated: false, id: null, evidence, ...withIds([]), docs, answers: [{ question, model, endpoint, text: null, provenance: null }], ...empty };
   }
 
   /** @param {boolean} simulated @param {Totals | null | undefined} totals */
@@ -5205,7 +5209,7 @@
   /** @param {RunTab} tab @param {Narrator} narr */
   async function streamRun(tab, narr) {
     const { question, model, endpoint } = tab.run.answers[0];
-    const body = { question, model, endpoint, ...documentsOf(tab.run), relevance_rounds: tab.run.rounds.length };
+    const body = { question, model, endpoint, ...documentsOf(tab.run), relevance_rounds: tab.run.rounds.length, evidence_level: tab.run.evidence };
     await playLive(tab, narr, '/api/runs', body, 'failed');
   }
 
@@ -6202,11 +6206,14 @@
   }
 
   const pickedRounds = () => Number(roundsPick.value);
+  /** @returns {EvidenceLevel} */
+  const pickedEvidence = () => (evidenceBox.checked ? 'sentence' : 'document');
 
   function buildSettings() {
     fill($('keys'), keyRows());
     fill(roundsPick, range(MAX_ROUNDS).map((k) => h('option', { value: k + 1 }, k + 1 === DEFAULT_ROUNDS ? `${k + 1} · default` : String(k + 1))));
     roundsPick.value = String(readRounds());
+    evidenceBox.checked = readStored(EVIDENCE_KEY) !== 'document';
   }
 
   // The groups typed in and not yet saved: a provider's key, or a server's URL and key together.
@@ -6679,6 +6686,7 @@
     });
     modelRemove.addEventListener('click', removeSavedModel);
     roundsPick.addEventListener('change', () => writeStored(ROUNDS_KEY, roundsPick.value));
+    evidenceBox.addEventListener('change', () => writeStored(EVIDENCE_KEY, pickedEvidence()));
     questionEl.addEventListener('input', readyStatus);
 
     for (const id of ['file-input', 'folder-input']) {
@@ -7147,7 +7155,7 @@
         return oneDocument(file, { why: `Couldn't unzip it: ${explain(error, /** @type {Error} */ (error).message, "couldn't unzip a file")}.` });
       }
     },
-    newRun: (question, files) => liveRun(question, pickedModel(), pickedEndpoint(), files, pickedRounds()),
+    newRun: (question, files) => liveRun(question, pickedModel(), pickedEndpoint(), files, pickedRounds(), pickedEvidence()),
     play: streamRun,
     runGoing: (tab) => streaming('run', tab),
     stop: (tab) => toStop(tab).forEach(stopJob),
