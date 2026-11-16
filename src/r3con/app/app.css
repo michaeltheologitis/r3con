@@ -349,7 +349,7 @@ p { margin: 0; }
   align-items: baseline;
   gap: 0.45em 2ch;
 }
-.keys label, .rounds label { font-weight: 600; }
+.keys label, .evidence label, .rounds label { font-weight: 600; }
 #key-other, .key-state { grid-column: 2; }
 /* Two lines beside its URL and key, so the fields keep the width the providers' labels leave them. */
 #servers-label { width: min-content; grid-row: span 2; }
@@ -371,7 +371,10 @@ p { margin: 0; }
 .field:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
 /* A line kept for what a save says, so nothing moves when it does. */
 #settings-saved { min-height: 1lh; }
-.rounds { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45em 2ch; padding-top: 0.9em; border-top: 1px solid var(--line); }
+.evidence, .rounds { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45em 2ch; }
+.evidence { column-gap: 1ch; padding-top: 0.9em; border-top: 1px solid var(--line); }
+/* A box on the baseline rises above lowercase text: lowered, it centres on the label's letters. */
+#evidence { margin: 0; translate: 0 0.15em; accent-color: var(--accent); }
 #rounds { width: auto; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }

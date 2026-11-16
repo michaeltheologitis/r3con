@@ -239,6 +239,8 @@ const roundKinds = (rounds) => Array.from({ length: rounds }, (_, k) => `r${k + 
 const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
+const EVIDENCE_KEY = 'r3con-proto-evidence';
+const EVIDENCE_LABEL = 'sentence-level evidence';
 // What storage may hold that r3con app would refuse as a count of rounds.
 const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
 // Frames drawn while a run's request is held, before r3con app has said anything of the run.
@@ -499,6 +501,12 @@ const transform = (page) => page.$eval('#world', (el) => el.style.transform);
 const zoom = (page) => page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
 const sameSpot = (a, b) => Boolean(a && b) && a.left === b.left && a.top === b.top;
 const focusedId = (page) => page.evaluate(() => document.activeElement.id);
+
+// Presses Tab, at most MAX_TABS times, until control `id` has focus; whether its focus ring then shows.
+async function tabTo(page, id) {
+  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== id; tabs++) await page.keyboard.press('Tab');
+  return page.$eval(`#${id}`, (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+}
 const shownTab = async (page) => (await page.evaluate(tabRow)).findIndex((tab) => tab.selected);
 
 async function zoomAt(page, { x, y }, deltaY) {
@@ -2721,6 +2729,7 @@ async function settings() {
       await serverMenu(page, checkAt);
       await picker(page, checkAt);
       await savedModels(page, checkAt);
+      await evidenceSetting(page, checkAt);
       await roundsSetting(page, checkAt);
       const leaks = messages.filter((m) => m.text.includes(TEST_KEY)).length;
       checkAt('no console message holds the key', leaks === 0, `${messages.length} messages`);
@@ -2816,7 +2825,7 @@ async function keys(page, checkAt) {
   const notKept = 'once closed, no field, storage, address or markup holds a key, and only the server list shows the endpoint';
   checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
-  const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
+  const filled = await page.$$eval('#settings input:not([type="checkbox"])', (els) => els.filter((el) => el.value).map((el) => el.id));
   const reopened = filled.length === 0 && isDeepStrictEqual(await states(), ['state-openai', 'state-anthropic', 'state-gemini']);
   checkAt('reopened, every field is empty and the providers are still set', reopened, filled.join(', '));
 
@@ -2974,7 +2983,7 @@ async function savedModels(page, checkAt) {
   await page.fill('#question', NEW_QUESTION);
   await page.focus('#model-pick');
   await page.keyboard.press('End');
-  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'model-other'; tabs++) await page.keyboard.press('Tab');
+  await tabTo(page, 'model-other');
   const before = await turns();
   await page.keyboard.type(SAVED_MODEL);
   await page.keyboard.press('Enter');
@@ -3042,15 +3051,57 @@ function roundsControl(key) {
   };
 }
 
-function roundsFit() {
+// In-page: whether control `id` and its label fit inside the settings, which do not scroll sideways.
+function controlFits(id) {
   const settings = document.getElementById('settings');
   const box = settings.getBoundingClientRect();
   const inside = (el) => {
     const r = el.getBoundingClientRect();
     return r.left >= box.left && r.right <= box.right && r.width > 0;
   };
-  const select = document.getElementById('rounds');
-  return inside(select.labels[0]) && inside(select) && settings.scrollWidth <= settings.clientWidth;
+  const control = document.getElementById(id);
+  return inside(control.labels[0]) && inside(control) && settings.scrollWidth <= settings.clientWidth;
+}
+
+// In-page: whether the evidence box is ticked, what storage holds for it, and, in the open settings, whether its block
+// comes right before the rounds row and is drawn above it.
+function evidenceControl(key) {
+  const box = document.getElementById('evidence');
+  const [block, rounds] = [box.parentElement, document.getElementById('rounds').parentElement];
+  return {
+    checked: box.checked,
+    stored: localStorage.getItem(key),
+    above: block.nextElementSibling === rounds && block.getBoundingClientRect().bottom <= rounds.getBoundingClientRect().top,
+  };
+}
+
+// The sentence-level evidence box, before the rounds setting, which blocks storage at its end.
+async function evidenceSetting(page, checkAt) {
+  const control = () => page.evaluate(evidenceControl, EVIDENCE_KEY);
+  await page.reload();
+  await page.click('#settings-btn');
+  const fresh = await control();
+  const named = await page.getByRole('checkbox', { name: EVIDENCE_LABEL, exact: true }).evaluateAll((els) => els.map((el) => el.id));
+  const offeredName = `the settings offer ${EVIDENCE_LABEL}, named by its label, right above relevance rounds, ticked, and store nothing until it is changed`;
+  checkAt(offeredName, isDeepStrictEqual(named, ['evidence']) && isDeepStrictEqual(fresh, { checked: true, stored: null, above: true }), JSON.stringify({ named, ...fresh }));
+  checkAt('the evidence box and its label fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'evidence'));
+
+  await page.focus('#key-other');
+  const ring = await tabTo(page, 'evidence');
+  await page.keyboard.press('Space');
+  const unticked = await control();
+  const keyboardName = 'from the keyboard alone, Tab reaches the evidence box, its focus shows, and Space unticks it, storing document level at once';
+  checkAt(keyboardName, ring && !unticked.checked && unticked.stored === 'document', JSON.stringify({ ring, ...unticked }));
+  await page.keyboard.press('Escape');
+  await page.reload();
+  const reloaded = await control();
+  checkAt('unticked, the evidence box is still unticked after a reload', !reloaded.checked && reloaded.stored === 'document', JSON.stringify(reloaded));
+  await page.click('#settings-btn');
+  await page.check('#evidence');
+  await page.keyboard.press('Escape');
+  await page.reload();
+  const ticked = await control();
+  checkAt('ticked again, it stores sentence level and is still ticked after a reload', ticked.checked && ticked.stored === 'sentence', JSON.stringify(ticked));
 }
 
 // In-page, before the page's own script: storage throws on any use, as when the browser blocks it.
@@ -3076,11 +3127,10 @@ async function roundsSetting(page, checkAt) {
   const offered = isDeepStrictEqual(named, ['rounds']) && isDeepStrictEqual(fresh, bare);
   const offeredName = `the settings offer relevance rounds 1 to ${MAX_ROUNDS}, ${ROUNDS} by default, named by its label, with no text under it or description, and store nothing until one is chosen`;
   checkAt(offeredName, offered, JSON.stringify({ named, ...fresh }));
-  checkAt('the rounds label and control fit inside the settings, which do not scroll sideways', await page.evaluate(roundsFit));
+  checkAt('the rounds label and control fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'rounds'));
 
   await page.focus('#key-other');
-  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'rounds'; tabs++) await page.keyboard.press('Tab');
-  const ring = await page.$eval('#rounds', (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+  const ring = await tabTo(page, 'rounds');
   await page.keyboard.press('ArrowDown');
   const down = await control();
   await page.keyboard.press('ArrowUp');
@@ -6181,6 +6231,36 @@ async function liveQuotes(url) {
   });
 }
 
+// In-page: how many of the events streamed carry quotes, a relevance summary's or an answer's.
+const quotingEvents = () => window.events.filter((e) => (e.quotes ?? e.provenance?.quotes ?? []).length > 0).length;
+
+// Unticked, a run is sent document level and r3con quotes nothing, yet the files list still dims only the documents
+// off the answer's trail.
+async function liveDocumentLevel(url) {
+  const before = (page) => page.addInitScript(recordEvents);
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+    await page.click('#settings-btn');
+    await page.uncheck('#evidence');
+    await page.keyboard.press('Escape');
+    const started = startedJob(page, '/api/runs');
+    await page.click('#run-btn');
+    const sent = (await started).request().postDataJSON().evidence_level;
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const quoting = await page.evaluate(quotingEvents);
+    const sentName = `a run started with ${EVIDENCE_LABEL} unticked is sent evidence_level "document", and no event of it carries a quote`;
+    check('live', sentName, done && sent === 'document' && quoting === 0, `sent ${JSON.stringify(sent)}; ${quoting} events with quotes`);
+
+    const [answer] = await page.evaluate(answersRead);
+    const docIds = await docIdsOf(page);
+    const { nodes } = trailOnPage(answer.trail, answer.ids, docIds);
+    const onTrail = docIds.map((id) => nodes.includes(id));
+    await page.click('#tab-files');
+    const lit = (await page.evaluate(fileCounts)).map((f) => !f.off);
+    const dimmed = onTrail.includes(true) && onTrail.includes(false) && isDeepStrictEqual(lit, onTrail);
+    check('live', "its files list dims exactly the documents off the answer's trail, which reaches some of them", dimmed, JSON.stringify({ lit, onTrail }));
+  });
+}
+
 // Lines of about 70 characters: past fake_server.py's PART_CHARS, 2,000, so it refuses them whole, and few enough
 // that each half fits, so r3con reads them in exactly two parts.
 const TWO_PART_LINES = 48;
@@ -6938,6 +7018,7 @@ async function liveNames(url) {
     const name = "a run is sent each file's name beside its text, and r3con app names the run's documents by them, a name sent twice numbered the second time";
     check('live', name, done && paired && numbered, `${JSON.stringify(sent.names)}; ${JSON.stringify(named)}`);
     check('live', `with no rounds chosen, a run is sent relevance_rounds ${ROUNDS}`, sent.relevance_rounds === ROUNDS, JSON.stringify(sent.relevance_rounds));
+    check('live', `with ${EVIDENCE_LABEL} left ticked, a run is sent evidence_level "sentence"`, sent.evidence_level === 'sentence', JSON.stringify(sent.evidence_level));
   });
 }
 
@@ -8165,6 +8246,7 @@ async function live() {
     await liveFoldsParsed(url);
     await liveQuotes(url);
     await livePartQuotes(url);
+    await liveDocumentLevel(url);
     await liveRounds(url);
     await liveRoundsKept(url);
     await liveFailure(url);
