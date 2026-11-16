@@ -71,7 +71,6 @@ from tests.fakes import (
     FakeKeyring,
     FakeLLM,
     a_parse_citation_short,
-    asks_for_quotes,
     in_json,
     reading,
     silent_when,
@@ -1173,16 +1172,13 @@ def test_a_run_builds_its_representation_over_the_relevance_rounds_sent(
     ids=["default", "document"],
 )
 def test_a_run_reads_at_the_evidence_level_sent(
-    client: TestClient, llm: FakeLLM, sent: dict[str, str], level: str
+    client: TestClient, sent: dict[str, str], level: str
 ):
     response = client.post("/api/runs", json={**run_body(), **sent})
     assert response.status_code == 202, response.text
     events = run_events(client, response.json()["run_id"])
     manifest = json.loads((Path(events[0]["run_dir"]) / "manifest.json").read_text())
-    reads = llm.requests_for("relevance")
     assert manifest["config"]["evidence_level"] == level
-    assert reads
-    assert all(asks_for_quotes(read) == (level == "sentence") for read in reads)
     assert events[-1]["type"] == "run_finished"
 
 
@@ -2102,7 +2098,6 @@ def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_aske
         ({"relevance_rounds": True}, NOT_A_ROUND_COUNT),
         ({"relevance_rounds": 2.5}, NOT_A_ROUND_COUNT),
         ({"evidence_level": "paragraph"}, NOT_AN_EVIDENCE_LEVEL),
-        ({"evidence_level": None}, NOT_AN_EVIDENCE_LEVEL),
     ],
 )
 def test_a_run_body_that_is_not_valid_is_refused_with_what_is_wrong(

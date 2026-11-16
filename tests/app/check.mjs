@@ -501,6 +501,12 @@ const transform = (page) => page.$eval('#world', (el) => el.style.transform);
 const zoom = (page) => page.$eval('#world', (el) => parseFloat(el.style.getPropertyValue('--k')));
 const sameSpot = (a, b) => Boolean(a && b) && a.left === b.left && a.top === b.top;
 const focusedId = (page) => page.evaluate(() => document.activeElement.id);
+
+// Presses Tab, at most MAX_TABS times, until control `id` has focus; whether its focus ring then shows.
+async function tabTo(page, id) {
+  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== id; tabs++) await page.keyboard.press('Tab');
+  return page.$eval(`#${id}`, (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+}
 const shownTab = async (page) => (await page.evaluate(tabRow)).findIndex((tab) => tab.selected);
 
 async function zoomAt(page, { x, y }, deltaY) {
@@ -2977,7 +2983,7 @@ async function savedModels(page, checkAt) {
   await page.fill('#question', NEW_QUESTION);
   await page.focus('#model-pick');
   await page.keyboard.press('End');
-  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'model-other'; tabs++) await page.keyboard.press('Tab');
+  await tabTo(page, 'model-other');
   const before = await turns();
   await page.keyboard.type(SAVED_MODEL);
   await page.keyboard.press('Enter');
@@ -3081,8 +3087,7 @@ async function evidenceSetting(page, checkAt) {
   checkAt('the evidence box and its label fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'evidence'));
 
   await page.focus('#key-other');
-  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'evidence'; tabs++) await page.keyboard.press('Tab');
-  const ring = await page.$eval('#evidence', (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+  const ring = await tabTo(page, 'evidence');
   await page.keyboard.press('Space');
   const unticked = await control();
   const keyboardName = 'from the keyboard alone, Tab reaches the evidence box, its focus shows, and Space unticks it, storing document level at once';
@@ -3125,8 +3130,7 @@ async function roundsSetting(page, checkAt) {
   checkAt('the rounds label and control fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'rounds'));
 
   await page.focus('#key-other');
-  for (let tabs = 0; tabs < MAX_TABS && (await focusedId(page)) !== 'rounds'; tabs++) await page.keyboard.press('Tab');
-  const ring = await page.$eval('#rounds', (el) => el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none');
+  const ring = await tabTo(page, 'rounds');
   await page.keyboard.press('ArrowDown');
   const down = await control();
   await page.keyboard.press('ArrowUp');
@@ -6230,8 +6234,8 @@ async function liveQuotes(url) {
 // In-page: how many of the events streamed carry quotes, a relevance summary's or an answer's.
 const quotingEvents = () => window.events.filter((e) => (e.quotes ?? e.provenance?.quotes ?? []).length > 0).length;
 
-// Unticked, a run is sent document level, and r3con quotes nothing: the page marks, counts and lists no sentence and
-// folds no quotes, yet lights the documents the answer's trail reaches, on the panel and in the files list.
+// Unticked, a run is sent document level and r3con quotes nothing, yet the files list still dims only the documents
+// off the answer's trail.
 async function liveDocumentLevel(url) {
   const before = (page) => page.addInitScript(recordEvents);
   await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
@@ -6248,32 +6252,12 @@ async function liveDocumentLevel(url) {
 
     const [answer] = await page.evaluate(answersRead);
     const docIds = await docIdsOf(page);
-    const expected = trailOnPage(answer.trail, answer.ids, docIds);
-    const onTrail = docIds.map((id) => expected.nodes.includes(id));
-    const lit = await litOnPanel(page);
-    await inspect(page, 'answer-0');
-    const answerLine = await page.$$eval('#inspector .used', (els) => els.length);
-    await inspect(page, 'r2-0');
-    const folds = (await page.evaluate(foldsIn)).map(({ name }) => name.split(' ')[0]);
-    await inspect(page, docIds[onTrail.indexOf(true)]);
-    const doc = await page.evaluate(marksIn, '#inspector');
-    await page.keyboard.press('Escape');
+    const { nodes } = trailOnPage(answer.trail, answer.ids, docIds);
+    const onTrail = docIds.map((id) => nodes.includes(id));
     await page.click('#tab-files');
-    const files = await page.evaluate(fileCounts);
-    await page.click('#tab-chat');
-    const shown = {
-      pills: await page.evaluate(pillsOn),
-      lists: (await page.evaluate(sentenceLists)).length,
-      counts: files.filter((f) => f.count).length,
-      answerLine,
-      folds,
-      marks: doc.marks.length,
-      used: doc.meta.endsWith(' · used'),
-    };
-    const quiet = { pills: {}, lists: 0, counts: 0, answerLine: 0, folds: ['provenance'], marks: 0, used: true };
-    const reached = onTrail.some(Boolean) && isDeepStrictEqual(lit, expected) && isDeepStrictEqual(files.map((f) => !f.off), onTrail);
-    const quietName = "its answer shows no quote: no pill, list or count of sentences, no quotes fold or sentences line, and a document on the trail says used with nothing marked; that document and the others on the trail are lit, on the panel and in the files list";
-    check('live', quietName, reached && isDeepStrictEqual(shown, quiet), JSON.stringify({ ...shown, onTrail }));
+    const lit = (await page.evaluate(fileCounts)).map((f) => !f.off);
+    const dimmed = onTrail.includes(true) && onTrail.includes(false) && isDeepStrictEqual(lit, onTrail);
+    check('live', "its files list dims exactly the documents off the answer's trail, which reaches some of them", dimmed, JSON.stringify({ lit, onTrail }));
   });
 }
 

@@ -84,10 +84,10 @@ a reload reads.
   ``notes.txt (2)``); without them, r3con names the documents by index.
   ``relevance_rounds``, from 1 to ``MAX_RELEVANCE_ROUNDS``, is how many relevance
   rounds the run builds its representation over, ``DEFAULT_RELEVANCE_ROUNDS`` if not
-  given. ``evidence_level`` is ``"sentence"``, the default, for relevance summaries
-  that quote the sentences they are based on, or ``"document"`` for summaries that
-  quote none, whose trail still reaches the documents. An ask reuses its run's
-  representation, so it takes neither.
+  given. ``evidence_level`` is ``"sentence"``, for relevance summaries that quote the
+  sentences they are based on, or ``"document"``, for summaries that quote none, whose
+  trail still reaches the documents; r3con's config decides it if not given. An ask
+  reuses its run's representation, so it takes neither.
 - ``POST /api/runs/{run_id}/asks`` (``{question, model, endpoint?}``) starts
   ``r3con.ask`` over a run that has ended and answers ``{ask_id}``;
   ``GET /api/asks/{ask_id}/events`` streams its events until ``ask_finished`` or
@@ -435,7 +435,7 @@ class RunRequest(BaseModel):
     relevance_rounds: Annotated[
         int, Field(ge=1, le=MAX_RELEVANCE_ROUNDS, strict=True)
     ] = DEFAULT_RELEVANCE_ROUNDS
-    evidence_level: EvidenceLevel = "sentence"
+    evidence_level: EvidenceLevel | None = None
     _one_name_each = field_validator("names")(_one_per_document)
 
 
