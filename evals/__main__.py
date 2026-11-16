@@ -2,6 +2,7 @@
 
     uv run python -m evals                      # a full run: writes its line to results.jsonl
     uv run python -m evals --limit 1            # one task per benchmark, writes nothing
+    uv run python -m evals --evidence-level document
     uv run python -m evals --resume evals/runs/<folder>
     uv run python -m evals --ask-over evals/runs/<folder> --model <litellm model>
 
@@ -33,7 +34,7 @@ from litellm import exceptions
 
 import r3con
 from evals import JUDGE_MODEL, corpusqa, log, loong
-from r3con.config import RunConfig, load_config
+from r3con.config import EVIDENCE_LEVELS, EvidenceLevel, RunConfig, load_config
 from r3con.logging_setup import configure_logging
 from r3con.masking import masked
 from r3con.pipeline import ASKS_FOLDER
@@ -92,18 +93,22 @@ def evaluate(
     *,
     limit: int | None = None,
     workers: int = DEFAULT_WORKERS,
+    evidence_level: EvidenceLevel | None = None,
 ) -> dict[str, Any] | None:
     """Run each pinned task, or the first ``limit`` of each benchmark, that has no
-    record in ``folder`` yet. Once every one has a record, return the results line; a
-    full run also writes it to ``results``, in place of an earlier line of the same
-    run. Else log what is missing and return ``None``."""
+    record in ``folder`` yet, with the default config at ``evidence_level`` when given.
+    Once every one has a record, return the results line; a full run also writes it to
+    ``results``, in place of an earlier line of the same run. Else log what is missing
+    and return ``None``."""
     earlier = _results_lines(results) if limit is None else []
-    config = load_config()
+    config = load_config(evidence_level=evidence_level)
     _as_run(folder)
     header = _start(folder, "label", config.label())
     selection = {name: pinned[name][:limit] for name in BENCHMARKS}
     answer = functools.partial(_answer, root=folder, config=config)
     again = f"--resume {folder}"
+    if evidence_level:
+        again += f" --evidence-level {evidence_level}"
     scored = _score(selection, folder, answer, folder, workers, again)
     if scored is None:
         return None
@@ -374,7 +379,7 @@ def _start(
         raise SystemExit(
             f"evals: {folder} was started at commit {started['commit']} as "
             f"{started.get(key)}, but this checkout is {current['commit']} as "
-            f"{value}. Resume it from that commit, or {anew}."
+            f"{value}. Resume it from that commit with the same settings, or {anew}."
         )
     return started
 
@@ -531,6 +536,12 @@ def _parser() -> argparse.ArgumentParser:
         help="The litellm model that answers with --ask-over.",
     )
     parser.add_argument(
+        "--evidence-level",
+        choices=EVIDENCE_LEVELS,
+        help="Override the config's evidence level (document = relevance quotes no "
+        "sentences). A run resumes only at the level it started with.",
+    )
+    parser.add_argument(
         "--draw",
         action="store_true",
         help="Re-draw evals/tasks.json from the seed, then exit.",
@@ -543,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if (args.ask_over is None) != (args.model is None):
         parser.error("--ask-over and --model go together")
+    if args.ask_over and args.evidence_level:
+        parser.error("--ask-over reruns only reasoning; --evidence-level is the run's")
     configure_logging()
     log.setLevel(logging.INFO)
     if args.draw:
@@ -561,7 +574,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         folder = args.resume.resolve() if args.resume else RUNS_DIR / new_run_folder()
         line = evaluate(
-            pinned, folder, RESULTS_PATH, limit=args.limit, workers=args.workers
+            pinned,
+            folder,
+            RESULTS_PATH,
+            limit=args.limit,
+            workers=args.workers,
+            evidence_level=args.evidence_level,
         )
     if line is None:
         return 1

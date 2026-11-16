@@ -14,6 +14,7 @@ from evals import JUDGE_MODEL, download
 from evals.__main__ import SEED, compare, evaluate, main, sample, spend
 from r3con.config import load_config
 from r3con.stages.structuring.parsing import SchemaError
+from tests.fakes import ANSWERING_SCHEMA
 
 PINNED = {
     "seed": SEED,
@@ -360,6 +361,53 @@ def test_main_prints_a_partial_runs_line_and_writes_none(
     assert not (cli_paths / "results_path").exists()
 
 
+@pytest.mark.parametrize("level", [None, "document"], ids=["omitted", "document"])
+def test_the_evidence_level_flag_reaches_the_config_and_the_label(
+    loong_cache, corpusqa_cache, judging_llm, cli_paths, capsys, level
+):
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    flag = ["--evidence-level", level] if level else []
+
+    assert main(["--limit", "1", *flag]) == 0
+
+    line = json.loads(capsys.readouterr().out)
+    run = cli_paths / "runs_dir" / line["run"]
+    assert line["label"] == load_config(evidence_level=level).label()
+    assert line["label"] == read_json(run / "run.json")["label"]
+    assert ("evidence=document" in line["label"]) == (level == "document")
+    levels = {
+        read_json(manifest)["config"]["evidence_level"]
+        for manifest in run.glob("*/*/*/manifest.json")
+    }
+    assert levels == {level or "sentence"}
+
+
+def test_a_document_level_run_resumes_only_at_that_level(
+    loong_cache, corpusqa_cache, judging_llm, cli_paths, capsys
+):
+    (cli_paths / "tasks_path").write_text(json.dumps(PINNED))
+    judging_llm.answers(schema=exceptions.BadGatewayError(**LITELLM_ERROR))
+    assert main(["--evidence-level", "document"]) == 1
+    [folder] = (cli_paths / "runs_dir").iterdir()
+    finish = f"finish with --resume {folder} --evidence-level document"
+    assert finish in capsys.readouterr().err
+    judging_llm.answers(schema=ANSWERING_SCHEMA)
+
+    with pytest.raises(
+        SystemExit, match=r"as default\[.*evidence=document.*same settings"
+    ):
+        main(["--resume", str(folder)])
+    assert main(["--resume", str(folder), "--evidence-level", "document"]) == 0
+
+    line = json.loads(capsys.readouterr().out)
+    assert line["label"] == load_config(evidence_level="document").label()
+    levels = {
+        read_json(manifest)["config"]["evidence_level"]
+        for manifest in folder.glob("*/*/*/manifest.json")
+    }
+    assert levels == {"document"}
+
+
 def test_main_fails_while_a_task_has_no_record_and_resume_runs_it_again(
     loong_cache, corpusqa_cache, judging_llm, cli_paths
 ):
@@ -558,10 +606,11 @@ def test_main_asks_over_a_run_and_prints_the_comparisons_line(
         ["--model", ANSWER_MODEL],
         ["--ask-over", "run"],
         ["--ask-over", "run", "--model", ANSWER_MODEL, "--resume", "run"],
+        ["--ask-over", "run", "--model", ANSWER_MODEL, "--evidence-level", "document"],
     ],
-    ids=["model-alone", "no-model", "with-resume"],
+    ids=["model-alone", "no-model", "with-resume", "with-evidence-level"],
 )
-def test_ask_over_takes_a_model_and_no_resume(argv):
+def test_ask_over_takes_a_model_and_no_resume_or_evidence_level(argv):
     with pytest.raises(SystemExit) as raised:
         main(argv)
     assert raised.value.code == 2
