@@ -34,7 +34,7 @@ From the repo root, with `OPENAI_API_KEY` set:
 ```bash
 uv run python -m evals                       # the full run; writes its line to results.jsonl
 uv run python -m evals --limit 1             # one task per benchmark, to try it out
-uv run python -m evals --evidence-level document   # relevance quotes no sentences
+uv run python -m evals --evidence-level document   # skip quoting sentences
 uv run python -m evals --resume evals/runs/<folder>
 uv run python -m evals --ask-over evals/runs/<folder> --model <model>   # see below
 ```
