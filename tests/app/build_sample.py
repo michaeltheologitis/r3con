@@ -70,8 +70,9 @@ def provenance(
 ) -> dict[str, Any]:
     """The provenance of the answer saved in ``folder``, as r3con.trace gives it, each
     quote's document_text read from its document's text in ``texts``. Before 0.6.5,
-    r3con saved only its citations; it saves its quotes since, and its trail since
-    0.6.9. The recorded run predates document_text, which trace then gives as None."""
+    r3con saved only its citations; it saves its quotes since, its trail since 0.6.9,
+    and its documents since 0.6.33. The recorded run predates document_text, which
+    trace then gives as None."""
     traced = r3con.trace(folder)
     assert saved.items() <= traced.items(), (
         f"{folder.name}: trace gives the saved provenance"

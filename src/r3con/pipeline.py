@@ -208,22 +208,21 @@ class Answer:
     obvious thing.
 
     - ``answer`` — the answer text.
-    - ``provenance`` — what the answer used: ``provenance["summary_ids"]``, the ids of
-      the relevance snippets of ``relevant_context`` it used (``<id>.<k>`` for part
-      ``k`` of a document read in parts), ``provenance["parse_ids"]``, those of the
-      documents whose records in ``structured_context`` it used (an id can be in both),
-      ``provenance["trail"]``, the answer's trail under the default rule
+    - ``provenance`` — what the answer used (:class:`~r3con.provenance.Provenance`).
+      ``provenance["summary_ids"]`` lists the ids of the relevance snippets of
+      ``relevant_context`` it used (``<id>.<k>`` for part ``k`` of a document read in
+      parts). ``provenance["parse_ids"]`` lists those of the documents whose records
+      in ``structured_context`` it used (an id can be in both).
+      ``provenance["trail"]`` is the answer's trail under the default rule
       (:class:`~r3con.provenance.Trail`): the snippets and parses it cites, the
       snippets they cite, round by round back, and the documents those snippets
-      summarize, ``provenance["documents"]``, the documents behind it, those the
-      trail reaches, in document order, each by id and by name
-      (:class:`~r3con.provenance.NamedDocument`), and ``provenance["quotes"]``, the
-      sentences behind it, those the trail's snippets are based on
-      (:class:`~r3con.provenance.NamedQuote`), each naming its document by id and by
-      name (:class:`~r3con.provenance.Provenance`), none for a document-level run
-      (``evidence_level="document"``), whose provenance names its documents in
-      ``documents`` alone. :func:`r3con.trace` builds it again from the run folder,
-      under any rule.
+      summarize. ``provenance["documents"]`` lists the documents the trail reaches,
+      in document order, each by id and by name
+      (:class:`~r3con.provenance.NamedDocument`). ``provenance["quotes"]`` lists the
+      sentences behind the answer, those the trail's snippets are based on, each
+      naming its document by id and by name (:class:`~r3con.provenance.NamedQuote`);
+      a document-level run (``evidence_level="document"``) has none.
+      :func:`r3con.trace` builds it again from the run folder, under any rule.
     - ``relevant_context`` — the **relevant context**: the relevance snippet of each
       document in the round of
       :attr:`~r3con.stages.relevance.RelevantContext.context_round`, aligned 1:1 with

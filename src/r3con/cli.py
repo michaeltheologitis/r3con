@@ -166,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override what relevance records as evidence (sentence = each snippet "
         "with the sentences it is based on, quoted; document = no quotes, so the "
-        "answer's provenance ends at documents).",
+        "answer's provenance lists only its documents).",
     )
     # --- runtime ---
     run_cmd.add_argument(

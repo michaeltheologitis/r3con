@@ -142,38 +142,29 @@ def test_the_default_trail_reaches_a_document_only_through_a_summary_of_it():
     }
 
 
+# The trail reaches documents in its own order; documents lists them in document order.
 @pytest.mark.parametrize(
-    ("rule", "documents"),
+    ("rule", "reached", "documents"),
     [
-        ("through-summaries", ["document:b", "document:a"]),
-        ("parses-light-documents", ["document:b", "document:c", "document:a"]),
+        ("through-summaries", ["document:b", "document:a"], ["a", "b"]),
+        (
+            "parses-light-documents",
+            ["document:b", "document:c", "document:a"],
+            ["a", "b", "c"],
+        ),
     ],
 )
 def test_a_cited_parse_that_cites_nothing_reaches_its_document_only_if_parses_do(
-    rule, documents
+    rule, reached, documents
 ):
     provenance = provenance_of(
         CITED_ROUNDS, summary_ids=["b"], parse_ids=["c"], rule=rule
     )
     nodes = provenance["trail"]["nodes"]
     assert provenance["trail"]["rule"] == rule
-    assert [node for node in nodes if node.startswith("document:")] == documents
-    assert places(provenance["quotes"]) == [("a", 0, 9), ("b", 10, 19)]
-
-
-@pytest.mark.parametrize(
-    ("rule", "documents"),
-    [("through-summaries", ["a", "b"]), ("parses-light-documents", ["a", "b", "c"])],
-)
-def test_the_documents_are_the_trails_in_document_order_each_with_its_name(
-    rule, documents
-):
-    # The trail reaches b; c, under a rule that follows parses, through its cited
-    # parse alone; then a, only through round 1's summary of it.
-    provenance = provenance_of(
-        CITED_ROUNDS, summary_ids=["b"], parse_ids=["c"], rule=rule
-    )
+    assert [node for node in nodes if node.startswith("document:")] == reached
     assert provenance["documents"] == [named(id_) for id_ in documents]
+    assert places(provenance["quotes"]) == [("a", 0, 9), ("b", 10, 19)]
 
 
 def test_a_node_reached_twice_is_listed_once_and_both_edges_to_it_followed():

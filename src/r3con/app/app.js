@@ -54,6 +54,7 @@
    * @typedef {{ document: string, name: string, start: number, end: number, text: string, document_text: string | null,
    *   match: 'exact' | 'normalized' | 'elided' | 'fuzzy', score: number | null }} NamedQuote
    */
+  /** @typedef {{ document: string, name: string }} NamedDocument A document behind an answer, as r3con gives it. */
   /**
    * The lit answer's trail as the page draws it: its nodes and lines, as the page names them, a summary of a document
    * read in parts as its document's; each summary on it, with the first node on it that cites the summary; the trail
@@ -68,8 +69,8 @@
    */
   /**
    * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id.
-   * @typedef {{ summary_ids: string[], parse_ids: string[], documents: { document: string, name: string }[],
-   *   quotes: NamedQuote[], trail: ProvenanceTrail }} R3conProvenance
+   * @typedef {{ summary_ids: string[], parse_ids: string[], documents: NamedDocument[], quotes: NamedQuote[],
+   *   trail: ProvenanceTrail }} R3conProvenance
    */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
   /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
