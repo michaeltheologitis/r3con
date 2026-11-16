@@ -30,6 +30,11 @@ nothing is pruned. The other documents' snippets in the round it went empty in m
 still cite its snippet of the round before, so the answer's trail can reach it through
 them.
 
+Relevance reads at one of two evidence levels (``evidence_level``). At
+``"sentence"``, the default, each reply quotes the sentences of the document its summary
+is based on, as above. At ``"document"``, neither the prompts nor the reply schema
+mention quotes, so every snippet keeps none, and the answer's trail ends at documents.
+
 Each quote is looked for in the text its call read (:func:`r3con.quotes.locate_quotes`)
 and kept with its position in the whole document and the document's words there, or
 with neither when it is not found; a null or empty summary keeps no quotes. Later stages
@@ -62,7 +67,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from r3con import settings
-from r3con.config import PromptStage
+from r3con.config import EvidenceLevel, PromptStage
 from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
@@ -91,9 +96,9 @@ class SnippetRecord:
     """One relevance snippet with its id: a whole document's, or one part's.
 
     ``summary`` is the snippet's text, ``quotes`` the sentences of the document it is
-    based on, each where it was found in the whole document, and ``provenance`` the ids
-    of the previous round's snippets it used: empty in round 1, and whenever it used
-    none.
+    based on, each where it was found in the whole document (none at the document
+    evidence level), and ``provenance`` the ids of the previous round's snippets it
+    used: empty in round 1, and whenever it used none.
     """
 
     id: str
@@ -273,37 +278,45 @@ def _render_other_snippets(shown: Mapping[str, str]) -> str:
     return "\n\n".join(f"### Summary ID: {id_}\n{s}" for id_, s in shown.items())
 
 
-def _reply_schema(citable: Sequence[str] | None) -> type[BaseModel]:
-    """A reply's schema: its ``summary``, or null, its ``quotes`` (:func:`lenient_list`
-    of strings), then, unless ``citable`` is ``None``, its ``provenance_ids`` of those
-    ids."""
+def _reply_schema(citable: Sequence[str] | None, quotes: bool) -> type[BaseModel]:
+    """A reply's schema: its ``summary``, or null, then, with ``quotes``, its
+    ``quotes`` (:func:`lenient_list` of strings), then, unless ``citable`` is ``None``,
+    its ``provenance_ids`` of those ids."""
+    quoted = {"quotes": lenient_list(str)} if quotes else {}
     return citing_schema(
-        "RelevanceSummary",
-        citable,
-        summary=(str | None, ...),
-        quotes=lenient_list(str),
+        "RelevanceSummary", citable, summary=(str | None, ...), **quoted
     )
 
 
 def _request(
-    task: str, shown: dict[str, str], prompts: Mapping[PromptStage, str]
+    task: str,
+    shown: dict[str, str],
+    prompts: Mapping[PromptStage, str],
+    evidence_level: EvidenceLevel,
 ) -> CitingRequest:
     """A document's request in one round, given the OTHER documents' non-empty snippets
     it shows, by id: the first-round prompt and its ``{summary, quotes}`` reply when
     there are none, else the later-rounds prompt and its ``{summary, quotes,
-    provenance_ids}`` reply."""
+    provenance_ids}`` reply. At the document ``evidence_level``, neither prompt nor
+    reply has quotes."""
+    quotes = evidence_level == "sentence"
     if not shown:
-        version = prompts["relevance/first-round"]
-        prompt = load_prompt("relevance/first-round", version=version, task=task)
-        return CitingRequest(prompt, _reply_schema(None), [])
+        prompt = load_prompt(
+            "relevance/first-round",
+            version=prompts["relevance/first-round"],
+            task=task,
+            evidence_level=evidence_level,
+        )
+        return CitingRequest(prompt, _reply_schema(None, quotes), [])
     prompt = load_prompt(
         "relevance/later-rounds",
         version=prompts["relevance/later-rounds"],
         task=task,
         other_snippets=_render_other_snippets(shown),
+        evidence_level=evidence_level,
     )
     ids = list(shown)
-    return CitingRequest(prompt, _reply_schema(ids), ids)
+    return CitingRequest(prompt, _reply_schema(ids, quotes), ids)
 
 
 def combine_parts(ids_per_part: Iterable[Sequence[str]]) -> list[str]:
@@ -317,7 +330,7 @@ def _read(
 ) -> tuple[str, list[str], list[str]]:
     """``part`` (a document or one part of one) read under ``request`` by
     :func:`~r3con.stages.citing.read_citing`: its snippet, stripped, its quotes,
-    none for an empty snippet, and the shown ids it used."""
+    none for an empty snippet or a reply without quotes, and the shown ids it used."""
     reply, provenance = read_citing(
         request,
         part,
@@ -327,7 +340,7 @@ def _read(
         **llm_call,
     )
     summary = (reply.summary or "").strip()
-    return summary, reply.quotes if summary else [], provenance
+    return summary, getattr(reply, "quotes", []) if summary else [], provenance
 
 
 def _report_snippets(
@@ -373,6 +386,7 @@ def relevance_snippet(
     other_snippets: Mapping[str, str],
     model: str,
     prompts: Mapping[PromptStage, str],
+    evidence_level: EvidenceLevel = "sentence",
     run: StageRun | None = None,
     kind: str = "relevance",
     max_attempts: int | None = None,
@@ -386,9 +400,10 @@ def relevance_snippet(
     ``relevance/later-rounds`` (a run config's ``prompts``). With no non-empty snippet
     to show, the call uses the first-round prompt and a structured ``{summary, quotes}``
     reply; otherwise the later-rounds prompt and a ``{summary, quotes,
-    provenance_ids}`` reply. A reply that does not fit its schema is sent again with
-    the validator's error, up to ``max_attempts`` sends (``None`` reads
-    ``settings.RELEVANCE_MAX_ATTEMPTS``).
+    provenance_ids}`` reply. At the ``"document"`` ``evidence_level``, neither prompt
+    nor reply has quotes, and none are returned. A reply that does not fit its schema
+    is sent again with the validator's error, up to ``max_attempts`` sends (``None``
+    reads ``settings.RELEVANCE_MAX_ATTEMPTS``).
 
     Returns the snippet, stripped — an empty string is allowed (the document contributes
     nothing relevant to the task) — its quotes, each located in ``document``
@@ -401,7 +416,7 @@ def relevance_snippet(
     attempts = _attempts(max_attempts)
     shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
     summary, quotes, provenance = _read(
-        _request(task, shown, prompts),
+        _request(task, shown, prompts, evidence_level),
         document,
         kind=kind,
         max_attempts=attempts,
@@ -419,6 +434,7 @@ def surface_relevance(
     document_ids: list[str],
     model: str,
     prompts: Mapping[PromptStage, str],
+    evidence_level: EvidenceLevel = "sentence",
     rounds: int = 2,
     run: StageRun | None = None,
     workers: int | None = None,
@@ -440,8 +456,8 @@ def surface_relevance(
     — a deliberate "no-relevance" run). An empty ``documents`` → empty results.
 
     ``document_ids`` names each document, one distinct id each
-    (:func:`draw_document_ids`). ``prompts`` and ``max_attempts`` are as in
-    :func:`relevance_snippet`.
+    (:func:`draw_document_ids`). ``prompts``, ``evidence_level`` and
+    ``max_attempts`` are as in :func:`relevance_snippet`.
 
     Each document is read through ``splits`` (built over ``documents``; ``None`` builds
     one), so a document too long for the model's window is read in parts, one snippet
@@ -508,7 +524,7 @@ def surface_relevance(
             # documents, never its own (the document itself is the user message).
             own = {record.id for record in prev[i]}
             others = {id_: s for id_, s in shown.items() if id_ not in own}
-            request = _request(task, others, prompts)
+            request = _request(task, others, prompts, evidence_level)
             emit("relevance_started", round=round_idx, doc_id=document_ids[i])
             replies = reader.read_in_parts(
                 i,

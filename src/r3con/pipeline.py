@@ -217,7 +217,8 @@ class Answer:
       snippets they cite, round by round back, and the documents those snippets
       summarize, and ``provenance["quotes"]``, the sentences behind it, those the
       trail's snippets are based on (:class:`~r3con.provenance.NamedQuote`), each
-      naming its document by id and by name (:class:`~r3con.provenance.Provenance`).
+      naming its document by id and by name (:class:`~r3con.provenance.Provenance`),
+      none for a document-level run (``evidence_level="document"``).
       :func:`r3con.trace` builds it again from the run folder, under any rule.
     - ``relevant_context`` — the **relevant context**: the relevance snippet of each
       document in the round of
@@ -409,8 +410,9 @@ def run_pipeline(
     takes them and :func:`names_and_texts` checks them, before anything else.
 
     ``config`` (a :class:`r3con.config.RunConfig`) carries everything that shapes the
-    output — model, relevance rounds, the reasoning path, the prompt version of each
-    stage, and any generation params — so nothing output-affecting is threaded ad-hoc.
+    output — model, relevance rounds, the reasoning path, the evidence level, the
+    prompt version of each stage, and any generation params — so nothing
+    output-affecting is threaded ad-hoc.
 
     ``api_base``, ``api_key`` and ``completion`` are **transport**: routing, auth, and how
     the request is actually made. None of them changes what a correct answer is, so none
@@ -618,6 +620,7 @@ def _build_and_answer(
                 document_ids=document_ids,
                 model=model,
                 prompts=config.prompts,
+                evidence_level=config.evidence_level,
                 rounds=rounds,
                 max_attempts=caps["relevance_max_attempts"],
                 workers=caps["doc_workers"],

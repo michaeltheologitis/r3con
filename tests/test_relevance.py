@@ -19,12 +19,16 @@ from r3con.stages.relevance import (
     render_relevance,
     surface_relevance,
 )
-from tests.fakes import is_later_round, quote
+from tests.fakes import (
+    is_later_round,
+    quote,
+    quoting_its_first_line_and_citing_all_shown,
+)
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
-PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
+PROMPTS = {"relevance/first-round": "v3", "relevance/later-rounds": "v4"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
@@ -103,7 +107,7 @@ def allowed_ids(request) -> dict:
 def check_strict_schema(request, fields: list[str]) -> None:
     """Checks ``request`` asks, in strict mode, for a ``RelevanceSummary`` of
     ``fields``, in order, each required and none with a default: the summary a string
-    or null, and the quotes strings."""
+    or null, and the quotes, if among them, strings."""
     sent = request["response_format"]["json_schema"]
     assert (sent["name"], sent["strict"]) == ("RelevanceSummary", True)
     schema = sent["schema"]
@@ -113,7 +117,8 @@ def check_strict_schema(request, fields: list[str]) -> None:
         {"type": "string"},
         {"type": "null"},
     ]
-    assert schema["properties"]["quotes"]["items"] == {"type": "string"}
+    if "quotes" in fields:
+        assert schema["properties"]["quotes"]["items"] == {"type": "string"}
 
 
 @pytest.mark.parametrize(("n_docs", "rounds"), [(3, 1), (3, 2), (3, 3), (2, 3), (1, 3)])
@@ -402,6 +407,24 @@ def test_the_reply_schema_does_not_depend_on_the_prompt_version(llm, pinned):
         schema = request["response_format"]["json_schema"]["schema"]
         fields = ["summary", "quotes", "provenance_ids"]
         assert list(schema["properties"]) == fields[: 2 if k < 2 else 3]
+
+
+@pytest.mark.parametrize("rounds", [1, 3])
+@pytest.mark.parametrize("quoting", [False, True], ids=["plain", "quoting-anyway"])
+def test_a_document_level_read_never_asks_for_quotes_and_keeps_none(
+    llm, shown_ids, rounds, quoting
+):
+    documents = ["DOC0", "DOC1", "DOC2"]
+    reply = quoting_its_first_line_and_citing_all_shown(shown_ids) if quoting else None
+    result = surface(llm, documents, rounds, reply=reply, evidence_level="document")
+    assert len(llm.requests) == len(documents) * rounds
+    for k, request in enumerate(llm.requests):
+        assert "quote" not in request["messages"][0]["content"].lower()
+        later = ["provenance_ids"] if k >= len(documents) else []
+        assert is_later_round(request) == bool(later)
+        check_strict_schema(request, ["summary", *later])
+    assert by_round(result, "quotes") == [[[[]]] * len(documents)] * rounds
+    assert all(result.snippets)
 
 
 def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):
