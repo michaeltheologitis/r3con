@@ -8,7 +8,7 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
-    result.provenance             # the snippets, parses, quotes and trail behind it
+    result.provenance             # the snippets, parses, documents, quotes and trail behind it
     result.schema_code            # the schema proposed for this question
 
 The answer cites its two views separately: the relevance snippets it used
@@ -16,7 +16,8 @@ The answer cites its two views separately: the relevance snippets it used
 (``result.provenance["parse_ids"]``). Each document's relevance snippet and its parse
 also record the snippets they used (``result.relevance_provenance``,
 ``result.parsing_provenance``). ``result.provenance["trail"]`` is what the answer
-reaches through those citations, and ``result.provenance["quotes"]`` the sentences
+reaches through those citations, ``result.provenance["documents"]`` the documents on
+that trail, each with its name, and ``result.provenance["quotes"]`` the sentences
 behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
 :mod:`r3con.provenance`).
 
@@ -125,7 +126,8 @@ def run(
         evidence_level: overrides the config's: ``"sentence"`` has each relevance
             snippet quote the sentences of its document it is based on;
             ``"document"`` asks for no quotes, so ``result.provenance["quotes"]`` is
-            empty and the trail ends at the documents.
+            empty and ``result.provenance["documents"]`` names the documents the
+            trail ends at.
         params: extra keyword arguments passed straight to ``litellm.completion`` —
             ``temperature``, ``top_p``, ``seed``, ``extra_body``, anything it accepts.
         api_key, api_base: passed through to litellm. Usually unnecessary: litellm reads
@@ -169,10 +171,10 @@ def run(
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
-        it used, its trail and the quotes on it (``.provenance``: ids from
-        ``.document_ids``, a part's snippet as ``<id>.<k>``, whose document is the part
-        before the dot, each quote with its document's name; see
-        :attr:`~r3con.pipeline.Answer.provenance`), each document's name
+        it used, its trail and the documents and quotes on it (``.provenance``: ids
+        from ``.document_ids``, a part's snippet as ``<id>.<k>``, whose document is the
+        part before the dot, each document and each quote with the document's name;
+        see :attr:`~r3con.pipeline.Answer.provenance`), each document's name
         (``.document_names``), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
         schema proposed for this question (``.schema_code``), and where the artifacts
@@ -294,9 +296,10 @@ def ask(
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
-        reasoning (its trail and quotes through the run's snippets of every round and
-        its parses), and whose other fields are the run's; ``run_dir`` is the ask's own
-        folder, which holds its manifest, calls and transcript.
+        reasoning (its trail, documents and quotes through the run's snippets of
+        every round and its parses), and whose other fields are the run's;
+        ``run_dir`` is the ask's own folder, which holds its manifest, calls and
+        transcript.
 
     Raises:
         FileNotFoundError: if ``source`` is neither a run folder nor an ask's folder in

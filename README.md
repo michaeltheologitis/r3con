@@ -114,7 +114,7 @@ a glob pattern, R3Con skips links to files outside the selected folder.
 Individual files can be specified directly.
 
 Add `--evidence-level document` to skip quoting sentences: the answer's
-provenance then names only the documents it used.
+provenance then lists only its documents.
 
 #### Carry On a Stopped Run
 
@@ -187,8 +187,8 @@ result = r3con.run(
 )
 ```
 
-R3Con then doesn't ask the model for quotes, so the provenance names the documents
-the answer used, not their sentences.
+R3Con then doesn't ask the model for quotes, so the provenance lists only
+documents (`result.provenance["documents"]`), not their sentences.
 
 #### Re-use Representation
 
@@ -219,6 +219,10 @@ reasoning step.
 
 #### Provenance
 
+`result.provenance["documents"]` lists the documents behind the relevance
+snippets the answer cites, directly or through the parsed records it cites,
+each with its `document` ID and `name`.
+
 `result.provenance["quotes"]` lists the sentences the answer is based on.
 Each has the document's `name`, `text` as the AI model quoted it, and
 `document_text`, the document's own words, from its `start` to its `end`
@@ -235,8 +239,7 @@ print(quote["text"])  # Ardent missed 8 delivery windows, mainly in August.
 print(quote["document_text"])  # Ardent missed 8 delivery windows, mostly in August.
 ```
 
-With `evidence_level="document"`, `quotes` is empty, and
-`result.provenance["trail"]` still reaches the documents the answer used.
+With `evidence_level="document"`, `quotes` is empty.
 
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
 shows the rest of the provenance.

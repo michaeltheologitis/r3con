@@ -33,6 +33,7 @@ from tests.fakes import (
     first_line,
     is_later_round,
     memo_line,
+    named_documents,
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
     reading,
@@ -437,6 +438,7 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert without_trail(result.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [ids[2]],
+        "documents": named_documents(result, 0, 1, 2),
         "quotes": [
             memo_line(ids, 0, 0),
             memo_line(ids, 0, 1),
@@ -449,7 +451,7 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert finished["provenance"] == result.provenance
 
 
-def test_a_document_level_run_quotes_nothing_and_its_trail_still_reaches_documents(
+def test_a_document_level_run_quotes_nothing_and_names_the_documents_its_trail_reaches(
     answering_llm, shown_ids, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
@@ -471,11 +473,9 @@ def test_a_document_level_run_quotes_nothing_and_its_trail_still_reaches_documen
     assert without_trail(result.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [ids[2]],
+        "documents": named_documents(result, 0, 1, 2),
         "quotes": [],
     }
-    nodes = result.provenance["trail"]["nodes"]
-    reached = [node for node in nodes if node.startswith("document:")]
-    assert sorted(reached) == sorted(f"document:{id_}" for id_ in ids)
     snippets = [
         snippet
         for round_ in read_json(logger, "relevance/result")["rounds"]
@@ -522,6 +522,7 @@ def test_a_config_that_pins_reasoning_v2_still_answers(
     assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": parse_ids,
+        "documents": [],
         "quotes": [],
     }
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
@@ -608,7 +609,12 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
     system, user = request["messages"]
     shows_the_notes_and_the_stamped_parse(system, "direct", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
-    cited = {"summary_ids": [ids[0]], "parse_ids": [ids[1]], "quotes": []}
+    cited = {
+        "summary_ids": [ids[0]],
+        "parse_ids": [ids[1]],
+        "documents": named_documents(result, 0),
+        "quotes": [],
+    }
     assert (result.answer, without_trail(result.provenance)) == (
         "Halloran and Merrow.",
         cited,
@@ -640,6 +646,7 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
     assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": [],
+        "documents": [],
         "quotes": [],
     }
     assert result.provenance["trail"]["nodes"] == ["answer"]

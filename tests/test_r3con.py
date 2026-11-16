@@ -41,6 +41,7 @@ from tests.fakes import (
     first_line,
     in_json,
     is_later_round,
+    named_documents,
     predating_resume,
     quoting_a_line_a_round,
     quoting_its_first_line_and_citing_all_shown,
@@ -344,6 +345,7 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
     assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": result.document_ids,
+        "documents": [],
         "quotes": [],
     }
     assert result.relevance_provenance == [[], []]
@@ -823,6 +825,7 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
     assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
+        "documents": named_documents(asked, 0, 1),
         "quotes": [merrow],
     }
     assert asked.provenance == quoted_run.provenance
@@ -865,6 +868,7 @@ def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_noth
     assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
+        "documents": named_documents(asked, 0, 1),
         "quotes": [],
     }
 
@@ -944,7 +948,11 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
     assert [n for n in lit["trail"]["nodes"] if n not in trail["nodes"]] == [
         f"document:{last}"
     ]
-    assert without_trail(lit) == without_trail(cited_run.provenance)
+    documents = [*cited_run.provenance["documents"], *named_documents(cited_run, -1)]
+    assert without_trail(lit) == {
+        **without_trail(cited_run.provenance),
+        "documents": documents,
+    }
 
 
 def test_trace_of_an_asks_folder_follows_the_asks_citations_through_the_runs_records(

@@ -25,8 +25,8 @@ What a call was shown but did not cite is no edge.
 A rule (:data:`RULES`) names the kinds of edge a walk follows. :func:`walk` goes
 breadth-first from the answer along them, and returns the trail: what it reached and
 the edges it followed. :func:`build_provenance` gives an answer's whole provenance:
-its citations, the trail under a rule, and the quotes the trail's ``summarizes`` edges
-carry. A run builds it under :data:`DEFAULT_RULE`
+its citations, the trail under a rule, the documents the trail reaches, and the quotes
+the trail's ``summarizes`` edges carry. A run builds it under :data:`DEFAULT_RULE`
 (:attr:`r3con.pipeline.Answer.provenance`); :func:`r3con.trace` builds it again from a
 saved run's folder, under any rule.
 """
@@ -92,6 +92,13 @@ class NamedQuote(TypedDict):
     score: float | None
 
 
+class NamedDocument(TypedDict):
+    """A document behind an answer, ``{document, name}``: its id and its name."""
+
+    document: str
+    name: str
+
+
 class Trail(TypedDict):
     """What :func:`walk` reached from the answer under ``rule``: ``nodes``, in the order
     it reached them, the answer first, and ``edges``, those it followed, in the order
@@ -104,9 +111,10 @@ class Trail(TypedDict):
 
 class Provenance(Citations):
     """An answer's provenance: its citations, ``{summary_ids, parse_ids}``, the
-    ``quotes`` behind it, those its trail's ``summarizes`` edges carry, and its
-    ``trail``."""
+    ``documents`` behind it, those its trail reaches, in document order, the ``quotes``
+    behind it, those its trail's ``summarizes`` edges carry, and its ``trail``."""
 
+    documents: list[NamedDocument]
     quotes: list[NamedQuote]
     trail: Trail
 
@@ -138,6 +146,7 @@ def build_provenance(
     """The provenance of an answer that cites ``citations``, its trail walked under
     ``rule`` over its graph (:func:`build_graph`).
 
+    Its documents are those the trail reaches, in document order, each with its name.
     Its quotes are those the trail's ``summarizes`` edges carry, each place once, as
     the summary that matched it best copied it: by tier, ``exact``, ``normalized``,
     ``elided``, then ``fuzzy``, a fuzzy one by its score, and among equals the first in
@@ -156,6 +165,7 @@ def build_provenance(
     return Provenance(
         summary_ids=citations["summary_ids"],
         parse_ids=citations["parse_ids"],
+        documents=_documents(trail, names),
         quotes=_quotes(graph, trail),
         trail=trail,
     )
@@ -263,6 +273,17 @@ def _found(quotes: Iterable[Quote], document: str, name: str) -> list[NamedQuote
         if (start := quote["start"]) is not None
         and (end := quote["end"]) is not None
         and (match := quote["match"]) is not None
+    ]
+
+
+def _documents(trail: Trail, names: Mapping[str, str]) -> list[NamedDocument]:
+    """The documents ``trail`` reaches, ``names`` giving each one's name by its id, in
+    document order."""
+    reached = set(trail["nodes"])
+    return [
+        NamedDocument(document=id_, name=name)
+        for id_, name in names.items()
+        if _document(id_) in reached
     ]
 
 

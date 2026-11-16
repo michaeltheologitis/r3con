@@ -18,6 +18,8 @@ from keyring.errors import PasswordDeleteError
 from litellm.exceptions import AuthenticationError, ContextWindowExceededError
 from pydantic import BaseModel
 
+from r3con import Answer
+
 _completion = litellm.completion
 
 Stage = Literal["relevance", "schema", "parsing", "reasoning"]
@@ -428,6 +430,15 @@ def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
     """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
     pins."""
     return {key: value for key, value in provenance.items() if key != "trail"}
+
+
+def named_documents(answer: Answer, *indices: int) -> list[dict[str, str]]:
+    """The documents at ``indices`` of ``answer``'s run, as its provenance names
+    them."""
+    return [
+        {"document": answer.document_ids[i], "name": answer.document_names[i]}
+        for i in indices
+    ]
 
 
 def quote(
