@@ -34,6 +34,7 @@ From the repo root, with `OPENAI_API_KEY` set:
 ```bash
 uv run python -m evals                       # the full run; writes its line to results.jsonl
 uv run python -m evals --limit 1             # one task per benchmark, to try it out
+uv run python -m evals --evidence-level document   # skip quoting sentences
 uv run python -m evals --resume evals/runs/<folder>
 uv run python -m evals --ask-over evals/runs/<folder> --model <model>   # see below
 ```
@@ -106,7 +107,7 @@ One JSON object per full run, and one per full comparison:
 | Field | Meaning |
 | --- | --- |
 | `date`, `commit`, `dirty` | When the run or comparison started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
-| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, generation params when set, and every prompt version. A comparison has no `label` |
+| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, evidence level when `document`, generation params when set, and every prompt version. A comparison has no `label` |
 | `ask_of`, `answer_model` | A comparison's only: the run it asked over (its `run` folder, `commit`, `dirty` and `label`), and the model that answered |
 | `judge_model` | The judge |
 | `benchmarks.loong` | `n`, `errors`, `avg_score` (1–100), `perfect_rate` (0–1) |
