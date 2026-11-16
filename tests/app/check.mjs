@@ -240,7 +240,10 @@ const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
 const EVIDENCE_KEY = 'r3con-proto-evidence';
-const EVIDENCE_LABEL = 'sentence-level evidence';
+const EVIDENCE_LABEL = 'evidence level';
+const EVIDENCE_LEVELS = ['sentence', 'document'];
+// What storage may hold for the evidence level, as the checkbox before the select stored it or not, and what each shows.
+const STORED_EVIDENCE = { sentence: 'sentence', document: 'document', paragraph: 'sentence' };
 // What storage may hold that r3con app would refuse as a count of rounds.
 const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
 // Frames drawn while a run's request is held, before r3con app has said anything of the run.
@@ -2825,7 +2828,7 @@ async function keys(page, checkAt) {
   const notKept = 'once closed, no field, storage, address or markup holds a key, and only the server list shows the endpoint';
   checkAt(notKept, holders.length === 0, holders.join(', '));
   await page.click('#settings-btn');
-  const filled = await page.$$eval('#settings input:not([type="checkbox"])', (els) => els.filter((el) => el.value).map((el) => el.id));
+  const filled = await page.$$eval('#settings input', (els) => els.filter((el) => el.value).map((el) => el.id));
   const reopened = filled.length === 0 && isDeepStrictEqual(await states(), ['state-openai', 'state-anthropic', 'state-gemini']);
   checkAt('reopened, every field is empty and the providers are still set', reopened, filled.join(', '));
 
@@ -3033,9 +3036,10 @@ async function savedModels(page, checkAt) {
   checkAt(staysName, listed.value === PROVIDER_MODEL && stays, `${JSON.stringify(listed)} → ${JSON.stringify(unsaved)}`);
 }
 
-// The relevance rounds control: its value, its options, what describes it, what its block holds, and what storage holds for it.
-function roundsControl(key) {
-  const select = document.getElementById('rounds');
+// In-page: settings select `id`'s value, its options, what describes it, what its block holds, and what storage holds
+// at `key`.
+function selectControl([id, key]) {
+  const select = document.getElementById(id);
   let stored;
   try {
     stored = localStorage.getItem(key);
@@ -3063,45 +3067,65 @@ function controlFits(id) {
   return inside(control.labels[0]) && inside(control) && settings.scrollWidth <= settings.clientWidth;
 }
 
-// In-page: whether the evidence box is ticked, what storage holds for it, and, in the open settings, whether its block
-// comes right before the rounds row and is drawn above it.
-function evidenceControl(key) {
-  const box = document.getElementById('evidence');
-  const [block, rounds] = [box.parentElement, document.getElementById('rounds').parentElement];
-  return {
-    checked: box.checked,
-    stored: localStorage.getItem(key),
-    above: block.nextElementSibling === rounds && block.getBoundingClientRect().bottom <= rounds.getBoundingClientRect().top,
-  };
+// In-page, in the open settings: whether the evidence row comes right before the rounds row, is drawn above it, and
+// starts its label and its select where the rounds row starts them.
+function evidenceAboveRounds() {
+  const [evidence, rounds] = [document.getElementById('evidence'), document.getElementById('rounds')];
+  const [row, roundsRow] = [evidence.parentElement, rounds.parentElement];
+  const lined = (a, b) => Math.abs(a.getBoundingClientRect().left - b.getBoundingClientRect().left) < 1;
+  const above = row.nextElementSibling === roundsRow && row.getBoundingClientRect().bottom <= roundsRow.getBoundingClientRect().top;
+  return above && lined(evidence.labels[0], rounds.labels[0]) && lined(evidence, rounds);
 }
 
-// The sentence-level evidence box, before the rounds setting, which blocks storage at its end.
-async function evidenceSetting(page, checkAt) {
-  const control = () => page.evaluate(evidenceControl, EVIDENCE_KEY);
+// Settings select `id`, named `label`, offering `options` at `initial`: it stores nothing until changed, fits, Tab
+// reaches it with its focus showing, the arrow keys choose an option and store it at once, and `other` chosen is still
+// chosen after a reload, where it leaves the page.
+async function selectSetting(page, checkAt, { id, label, key, options, initial, other }) {
+  const control = () => page.evaluate(selectControl, [id, key]);
   await page.reload();
   await page.click('#settings-btn');
   const fresh = await control();
-  const named = await page.getByRole('checkbox', { name: EVIDENCE_LABEL, exact: true }).evaluateAll((els) => els.map((el) => el.id));
-  const offeredName = `the settings offer ${EVIDENCE_LABEL}, named by its label, right above relevance rounds, ticked, and store nothing until it is changed`;
-  checkAt(offeredName, isDeepStrictEqual(named, ['evidence']) && isDeepStrictEqual(fresh, { checked: true, stored: null, above: true }), JSON.stringify({ named, ...fresh }));
-  checkAt('the evidence box and its label fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'evidence'));
+  const named = await page.getByRole('combobox', { name: label, exact: true }).evaluateAll((els) => els.map((el) => el.id));
+  const bare = { value: initial, options, describedBy: null, block: ['label', 'select'], stored: null };
+  const offeredName = `the settings offer ${label} [${options.join(', ')}], ${initial} by default, named by its label, with no text under it or description, and store nothing until one is chosen`;
+  checkAt(offeredName, isDeepStrictEqual(named, [id]) && isDeepStrictEqual(fresh, bare), JSON.stringify({ named, ...fresh }));
+  checkAt(`the ${label} label and control fit inside the settings, which do not scroll sideways`, await page.evaluate(controlFits, id));
 
   await page.focus('#key-other');
-  const ring = await tabTo(page, 'evidence');
-  await page.keyboard.press('Space');
-  const unticked = await control();
-  const keyboardName = 'from the keyboard alone, Tab reaches the evidence box, its focus shows, and Space unticks it, storing document level at once';
-  checkAt(keyboardName, ring && !unticked.checked && unticked.stored === 'document', JSON.stringify({ ring, ...unticked }));
+  const ring = await tabTo(page, id);
+  const at = options.indexOf(initial);
+  const [after, before] = [options[at + 1], options[Math.max(at - 1, 0)]];
+  await page.keyboard.press('ArrowDown');
+  const down = await control();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  const up = await control();
+  const keyboard = ring && down.value === after && down.stored === after && up.value === before && up.stored === before;
+  const keyboardName = `from the keyboard alone, Tab reaches ${label}, its focus shows, and the arrow keys choose an option, stored at once`;
+  checkAt(keyboardName, keyboard, `focus ring ${ring}; ${down.value} stored ${down.stored}, then ${up.value} stored ${up.stored}`);
+
+  await page.selectOption(`#${id}`, other);
   await page.keyboard.press('Escape');
   await page.reload();
   const reloaded = await control();
-  checkAt('unticked, the evidence box is still unticked after a reload', !reloaded.checked && reloaded.stored === 'document', JSON.stringify(reloaded));
+  checkAt(`${label} ${other}, once chosen, is still chosen after a reload`, reloaded.value === other && reloaded.stored === other, JSON.stringify(reloaded));
+}
+
+// The evidence level setting, before the rounds setting, which blocks storage at its end.
+async function evidenceSetting(page, checkAt) {
+  await selectSetting(page, checkAt, { id: 'evidence', label: EVIDENCE_LABEL, key: EVIDENCE_KEY, options: EVIDENCE_LEVELS, initial: 'sentence', other: 'document' });
   await page.click('#settings-btn');
-  await page.check('#evidence');
+  checkAt(`${EVIDENCE_LABEL} sits right above relevance rounds, its label and select lined up with that row's`, await page.evaluate(evidenceAboveRounds));
   await page.keyboard.press('Escape');
-  await page.reload();
-  const ticked = await control();
-  checkAt('ticked again, it stores sentence level and is still ticked after a reload', ticked.checked && ticked.stored === 'sentence', JSON.stringify(ticked));
+
+  const shown = {};
+  for (const held of Object.keys(STORED_EVIDENCE)) {
+    await page.evaluate(([key, value]) => localStorage.setItem(key, value), [EVIDENCE_KEY, held]);
+    await page.reload();
+    shown[held] = await page.$eval('#evidence', (el) => el.value);
+  }
+  const storedName = 'a level stored as the checkbox before it stored one still shows, and anything else reads as sentence';
+  checkAt(storedName, isDeepStrictEqual(shown, STORED_EVIDENCE), JSON.stringify(shown));
 }
 
 // In-page, before the page's own script: storage throws on any use, as when the browser blocks it.
@@ -3115,37 +3139,11 @@ function blockStorage() {
 
 // The relevance rounds setting, last: what it stores would be found by the other settings checks.
 async function roundsSetting(page, checkAt) {
-  const control = () => page.evaluate(roundsControl, ROUNDS_KEY);
+  const control = () => page.evaluate(selectControl, ['rounds', ROUNDS_KEY]);
   const drawn = () => page.evaluate(columnsDrawn);
   const store = (value) => page.evaluate(([key, held]) => localStorage.setItem(key, held), [ROUNDS_KEY, value]);
   const counts = Array.from({ length: MAX_ROUNDS }, (_, k) => String(k + 1));
-  await page.reload();
-  await page.click('#settings-btn');
-  const fresh = await control();
-  const named = await page.getByRole('combobox', { name: 'relevance rounds', exact: true }).evaluateAll((els) => els.map((el) => el.id));
-  const bare = { value: String(ROUNDS), options: counts, describedBy: null, block: ['label', 'select'], stored: null };
-  const offered = isDeepStrictEqual(named, ['rounds']) && isDeepStrictEqual(fresh, bare);
-  const offeredName = `the settings offer relevance rounds 1 to ${MAX_ROUNDS}, ${ROUNDS} by default, named by its label, with no text under it or description, and store nothing until one is chosen`;
-  checkAt(offeredName, offered, JSON.stringify({ named, ...fresh }));
-  checkAt('the rounds label and control fit inside the settings, which do not scroll sideways', await page.evaluate(controlFits, 'rounds'));
-
-  await page.focus('#key-other');
-  const ring = await tabTo(page, 'rounds');
-  await page.keyboard.press('ArrowDown');
-  const down = await control();
-  await page.keyboard.press('ArrowUp');
-  await page.keyboard.press('ArrowUp');
-  const up = await control();
-  const [above, below] = [String(ROUNDS + 1), String(ROUNDS - 1)];
-  const keyboard = ring && down.value === above && down.stored === above && up.value === below && up.stored === below;
-  const keyboardName = 'from the keyboard alone, Tab reaches relevance rounds, its focus shows, and the arrow keys choose a count, stored at once';
-  checkAt(keyboardName, keyboard, `focus ring ${ring}; ${down.value} stored ${down.stored}, then ${up.value} stored ${up.stored}`);
-
-  await page.selectOption('#rounds', String(MORE_ROUNDS));
-  await page.keyboard.press('Escape');
-  await page.reload();
-  const reloaded = await control();
-  checkAt(`${MORE_ROUNDS} rounds chosen are still chosen after a reload`, reloaded.value === String(MORE_ROUNDS) && reloaded.stored === String(MORE_ROUNDS), JSON.stringify(reloaded));
+  await selectSetting(page, checkAt, { id: 'rounds', label: 'relevance rounds', key: ROUNDS_KEY, options: counts, initial: String(ROUNDS), other: String(MORE_ROUNDS) });
 
   await page.click('#run-btn');
   const recorded = (await becomes(page, statusIs, SAMPLE_STATUS)) && runOfRounds(await drawn(), ROUNDS);
@@ -6234,20 +6232,20 @@ async function liveQuotes(url) {
 // In-page: how many of the events streamed carry quotes, a relevance summary's or an answer's.
 const quotingEvents = () => window.events.filter((e) => (e.quotes ?? e.provenance?.quotes ?? []).length > 0).length;
 
-// Unticked, a run is sent document level and r3con quotes nothing, yet the files list still dims only the documents
-// off the answer's trail.
+// With document level chosen, r3con quotes nothing, yet the files list still dims only the documents off the answer's
+// trail.
 async function liveDocumentLevel(url) {
   const before = (page) => page.addInitScript(recordEvents);
   await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
     await page.click('#settings-btn');
-    await page.uncheck('#evidence');
+    await page.selectOption('#evidence', 'document');
     await page.keyboard.press('Escape');
     const started = startedJob(page, '/api/runs');
     await page.click('#run-btn');
     const sent = (await started).request().postDataJSON().evidence_level;
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const quoting = await page.evaluate(quotingEvents);
-    const sentName = `a run started with ${EVIDENCE_LABEL} unticked is sent evidence_level "document", and no event of it carries a quote`;
+    const sentName = `a run started with ${EVIDENCE_LABEL} document chosen is sent evidence_level "document", and no event of it carries a quote`;
     check('live', sentName, done && sent === 'document' && quoting === 0, `sent ${JSON.stringify(sent)}; ${quoting} events with quotes`);
 
     const [answer] = await page.evaluate(answersRead);
@@ -7018,7 +7016,7 @@ async function liveNames(url) {
     const name = "a run is sent each file's name beside its text, and r3con app names the run's documents by them, a name sent twice numbered the second time";
     check('live', name, done && paired && numbered, `${JSON.stringify(sent.names)}; ${JSON.stringify(named)}`);
     check('live', `with no rounds chosen, a run is sent relevance_rounds ${ROUNDS}`, sent.relevance_rounds === ROUNDS, JSON.stringify(sent.relevance_rounds));
-    check('live', `with ${EVIDENCE_LABEL} left ticked, a run is sent evidence_level "sentence"`, sent.evidence_level === 'sentence', JSON.stringify(sent.evidence_level));
+    check('live', `with no ${EVIDENCE_LABEL} chosen, a run is sent evidence_level "sentence"`, sent.evidence_level === 'sentence', JSON.stringify(sent.evidence_level));
   });
 }
 

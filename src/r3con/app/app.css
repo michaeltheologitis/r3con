@@ -372,10 +372,10 @@ p { margin: 0; }
 /* A line kept for what a save says, so nothing moves when it does. */
 #settings-saved { min-height: 1lh; }
 .evidence, .rounds { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45em 2ch; }
-.evidence { column-gap: 1ch; padding-top: 0.9em; border-top: 1px solid var(--line); }
-/* A box on the baseline rises above lowercase text: lowered, it centres on the label's letters. */
-#evidence { margin: 0; translate: 0 0.15em; accent-color: var(--accent); }
-#rounds { width: auto; }
+.evidence { padding-top: 0.9em; border-top: 1px solid var(--line); }
+/* As wide as the longer label, "relevance rounds", so the two selects line up. */
+.evidence label, .rounds label { min-width: 16ch; }
+#evidence, #rounds { width: auto; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
