@@ -449,7 +449,7 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert finished["provenance"] == result.provenance
 
 
-def test_a_document_level_run_quotes_nothing_and_its_trail_still_reaches_documents(
+def test_a_document_level_run_quotes_nothing_and_names_the_documents_its_trail_reaches(
     answering_llm, shown_ids, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
@@ -476,6 +476,10 @@ def test_a_document_level_run_quotes_nothing_and_its_trail_still_reaches_documen
     nodes = result.provenance["trail"]["nodes"]
     reached = [node for node in nodes if node.startswith("document:")]
     assert sorted(reached) == sorted(f"document:{id_}" for id_ in ids)
+    assert result.provenance["documents"] == [
+        {"document": id_, "name": name}
+        for id_, name in zip(ids, result.document_names, strict=True)
+    ]
     snippets = [
         snippet
         for round_ in read_json(logger, "relevance/result")["rounds"]

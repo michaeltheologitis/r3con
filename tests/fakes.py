@@ -425,9 +425,13 @@ def too_long(limit: int, size: int, model: str) -> ContextWindowExceededError:
 
 
 def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
-    """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
-    pins."""
-    return {key: value for key, value in provenance.items() if key != "trail"}
+    """An answer's ``provenance`` without its ``trail`` and the ``documents`` it
+    reaches, which ``test_provenance.py`` pins."""
+    return {
+        key: value
+        for key, value in provenance.items()
+        if key not in {"trail", "documents"}
+    }
 
 
 def quote(

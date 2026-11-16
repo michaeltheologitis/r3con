@@ -956,6 +956,14 @@ def test_trace_of_an_asks_folder_follows_the_asks_citations_through_the_runs_rec
     assert asked.provenance["trail"] != cited_run.provenance["trail"]
 
 
+def test_trace_of_a_folder_whose_answer_saved_no_documents_gives_them(cited_run):
+    assert cited_run.provenance["documents"]
+    in_json(
+        "reasoning/result.json", lambda result: result["provenance"].pop("documents")
+    )(cited_run.run_dir)
+    assert trace(cited_run.run_dir) == cited_run.provenance
+
+
 def test_trace_of_a_folder_whose_snippets_have_no_quotes_quotes_nothing(cited_run):
     assert cited_run.provenance["quotes"]
     in_json("relevance/result.json", snippets_without_quotes)(cited_run.run_dir)

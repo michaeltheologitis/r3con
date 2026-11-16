@@ -188,7 +188,7 @@ result = r3con.run(
 ```
 
 R3Con then doesn't ask the model for quotes, so the provenance names the documents
-the answer used, not their sentences.
+the answer used (`result.provenance["documents"]`), not their sentences.
 
 #### Re-use Representation
 
@@ -219,6 +219,9 @@ reasoning step.
 
 #### Provenance
 
+`result.provenance["documents"]` lists the documents the answer is based on,
+each with its `document` ID and `name`.
+
 `result.provenance["quotes"]` lists the sentences the answer is based on.
 Each has the document's `name`, `text` as the AI model quoted it, and
 `document_text`, the document's own words, from its `start` to its `end`
@@ -235,8 +238,8 @@ print(quote["text"])  # Ardent missed 8 delivery windows, mainly in August.
 print(quote["document_text"])  # Ardent missed 8 delivery windows, mostly in August.
 ```
 
-With `evidence_level="document"`, `quotes` is empty, and
-`result.provenance["trail"]` still reaches the documents the answer used.
+With `evidence_level="document"`, `quotes` is empty, and `documents` still
+names the documents the answer used.
 
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
 shows the rest of the provenance.

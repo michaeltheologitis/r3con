@@ -29,6 +29,11 @@ def quoted(document: str, start: int, end: int, text: str) -> dict:
     }
 
 
+def named(document: str) -> dict:
+    """A document behind an answer, as its provenance gives it."""
+    return {"document": document, "name": NAMES[document]}
+
+
 def run_over(rounds) -> dict:
     """The records of a run over the documents a, b and c with ``rounds``, each a
     round's snippets, as :func:`build_graph` and :func:`build_provenance` take them."""
@@ -114,6 +119,7 @@ def test_the_default_trail_reaches_a_document_only_through_a_summary_of_it():
     assert provenance_of(CITED_ROUNDS, summary_ids=["b"], parse_ids=["c"]) == {
         "summary_ids": ["b"],
         "parse_ids": ["c"],
+        "documents": [named("a"), named("b")],
         "quotes": [quoted("a", 0, 9, "A said x."), quoted("b", 10, 19, "B said y.")],
         "trail": {
             "rule": "through-summaries",
@@ -155,6 +161,21 @@ def test_a_cited_parse_that_cites_nothing_reaches_its_document_only_if_parses_do
     assert places(provenance["quotes"]) == [("a", 0, 9), ("b", 10, 19)]
 
 
+@pytest.mark.parametrize(
+    ("rule", "documents"),
+    [("through-summaries", ["a", "b"]), ("parses-light-documents", ["a", "b", "c"])],
+)
+def test_the_documents_are_the_trails_in_document_order_each_with_its_name(
+    rule, documents
+):
+    # The trail reaches b; c, under a rule that follows parses, through its cited
+    # parse alone; then a, only through round 1's summary of it.
+    provenance = provenance_of(
+        CITED_ROUNDS, summary_ids=["b"], parse_ids=["c"], rule=rule
+    )
+    assert provenance["documents"] == [named(id_) for id_ in documents]
+
+
 def test_a_node_reached_twice_is_listed_once_and_both_edges_to_it_followed():
     trail = provenance_of(
         CITED_ROUNDS[:1], summary_ids=["a"], parse_ids=["a"], parses=[["a"], [], []]
@@ -180,6 +201,7 @@ def test_an_unknown_rule_is_refused_naming_the_known_ones():
 @pytest.mark.parametrize("n_rounds", [0, 2])
 def test_an_answer_that_cites_nothing_reaches_only_itself_and_quotes_nothing(n_rounds):
     provenance = provenance_of(CITED_ROUNDS[:n_rounds])
+    assert provenance["documents"] == []
     assert provenance["quotes"] == []
     assert (provenance["trail"]["nodes"], provenance["trail"]["edges"]) == (
         ["answer"],

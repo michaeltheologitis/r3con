@@ -68,7 +68,8 @@
    */
   /**
    * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id.
-   * @typedef {{ summary_ids: string[], parse_ids: string[], quotes: NamedQuote[], trail: ProvenanceTrail }} R3conProvenance
+   * @typedef {{ summary_ids: string[], parse_ids: string[], documents: { document: string, name: string }[],
+   *   quotes: NamedQuote[], trail: ProvenanceTrail }} R3conProvenance
    */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
   /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
@@ -581,6 +582,24 @@
     "964bc2",
     "d9add2"
    ],
+   "documents": [
+    {
+     "document": "17f027",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "name": "3"
+    }
+   ],
    "quotes": [
     {
      "document": "17f027",
@@ -927,6 +946,24 @@
     "9e02b3",
     "d9add2"
    ],
+   "documents": [
+    {
+     "document": "17f027",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "name": "3"
+    }
+   ],
    "quotes": [
     {
      "document": "17f027",
@@ -1159,6 +1196,24 @@
     "9e02b3",
     "d9add2"
    ],
+   "documents": [
+    {
+     "document": "17f027",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "name": "3"
+    }
+   ],
    "quotes": [
     {
      "document": "17f027",
@@ -1388,6 +1443,24 @@
    "parse_ids": [
     "964bc2",
     "d9add2"
+   ],
+   "documents": [
+    {
+     "document": "17f027",
+     "name": "0"
+    },
+    {
+     "document": "964bc2",
+     "name": "1"
+    },
+    {
+     "document": "9e02b3",
+     "name": "2"
+    },
+    {
+     "document": "d9add2",
+     "name": "3"
+    }
    ],
    "quotes": [
     {
@@ -2397,7 +2470,7 @@
     return [...new Set(ids.flatMap((id) => docIndex(run, id) ?? []))];
   }
 
-  /** @param {Pick<Run, 'indexes'>} run @param {Omit<R3conProvenance, 'quotes'>} provenance @returns {Provenance} */
+  /** @param {Pick<Run, 'indexes'>} run @param {Omit<R3conProvenance, 'documents' | 'quotes'>} provenance @returns {Provenance} */
   function provenanceOf(run, { summary_ids, parse_ids, trail }) {
     return { summary_ids: docIndices(run, summary_ids), parse_ids: docIndices(run, parse_ids), trail };
   }
