@@ -29,6 +29,7 @@ from typing import Any
 
 import jinja2
 import yaml
+from jinja2 import meta
 
 from r3con import settings
 
@@ -101,11 +102,29 @@ def load_prompt(name: str, *, version: str, **context: Any) -> str:
     return _compile_prompt(path.read_text(encoding="utf-8")).render(**context)
 
 
+def prompt_variables(name: str, version: str) -> frozenset[str]:
+    """The variables a stage's prompt at ``version`` reads when :func:`load_prompt`
+    renders it.
+
+    Raises:
+        FileNotFoundError: as :func:`require_prompt_path` does.
+    """
+    text = require_prompt_path(name, version).read_text(encoding="utf-8")
+    parsed = jinja2.Environment().parse(_template_text(text))
+    return frozenset(meta.find_undeclared_variables(parsed))
+
+
 # Keyed on the file's text, not its path, so an edited file is compiled afresh.
 @functools.lru_cache
 def _compile_prompt(text: str) -> jinja2.Template:
+    return jinja2.Template(_template_text(text))
+
+
+def _template_text(text: str) -> str:
+    """A prompt file's ``text`` as the one template it renders as: its instructions,
+    then its examples."""
     data = yaml.safe_load(text)
     body: str = data["instructions"]
     if examples := data.get("examples"):
         body += "\n\nExamples:\n\n" + "\n\n".join(ex["text"] for ex in examples)
-    return jinja2.Template(body)
+    return body

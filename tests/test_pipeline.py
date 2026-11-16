@@ -66,8 +66,8 @@ CONFIG = {
     "relevance_rounds": 2,
     "prompts": {
         **dict.fromkeys(PROMPT_STAGES, "v1"),
-        "relevance/first-round": "v2",
-        "relevance/later-rounds": "v3",
+        "relevance/first-round": "v3",
+        "relevance/later-rounds": "v4",
         "structuring/schema": "v2",
         "structuring/parsing": "v4",
         "reasoning/direct": "v5",
@@ -447,6 +447,43 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     assert read_json(logger, "reasoning/result")["provenance"] == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
     assert finished["provenance"] == result.provenance
+
+
+def test_a_document_level_run_quotes_nothing_and_its_trail_still_reaches_documents(
+    answering_llm, shown_ids, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(
+        relevance=quoting_a_line_a_round(shown_ids),
+        parsing=citing_its_own_note,
+        reasoning=citing("Halloran memo", slice(1), slice(-1, None)),
+    )
+    events = []
+    result = answer(
+        llm,
+        logger,
+        documents=TWO_LINE_MEMOS,
+        on_event=events.append,
+        evidence_level="document",
+    )
+    ids = result.document_ids
+    # 0's summary cites 1's round 1; 2's parse cites its own, which cites 0's round 1.
+    assert without_trail(result.provenance) == {
+        "summary_ids": [ids[0]],
+        "parse_ids": [ids[2]],
+        "quotes": [],
+    }
+    nodes = result.provenance["trail"]["nodes"]
+    reached = [node for node in nodes if node.startswith("document:")]
+    assert sorted(reached) == sorted(f"document:{id_}" for id_ in ids)
+    snippets = [
+        snippet
+        for round_ in read_json(logger, "relevance/result")["rounds"]
+        for snippet in round_["snippets"]
+    ]
+    finished = [e for e in events if e["type"] == "relevance_finished"]
+    assert len(snippets) == len(finished) == 2 * len(ids)
+    assert all(item["quotes"] == [] for item in [*snippets, *finished])
 
 
 def test_documents_named_by_anything_but_strings_are_refused_before_anything(

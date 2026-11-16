@@ -113,6 +113,9 @@ Keep glob patterns in quotes, as shown above. When reading a folder or using
 a glob pattern, R3Con skips links to files outside the selected folder.
 Individual files can be specified directly.
 
+Add `--evidence-level document` to have relevance quote no sentences: the
+provenance then stops at the documents.
+
 #### Carry On a Stopped Run
 
 If a run fails or you stop it partway, it prints the command that carries it on:
@@ -174,6 +177,15 @@ documents = {
 }
 ```
 
+To skip quoting, run at the document level:
+
+```python
+result = r3con.run(question, docs, evidence_level="document")
+```
+
+Relevance then asks the model for no quotes, so the provenance names the documents
+the answer used, not their sentences.
+
 #### Re-use Representation
 
 To ask another question without repeating the earlier processing, use
@@ -218,6 +230,9 @@ print(quote["name"], quote["match"], quote["score"])  # q3/ardent.pdf fuzzy 94.1
 print(quote["text"])  # Ardent missed 8 delivery windows, mainly in August.
 print(quote["document_text"])  # Ardent missed 8 delivery windows, mostly in August.
 ```
+
+With `evidence_level="document"`, `quotes` is empty, and
+`result.provenance["trail"]` still reaches the documents the answer used.
 
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
 shows the rest of the provenance.

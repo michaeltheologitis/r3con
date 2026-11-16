@@ -21,7 +21,7 @@ from litellm.llms.github_copilot.authenticator import (
 import r3con
 from r3con import Answer, RunConfig
 from r3con import r3con as namespace
-from r3con.config import PROMPT_STAGES, REASONING_PATHS, load_config
+from r3con.config import EVIDENCE_LEVELS, PROMPT_STAGES, REASONING_PATHS, load_config
 from r3con.documents import read_documents
 from r3con.pipeline import OtherDocuments
 from r3con.r3con import ask, resume, run, trace
@@ -356,6 +356,42 @@ def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
 ):
     with pytest.raises(ValueError, match="`reasoning='agent'`: Input should be"):
         run("Who?", ["memo"], reasoning="agent", completion=llm, logs_dir=tmp_path)
+    assert llm.requests == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("level", EVIDENCE_LEVELS)
+def test_the_evidence_level_is_chosen_per_run_and_recorded(
+    answering_llm, tmp_path, level
+):
+    result = run(
+        "Who?",
+        ["Halloran memo"],
+        evidence_level=level,
+        completion=answering_llm,
+        logs_dir=tmp_path,
+    )
+    assert result.answer == "Halloran memo"
+    manifest = json.loads((result.run_dir / "manifest.json").read_text())
+    assert manifest["config"]["evidence_level"] == level
+    assert manifest["config"]["overrides"] == {"evidence_level": level}
+    for request in answering_llm.requests_for("relevance"):
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert ("quotes" in schema["properties"]) == (level == "sentence")
+
+
+def test_a_document_level_run_pinning_no_document_form_is_refused_before_any_request(
+    llm, tmp_path
+):
+    default = load_config("default")
+    config = default.model_copy(
+        update={
+            "evidence_level": "document",
+            "prompts": {**default.prompts, "relevance/first-round": "v2"},
+        }
+    )
+    with pytest.raises(ValueError, match="'relevance/first-round' version 'v2' has no"):
+        run("Who?", ["memo"], config=config, completion=llm, logs_dir=tmp_path)
     assert llm.requests == []
     assert list(tmp_path.iterdir()) == []
 
@@ -1693,6 +1729,40 @@ def test_a_failed_run_resumes_sending_only_what_it_lacks_and_answers_as_a_whole_
     assert as_named(answer) == as_named(whole)
     assert answer.run_dir == run_dir
     assert untouched(run_dir, finished) == before
+
+
+def without_evidence_level(manifest: dict) -> None:
+    """``manifest`` as r3con wrote it before runs had an evidence level."""
+    del manifest["config"]["evidence_level"]
+
+
+@pytest.mark.parametrize(
+    ("options", "change", "quoted"),
+    [
+        ({"evidence_level": "document"}, None, False),
+        ({}, in_json("manifest.json", without_evidence_level), True),
+    ],
+    ids=["document-level", "recorded-before-evidence-levels"],
+)
+def test_a_resume_reads_at_the_evidence_level_its_run_recorded(
+    answering_llm, one_worker, tmp_path, options, change, quoted
+):
+    failing = failing_once(
+        reading("Calder memo", later_round=True), ANSWERING["relevance"]
+    )
+    llm = answering_llm.answers(relevance=failing)
+    run_dir = failed_run(llm, tmp_path, **options)
+    if change is not None:
+        change(run_dir)
+    sent = len(llm.requests)
+    resume(run_dir, MEMOS_BY_NAME, completion=llm)
+    resent = [r for r in llm.requests[sent:] if stage_of(r) == "relevance"]
+    assert [first_line(request) for request in resent] == LAST_THREE
+    for request in resent:
+        assert is_later_round(request)
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert ("quotes" in schema["properties"]) == quoted
+        assert ("quote" in request["messages"][0]["content"].lower()) == quoted
 
 
 def test_a_resumed_stage_keeps_its_earlier_calls_and_leaves_the_finished_ones_alone(

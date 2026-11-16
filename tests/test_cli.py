@@ -128,6 +128,23 @@ def test_the_flags_override_the_config_and_show_in_the_label(answering, capsys):
     assert "final_answer(" in turn["messages"][0]["content"]
 
 
+def test_the_evidence_level_flag_reaches_the_config_and_the_label(answering, capsys):
+    argv = ["--relevance-rounds", "1", "--evidence-level", "document"]
+    assert r3con("run", "Who?", str(MEMOS), *argv) == 0
+    out, err = capsys.readouterr()
+    assert out == f"{ANSWER}\n"
+    assert (
+        "default[model=gpt-6-luna,rounds=1,reasoning=direct,evidence=document," in err
+    )
+    manifest = json.loads(
+        (path_after("artifacts: ", err) / "manifest.json").read_text()
+    )
+    assert manifest["config"]["evidence_level"] == "document"
+    for request in answering.requests_for("relevance"):
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert "quotes" not in schema["properties"]
+
+
 def finished_run(capsys) -> Path:
     """The folder of a finished ``r3con run`` over the memos."""
     assert r3con("run", "Who?", str(MEMOS), "--relevance-rounds", "1") == 0
@@ -296,7 +313,7 @@ def test_sources_that_are_all_empty_exit_2(scripted, tmp_path, capsys):
     assert scripted.requests == []
 
 
-@pytest.mark.parametrize("option", ["--config", "--reasoning"])
+@pytest.mark.parametrize("option", ["--config", "--reasoning", "--evidence-level"])
 def test_a_usage_error_exits_2(scripted, capsys, option):
     assert r3con("run", "Who?", str(MEMOS), option, "nope") == 2
     assert "invalid choice: 'nope'" in capsys.readouterr().err

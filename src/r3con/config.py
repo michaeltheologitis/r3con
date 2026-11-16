@@ -1,7 +1,8 @@
 """The run config: every knob that shapes the OUTPUT, in one place.
 
 A :class:`RunConfig` is the **identity of a run** — the model, number of relevance
-rounds, the reasoning path, the prompt version of each stage, and any generation params.
+rounds, the reasoning path, the evidence level, the prompt version of each stage, and
+any generation params.
 It is loaded from a bundled ``configs/<name>.yaml`` (with optional overrides) and flows
 through the whole pipeline as one object, so nothing output-affecting is threaded ad-hoc.
 Runtime-only knobs (parallelism, paths, retry caps, timeouts) stay in
@@ -24,9 +25,10 @@ Config file shape (``configs/<name>.yaml``)::
     model: openai/gpt-6-luna
     relevance_rounds: 2
     reasoning: direct            # or coding
+    evidence_level: sentence     # or document
     prompts:
-      relevance/first-round: v2
-      relevance/later-rounds: v3
+      relevance/first-round: v3
+      relevance/later-rounds: v4
       structuring/schema: v1
       structuring/parsing: v3
       reasoning/direct: v3
@@ -47,7 +49,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from r3con import settings
-from r3con.prompts import require_prompt_path
+from r3con.prompts import prompt_variables, require_prompt_path
 
 # The pipeline stages that carry a versioned prompt — a config must pin all of them.
 PromptStage = Literal[
@@ -65,9 +67,18 @@ DEFAULT_CONFIG = "default"
 ReasoningPath = Literal["direct", "coding"]
 REASONING_PATHS: tuple[ReasoningPath, ...] = get_args(ReasoningPath)
 
+EvidenceLevel = Literal["sentence", "document"]
+EVIDENCE_LEVELS: tuple[EvidenceLevel, ...] = get_args(EvidenceLevel)
+
+# The relevance prompts, which a document-level run renders without quotes.
+_RELEVANCE_STAGES: tuple[PromptStage, ...] = (
+    "relevance/first-round",
+    "relevance/later-rounds",
+)
+
 # The fields a config file may set; any other is refused rather than dropped.
 _CONFIG_FIELDS = frozenset(
-    {"model", "relevance_rounds", "reasoning", "prompts", "params"}
+    {"model", "relevance_rounds", "reasoning", "evidence_level", "prompts", "params"}
 )
 
 # Compact per-stage abbreviations for the prompts tag in RunConfig.label().
@@ -110,6 +121,8 @@ class RunConfig(BaseModel):
     relevance_rounds: Annotated[int, Field(ge=0, strict=True)] = 2
     # keep in sync with configs/default.yaml
     reasoning: ReasoningPath = "direct"
+    # keep in sync with configs/default.yaml
+    evidence_level: EvidenceLevel = "sentence"
     # {stage: version}; check_prompts refuses a config that leaves a stage unpinned
     prompts: dict[PromptStage, str] = Field(default_factory=dict)
     # extra kwargs for litellm.completion
@@ -135,6 +148,9 @@ class RunConfig(BaseModel):
             f"rounds={self.relevance_rounds}",
             f"reasoning={self.reasoning}",
         ]
+        # Only when not the default, so a sentence-level run's label is as it was.
+        if self.evidence_level != "sentence":
+            parts.append(f"evidence={self.evidence_level}")
         # Generation params are part of the identity only when set, so a provider-default
         # run carries no `params=` noise in its label.
         if self.params:
@@ -152,7 +168,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v2,rel2=v3,schema=v2,parse=v4,direct=v5,coding=v4)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
@@ -218,6 +234,7 @@ def load_config(
     model: str | None = None,
     relevance_rounds: int | None = None,
     reasoning: ReasoningPath | None = None,
+    evidence_level: EvidenceLevel | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> RunConfig:
     """Load ``configs/<name>.yaml`` into a :class:`RunConfig`, each override that is not
@@ -253,6 +270,7 @@ def load_config(
         model=model,
         relevance_rounds=relevance_rounds,
         reasoning=reasoning,
+        evidence_level=evidence_level,
         params=params,
     )
     check_prompts(cfg)
@@ -266,6 +284,7 @@ def configure(
     model: str | None = None,
     relevance_rounds: int | None = None,
     reasoning: ReasoningPath | None = None,
+    evidence_level: EvidenceLevel | None = None,
     params: Mapping[str, Any] | None = None,
 ) -> RunConfig:
     """The :class:`RunConfig` named ``name`` with the settings in ``fields``, each
@@ -280,6 +299,7 @@ def configure(
         "model": model,
         "relevance_rounds": relevance_rounds,
         "reasoning": reasoning,
+        "evidence_level": evidence_level,
         "params": params,
     }
     applied = {k: v for k, v in overrides.items() if v is not None}
@@ -299,7 +319,9 @@ def check_prompts(config: RunConfig) -> None:
     """Refuse a config that cannot render every stage's prompt, before any request.
 
     Raises:
-        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned.
+        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned, or the
+            config is document-level and a relevance prompt it pins has no
+            document-level form (its template does not read ``quotes``).
         FileNotFoundError: if a pinned version has no file on the prompt search path.
     """
     missing = [s for s in PROMPT_STAGES if s not in config.prompts]
@@ -309,3 +331,13 @@ def check_prompts(config: RunConfig) -> None:
         )
     for stage in PROMPT_STAGES:
         require_prompt_path(stage, config.prompts[stage])
+    if config.evidence_level == "sentence":
+        return
+    for stage in _RELEVANCE_STAGES:
+        version = config.prompts[stage]
+        if "quotes" not in prompt_variables(stage, version):
+            raise ValueError(
+                f"config {config.name!r} is document-level, but its prompt for stage "
+                f"{stage!r} version {version!r} has no document-level form: pin a "
+                "version that has one."
+            )

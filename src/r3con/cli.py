@@ -28,7 +28,12 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
-from r3con.config import REASONING_PATHS, available_configs, load_config
+from r3con.config import (
+    EVIDENCE_LEVELS,
+    REASONING_PATHS,
+    available_configs,
+    load_config,
+)
 from r3con.documents import read_documents
 from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import masked, masked_values
@@ -129,8 +134,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         choices=available_configs() or None,
         default="default",
-        help="Run config: model, relevance rounds, reasoning path, prompt versions, "
-        "generation params.",
+        help="Run config: model, relevance rounds, reasoning path, evidence level, "
+        "prompt versions, generation params.",
     )
     run_cmd.add_argument(
         "--model",
@@ -154,6 +159,14 @@ def build_parser() -> argparse.ArgumentParser:
         "snippets and the whole parse; coding = an agent that reads the parse with "
         "code, which a direct run also uses when its prompt does not fit the model's "
         "window).",
+    )
+    run_cmd.add_argument(
+        "--evidence-level",
+        choices=EVIDENCE_LEVELS,
+        default=None,
+        help="Override what relevance records as evidence (sentence = each snippet "
+        "with the sentences it is based on, quoted; document = no quotes, so the "
+        "answer's provenance ends at documents).",
     )
     # --- runtime ---
     run_cmd.add_argument(
@@ -245,6 +258,7 @@ def _run(args: argparse.Namespace) -> int:
             model=args.model,
             relevance_rounds=args.relevance_rounds,
             reasoning=args.reasoning,
+            evidence_level=args.evidence_level,
         )
         _use_settings(args)
         documents = _read_sources(args.documents)

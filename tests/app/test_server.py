@@ -1729,6 +1729,7 @@ def test_an_imported_run_keeps_no_param_override_or_other_field_of_its_manifest(
         "task",
     ]
     assert sorted(manifest["config"]) == [
+        "evidence_level",
         "model",
         "name",
         "prompts",

@@ -17,16 +17,22 @@ FULL = {
 V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)"
 DEFAULT_PROMPTS = {
     **PROMPTS,
-    "relevance/first-round": "v2",
-    "relevance/later-rounds": "v3",
+    "relevance/first-round": "v3",
+    "relevance/later-rounds": "v4",
     "structuring/schema": "v2",
     "structuring/parsing": "v4",
     "reasoning/direct": "v5",
     CODING: "v4",
 }
 DEFAULT_LABEL_PROMPTS = (
-    "prompts=(rel1=v2,rel2=v3,schema=v2,parse=v4,direct=v5,coding=v4)"
+    "prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4)"
 )
+# Relevance prompts with a document-level form, the rest at v1.
+DOCUMENT_FORM_PROMPTS = {
+    **PROMPTS,
+    "relevance/first-round": "v3",
+    "relevance/later-rounds": "v4",
+}
 # The prompts the default config pinned before reasoning had two paths.
 OLD_DEFAULT_PROMPTS = {
     "relevance/first-round": "v1",
@@ -41,11 +47,12 @@ def test_the_default_config_loads_with_its_shipped_values():
     config = load_config("default")
     assert config.name == "default"
     assert config.model == "openai/gpt-6-luna"
-    assert (config.relevance_rounds, config.reasoning, config.params) == (
-        2,
-        "direct",
-        {},
-    )
+    assert (
+        config.relevance_rounds,
+        config.reasoning,
+        config.evidence_level,
+        config.params,
+    ) == (2, "direct", "sentence", {})
     assert config.prompts == DEFAULT_PROMPTS
     assert "seed" not in config.model_dump()
     assert config.label() == (
@@ -77,10 +84,16 @@ def test_the_default_config_loads_with_its_shipped_values():
             "default[model=gpt-6-luna,rounds=0,",
         ),
         (
+            {"evidence_level": "document"},
+            {"evidence_level": "document"},
+            "default[model=gpt-6-luna,rounds=2,reasoning=direct,evidence=document,",
+        ),
+        (
             {
                 "model": None,
                 "relevance_rounds": None,
                 "reasoning": None,
+                "evidence_level": None,
                 "params": None,
             },
             {},
@@ -118,6 +131,21 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     assert load_config("exp2").label() == (
         "exp2[model=gpt-6-luna,rounds=3,reasoning=coding,"
         "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v9)]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("level", "tag"), [("sentence", ""), ("document", "evidence=document,")]
+)
+def test_the_evidence_level_set_in_a_config_is_in_the_label_only_when_document(
+    configs, level, tag
+):
+    configs(exp={**FULL, "prompts": DOCUMENT_FORM_PROMPTS, "evidence_level": level})
+    config = load_config("exp")
+    assert (config.evidence_level, config.overrides) == (level, {})
+    assert config.label() == (
+        f"exp[model=gpt-6-luna,rounds=3,reasoning=direct,{tag}"
+        "prompts=(rel1=v3,rel2=v4,schema=v1,parse=v1,direct=v1,coding=v1)]"
     )
 
 
@@ -215,6 +243,7 @@ BAD_SETTINGS = [
     ("relevance_rounds", True, NOT_AN_INTEGER),
     ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
     ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
+    ("evidence_level", "paragraph", "Input should be 'sentence' or 'document'"),
     ("model", 5, "Input should be a valid string"),
     ("model", "", "String should have at least 1 character"),
 ]
@@ -323,6 +352,32 @@ def test_a_config_pinning_a_prompt_that_does_not_exist_is_refused_on_load(
         load_config("exp")
     assert str(tmp_path / "prompts" / CODING / "v9.yaml") in str(missing.value)
     assert str(settings.PROMPTS_DIR / CODING / "v9.yaml") in str(missing.value)
+
+
+@pytest.mark.parametrize(
+    ("stage", "version"),
+    [("relevance/first-round", "v2"), ("relevance/later-rounds", "v3")],
+)
+@pytest.mark.parametrize(
+    ("name", "overrides"),
+    [("document", {}), ("sentence", {"evidence_level": "document"})],
+    ids=["file", "override"],
+)
+def test_a_document_level_config_pinning_a_prompt_without_that_form_is_refused(
+    configs, stage, version, name, overrides
+):
+    prompts = {**DOCUMENT_FORM_PROMPTS, stage: version}
+    configs(
+        document={**FULL, "prompts": prompts, "evidence_level": "document"},
+        sentence={**FULL, "prompts": prompts},
+    )
+    with pytest.raises(ValueError) as refused:
+        load_config(name, **overrides)
+    assert str(refused.value) == (
+        f"config {name!r} is document-level, but its prompt for stage {stage!r} "
+        f"version {version!r} has no document-level form: pin a version that has one."
+    )
+    assert load_config("sentence").evidence_level == "sentence"
 
 
 def test_an_unknown_config_is_refused_by_name():

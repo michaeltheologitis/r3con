@@ -24,7 +24,7 @@ from tests.fakes import is_later_round, quote
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 TASK = "Which filing reports higher revenue?"
-PROMPTS = {"relevance/first-round": "v2", "relevance/later-rounds": "v3"}
+PROMPTS = {"relevance/first-round": "v3", "relevance/later-rounds": "v4"}
 IDS = ["0a0a0a", "1b1b1b", "2c2c2c"]
 NOTE = re.compile(r"N\(\w+,r\d\)")
 MALFORMED = {"provenance_ids": ["1b1b1b"]}
@@ -402,6 +402,32 @@ def test_the_reply_schema_does_not_depend_on_the_prompt_version(llm, pinned):
         schema = request["response_format"]["json_schema"]["schema"]
         fields = ["summary", "quotes", "provenance_ids"]
         assert list(schema["properties"]) == fields[: 2 if k < 2 else 3]
+
+
+def quoting_anyway(request) -> dict:
+    """A reply that quotes the document whatever its schema asks, citing every id it
+    may."""
+    document = request["messages"][1]["content"]
+    reply = {"summary": f"Notes on {document}.", "quotes": [document]}
+    if not is_later_round(request):
+        return reply
+    return {**reply, "provenance_ids": allowed_ids(request)["enum"]}
+
+
+@pytest.mark.parametrize("rounds", [1, 3])
+@pytest.mark.parametrize("reply", [None, quoting_anyway], ids=["plain", "quoting"])
+def test_a_document_level_read_never_asks_for_quotes_and_keeps_none(llm, rounds, reply):
+    documents = ["DOC0", "DOC1", "DOC2"]
+    result = surface(llm, documents, rounds, reply=reply, evidence_level="document")
+    assert len(llm.requests) == len(documents) * rounds
+    for k, request in enumerate(llm.requests):
+        assert "quote" not in request["messages"][0]["content"].lower()
+        later = ["provenance_ids"] if k >= len(documents) else []
+        assert is_later_round(request) == bool(later)
+        schema = request["response_format"]["json_schema"]["schema"]
+        assert list(schema["properties"]) == schema["required"] == ["summary", *later]
+    assert by_round(result, "quotes") == [[[[]]] * len(documents)] * rounds
+    assert all(result.snippets)
 
 
 def test_a_later_rounds_snippet_keeps_the_ids_it_cites(llm, shown_ids):

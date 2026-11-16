@@ -58,6 +58,7 @@ from dotenv import find_dotenv, load_dotenv
 
 from r3con.config import (
     DEFAULT_CONFIG,
+    EvidenceLevel,
     ReasoningPath,
     RunConfig,
     check_prompts,
@@ -89,6 +90,7 @@ def run(
     config: str | RunConfig = DEFAULT_CONFIG,
     relevance_rounds: int | None = None,
     reasoning: ReasoningPath | None = None,
+    evidence_level: EvidenceLevel | None = None,
     params: dict[str, Any] | None = None,
     api_key: str | None = None,
     api_base: str | None = None,
@@ -120,6 +122,10 @@ def run(
             over the relevant context and the whole parse, or ``"coding"``, an agent
             that reads the parse with code. A direct run takes the coding path when its
             prompt does not fit the model's window.
+        evidence_level: overrides the config's: ``"sentence"`` has each relevance
+            snippet quote the sentences of its document it is based on;
+            ``"document"`` asks for no quotes, so ``result.provenance["quotes"]`` is
+            empty and the trail ends at the documents.
         params: extra keyword arguments passed straight to ``litellm.completion`` —
             ``temperature``, ``top_p``, ``seed``, ``extra_body``, anything it accepts.
         api_key, api_base: passed through to litellm. Usually unnecessary: litellm reads
@@ -179,7 +185,8 @@ def run(
             not dropped — dropping it would renumber every index the run reports), if
             ``config`` is a prebuilt :class:`RunConfig` *and* field overrides were also
             given (which would be silently ignored), if the config pins no prompt
-            version for a stage, if an override is not valid for its setting (a
+            version for a stage, or is document-level and pins a relevance prompt
+            with no document-level form, if an override is not valid for its setting (a
             ``reasoning`` that is not a reasoning path, say), or if a setting in
             :mod:`r3con.settings` is below its floor.
         FileNotFoundError: if the config, by name or as a :class:`RunConfig`, pins a
@@ -201,6 +208,7 @@ def run(
         "model": model,
         "relevance_rounds": relevance_rounds,
         "reasoning": reasoning,
+        "evidence_level": evidence_level,
         "params": params,
     }
     given = {k: v for k, v in overrides.items() if v is not None}
