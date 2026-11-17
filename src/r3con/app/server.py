@@ -21,6 +21,10 @@ a reload reads.
   both answer as ``GET`` does. A URL is kept without its trailing slashes, and one
   that names no host, or holds a user or password, is refused (422): the page keeps a
   server's URL with the models it saves.
+- ``GET /api/models/place?model=<name>`` answers ``{server}``: whether the page offers
+  to run a model of that name on a server by default, which it does when litellm,
+  placing it with no server, finds a provider in ``SELF_HOSTED`` or none. Any other
+  provider's model, ``openai``'s too, runs on its provider by default.
 - A run or ask names its model and, as ``endpoint``, the server it runs on, if any.
   With no server, OpenAI's, Anthropic's and Gemini's models get their provider's key
   stored here, and any other gets litellm's own setup from the environment. On a
@@ -454,6 +458,11 @@ class DocumentQuery(BaseModel):
     name: Text
 
 
+class ModelQuery(BaseModel):
+    model_config = FORBID_EXTRA
+    model: Text
+
+
 class SaveQuery(BaseModel):
     model_config = FORBID_EXTRA
     name: Annotated[str, StringConstraints(pattern=SAVED_FILE_NAME)]
@@ -822,6 +831,12 @@ async def page_file(request: Request, *, name: str, media_type: str) -> Response
 
 async def keys(request: Request) -> Response:
     return JSONResponse(_key_status(_state(request)))
+
+
+async def model_place(request: Request) -> Response:
+    query = _valid(ModelQuery.model_validate, dict(request.query_params))
+    provider = _provider(query.model, None)
+    return JSONResponse({"server": provider is None or provider in SELF_HOSTED})
 
 
 async def save_key(request: Request) -> Response:
@@ -1292,6 +1307,7 @@ def create_app(
             Route("/api/keys", keys, methods=["GET"]),
             Route("/api/keys", save_key, methods=["POST"]),
             Route("/api/keys", forget_key, methods=["DELETE"]),
+            Route("/api/models/place", model_place, methods=["GET"]),
             Route("/api/documents/text", document_text, methods=["POST"]),
             Route("/api/documents/zip", document_zip, methods=["POST"]),
             Route("/api/saves", save_tab, methods=["POST"]),
