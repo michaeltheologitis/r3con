@@ -241,6 +241,22 @@ print(quote["document_text"])  # Ardent missed 8 delivery windows, mostly in Aug
 
 With `evidence_level="document"`, `quotes` is empty.
 
+`result.provenance["claims"]` splits the answer into its claims (each
+sentence, list item or table row) and links each one to the evidence that
+supports it. Each claim has its `text`, from its `start` to its `end`
+character in `result.answer`, the `documents` behind it by ID, and the
+`quotes` behind it, each by its `document`, `start` and `end`, as in
+`result.provenance["quotes"]`:
+
+```python
+for claim in result.provenance["claims"]:
+    print(claim["text"], claim["documents"])
+```
+
+Finding the claims takes one more call to the AI model, after the answer. With
+`evidence_level="document"`, a claim lists only its documents. To skip the
+call, pass `claims=False`.
+
 [`examples/provenance.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/provenance.ipynb)
 shows the rest of the provenance.
 
@@ -292,6 +308,10 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 │   ├── result.json              <- final answer
 │   ├── calls.json               <- AI requests
 │   └── transcript.yaml          <- record of the reasoning process
+├── claims/
+│   ├── result.json              <- the answer's claims and the evidence behind each
+│   ├── calls.json               <- AI requests
+│   └── transcript.yaml          <- record of the request
 └── asks/<folder>/               <- saved results for each additional question
 ```
 

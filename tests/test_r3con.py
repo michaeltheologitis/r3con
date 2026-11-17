@@ -52,7 +52,8 @@ from tests.fakes import (
     snippets_without_quotes,
     stage_of,
     the_runs_own_files,
-    without_trail,
+    without_claims,
+    without_trail_and_claims,
 )
 
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -97,6 +98,9 @@ ASK_FILES = {
     "reasoning/calls.json",
     "reasoning/result.json",
     "reasoning/transcript.yaml",
+    "claims/calls.json",
+    "claims/result.json",
+    "claims/transcript.yaml",
 }
 
 
@@ -342,7 +346,7 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         logs_dir=tmp_path,
     )
     assert result.answer == "Halloran memo; Merrow memo"
-    assert without_trail(result.provenance) == {
+    assert without_trail_and_claims(result.provenance) == {
         "summary_ids": [],
         "parse_ids": result.document_ids,
         "documents": [],
@@ -351,7 +355,10 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
     assert result.relevance_provenance == [[], []]
     assert result.parsing_provenance == [[], []]
     folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
-    assert (folder["path"], folder["provenance"]) == (reasoning, result.provenance)
+    assert (folder["path"], folder["provenance"]) == (
+        reasoning,
+        without_claims(result.provenance),
+    )
 
 
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
@@ -822,7 +829,7 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         "match": "exact",
         "score": None,
     }
-    assert without_trail(asked.provenance) == {
+    assert without_trail_and_claims(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
@@ -831,9 +838,9 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
     assert asked.provenance == quoted_run.provenance
     assert asked.document_names == quoted_run.document_names == NAMES
     folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
-    assert folder["provenance"] == asked.provenance
+    assert folder["provenance"] == without_claims(asked.provenance)
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
-    assert finished["provenance"] == asked.provenance
+    assert finished["provenance"] == without_claims(asked.provenance)
 
 
 def test_an_ask_over_a_run_that_pruned_every_memo_reads_its_round_1_notes(
@@ -865,7 +872,7 @@ def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_noth
     ran, asked_request = answering_llm.requests_for("reasoning")
     assert asked_request["messages"][0] == ran["messages"][0]
     ids = quoted_run.document_ids
-    assert without_trail(asked.provenance) == {
+    assert without_trail_and_claims(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
@@ -937,7 +944,7 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
     cited_run,
 ):
     assert trace(cited_run.run_dir) == trace(cited_run) == cited_run.provenance
-    assert saved_provenance(cited_run.run_dir) == cited_run.provenance
+    assert saved_provenance(cited_run.run_dir) == without_claims(cited_run.provenance)
     last = cited_run.document_ids[-1]
     lit = trace(str(cited_run.run_dir), "parses-light-documents")
     trail = cited_run.provenance["trail"]
@@ -949,8 +956,8 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
         f"document:{last}"
     ]
     documents = [*cited_run.provenance["documents"], *named_documents(cited_run, -1)]
-    assert without_trail(lit) == {
-        **without_trail(cited_run.provenance),
+    assert without_trail_and_claims(lit) == {
+        **without_trail_and_claims(cited_run.provenance),
         "documents": documents,
     }
 
@@ -1265,9 +1272,11 @@ def test_an_ask_reports_its_own_events_into_its_folder(
         "ask_started",
         "reasoning_started",
         "reasoning_finished",
+        "claims_started",
+        "claims_finished",
         "ask_finished",
     ]
-    started, reasoning, answered, finished = asked
+    started, reasoning, answered, _, claimed, finished = asked
     folder = Path(started["ask_dir"])
     assert folder == answer.run_dir
     assert folder.parent == built.run_dir / "asks"
@@ -1277,6 +1286,7 @@ def test_an_ask_reports_its_own_events_into_its_folder(
         "openai/gpt-6-luna",
     )
     assert answered["answer"] == JOINED
+    assert claimed["claims"] == answer.provenance["claims"] == []
     assert finished["ask_dir"] == started["ask_dir"]
     assert finished["tokens"] == {"prompt": 10, "completion": 20, "total": 30}
     assert events_in(folder) == asked
@@ -1812,7 +1822,12 @@ def test_a_resume_reports_what_it_reuses_then_the_events_that_reported_it(
     started, reuse, *rest = seen
     assert (started["type"], started["run_dir"]) == ("run_started", str(run_dir))
     assert reuse["type"] == "run_resumed"
-    assert reuse["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 2}
+    assert reuse["reused"] == {
+        "relevance": [5, 5],
+        "schema": 1,
+        "parsing": 2,
+        "reasoning": 0,
+    }
     replayed = [
         event
         for event in before
@@ -2134,7 +2149,12 @@ def test_a_resumed_all_pruned_run_reuses_its_structuring_and_answers_from_round_
     ]
     assert pruning == [(2, ids)]
     [resumed_event] = [e for e in seen if e["type"] == "run_resumed"]
-    assert resumed_event["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 5}
+    assert resumed_event["reused"] == {
+        "relevance": [5, 5],
+        "schema": 1,
+        "parsing": 5,
+        "reasoning": 0,
+    }
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(
@@ -2350,7 +2370,8 @@ def test_a_run_that_finished_while_its_resume_waited_is_not_resumed(
         """The run's own lock, held until the run finished."""
 
         def acquire(self, *args, **kwargs):
-            shutil.copy(run_dir / "manifest.json", run_dir / "reasoning/result.json")
+            (run_dir / "claims").mkdir()
+            shutil.copy(run_dir / "manifest.json", run_dir / "claims/result.json")
             return super().acquire(*args, **kwargs)
 
     monkeypatch.setattr("r3con.runs.FileLock", FinishingFirst)

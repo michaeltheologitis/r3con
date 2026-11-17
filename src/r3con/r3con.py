@@ -8,7 +8,7 @@ This is the whole surface most callers need::
     print(result)                 # the answer text
     result.relevant_context              # what each document was found to contribute
     result.structured_context            # the structured parse the answer was computed over
-    result.provenance             # the snippets, parses, documents, quotes and trail behind it
+    result.provenance             # the snippets, parses, documents, quotes, trail and claims behind it
     result.schema_code            # the schema proposed for this question
 
 The answer cites its two views separately: the relevance snippets it used
@@ -17,9 +17,10 @@ The answer cites its two views separately: the relevance snippets it used
 also record the snippets they used (``result.relevance_provenance``,
 ``result.parsing_provenance``). ``result.provenance["trail"]`` is what the answer
 reaches through those citations, ``result.provenance["documents"]`` the documents on
-that trail, each with its name, and ``result.provenance["quotes"]`` the sentences
-behind it, the quotes on that trail (:attr:`~r3con.pipeline.Answer.provenance`,
-:mod:`r3con.provenance`).
+that trail, each with its name, ``result.provenance["quotes"]`` the sentences
+behind it, the quotes on that trail, and ``result.provenance["claims"]`` each claim the
+answer makes, with the quotes or documents that support it
+(:attr:`~r3con.pipeline.Answer.provenance`, :mod:`r3con.provenance`).
 
 (``from r3con import run`` works too — same function, imported from the package root.)
 
@@ -92,6 +93,7 @@ def run(
     relevance_rounds: int | None = None,
     reasoning: ReasoningPath | None = None,
     evidence_level: EvidenceLevel | None = None,
+    claims: bool | None = None,
     params: dict[str, Any] | None = None,
     api_key: str | None = None,
     api_base: str | None = None,
@@ -128,6 +130,10 @@ def run(
             ``"document"`` asks for no quotes, so ``result.provenance["quotes"]`` is
             empty and ``result.provenance["documents"]`` names the documents the
             trail ends at.
+        claims: overrides the config's: whether one more call, after reasoning, finds
+            the claims the answer makes, each with the quotes, or at the document
+            level the documents, that support it, in
+            ``result.provenance["claims"]``. Off, it is empty.
         params: extra keyword arguments passed straight to ``litellm.completion`` —
             ``temperature``, ``top_p``, ``seed``, ``extra_body``, anything it accepts.
         api_key, api_base: passed through to litellm. Usually unnecessary: litellm reads
@@ -171,7 +177,8 @@ def run(
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
         ``str()`` of the result), the ids of the relevance snippets and parsed records
-        it used, its trail and the documents and quotes on it (``.provenance``: ids
+        it used, its trail and the documents and quotes on it, and its claims, each
+        with what supports it (``.provenance``: ids
         from ``.document_ids``, a part's snippet as ``<id>.<k>``, whose document is the
         part before the dot, each document and each quote with the document's name;
         see :attr:`~r3con.pipeline.Answer.provenance`), each document's name
@@ -211,6 +218,7 @@ def run(
         "relevance_rounds": relevance_rounds,
         "reasoning": reasoning,
         "evidence_level": evidence_level,
+        "claims": claims,
         "params": params,
     }
     given = {k: v for k, v in overrides.items() if v is not None}
@@ -283,21 +291,24 @@ def ask(
             as ``REDACTED`` (:mod:`r3con.masking`), so pass its real value here.
         api_key, api_base, completion: as in :func:`run`.
         on_event: as in :func:`run`, called with the ask's events: ``ask_started``,
-            ``reasoning_started``, ``reasoning_finished``, then ``ask_finished`` or
-            ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
+            ``reasoning_started``, ``reasoning_finished``, ``claims_started`` and
+            ``claims_finished`` when the run's config makes claims, then
+            ``ask_finished`` or ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
         cancel: as in :func:`run`: the ask fails with ``ask_failed``, its folder
             holding the calls reasoning made and ``error.txt``.
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
     folder is: a ``manifest.json`` as a run writes one, for the run's config with this
     ask's overrides (its ``task`` the question, ``ask_of`` the run folder's name),
-    ``events.jsonl`` and ``reasoning/`` as a run writes them. The run's own files are
-    left as they are.
+    ``events.jsonl``, ``reasoning/`` and ``claims/`` as a run writes them. The run's
+    own files are left as they are.
 
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
         reasoning (its trail, documents and quotes through the run's snippets of
-        every round and its parses), and whose other fields are the run's;
+        every round and its parses), its claims found as a run finds them, unless
+        the run's config turns them off, as it does for a run made before r3con made
+        claims, and whose other fields are the run's;
         ``run_dir`` is the ask's own folder, which holds its manifest, calls and
         transcript.
 
@@ -350,7 +361,8 @@ def resume(
     they are. An unfinished one reuses each document's result the run saved in
     ``events.jsonl`` (each relevance snippet a round wrote, all its parts there, and
     each parse) and computes the rest, as the run would have, under its question,
-    config and document ids; reasoning always runs. The folder keeps one record of the
+    config and document ids, so a run stopped after its reasoning finds only its
+    claims. The folder keeps one record of the
     whole run: an unfinished stage's ``calls.json`` keeps the earlier calls before the
     new ones, ``events.jsonl`` adds the resume's events, the manifest lists each resume
     under ``resumes``, and ``run_finished`` totals every stage. A call the run had made
@@ -373,9 +385,10 @@ def resume(
         api_key, api_base, completion: as in :func:`run`.
         on_event: as in :func:`run`, called with the resume's events: ``run_started``;
             ``run_resumed``, whose ``reused`` gives how many results each stage reuses
-            (``relevance``, per round, ``schema``, 0 or 1, and ``parsing``); then the
-            ``relevance_finished``, ``documents_pruned``, ``schema_finished`` and
-            ``parsing_finished`` events that reported the results it reuses, as the
+            (``relevance``, per round, ``schema``, 0 or 1, ``parsing``, and
+            ``reasoning``, 0 or 1); then the ``relevance_finished``,
+            ``documents_pruned``, ``schema_finished``, ``parsing_finished`` and
+            ``reasoning_finished`` events that reported the results it reuses, as the
             folder saved them, their ``time`` the original's, in the order written,
             which ``events.jsonl`` does not get twice, a finished relevance's
             ``documents_pruned`` made again from its ``result.json``, each after its
@@ -389,7 +402,8 @@ def resume(
     Raises:
         FileNotFoundError: if ``run_dir`` is not a run folder, if it predates resume,
             or if a prompt version it pins has no file.
-        ValueError: if the run finished, if ``documents`` are not the run's or not in
+        ValueError: if the run finished (its claims, or its reasoning when it makes
+            none), if ``documents`` are not the run's or not in
             its order, if a prompt it pins now resolves to another file than it read,
             if ``params`` are not the run's, if a param it would send holds
             ``REDACTED``, or if a file in its folder is not as this r3con writes it.
@@ -413,7 +427,9 @@ def resume(
 
 def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
     """The provenance of the answer ``source`` saved, its trail walked under ``rule``
-    (:mod:`r3con.provenance`), built from the files of its folder alone.
+    (:mod:`r3con.provenance`), built from the files of its folder alone, with the
+    claims it saved: none for a folder saved without them, as before r3con made
+    claims.
 
     It calls no model, and reads neither the run's config nor its prompts, so a run
     whose config or prompts this r3con no longer runs is traced all the same.

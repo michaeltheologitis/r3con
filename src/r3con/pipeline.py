@@ -20,6 +20,10 @@ Wires the three moves of the method — see :mod:`r3con.stages`:
    fit the model's window). The answer cites the snippets it used, and the documents
    whose parsed records it used, by id.
 
+After reasoning, one more call finds the answer's **claims**, each with the evidence on
+its trail that supports it (:mod:`r3con.stages.claims`), unless the config turns
+claims off.
+
 The document is the unit throughout: a document too long for the model's window is read
 in parts (:mod:`r3con.splitting`), and the whole collection is never placed in one
 prompt.
@@ -39,6 +43,7 @@ written to the folder's ``events.jsonl`` and handed to the caller's ``on_event``
 
 from __future__ import annotations
 
+import functools
 import json
 import threading
 import traceback
@@ -53,6 +58,7 @@ from typing import Any, NamedTuple, TypeVar
 from pydantic import BaseModel, StrictInt, ValidationError
 
 from r3con.config import (
+    CLAIMS_STAGES,
     PromptStage,
     ReasoningPath,
     RunConfig,
@@ -83,6 +89,7 @@ from r3con.runtime.llm import raise_if_cancelled, register_credentials
 from r3con.settings import settings_snapshot
 from r3con.splitting import Splits
 from r3con.stages import reasoning
+from r3con.stages.claims import find_claims
 from r3con.stages.relevance import (
     RelevantContext,
     SnippetRecord,
@@ -222,6 +229,13 @@ class Answer:
       sentences behind the answer, those the trail's snippets are based on, each
       naming its document by id and by name (:class:`~r3con.provenance.NamedQuote`);
       a document-level run (``evidence_level="document"``) has none.
+      ``provenance["claims"]`` lists the claims the answer makes, each one of its
+      sentences, list items or table rows, in the order it makes them: its ``text``,
+      ``answer[start:end]``, the ids of the ``documents`` whose evidence supports it,
+      and the ``quotes`` that do, each by its ``{document, start, end}`` in
+      ``provenance["quotes"]``, none at the document level
+      (:class:`~r3con.provenance.Claim`). It is empty when the config turns claims
+      off, the trail holds no evidence, or their call fails.
       :func:`r3con.trace` builds it again from the run folder, under any rule.
     - ``relevant_context`` — the **relevant context**: the relevance snippet of each
       document in the round of
@@ -384,6 +398,59 @@ def _spent(
     return {"tokens": summed["tokens"], "usd": summed["usd"]}
 
 
+def _claims_stage(
+    answer: str,
+    provenance: Provenance,
+    *,
+    task: str,
+    relevance: RelevantContext,
+    document_ids: list[str],
+    config: RunConfig,
+    caps: Mapping[str, int],
+    llm_kwargs: dict[str, Any],
+    task_logger: TaskLogger | None,
+    emit: Emit,
+    cancel: threading.Event | None,
+    failed: str = "run_failed",
+    resumed: bool = False,
+) -> StageRun | None:
+    """Set ``provenance["claims"]`` to the claims ``answer`` to ``task`` makes
+    (:func:`~r3con.stages.claims.find_claims`), on reasoning's model, with its params
+    and its cap on sends, recorded under ``<run-folder>/claims/`` as
+    :func:`_recorded_stage` records a stage, between ``claims_started`` and
+    ``claims_finished``; and return the stage's run, whose calls count in the totals.
+    Nothing, when ``config`` turns claims off."""
+    if not config.claims:
+        return None
+    emit("claims_started")
+    with _recorded_stage(
+        task_logger,
+        "claims",
+        config.model,
+        transcript=True,
+        emit=emit,
+        cancel=cancel,
+        failed=failed,
+        resumed=resumed,
+    ) as record:
+        provenance["claims"] = find_claims(
+            question=task,
+            answer=answer,
+            provenance=provenance,
+            relevance=relevance,
+            document_ids=document_ids,
+            evidence_level=config.evidence_level,
+            prompts=config.prompts,
+            model=config.model,
+            max_attempts=caps["reasoning_max_attempts"],
+            run=record.run,
+            **llm_kwargs,
+        )
+        record.result = {"claims": provenance["claims"]}
+    emit("claims_finished", claims=provenance["claims"])
+    return record.run
+
+
 def _preview(text: str, n: int = 100) -> str:
     """One-line, truncated preview of an answer for the progress log."""
     s = " ".join((text or "").split())
@@ -469,11 +536,15 @@ def run_pipeline(
       ``provenance``.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
       ``answer``, ``provenance`` (``{summary_ids, parse_ids, documents, quotes,
-      trail}``, as :attr:`Answer.provenance`), ``path``, ``fallback``.
+      trail}``, as :attr:`Answer.provenance` but for its claims, which come later),
+      ``path``, ``fallback``.
+    - ``claims_started`` / ``claims_finished``, unless the config turns claims off:
+      finished has ``claims``, as ``provenance["claims"]`` gives them.
     - ``run_finished``: ``run_dir`` as in ``run_started``, then the run's ``tokens``
       and ``usd``, as a stage's ``totals`` gives them (``None`` without a run folder).
     - ``run_failed``, when a stage raises, before the exception propagates: ``stage``
-      (``relevance``, ``schema``, ``parsing`` or ``reasoning``) and ``error``, the
+      (``relevance``, ``schema``, ``parsing``, ``reasoning`` or ``claims``, which
+      fails only when cancelled) and ``error``, the
       error on one line, keys masked (:func:`r3con.masking.one_line`): its class and
       its message, or each of a ``ValidationError``'s errors as ``loc: msg``.
 
@@ -553,6 +624,7 @@ class _Saved:
     recorded_through: int = 1
     proposal: ProposalResult | None = None
     extraction: ParseResult | None = None
+    reasoning: reasoning.ReasoningResult | None = None
     parses: dict[int, tuple[BaseModel, list[str]]] = field(default_factory=dict)
     totals: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -751,49 +823,72 @@ def _build_and_answer(
 
     # --- Stage 3: reasoning over the parse + the relevant context. ---
     _log.info("stage 3/3 · reasoning")
-    emit("reasoning_started", question=task, model=model)
-    with _recorded_stage(
-        task_logger,
-        "reasoning",
-        model,
-        transcript=True,
-        emit=emit,
-        cancel=cancel,
-        resumed=resumed,
-    ) as record:
-        result = reasoning.reason(
+    provenance_of = functools.partial(
+        build_provenance,
+        relevance=relevance,
+        parsing_provenance=extraction.provenance,
+        names=names,
+    )
+    result = saved.reasoning
+    if result is None:
+        emit("reasoning_started", question=task, model=model)
+        with _recorded_stage(
+            task_logger,
+            "reasoning",
+            model,
+            transcript=True,
+            emit=emit,
+            cancel=cancel,
+            resumed=resumed,
+        ) as record:
+            result = reasoning.reason(
+                task=task,
+                schema_code=proposal.schema_code,
+                parsed=parsed,
+                source_docs=extraction.source_docs,
+                relevance_snippets=relevance_snippets,
+                model=model,
+                prompts=config.prompts,
+                path=config.reasoning,
+                document_ids=document_ids,
+                max_attempts=caps["reasoning_max_attempts"],
+                max_turns=caps["reasoning_max_turns"],
+                timeout_s=reasoning_timeout_s,
+                run=record.run,
+                splits=splits,
+                **llm_kwargs,
+            )
+            _log.info(
+                "reasoning done on the %s path (%s, %d turn(s)): %s",
+                result.path,
+                result.terminated_by,
+                len(result.turns),
+                _preview(result.answer),
+            )
+            provenance = provenance_of(result.citations)
+            record.result = _reasoning_record(result, provenance)
+        stage_runs.append(record.run)
+        emit("reasoning_finished", **_reasoning_outcome(result, provenance))
+    else:
+        provenance = provenance_of(result.citations)
+
+    # --- Claims: each claim of the answer, with the evidence that supports it. ---
+    stage_runs.append(
+        _claims_stage(
+            result.answer,
+            provenance,
             task=task,
-            schema_code=proposal.schema_code,
-            parsed=parsed,
-            source_docs=extraction.source_docs,
-            relevance_snippets=relevance_snippets,
-            model=model,
-            prompts=config.prompts,
-            path=config.reasoning,
-            document_ids=document_ids,
-            max_attempts=caps["reasoning_max_attempts"],
-            max_turns=caps["reasoning_max_turns"],
-            timeout_s=reasoning_timeout_s,
-            run=record.run,
-            splits=splits,
-            **llm_kwargs,
-        )
-        _log.info(
-            "reasoning done on the %s path (%s, %d turn(s)): %s",
-            result.path,
-            result.terminated_by,
-            len(result.turns),
-            _preview(result.answer),
-        )
-        provenance = build_provenance(
-            result.citations,
             relevance=relevance,
-            parsing_provenance=extraction.provenance,
-            names=names,
+            document_ids=document_ids,
+            config=config,
+            caps=caps,
+            llm_kwargs=llm_kwargs,
+            task_logger=task_logger,
+            emit=emit,
+            cancel=cancel,
+            resumed=resumed,
         )
-        record.result = _reasoning_record(result, provenance)
-    stage_runs.append(record.run)
-    emit("reasoning_finished", **_reasoning_outcome(result, provenance))
+    )
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs, saved.totals))
     return _answer(
         result,
@@ -954,9 +1049,15 @@ def _refuse_finished(run_dir: Path) -> None:
     """Refuse to resume the run in ``run_dir`` once it has finished.
 
     Raises:
-        RunFinished: if its reasoning finished.
+        RunFinished: if its last stage finished: its claims, or, for a run that makes
+            none (:func:`_makes_claims`), its reasoning. A run stopped between the two
+            resumes into its claims.
+        ValueError: if its manifest is not as this r3con writes it.
     """
-    if (run_dir / "reasoning" / "result.json").is_file():
+    with _readable(run_dir):
+        makes_claims = _makes_claims(_read_json(run_dir / "manifest.json"))
+    last = "claims" if makes_claims else "reasoning"
+    if (run_dir / last / "result.json").is_file():
         raise RunFinished(
             f"{run_dir}: this run finished; ask it a new question instead (r3con ask, "
             "or r3con.ask)."
@@ -1086,7 +1187,12 @@ def _read_saved(
     parsing_result = (
         _finished(run_dir, "structuring/parsing") if schema_result else None
     )
-    finished = [r for r in (relevance_result, schema_result, parsing_result) if r]
+    reasoning_result = _finished(run_dir, "reasoning") if parsing_result else None
+    finished = [
+        r
+        for r in (relevance_result, schema_result, parsing_result, reasoning_result)
+        if r
+    ]
     saved = _Saved(totals=[result["totals"] for result in finished])
     replayed: list[int] = []
     rebuilt: list[tuple[float, dict[str, Any]]] = []
@@ -1129,6 +1235,10 @@ def _read_saved(
                 for doc, (at, event) in reported.items()
                 if (event.parse, event.provenance) == _parse_of(parsing_result, doc)
             ]
+    if reasoning_result is not None:
+        saved.reasoning = _reasoned(reasoning_result)
+        answer = saved.reasoning.answer
+        replayed += _last_reporting(events, "reasoning_finished", answer=answer)
     if unreadable or skipped:
         _log.warning(
             "resuming %s: %d line(s) of events.jsonl don't parse, and %d saved "
@@ -1153,6 +1263,7 @@ def _read_saved(
         ],
         "schema": int(saved.proposal is not None),
         "parsing": n if saved.extraction is not None else len(parsed),
+        "reasoning": int(saved.reasoning is not None),
     }
     return saved
 
@@ -1411,6 +1522,19 @@ def _extraction(result: Mapping[str, Any], parse_cls: type[BaseModel]) -> ParseR
     )
 
 
+def _reasoned(result: Mapping[str, Any]) -> reasoning.ReasoningResult:
+    """The answer reasoning's ``result.json``, ``result``, holds, on its path, with
+    its citations."""
+    cited = result["provenance"]
+    return reasoning.ReasoningResult(
+        answer=result["answer"],
+        path=result["path"],
+        citations=Citations(
+            summary_ids=list(cited["summary_ids"]), parse_ids=list(cited["parse_ids"])
+        ),
+    )
+
+
 def _parse_of(result: Mapping[str, Any], doc: int) -> tuple[dict[str, Any], list[str]]:
     """Document ``doc``'s parse and the ids it used, as the parsing stage's
     ``result.json``, ``result``, holds them among every document's."""
@@ -1469,8 +1593,9 @@ def _provenance_over(built: Representation, citations: Citations) -> Provenance:
 def read_answer(folder: Path, rule: str) -> Provenance:
     """The provenance of the answer saved in the run folder or ask's folder ``folder``,
     its trail walked under ``rule``, built from its citations and the snippets and
-    parses' citations of the run it answered over: only what :func:`r3con.trace` needs,
-    so neither the run's config nor its prompts are read.
+    parses' citations of the run it answered over, with the claims ``folder`` saved,
+    none for one saved without: only what :func:`r3con.trace` needs, so neither the
+    run's config nor its prompts are read.
 
     Raises:
         ValueError: if no rule is named ``rule``, before anything is read; or, in one
@@ -1487,21 +1612,25 @@ def read_answer(folder: Path, rule: str) -> Provenance:
         raise FileNotFoundError(
             f"{folder} holds no answer: reasoning/result.json is missing."
         )
+    claimed = folder / "claims" / "result.json"
     with _readable(folder):
         cited = _read_json(answered)["provenance"]
         citations = Citations(
             summary_ids=list(cited["summary_ids"]), parse_ids=list(cited["parse_ids"])
         )
+        claims = list(_read_json(claimed)["claims"]) if claimed.is_file() else []
     with _readable(run_dir):
         names, relevance = _names_and_relevance(run_dir)
         parsing = _read_json(run_dir / "structuring" / "parsing" / "result.json")
-        return build_provenance(
+        provenance = build_provenance(
             citations,
             relevance=relevance,
             parsing_provenance=parsing["provenance"],
             names=names,
             rule=rule,
         )
+    provenance["claims"] = claims
+    return provenance
 
 
 def _run_of(folder: Path) -> Path:
@@ -1562,9 +1691,23 @@ def _read_built(run_dir: Path) -> Representation:
 
 def _run_config(manifest: Mapping[str, Any]) -> RunConfig:
     """The config a run's ``manifest`` records, its model the string litellm was called
-    with, or, for a run recorded before r3con kept that, the bare name."""
+    with, or, for a run recorded before r3con kept that, the bare name; claims off for
+    a run that makes none (:func:`_makes_claims`)."""
     model = manifest.get("litellm_model") or manifest["config"]["model"]
-    return RunConfig.model_validate({**manifest["config"], "model": model})
+    claims = _makes_claims(manifest)
+    return RunConfig.model_validate(
+        {**manifest["config"], "model": model, "claims": claims}
+    )
+
+
+def _makes_claims(manifest: Mapping[str, Any]) -> bool:
+    """Whether the run whose ``manifest`` this is makes claims: they are on in its
+    config, as they are unless set off, and it pins a claims prompt, which a run
+    recorded before r3con made claims, or an app's saved run from then, does not."""
+    config = {**manifest["config"]}
+    pinned = config.get("prompts") or {}
+    on = bool(config.get("claims", True))
+    return on and any(stage in pinned for stage in CLAIMS_STAGES)
 
 
 def _names_and_relevance(run_dir: Path) -> tuple[dict[str, str], RelevantContext]:
@@ -1651,9 +1794,10 @@ def ask_pipeline(
 
     It reports its progress as :func:`run_pipeline` does, to ``on_event`` and the ask
     folder's own ``events.jsonl``: ``ask_started`` (``question``, ``model``,
-    ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, then
-    ``ask_finished`` (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``,
-    ``error``). ``cancel`` stops it as it stops :func:`run_pipeline`."""
+    ``ask_dir``), ``reasoning_started`` and ``reasoning_finished``, ``claims_started``
+    and ``claims_finished`` unless the config turns claims off, then ``ask_finished``
+    (``ask_dir``, ``tokens``, ``usd``) or ``ask_failed`` (``stage``, ``error``).
+    ``cancel`` stops it as it stops :func:`run_pipeline`."""
     caps = settings_snapshot()
     refuse_masked(config.params, api_base=api_base, api_key=api_key)
     llm_kwargs = _llm_kwargs(
@@ -1705,7 +1849,21 @@ def ask_pipeline(
         provenance = _provenance_over(built, result.citations)
         record.result = _reasoning_record(result, provenance)
     emit("reasoning_finished", **_reasoning_outcome(result, provenance))
-    emit("ask_finished", ask_dir=ask_dir, **_spent([record.run]))
+    claims_run = _claims_stage(
+        result.answer,
+        provenance,
+        task=task,
+        relevance=built.relevance,
+        document_ids=list(built.names),
+        config=config,
+        caps=caps,
+        llm_kwargs=llm_kwargs,
+        task_logger=task_logger,
+        emit=emit,
+        cancel=cancel,
+        failed="ask_failed",
+    )
+    emit("ask_finished", ask_dir=ask_dir, **_spent([record.run, claims_run]))
     return _answer(
         result,
         provenance=provenance,
@@ -1801,12 +1959,12 @@ def _paths_holding_mask(data: Any, path: tuple[Any, ...]) -> Iterator[str]:
 def _reasoning_outcome(
     result: reasoning.ReasoningResult, provenance: Provenance
 ) -> dict[str, Any]:
-    """What reasoning concluded: its answer, with the answer's ``provenance``, its
-    path and fallback, as its ``result.json`` and its ``reasoning_finished`` event both
-    give them."""
+    """What reasoning concluded: its answer, with the answer's ``provenance`` but for
+    its claims, which come later, its path and fallback, as its ``result.json`` and its
+    ``reasoning_finished`` event both give them."""
     return {
         "answer": result.answer,
-        "provenance": provenance,
+        "provenance": {k: v for k, v in provenance.items() if k != "claims"},
         "path": result.path,
         "fallback": result.fallback,
     }

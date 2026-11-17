@@ -63,6 +63,12 @@ Layout per ``logs/<run-folder>/``:
   says, the trail ``{rule, nodes, edges}`` (:mod:`r3con.provenance`), ``path`` is
   ``direct`` or ``coding``, and ``fallback`` says why the coding path ran when the
   config asked for direct, else ``null``) + ``calls.json`` + ``transcript.yaml``.
+  Its ``provenance`` has no ``claims``: they are found after it.
+- ``claims/`` (after reasoning, unless the config turns claims off) — ``result.json``
+  (``{claims, totals}``, the answer's claims as
+  :attr:`r3con.pipeline.Answer.provenance` gives them, none when the trail holds no
+  evidence, with no call, or when their call failed) + ``calls.json`` +
+  ``transcript.yaml`` (:mod:`r3con.stages.claims`).
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
@@ -76,8 +82,8 @@ Layout per ``logs/<run-folder>/``:
   (:func:`run_lock`), so that only one does at a time.
 - ``asks/<folder>/`` — one per :func:`r3con.ask` over the run, named as a run folder
   is: ``manifest.json`` as above, its ``task`` the ask's question and ``ask_of`` the
-  run folder's name, ``events.jsonl`` (the ask's own events) and ``reasoning/`` as
-  above.
+  run folder's name, ``events.jsonl`` (the ask's own events), and ``reasoning/`` and
+  ``claims/`` as above.
 
 A stage that raises writes no ``result.json``: its folder holds ``calls.json`` (every
 call that answered or raised an error, plus ``transcript.yaml`` where the stage writes

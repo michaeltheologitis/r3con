@@ -149,9 +149,18 @@ RUN_EVENTS = [
     "parsing_finished",
     "reasoning_started",
     "reasoning_finished",
+    "claims_started",
+    "claims_finished",
     "run_finished",
 ]
-ASK_EVENTS = ["ask_started", "reasoning_started", "reasoning_finished", "ask_finished"]
+ASK_EVENTS = [
+    "ask_started",
+    "reasoning_started",
+    "reasoning_finished",
+    "claims_started",
+    "claims_finished",
+    "ask_finished",
+]
 TOO_FEW_ROUNDS = "relevance_rounds: Input should be greater than or equal to 1"
 TOO_MANY_ROUNDS = (
     f"relevance_rounds: Input should be less than or equal to {MAX_RELEVANCE_ROUNDS}"
@@ -1779,6 +1788,7 @@ def test_an_imported_run_keeps_no_param_override_or_other_field_of_its_manifest(
         "task",
     ]
     assert sorted(manifest["config"]) == [
+        "claims",
         "evidence_level",
         "model",
         "name",

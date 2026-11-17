@@ -22,7 +22,7 @@ from r3con import Answer
 
 _completion = litellm.completion
 
-Stage = Literal["relevance", "schema", "parsing", "reasoning"]
+Stage = Literal["relevance", "schema", "parsing", "reasoning", "claims"]
 Request = dict[str, Any]
 Content = str | dict[str, Any]
 Reply = Content | BaseException | Callable[[Request], Content]
@@ -53,6 +53,8 @@ class Parse(BaseModel):
 </schema>"""
 # The line, and the blank one after it, that heads a parse request's user message.
 PARSE_HEADING = re.compile(r"\ADocument ID: (\w+)\n\n")
+# The heading of each piece of evidence a claims request shows.
+EVIDENCE_HEADING = re.compile(r"^### (?:Quote|Document) ID: (\S+)$", re.MULTILINE)
 GATE_TIMEOUT_SECONDS = 10
 UNSCRIPTED_SHOWN_CHARS = 200
 TWO_LINE_MEMOS = {
@@ -100,6 +102,7 @@ def stage_of(request: Request) -> Stage:
         by_schema: dict[str, Stage] = {
             "RelevanceSummary": "relevance",
             "ReasoningAnswer": "reasoning",
+            "Claims": "claims",
         }
         return by_schema.get(schema, "parsing")
     messages = request["messages"]
@@ -250,15 +253,49 @@ def joined_rows(request: Request) -> Content:
     }
 
 
+def claimed_answer(request: Request) -> str:
+    """The answer a claims ``request`` shows."""
+    user = request["messages"][1]["content"]
+    return user.split("\n<answer>\n", 1)[1].split("\n</answer>\n", 1)[0]
+
+
+def shown_evidence(request: Request) -> list[str]:
+    """The ids of the evidence a claims ``request`` shows, in order."""
+    user = request["messages"][1]["content"]
+    return EVIDENCE_HEADING.findall(user.split("\n</answer>\n", 1)[1])
+
+
+def claims_reply(*claims: tuple[str, list[str]]) -> Callable[[Request], Content]:
+    """A claims reply of ``claims``, each its text and the ids that support it, in the
+    field the request's schema names for them."""
+
+    def reply(request: Request) -> Content:
+        schema = request["response_format"]["json_schema"]["schema"]
+        ids = next(
+            key for key in schema["$defs"]["Claim"]["properties"] if key != "text"
+        )
+        return {"claims": [{"text": text, ids: cited} for text, cited in claims]}
+
+    return reply
+
+
+def claiming_the_answer(request: Request) -> Content:
+    """A claims reply claiming the whole answer, supported by all the evidence
+    shown."""
+    return claims_reply((claimed_answer(request), shown_evidence(request)))(request)
+
+
 ANSWERING: dict[str, Content | Callable[[Request], Content]] = {
     "relevance": lambda request: f"Notes on {first_line(request)}.",
     "schema": ANSWERING_SCHEMA,
     "parsing": lambda request: {"rows": [{"who": first_line(request)}]},
     "reasoning": joined_rows,
+    "claims": claiming_the_answer,
 }
 """What ``answering_llm`` answers each stage with, so that any run completes: each
-document's first line is its note and its one parsed row, and the answer joins the
-rows, on either reasoning path."""
+document's first line is its note and its one parsed row, the answer joins the rows,
+on either reasoning path, and its one claim is the whole answer, supported by all the
+evidence shown."""
 
 
 def failing_once(
@@ -426,10 +463,20 @@ def too_long(limit: int, size: int, model: str) -> ContextWindowExceededError:
     )
 
 
-def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
+def without_claims(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    """An answer's ``provenance`` without its ``claims``, as reasoning saves it and the
+    app's page reads it."""
+    return {key: value for key, value in provenance.items() if key != "claims"}
+
+
+def without_trail_and_claims(provenance: Mapping[str, Any]) -> dict[str, Any]:
     """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
-    pins."""
-    return {key: value for key, value in provenance.items() if key != "trail"}
+    pins, and its ``claims``, which ``test_claims.py`` pins."""
+    return {
+        key: value
+        for key, value in provenance.items()
+        if key not in ("trail", "claims")
+    }
 
 
 def named_documents(answer: Answer, *indices: int) -> list[dict[str, str]]:

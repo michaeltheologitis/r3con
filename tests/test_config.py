@@ -14,7 +14,10 @@ FULL = {
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
-V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)"
+CLAIMS_PINS = "claims-s=v1,claims-d=v1"
+V1_PROMPTS = (
+    f"prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1,{CLAIMS_PINS})"
+)
 DEFAULT_PROMPTS = {
     **PROMPTS,
     "relevance/first-round": "v3",
@@ -25,7 +28,7 @@ DEFAULT_PROMPTS = {
     CODING: "v4",
 }
 DEFAULT_LABEL_PROMPTS = (
-    "prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4)"
+    f"prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4,{CLAIMS_PINS})"
 )
 # Relevance prompts with a document-level form, the rest at v1.
 DOCUMENT_FORM_PROMPTS = {
@@ -51,8 +54,9 @@ def test_the_default_config_loads_with_its_shipped_values():
         config.relevance_rounds,
         config.reasoning,
         config.evidence_level,
+        config.claims,
         config.params,
-    ) == (2, "direct", "sentence", {})
+    ) == (2, "direct", "sentence", True, {})
     assert config.prompts == DEFAULT_PROMPTS
     assert "seed" not in config.model_dump()
     assert config.label() == (
@@ -89,11 +93,17 @@ def test_the_default_config_loads_with_its_shipped_values():
             "default[model=gpt-6-luna,rounds=2,reasoning=direct,evidence=document,",
         ),
         (
+            {"claims": False},
+            {"claims": False},
+            "default[model=gpt-6-luna,rounds=2,reasoning=direct,claims=off,",
+        ),
+        (
             {
                 "model": None,
                 "relevance_rounds": None,
                 "reasoning": None,
                 "evidence_level": None,
+                "claims": None,
                 "params": None,
             },
             {},
@@ -130,7 +140,7 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     )
     assert load_config("exp2").label() == (
         "exp2[model=gpt-6-luna,rounds=3,reasoning=coding,"
-        "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v9)]"
+        f"prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v9,{CLAIMS_PINS})]"
     )
 
 
@@ -145,7 +155,32 @@ def test_the_evidence_level_set_in_a_config_is_in_the_label_only_when_document(
     assert (config.evidence_level, config.overrides) == (level, {})
     assert config.label() == (
         f"exp[model=gpt-6-luna,rounds=3,reasoning=direct,{tag}"
-        "prompts=(rel1=v3,rel2=v4,schema=v1,parse=v1,direct=v1,coding=v1)]"
+        f"prompts=(rel1=v3,rel2=v4,schema=v1,parse=v1,direct=v1,coding=v1,{CLAIMS_PINS})]"
+    )
+
+
+@pytest.mark.parametrize(("claims", "tag"), [(True, ""), (False, "claims=off,")])
+def test_claims_set_in_a_config_are_in_the_label_only_when_off(configs, claims, tag):
+    configs(exp={**FULL, "claims": claims})
+    config = load_config("exp")
+    assert (config.claims, config.overrides) == (claims, {})
+    assert config.label() == (
+        f"exp[model=gpt-6-luna,rounds=3,reasoning=direct,{tag}{V1_PROMPTS}]"
+    )
+
+
+def test_a_config_with_claims_off_needs_no_claims_prompt(configs):
+    unpinned = {s: v for s, v in PROMPTS.items() if not s.startswith("claims/")}
+    configs(
+        off={**FULL, "claims": False, "prompts": unpinned},
+        on={**FULL, "prompts": unpinned},
+    )
+    assert load_config("off").prompts == unpinned
+    with pytest.raises(ValueError) as refused:
+        load_config("on")
+    assert str(refused.value) == (
+        "config 'on' is missing prompt versions for stage(s): "
+        "['claims/sentence', 'claims/document']"
     )
 
 
@@ -176,7 +211,7 @@ NO_PROMPTS = f"{MISSING_PROMPTS}{list(PROMPT_STAGES)}"
         ({"model": "openai/m", "prompts": {}}, NO_PROMPTS),
         (
             {**FULL, "prompts": {CODING: "v1"}},
-            f"{MISSING_PROMPTS}{list(PROMPT_STAGES[:-1])}",
+            f"{MISSING_PROMPTS}{[s for s in PROMPT_STAGES if s != CODING]}",
         ),
     ],
     ids=[
@@ -203,8 +238,8 @@ def test_a_config_without_a_model_loads_when_the_model_is_overridden(configs):
 
 THE_STAGES = (
     "Input should be 'relevance/first-round', 'relevance/later-rounds', "
-    "'structuring/schema', 'structuring/parsing', 'reasoning/direct' or "
-    "'reasoning/coding'"
+    "'structuring/schema', 'structuring/parsing', 'reasoning/direct', "
+    "'reasoning/coding', 'claims/sentence' or 'claims/document'"
 )
 
 
@@ -244,6 +279,11 @@ BAD_SETTINGS = [
     ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
     ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
     ("evidence_level", "paragraph", "Input should be 'sentence' or 'document'"),
+    (
+        "claims",
+        "sometimes",
+        "Input should be a valid boolean, unable to interpret input",
+    ),
     ("model", 5, "Input should be a valid string"),
     ("model", "", "String should have at least 1 character"),
 ]

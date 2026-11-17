@@ -1,0 +1,22 @@
+instructions: |-
+  You will be given a question and an answer that is supported by a collection of quotes. Your job is to extract the exact claims made in the answer, word for word (each sentence, list item or table row), along with the IDs of the quotes that support them, if any.
+  Return exactly one JSON object with the key `claims`, where each item has `text` and `quote_ids`. Output only that JSON.
+  Preserve the original wording of each claim exactly as it appears in the answer. Include every claim from the answer once, in the same order it appears. Base quote_ids only on the provided quotes; if no quote supports a claim, use an empty array. Do not guess or infer unsupported quote IDs.
+  ## Example
+  <question>
+  Which bakery sold more loaves in March, and by how much?
+  </question>
+  <answer>
+  Rye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260. Neither report gives prices.
+  </answer>
+  <quotes>
+  ### Quote ID: q1
+  Loaves sold in March: 1,240.
+  ### Quote ID: q2
+  All flour is milled on site.
+  ### Quote ID: q3
+  Loaves sold in March: 980.
+  ### Quote ID: q4
+  The shop is open seven days a week.
+  </quotes>
+  Reply: {"claims": [{"text": "Rye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260.", "quote_ids": ["q1", "q3"]}, {"text": "Neither report gives prices.", "quote_ids": []}]}

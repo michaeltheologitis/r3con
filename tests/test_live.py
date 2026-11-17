@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from r3con import ask, read_documents, run
+from r3con import Answer, ask, read_documents, run
 from r3con.config import REASONING_PATHS
 from tests.fakes import cited_documents
 
@@ -22,6 +22,15 @@ pytestmark = [
         not os.environ.get("OPENAI_API_KEY"), reason="OPENAI_API_KEY is not set"
     ),
 ]
+
+
+def assert_claims_are_slices_of_the_answer(result: Answer) -> None:
+    """``result`` has claims, and each one's text is the answer from its start to its
+    end."""
+    claims = result.provenance["claims"]
+    assert claims
+    for claim in claims:
+        assert result.answer[claim["start"] : claim["end"]] == claim["text"]
 
 
 def assert_cost_reported(events: list[dict[str, Any]], finished: str) -> None:
@@ -44,6 +53,7 @@ def test_the_answer_joins_evidence_that_no_single_memo_holds(
     cited = [texts[id_] for id_ in used]
     assert cited
     assert not any("Cafeteria refurbishment" in document for document in cited)
+    assert_claims_are_slices_of_the_answer(result)
     assert result.run_dir is not None
     assert_cost_reported(events_in(result.run_dir), "run_finished")
 
@@ -55,5 +65,6 @@ def test_an_ask_answers_a_new_question_over_a_finished_run(tmp_path, events_in):
     used = cited_documents(asked.provenance)
     assert used
     assert used <= set(result.document_ids)
+    assert_claims_are_slices_of_the_answer(asked)
     assert asked.run_dir is not None
     assert_cost_reported(events_in(asked.run_dir), "ask_finished")

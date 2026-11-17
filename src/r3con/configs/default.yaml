@@ -1,5 +1,5 @@
 # The default run config. Everything here shapes the OUTPUT — model, relevance rounds,
-# the reasoning path, the evidence level, prompt versions, generation params — and
+# the reasoning path, the evidence level, claims, prompt versions, generation params — and
 # together these are a run's identity (RunConfig.label()). Runtime knobs (parallelism,
 # retry caps, where logs go) live in settings.py, not here.
 #
@@ -21,6 +21,11 @@ reasoning: direct
 # based on, quoted; document = the snippet alone, so the trail ends at documents.
 evidence_level: sentence
 
+# Whether a last call links each claim of the answer, each sentence, list item or table
+# row, to the evidence on its trail that supports it: the quotes it rests on at the
+# sentence level, the documents at the document level.
+claims: true
+
 prompts:
   relevance/first-round: v3
   relevance/later-rounds: v4
@@ -28,6 +33,8 @@ prompts:
   structuring/parsing: v4
   reasoning/direct: v5
   reasoning/coding: v4
+  claims/sentence: v1
+  claims/document: v1
 
 # Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
 # it accepts. Empty means provider defaults.
