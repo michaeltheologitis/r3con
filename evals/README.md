@@ -1,8 +1,9 @@
 # evals
 
 A small regression check for r3con, not the paper's evaluation: it runs `r3con.run` with
-the default config on 75 pinned tasks, judges each answer, and writes one line of scores
-to [`results.jsonl`](results.jsonl), so the numbers can be compared commit to commit.
+the default config, claims off, on 75 pinned tasks, judges each answer, and writes one
+line of scores to [`results.jsonl`](results.jsonl), so the numbers can be compared commit
+to commit.
 
 - **Loong**: 40 tasks drawn from all 1,600 (English and Chinese; financial, paper and
   legal; every task type and length set). Each answer is rated 1–100 against the gold:
@@ -107,7 +108,7 @@ One JSON object per full run, and one per full comparison:
 | Field | Meaning |
 | --- | --- |
 | `date`, `commit`, `dirty` | When the run or comparison started (UTC), its commit, and whether tracked files under `src/` or `evals/` (other than `results.jsonl`) had uncommitted changes |
-| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, evidence level when `document`, generation params when set, and every prompt version. A comparison has no `label` |
+| `r3con_version`, `label` | The package version, and the run label: the config name, model, relevance rounds, reasoning path, evidence level when `document`, generation params when set, and the version of every prompt it reads. A comparison has no `label` |
 | `ask_of`, `answer_model` | A comparison's only: the run it asked over (its `run` folder, `commit`, `dirty` and `label`), and the model that answered |
 | `judge_model` | The judge |
 | `benchmarks.loong` | `n`, `errors`, `avg_score` (1–100), `perfect_rate` (0–1) |

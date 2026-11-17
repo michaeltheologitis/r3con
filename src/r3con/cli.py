@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=available_configs() or None,
         default="default",
         help="Run config: model, relevance rounds, reasoning path, evidence level, "
-        "prompt versions, generation params.",
+        "claims, prompt versions, generation params.",
     )
     run_cmd.add_argument(
         "--model",

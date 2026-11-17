@@ -2,11 +2,13 @@ import json
 import logging
 import shutil
 import threading
+from pathlib import Path
 
 import pytest
 
 from r3con import Answer, Cancelled, ask, resume, run, trace
-from r3con.config import CLAIMS_STAGES, EVIDENCE_LEVELS
+from r3con.config import EVIDENCE_LEVELS
+from r3con.provenance import RULES
 from tests.fakes import (
     ANSWERING,
     TWO_LINE_MEMOS,
@@ -67,14 +69,16 @@ Site B's monthly report: enrollment figures, and a note that no adverse events o
 Site C's safety summary: one adverse event, a case of nausea, resolved the same day.
 </summaries>
 Reply: {"claims": [{"text": "Site A: two mild headaches.", "document_ids": ["3f9a"]}, {"text": "Site C: one case of nausea.", "document_ids": ["b604"]}, {"text": "Site B reported none.", "document_ids": ["7c21"]}]}"""
-# The trail of an ANSWER over TWO_LINE_MEMOS quotes each memo's line in its order.
-SENTENCE_USER = """<question>
+SYSTEMS = {"sentence": SENTENCE_SYSTEM, "document": DOCUMENT_SYSTEM}
+QUESTION_AND_ANSWER = """<question>
 Who?
 </question>
 <answer>
 The Halloran memo logs two sites. The Merrow memo logs two sites.
 </answer>
-<quotes>
+"""
+# The trail of an ANSWER over TWO_LINE_MEMOS quotes each memo's line in its order.
+QUOTES = """<quotes>
 ### Quote ID: q1
 Halloran memo
 ### Quote ID: q2
@@ -86,6 +90,12 @@ The Merrow memo logs two sites.
 ### Quote ID: q5
 The Calder memo logs two sites.
 </quotes>"""
+QUOTE_IDS = ["q1", "q2", "q3", "q4", "q5"]
+CANCELLED = "Cancelled: cancel was set, so no further model call is sent"
+# An answer long enough that the claims request is over a window of WINDOW_TOKENS,
+# which every other request of a run over TWO_LINE_MEMOS fits.
+LONG_ANSWER = " ".join([HALLORAN] * 1_000)
+WINDOW_TOKENS = 8_192
 
 
 @pytest.fixture
@@ -98,17 +108,33 @@ def quoting_llm(answering_llm, shown_ids):
     )
 
 
-def claimed(llm, tmp_path, *claims, **options) -> Answer:
+def run_memos(llm, tmp_path: Path, **options) -> Answer:
+    """A run of QUESTION over TWO_LINE_MEMOS, ``llm`` answering, its folder under
+    ``tmp_path / "logs"``."""
+    logs = tmp_path / "logs"
+    return run(QUESTION, TWO_LINE_MEMOS, completion=llm, logs_dir=logs, **options)
+
+
+def claimed(llm, tmp_path: Path, *claims, **options) -> Answer:
     """A run of QUESTION over TWO_LINE_MEMOS whose claims reply is ``claims``, each
     its text and the ids that support it."""
     llm.answers(claims=claims_reply(*claims))
-    logs = tmp_path / "logs"
-    return run(QUESTION, TWO_LINE_MEMOS, completion=llm, logs_dir=logs, **options)
+    return run_memos(llm, tmp_path, **options)
 
 
 def place(quote: dict) -> dict:
     """Where ``quote`` is, as a claim names it."""
     return {key: quote[key] for key in ("document", "start", "end")}
+
+
+def cancelling(cancel: threading.Event, reply):
+    """A reply that sets ``cancel`` as it answers with ``reply``."""
+
+    def answer(request):
+        cancel.set()
+        return reply(request) if callable(reply) else reply
+
+    return answer
 
 
 def reply_schema(ids_key: str, title: str, ids: list[str]) -> dict:
@@ -150,57 +176,30 @@ def reply_schema(ids_key: str, title: str, ids: list[str]) -> dict:
     }
 
 
-def test_a_sentence_level_request_is_its_prompt_then_the_question_answer_and_quotes(
-    quoting_llm, tmp_path
+@pytest.mark.parametrize("level", EVIDENCE_LEVELS)
+def test_a_claims_request_is_the_owners_prompt_then_the_question_answer_and_evidence(
+    quoting_llm, tmp_path, level
 ):
-    run(QUESTION, TWO_LINE_MEMOS, completion=quoting_llm, logs_dir=tmp_path)
-    [request] = quoting_llm.requests_for("claims")
-    assert request["messages"] == [
-        {"role": "system", "content": SENTENCE_SYSTEM},
-        {"role": "user", "content": SENTENCE_USER},
-    ]
-    quote_ids = ["q1", "q2", "q3", "q4", "q5"]
-    assert request["response_format"] == reply_schema(
-        "quote_ids", "Quote Ids", quote_ids
-    )
-
-
-def test_a_document_level_request_is_its_prompt_then_the_question_answer_and_summaries(
-    answering_llm, tmp_path
-):
-    answering_llm.answers(reasoning=citing(ANSWER, slice(None)))
-    result = run(
-        QUESTION,
-        TWO_LINE_MEMOS,
-        evidence_level="document",
-        completion=answering_llm,
-        logs_dir=tmp_path,
-    )
-    halloran, merrow, calder = result.document_ids
-    [request] = answering_llm.requests_for("claims")
-    assert request["messages"] == [
-        {"role": "system", "content": DOCUMENT_SYSTEM},
-        {
-            "role": "user",
-            "content": f"""<question>
-Who?
-</question>
-<answer>
-The Halloran memo logs two sites. The Merrow memo logs two sites.
-</answer>
-<summaries>
+    result = run_memos(quoting_llm, tmp_path, evidence_level=level)
+    halloran, merrow, calder = ids = result.document_ids
+    summaries = f"""<summaries>
 ### Document ID: {halloran}
 Notes on Halloran memo.
 ### Document ID: {merrow}
 Notes on Merrow memo.
 ### Document ID: {calder}
 Notes on Calder memo.
-</summaries>""",
-        },
+</summaries>"""
+    evidence, schema = {
+        "sentence": (QUOTES, reply_schema("quote_ids", "Quote Ids", QUOTE_IDS)),
+        "document": (summaries, reply_schema("document_ids", "Document Ids", ids)),
+    }[level]
+    [request] = quoting_llm.requests_for("claims")
+    assert request["messages"] == [
+        {"role": "system", "content": SYSTEMS[level]},
+        {"role": "user", "content": QUESTION_AND_ANSWER + evidence},
     ]
-    assert request["response_format"] == reply_schema(
-        "document_ids", "Document Ids", result.document_ids
-    )
+    assert request["response_format"] == schema
 
 
 def test_claims_are_asked_of_reasonings_model_with_its_params(quoting_llm, tmp_path):
@@ -218,7 +217,6 @@ def test_claims_are_the_answers_own_words_in_its_order_with_what_supports_them(
     result = claimed(quoting_llm, tmp_path, (MERROW, ["q5", "q3"]), (HALLORAN, ["q2"]))
     quotes = result.provenance["quotes"]
     halloran, merrow, calder = result.document_ids
-    merrow_starts = len(HALLORAN) + 1
     assert result.provenance["claims"] == [
         {
             "text": HALLORAN,
@@ -229,7 +227,7 @@ def test_claims_are_the_answers_own_words_in_its_order_with_what_supports_them(
         },
         {
             "text": MERROW,
-            "start": merrow_starts,
+            "start": len(HALLORAN) + 1,
             "end": len(ANSWER),
             "documents": [merrow, calder],
             "quotes": [place(quotes[2]), place(quotes[4])],
@@ -251,6 +249,31 @@ def test_a_sentence_the_answer_repeats_is_claimed_where_each_claim_makes_it(
     starts = [0, len(HALLORAN) + 1, repeated.rindex(HALLORAN)]
     assert [claim["start"] for claim in claims] == starts
     assert [claim["text"] for claim in claims] == [HALLORAN, MERROW, HALLORAN]
+
+
+# A claim found again where one is placed is dropped, as is one found there once a
+# claim the answer words otherwise is placed before it.
+@pytest.mark.parametrize(
+    ("claims", "kept"),
+    [
+        ([HALLORAN, MERROW, HALLORAN], [HALLORAN, MERROW]),
+        (
+            [MERROW, "The Halloran memo lists two sites.", MERROW],
+            [HALLORAN, MERROW],
+        ),
+    ],
+    ids=["repeated", "after-a-located-one"],
+)
+def test_a_claim_overlapping_one_placed_is_dropped_with_a_warning(
+    quoting_llm, tmp_path, caplog, claims, kept
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    result = claimed(quoting_llm, tmp_path, *((text, []) for text in claims))
+    assert [claim["text"] for claim in result.provenance["claims"]] == kept
+    overlapping = claims[-1]
+    assert (
+        f"claims: dropped a claim that overlaps another: {overlapping!r}"
+    ) in caplog.text
 
 
 def test_an_id_the_call_did_not_show_is_dropped_with_a_warning(
@@ -284,6 +307,7 @@ def test_a_claim_the_answer_does_not_make_is_dropped_with_a_warning(
     assert (
         "claims: dropped a claim not found in the answer: 'Calder logs nothing.'"
     ) in caplog.text
+    assert "claims: dropped a blank claim" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -303,23 +327,48 @@ def test_a_claim_altered_slightly_is_found_and_keeps_the_answers_words(
     assert claim["quotes"] == [place(result.provenance["quotes"][3])]
 
 
+def test_an_elided_quote_is_shown_in_the_notes_words_not_the_span_it_skips(
+    answering_llm, tmp_path
+):
+    def eliding(request) -> dict:
+        line = request["messages"][1]["content"].splitlines()[1]
+        return {"summary": "Notes.", "quotes": [line.replace(" logs ", " ... ")]}
+
+    answering_llm.answers(relevance=eliding, reasoning=citing(ANSWER, slice(None)))
+    result = run_memos(answering_llm, tmp_path)
+    [elided, *_] = result.provenance["quotes"]
+    assert (elided["match"], elided["document_text"]) == ("elided", HALLORAN)
+    [request] = answering_llm.requests_for("claims")
+    user = request["messages"][1]["content"]
+    assert "### Quote ID: q1\nThe Halloran memo ... two sites.\n" in user
+    assert HALLORAN not in user.split("<quotes>", 1)[1]
+
+
 @pytest.mark.parametrize("level", EVIDENCE_LEVELS)
 def test_an_answer_whose_trail_holds_no_evidence_makes_no_claims_call(
     answering_llm, tmp_path, level
 ):
-    result = run(
-        QUESTION,
-        TWO_LINE_MEMOS,
-        evidence_level=level,
-        completion=answering_llm,
-        logs_dir=tmp_path,
-    )
+    result = run_memos(answering_llm, tmp_path, evidence_level=level)
     assert (result.provenance["quotes"], result.provenance["documents"]) == ([], [])
     assert answering_llm.requests_for("claims") == []
     assert result.provenance["claims"] == []
     folder = result.run_dir / "claims"
     assert json.loads((folder / "calls.json").read_text()) == []
     assert json.loads((folder / "result.json").read_text())["claims"] == []
+
+
+def test_a_claims_request_over_the_models_line_is_not_sent(
+    quoting_llm, window, tmp_path, caplog, events_in
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    quoting_llm.answers(reasoning=citing(LONG_ANSWER, slice(None)))
+    result = run_memos(quoting_llm, tmp_path, model=window(WINDOW_TOKENS))
+    assert result.answer == LONG_ANSWER
+    assert result.provenance["quotes"]
+    assert quoting_llm.requests_for("claims") == []
+    assert result.provenance["claims"] == []
+    assert "claims: none, as their request would take about " in caplog.text
+    assert events_in(result.run_dir)[-1]["type"] == "run_finished"
 
 
 @pytest.mark.parametrize(
@@ -330,11 +379,11 @@ def test_a_claims_call_that_fails_leaves_no_claims_and_the_run_finishes(
 ):
     caplog.set_level(logging.WARNING, logger="r3con")
     quoting_llm.answers(claims=reply)
-    result = run(QUESTION, TWO_LINE_MEMOS, completion=quoting_llm, logs_dir=tmp_path)
+    result = run_memos(quoting_llm, tmp_path)
     assert result.answer == ANSWER
     assert result.provenance["claims"] == []
     assert len(quoting_llm.requests_for("claims")) == sends
-    assert "claims: the answer has none, as their call failed: " in caplog.text
+    assert "claims: none, as their call failed: " in caplog.text
     events = events_in(result.run_dir)
     assert [event["type"] for event in events[-3:]] == [
         "claims_started",
@@ -345,16 +394,55 @@ def test_a_claims_call_that_fails_leaves_no_claims_and_the_run_finishes(
     assert not (result.run_dir / "claims" / "error.txt").exists()
 
 
-def test_claims_turned_off_make_no_call_and_leave_no_trace_but_the_label(
+def test_a_cancel_during_the_claims_call_leaves_no_claims_and_finishes_the_run(
+    quoting_llm, tmp_path, caplog, events_in
+):
+    caplog.set_level(logging.WARNING, logger="r3con")
+    cancel = threading.Event()
+    # A reply that does not fit, which the call would send again but for the cancel.
+    quoting_llm.answers(claims=cancelling(cancel, "not JSON"))
+    result = run_memos(quoting_llm, tmp_path, cancel=cancel)
+    assert result.answer == ANSWER
+    assert result.provenance["claims"] == []
+    assert len(quoting_llm.requests_for("claims")) == 1
+    assert f"claims: none, as their call failed: {CANCELLED}" in caplog.text
+    assert events_in(result.run_dir)[-1]["type"] == "run_finished"
+    saved = json.loads((result.run_dir / "claims" / "result.json").read_text())
+    assert saved["claims"] == []
+    with pytest.raises(ValueError, match="this run finished"):
+        resume(result.run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+
+
+def test_a_cancel_during_the_claims_call_of_an_ask_finishes_the_ask(
     quoting_llm, tmp_path, events_in
 ):
-    result = run(
-        QUESTION,
-        TWO_LINE_MEMOS,
-        claims=False,
-        completion=quoting_llm,
-        logs_dir=tmp_path,
-    )
+    result = claimed(quoting_llm, tmp_path, (HALLORAN, ["q2"]))
+    cancel = threading.Event()
+    quoting_llm.answers(claims=cancelling(cancel, "not JSON"))
+    asked = ask(result, "Who else?", completion=quoting_llm, cancel=cancel)
+    assert (asked.answer, asked.provenance["claims"]) == (ANSWER, [])
+    assert events_in(asked.run_dir)[-1]["type"] == "ask_finished"
+
+
+def test_a_cancel_during_reasoning_still_cancels_the_run(
+    quoting_llm, tmp_path, events_in
+):
+    cancel = threading.Event()
+    # A reply that does not fit, which reasoning would send again but for the cancel.
+    quoting_llm.answers(reasoning=cancelling(cancel, {"answer": ""}))
+    with pytest.raises(Cancelled):
+        run_memos(quoting_llm, tmp_path, cancel=cancel)
+    [run_dir] = (tmp_path / "logs").iterdir()
+    failed = events_in(run_dir)[-1]
+    assert (failed["type"], failed["stage"]) == ("run_failed", "reasoning")
+    assert quoting_llm.requests_for("claims") == []
+    assert not (run_dir / "claims").exists()
+
+
+def test_claims_turned_off_make_no_call_no_folder_and_no_event(
+    quoting_llm, tmp_path, events_in
+):
+    result = run_memos(quoting_llm, tmp_path, claims=False)
     assert result.provenance["quotes"]
     assert quoting_llm.requests_for("claims") == []
     assert result.provenance["claims"] == trace(result)["claims"] == []
@@ -414,16 +502,15 @@ def test_a_document_level_request_shows_each_round_1_summary_or_the_latest_inste
     assert (claim["documents"], claim["quotes"]) == ([registry, merrow], [])
 
 
-def test_trace_gives_the_saved_claims_whose_quotes_its_rules_trails_quote(
-    quoting_llm, tmp_path
+@pytest.mark.parametrize("rule", RULES)
+def test_trace_gives_the_saved_claims_whose_quotes_the_rules_trail_quotes(
+    quoting_llm, tmp_path, rule
 ):
     result = claimed(quoting_llm, tmp_path, (HALLORAN, ["q2"]), (MERROW, ["q4"]))
-    assert result.provenance["claims"]
-    for rule in ("through-summaries", "parses-light-documents"):
-        traced = trace(result.run_dir, rule)
-        assert traced["claims"] == result.provenance["claims"]
-        places = [place(quote) for quote in traced["quotes"]]
-        assert all(q in places for c in traced["claims"] for q in c["quotes"])
+    traced = trace(result.run_dir, rule)
+    assert traced["claims"] == result.provenance["claims"] != []
+    places = [place(quote) for quote in traced["quotes"]]
+    assert all(q in places for c in traced["claims"] for q in c["quotes"])
 
 
 def test_a_folder_saved_before_claims_traces_with_none(quoting_llm, tmp_path):
@@ -464,63 +551,23 @@ def test_a_run_that_failed_resumes_through_to_its_claims(quoting_llm, tmp_path):
     assert trace(run_dir)["claims"] == resumed.provenance["claims"]
 
 
-# Cancelled as reasoning's call answers, claims never start; as the claims call
-# answers, with a reply to send again, no other is sent.
-@pytest.mark.parametrize(
-    ("stage", "reply", "claims_sent"),
-    [("reasoning", citing(ANSWER, slice(None)), 0), ("claims", "not JSON", 1)],
-)
-def test_a_run_cancelled_once_reasoning_answers_fails_in_claims_and_resumes_into_them(
-    quoting_llm, tmp_path, events_in, stage, reply, claims_sent
+def test_a_run_stopped_before_its_claims_finished_resumes_from_reasoning(
+    quoting_llm, tmp_path
 ):
-    cancel = threading.Event()
-
-    def cancelling(request):
-        cancel.set()
-        return reply(request) if callable(reply) else reply
-
-    quoting_llm.answers(**{stage: cancelling})
-    logs = tmp_path / "logs"
-    with pytest.raises(Cancelled):
-        run(
-            QUESTION,
-            TWO_LINE_MEMOS,
-            completion=quoting_llm,
-            logs_dir=logs,
-            cancel=cancel,
-        )
-    [run_dir] = logs.iterdir()
-    assert len(quoting_llm.requests_for("claims")) == claims_sent
-    failed = events_in(run_dir)[-1]
-    assert (failed["type"], failed["stage"]) == ("run_failed", "claims")
-    assert (run_dir / "claims" / "error.txt").is_file()
-    quoting_llm.answers(
-        reasoning=citing(ANSWER, slice(None)), claims=claims_reply((HALLORAN, ["q2"]))
-    )
+    result = claimed(quoting_llm, tmp_path, (HALLORAN, ["q2"]))
+    shutil.rmtree(result.run_dir / "claims")
     sent = len(quoting_llm.requests)
-    events = []
-    resumed = resume(
-        run_dir, TWO_LINE_MEMOS, completion=quoting_llm, on_event=events.append
-    )
-    assert [stage_of(request) for request in quoting_llm.requests[sent:]] == ["claims"]
-    assert resumed.answer == ANSWER
-    assert [claim["text"] for claim in resumed.provenance["claims"]] == [HALLORAN]
-    [reused] = [e["reused"] for e in events if e["type"] == "run_resumed"]
-    assert reused["reasoning"] == 1
-    assert "reasoning_finished" in [e["type"] for e in events]
-    calls = json.loads((run_dir / "claims" / "calls.json").read_text())
-    assert len(calls) == claims_sent + 1
-    assert not (run_dir / "claims" / "error.txt").exists()
-    with pytest.raises(ValueError, match="this run finished"):
-        resume(run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+    resumed = resume(result.run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+    stages = [stage_of(request) for request in quoting_llm.requests[sent:]]
+    assert stages == ["reasoning", "claims"]
+    assert resumed.provenance["claims"] == result.provenance["claims"]
 
 
 def as_before_claims(manifest: dict) -> None:
     """A run's manifest as r3con wrote one before it made claims."""
     del manifest["config"]["claims"]
-    for stage in CLAIMS_STAGES:
-        del manifest["config"]["prompts"][stage]
-        del manifest["sources"]["prompts"][stage]
+    del manifest["config"]["prompts"]["claims"]
+    del manifest["sources"]["prompts"]["claims"]
 
 
 def test_a_run_made_before_claims_is_asked_without_them_and_stays_finished(
@@ -536,3 +583,37 @@ def test_a_run_made_before_claims_is_asked_without_them_and_stays_finished(
     assert not (asked.run_dir / "claims").exists()
     with pytest.raises(ValueError, match="this run finished"):
         resume(result.run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+
+
+def failed_with_its_claims_prompt_shadowed(llm, tmp_path: Path, **options) -> Path:
+    """The folder of a run that failed in parsing, whose claims prompt a ``./prompts``
+    overlay now shadows; ``llm`` answering every stage from then on."""
+    llm.answers(parsing=bad_key())
+    with pytest.raises(Exception, match="bad key"):
+        run_memos(llm, tmp_path, **options)
+    [run_dir] = (tmp_path / "logs").iterdir()
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    pinned = Path(manifest["sources"]["prompts"]["claims"])
+    overlay = Path("prompts") / "claims" / pinned.name
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text(pinned.read_text())
+    llm.answers(parsing=ANSWERING["parsing"])
+    return run_dir
+
+
+def test_a_resume_refuses_a_claims_prompt_that_now_resolves_elsewhere(
+    quoting_llm, tmp_path
+):
+    run_dir = failed_with_its_claims_prompt_shadowed(quoting_llm, tmp_path)
+    with pytest.raises(ValueError, match=r"claims now reads \S+/prompts/claims/v1"):
+        resume(run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+
+
+def test_a_resume_with_claims_off_does_not_check_where_its_claims_prompt_is(
+    quoting_llm, tmp_path
+):
+    run_dir = failed_with_its_claims_prompt_shadowed(
+        quoting_llm, tmp_path, claims=False
+    )
+    resumed = resume(run_dir, TWO_LINE_MEMOS, completion=quoting_llm)
+    assert (resumed.answer, resumed.provenance["claims"]) == (ANSWER, [])

@@ -52,8 +52,7 @@ from tests.fakes import (
     snippets_without_quotes,
     stage_of,
     the_runs_own_files,
-    without_claims,
-    without_trail_and_claims,
+    without_trail,
 )
 
 PINS_A_MISSING_FILE = {**dict.fromkeys(PROMPT_STAGES, "v1"), "reasoning/coding": "v9"}
@@ -346,19 +345,18 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         logs_dir=tmp_path,
     )
     assert result.answer == "Halloran memo; Merrow memo"
-    assert without_trail_and_claims(result.provenance) == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": result.document_ids,
         "documents": [],
         "quotes": [],
+        "claims": [],
     }
     assert result.relevance_provenance == [[], []]
     assert result.parsing_provenance == [[], []]
     folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
-    assert (folder["path"], folder["provenance"]) == (
-        reasoning,
-        without_claims(result.provenance),
-    )
+    saved = {**folder["provenance"], "claims": []}
+    assert (folder["path"], saved) == (reasoning, result.provenance)
 
 
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
@@ -829,18 +827,28 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         "match": "exact",
         "score": None,
     }
-    assert without_trail_and_claims(asked.provenance) == {
+    # The claims call claims the whole answer, supported by the one quote shown.
+    claim = {
+        "text": "Halloran memo",
+        "start": 0,
+        "end": 13,
+        "documents": [ids[1]],
+        "quotes": [{"document": ids[1], "start": 0, "end": 11}],
+    }
+    assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
         "quotes": [merrow],
+        "claims": [claim],
     }
     assert asked.provenance == quoted_run.provenance
     assert asked.document_names == quoted_run.document_names == NAMES
+    claims = asked.provenance["claims"]
     folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
-    assert folder["provenance"] == without_claims(asked.provenance)
+    assert {**folder["provenance"], "claims": claims} == asked.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
-    assert finished["provenance"] == without_claims(asked.provenance)
+    assert {**finished["provenance"], "claims": claims} == asked.provenance
 
 
 def test_an_ask_over_a_run_that_pruned_every_memo_reads_its_round_1_notes(
@@ -872,11 +880,12 @@ def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_noth
     ran, asked_request = answering_llm.requests_for("reasoning")
     assert asked_request["messages"][0] == ran["messages"][0]
     ids = quoted_run.document_ids
-    assert without_trail_and_claims(asked.provenance) == {
+    assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
         "quotes": [],
+        "claims": [],
     }
 
 
@@ -944,7 +953,8 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
     cited_run,
 ):
     assert trace(cited_run.run_dir) == trace(cited_run) == cited_run.provenance
-    assert saved_provenance(cited_run.run_dir) == without_claims(cited_run.provenance)
+    saved = saved_provenance(cited_run.run_dir)
+    assert {**saved, "claims": cited_run.provenance["claims"]} == cited_run.provenance
     last = cited_run.document_ids[-1]
     lit = trace(str(cited_run.run_dir), "parses-light-documents")
     trail = cited_run.provenance["trail"]
@@ -956,8 +966,8 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
         f"document:{last}"
     ]
     documents = [*cited_run.provenance["documents"], *named_documents(cited_run, -1)]
-    assert without_trail_and_claims(lit) == {
-        **without_trail_and_claims(cited_run.provenance),
+    assert without_trail(lit) == {
+        **without_trail(cited_run.provenance),
         "documents": documents,
     }
 
@@ -1822,12 +1832,7 @@ def test_a_resume_reports_what_it_reuses_then_the_events_that_reported_it(
     started, reuse, *rest = seen
     assert (started["type"], started["run_dir"]) == ("run_started", str(run_dir))
     assert reuse["type"] == "run_resumed"
-    assert reuse["reused"] == {
-        "relevance": [5, 5],
-        "schema": 1,
-        "parsing": 2,
-        "reasoning": 0,
-    }
+    assert reuse["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 2}
     replayed = [
         event
         for event in before
@@ -2149,12 +2154,7 @@ def test_a_resumed_all_pruned_run_reuses_its_structuring_and_answers_from_round_
     ]
     assert pruning == [(2, ids)]
     [resumed_event] = [e for e in seen if e["type"] == "run_resumed"]
-    assert resumed_event["reused"] == {
-        "relevance": [5, 5],
-        "schema": 1,
-        "parsing": 5,
-        "reasoning": 0,
-    }
+    assert resumed_event["reused"] == {"relevance": [5, 5], "schema": 1, "parsing": 5}
 
 
 def test_a_snippet_read_over_a_round_redone_since_is_read_again(

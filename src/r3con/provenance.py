@@ -30,11 +30,10 @@ the trail's ``summarizes`` edges carry. A run builds it under :data:`DEFAULT_RUL
 (:attr:`r3con.pipeline.Answer.provenance`); :func:`r3con.trace` builds it again from a
 saved run's folder, under any rule.
 
-Its ``claims`` are the answer's claims, each with the evidence on the trail that
-supports it, which a last model call finds after reasoning
-(:mod:`r3con.stages.claims`): none until it has. A claim names its quotes by their
-place, which is the same under any rule, so a trace under another rule still finds them
-among its ``quotes``.
+An answer's provenance adds its ``claims`` (:class:`AnswerProvenance`), which a last
+model call finds after reasoning (:mod:`r3con.stages.claims`). A claim names its quotes
+by their place, the same under any rule, so it finds them among the ``quotes`` of a
+trail under any rule.
 """
 
 from __future__ import annotations
@@ -105,29 +104,6 @@ class NamedDocument(TypedDict):
     name: str
 
 
-class QuotePlace(TypedDict):
-    """Which quote behind an answer a claim rests on, ``{document, start, end}``: the
-    id of its document and where it is there, as its entry of ``quotes`` gives them."""
-
-    document: str
-    start: int
-    end: int
-
-
-class Claim(TypedDict):
-    """A claim the answer makes, ``{text, start, end, documents, quotes}``: one of its
-    sentences, list items or table rows, ``text``, which is ``answer[start:end]``; the
-    ids of the documents whose evidence supports it, in document order; and the quotes
-    that support it, each by its place (:class:`QuotePlace`), in the order of
-    ``quotes``, none at the document evidence level (:mod:`r3con.stages.claims`)."""
-
-    text: str
-    start: int
-    end: int
-    documents: list[str]
-    quotes: list[QuotePlace]
-
-
 class Trail(TypedDict):
     """What :func:`walk` reached from the answer under ``rule``: ``nodes``, in the order
     it reached them, the answer first, and ``edges``, those it followed, in the order
@@ -141,12 +117,39 @@ class Trail(TypedDict):
 class Provenance(Citations):
     """An answer's provenance: its citations, ``{summary_ids, parse_ids}``, the
     ``documents`` behind it, those its trail reaches, in document order, the ``quotes``
-    behind it, those its trail's ``summarizes`` edges carry, its ``trail``, and its
-    ``claims``, in the order the answer makes them (:class:`Claim`)."""
+    behind it, those its trail's ``summarizes`` edges carry, and its ``trail``."""
 
     documents: list[NamedDocument]
     quotes: list[NamedQuote]
     trail: Trail
+
+
+class QuotePlace(TypedDict):
+    """Which quote behind an answer a claim rests on, ``{document, start, end}``: its
+    document's id and where it is there, as its entry of ``quotes`` gives them."""
+
+    document: str
+    start: int
+    end: int
+
+
+class Claim(TypedDict):
+    """A claim the answer makes, ``{text, start, end, documents, quotes}``: one of its
+    sentences, list items or table rows, ``text``, which is ``answer[start:end]``; the
+    ids of the documents whose evidence supports it, in document order; and the quotes
+    that support it, by place, in the order of ``quotes``, none at the document
+    evidence level."""
+
+    text: str
+    start: int
+    end: int
+    documents: list[str]
+    quotes: list[QuotePlace]
+
+
+class AnswerProvenance(Provenance):
+    """An answer's provenance with its ``claims``, in the order of the answer."""
+
     claims: list[Claim]
 
 
@@ -182,7 +185,6 @@ def build_provenance(
     the summary that matched it best copied it: by tier, ``exact``, ``normalized``,
     ``elided``, then ``fuzzy``, a fuzzy one by its score, and among equals the first in
     the graph's order, so the latest round's; in document order, then by ``start``.
-    It has no claims: the claims stage finds them later.
 
     Raises:
         ValueError: if no rule is named ``rule``.
@@ -200,7 +202,6 @@ def build_provenance(
         documents=_documents(trail, names),
         quotes=_quotes(graph, trail),
         trail=trail,
-        claims=[],
     )
 
 

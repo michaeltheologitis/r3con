@@ -139,7 +139,6 @@ def test_the_default_trail_reaches_a_document_only_through_a_summary_of_it():
                 ["summary:1:a", "document:a", "summarizes"],
             ],
         },
-        "claims": [],
     }
 
 

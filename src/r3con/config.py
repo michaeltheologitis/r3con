@@ -26,7 +26,7 @@ Config file shape (``configs/<name>.yaml``)::
     relevance_rounds: 2
     reasoning: direct            # or coding
     evidence_level: sentence     # or document
-    claims: true                 # or false
+    claims: true                 # or false; left out, whether a claims prompt is pinned
     prompts:
       relevance/first-round: v3
       relevance/later-rounds: v4
@@ -34,8 +34,7 @@ Config file shape (``configs/<name>.yaml``)::
       structuring/parsing: v3
       reasoning/direct: v3
       reasoning/coding: v3
-      claims/sentence: v1        # claims/<evidence_level> is read; neither when off
-      claims/document: v1
+      claims: v1                 # read only when claims are on
     params:                      # optional; passed straight to litellm.completion
       temperature: 0.7
 """
@@ -49,7 +48,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from r3con import settings
 from r3con.prompts import prompt_variables, require_prompt_path
@@ -62,8 +61,7 @@ PromptStage = Literal[
     "structuring/parsing",
     "reasoning/direct",
     "reasoning/coding",
-    "claims/sentence",
-    "claims/document",
+    "claims",
 ]
 PROMPT_STAGES: tuple[PromptStage, ...] = get_args(PromptStage)
 
@@ -75,18 +73,11 @@ REASONING_PATHS: tuple[ReasoningPath, ...] = get_args(ReasoningPath)
 EvidenceLevel = Literal["sentence", "document"]
 EVIDENCE_LEVELS: tuple[EvidenceLevel, ...] = get_args(EvidenceLevel)
 
-# The claims prompt a run reads at each evidence level.
-CLAIMS_STAGE: dict[EvidenceLevel, PromptStage] = {
-    "sentence": "claims/sentence",
-    "document": "claims/document",
-}
-
-CLAIMS_STAGES: tuple[PromptStage, ...] = tuple(CLAIMS_STAGE.values())
-
-# The relevance prompts, which a document-level run renders without quotes.
-_RELEVANCE_STAGES: tuple[PromptStage, ...] = (
+# The prompts a document-level run renders without quotes.
+_LEVELLED_STAGES: tuple[PromptStage, ...] = (
     "relevance/first-round",
     "relevance/later-rounds",
+    "claims",
 )
 
 # The fields a config file may set; any other is refused rather than dropped.
@@ -110,8 +101,7 @@ _PROMPT_STAGE_ABBR: dict[str, str] = {
     "structuring/parsing": "parse",
     "reasoning/direct": "direct",
     "reasoning/coding": "coding",
-    "claims/sentence": "claims-s",
-    "claims/document": "claims-d",
+    "claims": "claims",
 }
 
 
@@ -146,7 +136,7 @@ class RunConfig(BaseModel):
     reasoning: ReasoningPath = "direct"
     # keep in sync with configs/default.yaml
     evidence_level: EvidenceLevel = "sentence"
-    # keep in sync with configs/default.yaml
+    # keep in sync with configs/default.yaml; left out, see _claims_if_pinned
     claims: bool = True
     # {stage: version}; check_prompts refuses a config that leaves a stage unpinned
     prompts: dict[PromptStage, str] = Field(default_factory=dict)
@@ -154,6 +144,23 @@ class RunConfig(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     # the overrides applied on load, recorded with the config
     overrides: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _claims_if_pinned(cls, data: Any) -> Any:
+        """``data`` with ``claims``, when it leaves them out, on if it pins the claims
+        prompt: off for a config, a run's manifest or an app's saved run from before
+        r3con made claims."""
+        if not isinstance(data, dict) or "claims" in data:
+            return data
+        prompts = data.get("prompts")
+        return {**data, "claims": isinstance(prompts, dict) and "claims" in prompts}
+
+    @property
+    def prompt_stages(self) -> tuple[PromptStage, ...]:
+        """The stages whose prompt this config reads: every one but claims when they
+        are off."""
+        return tuple(s for s in PROMPT_STAGES if self.claims or s != "claims")
 
     def _identity_parts(self) -> list[str]:
         """The output-shaping components that make up the run identity, in label
@@ -165,7 +172,7 @@ class RunConfig(BaseModel):
         :func:`normalize_model_name`)."""
         prompts = ",".join(
             f"{_PROMPT_STAGE_ABBR.get(s, s)}={self.prompts[s]}"
-            for s in PROMPT_STAGES
+            for s in self.prompt_stages
             if s in self.prompts
         )
         parts = [
@@ -176,8 +183,6 @@ class RunConfig(BaseModel):
         # Only when not the default, so a sentence-level run's label is as it was.
         if self.evidence_level != "sentence":
             parts.append(f"evidence={self.evidence_level}")
-        if not self.claims:
-            parts.append("claims=off")
         # Generation params are part of the identity only when set, so a provider-default
         # run carries no `params=` noise in its label.
         if self.params:
@@ -195,7 +200,7 @@ class RunConfig(BaseModel):
         match, so **every** output-shaping axis must appear in ``_identity_parts``. For
         example::
 
-            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4,claims-s=v1,claims-d=v1)]
+            exp[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4,claims=v1)]
         """
         return f"{self.name}[" + ",".join(self._identity_parts()) + "]"
 
@@ -350,25 +355,25 @@ def check_prompts(config: RunConfig) -> None:
     """Refuse a config that cannot render every stage's prompt, before any request.
 
     Raises:
-        ValueError: if a stage in :data:`PROMPT_STAGES` has no version pinned, but a
-            claims stage when the config makes no claims, or the config is
-            document-level and a relevance prompt it pins has no document-level form
-            (its template does not read ``evidence_level``).
+        ValueError: if a stage the config reads (:attr:`RunConfig.prompt_stages`) has
+            no version pinned, or the config is document-level and a relevance or
+            claims prompt it reads has no document-level form (its template does not
+            read ``evidence_level``).
         FileNotFoundError: if a pinned version has no file on the prompt search path.
     """
-    needed: list[PromptStage] = [
-        s for s in PROMPT_STAGES if config.claims or s not in CLAIMS_STAGES
-    ]
-    missing = [s for s in needed if s not in config.prompts]
+    missing = [s for s in config.prompt_stages if s not in config.prompts]
     if missing:
         raise ValueError(
             f"config {config.name!r} is missing prompt versions for stage(s): {missing}"
         )
-    for stage in needed:
+    for stage in config.prompt_stages:
         require_prompt_path(stage, config.prompts[stage])
     if config.evidence_level == "sentence":
         return
-    for stage in _RELEVANCE_STAGES:
+    levelled: list[PromptStage] = [
+        s for s in config.prompt_stages if s in _LEVELLED_STAGES
+    ]
+    for stage in levelled:
         version = config.prompts[stage]
         if "evidence_level" not in prompt_variables(stage, version):
             raise ValueError(

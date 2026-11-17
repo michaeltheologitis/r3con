@@ -17,7 +17,6 @@ from tests.fakes import (
     citing,
     in_json,
     quoting_its_first_line_and_citing_all_shown,
-    without_claims,
 )
 
 
@@ -48,8 +47,12 @@ def test_a_run_and_ask_this_r3con_saves_build_with_their_saved_provenance(
     assert todays_run.run_dir is not None and asked.run_dir is not None
     assert todays_run.provenance["quotes"] and todays_run.provenance["trail"]["edges"]
     built = build_sample(todays_run.run_dir, MEMOS)
-    assert built["answer"]["provenance"] == without_claims(todays_run.provenance)
-    assert ask_entry(asked.run_dir)["provenance"] == without_claims(asked.provenance)
+    for answer, built_provenance in [
+        (todays_run, built["answer"]["provenance"]),
+        (asked, ask_entry(asked.run_dir)["provenance"]),
+    ]:
+        claims = answer.provenance["claims"]
+        assert {**built_provenance, "claims": claims} == answer.provenance
 
 
 def test_a_saved_trail_trace_does_not_give_fails_the_build(todays_run: Answer) -> None:

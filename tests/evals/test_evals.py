@@ -128,7 +128,10 @@ def test_a_full_run_scores_every_task_and_writes_its_line(
         "corpusqa": {"n": 2, "errors": 0, "accuracy": 0.5},
     }
     assert line["usd"] == USD_PER_CALL * len(judging_llm.requests)
-    assert line["label"] == load_config().label()
+    assert line["label"] == load_config(claims=False).label()
+    assert "claims" not in line["label"]
+    assert list((tmp_path / "run").rglob("reasoning"))
+    assert not list((tmp_path / "run").rglob("claims"))
     assert line["judge_model"] == JUDGE_MODEL
     assert line["r3con_version"] == r3con.__version__
     assert len(line["commit"]) == 40
@@ -372,7 +375,7 @@ def test_the_evidence_level_flag_reaches_the_config_and_the_label(
 
     line = json.loads(capsys.readouterr().out)
     run = cli_paths / "runs_dir" / line["run"]
-    assert line["label"] == load_config(evidence_level=level).label()
+    assert line["label"] == load_config(evidence_level=level, claims=False).label()
     assert line["label"] == read_json(run / "run.json")["label"]
     assert ("evidence=document" in line["label"]) == (level == "document")
     levels = {
@@ -400,7 +403,7 @@ def test_a_document_level_run_resumes_only_at_that_level(
     assert main(["--resume", str(folder), "--evidence-level", "document"]) == 0
 
     line = json.loads(capsys.readouterr().out)
-    assert line["label"] == load_config(evidence_level="document").label()
+    assert line["label"] == load_config(evidence_level="document", claims=False).label()
     levels = {
         read_json(manifest)["config"]["evidence_level"]
         for manifest in folder.glob("*/*/*/manifest.json")

@@ -33,8 +33,7 @@ prompts:
   structuring/parsing: v4
   reasoning/direct: v5
   reasoning/coding: v4
-  claims/sentence: v1
-  claims/document: v1
+  claims: v1
 
 # Passed straight to litellm.completion — temperature, top_p, seed, extra_body, anything
 # it accepts. Empty means provider defaults.

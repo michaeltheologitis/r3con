@@ -39,8 +39,7 @@ from tests.fakes import (
     reading,
     reading_in_round,
     silent_when,
-    without_claims,
-    without_trail_and_claims,
+    without_trail,
 )
 
 MODEL = "openai/gpt-6-luna"
@@ -438,22 +437,32 @@ def test_the_answer_its_event_and_the_run_folder_quote_the_answers_trail(
     events = []
     result = answer(llm, logger, documents=TWO_LINE_MEMOS, on_event=events.append)
     ids = result.document_ids
+    quotes = [
+        memo_line(ids, 0, 0),
+        memo_line(ids, 0, 1),
+        memo_line(ids, 1, 0),
+        memo_line(ids, 2, 1),
+    ]
+    # The claims call claims the whole answer, supported by every quote it is shown.
+    claim = {
+        "text": "Halloran memo",
+        "start": 0,
+        "end": len("Halloran memo"),
+        "documents": ids,
+        "quotes": [{k: q[k] for k in ("document", "start", "end")} for q in quotes],
+    }
     # 0's summary cites 1's round 1; 2's parse cites its own, which cites 0's round 1.
-    assert without_trail_and_claims(result.provenance) == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [ids[2]],
         "documents": named_documents(result, 0, 1, 2),
-        "quotes": [
-            memo_line(ids, 0, 0),
-            memo_line(ids, 0, 1),
-            memo_line(ids, 1, 0),
-            memo_line(ids, 2, 1),
-        ],
+        "quotes": quotes,
+        "claims": [claim],
     }
     saved = read_json(logger, "reasoning/result")["provenance"]
-    assert saved == without_claims(result.provenance)
+    assert {**saved, "claims": [claim]} == result.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
-    assert finished["provenance"] == without_claims(result.provenance)
+    assert finished["provenance"] == saved
 
 
 def test_a_document_level_run_quotes_nothing_and_names_the_documents_its_trail_reaches(
@@ -475,11 +484,13 @@ def test_a_document_level_run_quotes_nothing_and_names_the_documents_its_trail_r
     )
     ids = result.document_ids
     # 0's summary cites 1's round 1; 2's parse cites its own, which cites 0's round 1.
-    assert without_trail_and_claims(result.provenance) == {
+    claim = {"text": "Halloran memo", "start": 0, "end": 13, "documents": ids}
+    assert without_trail(result.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [ids[2]],
         "documents": named_documents(result, 0, 1, 2),
         "quotes": [],
+        "claims": [{**claim, "quotes": []}],
     }
     snippets = [
         snippet
@@ -524,14 +535,15 @@ def test_a_config_that_pins_reasoning_v2_still_answers(
     [prompt] = system_prompts(llm, "reasoning")
     assert "- `provenance`: The IDs of the documents above" in prompt
     parse_ids = result.document_ids if cites_the_parse else []
-    assert without_trail_and_claims(result.provenance) == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": parse_ids,
         "documents": [],
         "quotes": [],
+        "claims": [],
     }
     saved = read_json(logger, "reasoning/result")["provenance"]
-    assert saved == without_claims(result.provenance)
+    assert {**saved, "claims": []} == result.provenance
 
 
 def test_a_config_that_pins_parsing_v1_still_runs(answering_llm, tmp_path):
@@ -620,16 +632,15 @@ def test_the_default_config_answers_in_one_call_over_the_whole_stamped_parse(
         "parse_ids": [ids[1]],
         "documents": named_documents(result, 0),
         "quotes": [],
+        "claims": [],
     }
-    assert (result.answer, without_trail_and_claims(result.provenance)) == (
+    assert (result.answer, without_trail(result.provenance)) == (
         "Halloran and Merrow.",
         cited,
     )
     reasoning = read_json(logger, "reasoning/result")
-    assert (reasoning["answer"], reasoning["provenance"]) == (
-        "Halloran and Merrow.",
-        without_claims(result.provenance),
-    )
+    saved = {**reasoning["provenance"], "claims": []}
+    assert (reasoning["answer"], saved) == ("Halloran and Merrow.", result.provenance)
     assert (reasoning["path"], reasoning["fallback"]) == ("direct", None)
     assert reasoning["totals"]["n_steps"] == 1
     transcript = yaml.safe_load((logger.dir / "reasoning/transcript.yaml").read_text())
@@ -649,11 +660,12 @@ def test_the_coding_path_sends_the_coding_prompt_over_the_whole_stamped_parse(
     shows_the_notes_and_the_stamped_parse(system, "coding", ids)
     assert user == {"role": "user", "content": "Input:\n<task>\nWho?\n</task>"}
     assert ast.literal_eval(result.answer) == stamped(ids)
-    assert without_trail_and_claims(result.provenance) == {
+    assert without_trail(result.provenance) == {
         "summary_ids": [],
         "parse_ids": [],
         "documents": [],
         "quotes": [],
+        "claims": [],
     }
     assert result.provenance["trail"]["nodes"] == ["answer"]
     reasoning = read_json(logger, "reasoning/result")
@@ -1058,7 +1070,7 @@ def test_no_request_carries_a_seed_unless_params_sets_one(answering_llm):
 def test_each_stage_renders_the_prompt_version_its_config_pins(
     answering_llm, shown_ids, tmp_path, reasoning
 ):
-    versions = dict(zip(PROMPT_STAGES, [f"v{c}" for c in "ABCDEFGH"], strict=True))
+    versions = dict(zip(PROMPT_STAGES, [f"v{c}" for c in "ABCDEFG"], strict=True))
     for stage, version in versions.items():
         prompt = yaml.safe_load((settings.PROMPTS_DIR / stage / "v1.yaml").read_text())
         prompt["instructions"] += f"\nMARKER-{version}"

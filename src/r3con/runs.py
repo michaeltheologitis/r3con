@@ -66,9 +66,9 @@ Layout per ``logs/<run-folder>/``:
   Its ``provenance`` has no ``claims``: they are found after it.
 - ``claims/`` (after reasoning, unless the config turns claims off) — ``result.json``
   (``{claims, totals}``, the answer's claims as
-  :attr:`r3con.pipeline.Answer.provenance` gives them, none when the trail holds no
-  evidence, with no call, or when their call failed) + ``calls.json`` +
-  ``transcript.yaml`` (:mod:`r3con.stages.claims`).
+  :attr:`r3con.pipeline.Answer.provenance` gives them, none when their call is not
+  sent, fails or is cancelled: :func:`r3con.stages.claims.find_claims`) +
+  ``calls.json`` + ``transcript.yaml``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.

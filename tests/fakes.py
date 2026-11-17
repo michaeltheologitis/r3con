@@ -463,20 +463,10 @@ def too_long(limit: int, size: int, model: str) -> ContextWindowExceededError:
     )
 
 
-def without_claims(provenance: Mapping[str, Any]) -> dict[str, Any]:
-    """An answer's ``provenance`` without its ``claims``, as reasoning saves it and the
-    app's page reads it."""
-    return {key: value for key, value in provenance.items() if key != "claims"}
-
-
-def without_trail_and_claims(provenance: Mapping[str, Any]) -> dict[str, Any]:
+def without_trail(provenance: Mapping[str, Any]) -> dict[str, Any]:
     """An answer's ``provenance`` without its ``trail``, which ``test_provenance.py``
-    pins, and its ``claims``, which ``test_claims.py`` pins."""
-    return {
-        key: value
-        for key, value in provenance.items()
-        if key not in ("trail", "claims")
-    }
+    pins."""
+    return {key: value for key, value in provenance.items() if key != "trail"}
 
 
 def named_documents(answer: Answer, *indices: int) -> list[dict[str, str]]:

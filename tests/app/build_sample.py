@@ -17,14 +17,13 @@ unedited from the ``logs/`` r3con wrote it to:
   log?" on ``openai/gpt-6-luna``.
 
 Building calls no model: each document's name, text and size come from
-``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder but
-for its claims, which the page does not read yet, each
-quote's ``document_text``, which the run predates, its memo's words from ``start`` to
-``end``, and every other value is read from the folder as it is. Each quote names the
-snippet it is from, so the app can match it to the trail. Every document in this run
-was read whole, and this handles only that. A sample with a document read in parts
-would need part handling: joining its parts' summaries as the app does, counting its
-``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
+``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder but for
+its claims, each quote's ``document_text``, which the run predates, its memo's words
+from ``start`` to ``end``, and every other value is read from the folder as it is. Each
+quote names the snippet it is from, so the app can match it to the trail. Every document
+in this run was read whole, and this handles only that. A sample with a document read in
+parts would need part handling: joining its parts' summaries as the app does, counting
+its ``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
 one call per node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
@@ -70,11 +69,10 @@ def provenance(
     folder: Path, saved: dict[str, Any], texts: dict[str, str]
 ) -> dict[str, Any]:
     """The provenance of the answer saved in ``folder``, as r3con.trace gives it but for
-    its claims, each quote's document_text read from its document's text in ``texts``.
-    Before 0.6.5,
-    r3con saved only its citations; it saves its quotes since, its trail since 0.6.9,
-    and its documents since 0.6.33. The recorded run predates document_text, which
-    trace then gives as None."""
+    its claims, which the page does not read yet, each quote's document_text read from
+    its document's text in ``texts``. Before 0.6.5, r3con saved only its citations; it
+    saves its quotes since, its trail since 0.6.9, and its documents since 0.6.33. The
+    recorded run predates document_text, which trace then gives as None."""
     traced = r3con.trace(folder)
     assert saved.items() <= traced.items(), (
         f"{folder.name}: trace gives the saved provenance"

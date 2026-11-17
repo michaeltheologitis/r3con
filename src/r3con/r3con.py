@@ -78,7 +78,7 @@ from r3con.pipeline import (
     resume_pipeline,
     run_pipeline,
 )
-from r3con.provenance import DEFAULT_RULE, Provenance
+from r3con.provenance import DEFAULT_RULE, AnswerProvenance
 from r3con.runs import TaskLogger, new_run_folder
 from r3con.runtime.llm import Cancelled
 from r3con.settings import active_logs_dir, settings_snapshot
@@ -172,7 +172,8 @@ def run(
             ``completion``'s (a ``litellm.Router``'s, say) and those of
             ``num_retries``, ``max_retries`` or ``retry_policy`` in ``params``; and a
             step the coding path is running in its sandbox, to its end or its
-            timeout.
+            timeout. Once reasoning has answered, the run finishes with its answer:
+            claims not yet found are left out, with no ``run_failed``.
 
     Returns:
         An :class:`~r3con.pipeline.Answer`: the answer text (``.answer``, and
@@ -295,7 +296,8 @@ def ask(
             ``claims_finished`` when the run's config makes claims, then
             ``ask_finished`` or ``ask_failed`` (:func:`~r3con.pipeline.ask_pipeline`).
         cancel: as in :func:`run`: the ask fails with ``ask_failed``, its folder
-            holding the calls reasoning made and ``error.txt``.
+            holding the calls reasoning made and ``error.txt``; once reasoning has
+            answered, it finishes, as a run does.
 
     Each ask is written to a new folder in the run folder's ``asks/``, named as a run
     folder is: a ``manifest.json`` as a run writes one, for the run's config with this
@@ -306,9 +308,9 @@ def ask(
     Returns:
         An :class:`Answer` whose ``answer`` and ``provenance`` come from the new
         reasoning (its trail, documents and quotes through the run's snippets of
-        every round and its parses), its claims found as a run finds them, unless
-        the run's config turns them off, as it does for a run made before r3con made
-        claims, and whose other fields are the run's;
+        every round and its parses), its claims found as a run finds them unless
+        the run's config turns them off, as a run's made before claims does, and
+        whose other fields are the run's;
         ``run_dir`` is the ask's own folder, which holds its manifest, calls and
         transcript.
 
@@ -361,8 +363,8 @@ def resume(
     they are. An unfinished one reuses each document's result the run saved in
     ``events.jsonl`` (each relevance snippet a round wrote, all its parts there, and
     each parse) and computes the rest, as the run would have, under its question,
-    config and document ids, so a run stopped after its reasoning finds only its
-    claims. The folder keeps one record of the
+    config and document ids; reasoning and claims always run. The folder keeps one
+    record of the
     whole run: an unfinished stage's ``calls.json`` keeps the earlier calls before the
     new ones, ``events.jsonl`` adds the resume's events, the manifest lists each resume
     under ``resumes``, and ``run_finished`` totals every stage. A call the run had made
@@ -385,10 +387,9 @@ def resume(
         api_key, api_base, completion: as in :func:`run`.
         on_event: as in :func:`run`, called with the resume's events: ``run_started``;
             ``run_resumed``, whose ``reused`` gives how many results each stage reuses
-            (``relevance``, per round, ``schema``, 0 or 1, ``parsing``, and
-            ``reasoning``, 0 or 1); then the ``relevance_finished``,
-            ``documents_pruned``, ``schema_finished``, ``parsing_finished`` and
-            ``reasoning_finished`` events that reported the results it reuses, as the
+            (``relevance``, per round, ``schema``, 0 or 1, and ``parsing``); then the
+            ``relevance_finished``, ``documents_pruned``, ``schema_finished`` and
+            ``parsing_finished`` events that reported the results it reuses, as the
             folder saved them, their ``time`` the original's, in the order written,
             which ``events.jsonl`` does not get twice, a finished relevance's
             ``documents_pruned`` made again from its ``result.json``, each after its
@@ -402,8 +403,8 @@ def resume(
     Raises:
         FileNotFoundError: if ``run_dir`` is not a run folder, if it predates resume,
             or if a prompt version it pins has no file.
-        ValueError: if the run finished (its claims, or its reasoning when it makes
-            none), if ``documents`` are not the run's or not in
+        ValueError: if the run finished (its claims, or its reasoning when claims are
+            off), if ``documents`` are not the run's or not in
             its order, if a prompt it pins now resolves to another file than it read,
             if ``params`` are not the run's, if a param it would send holds
             ``REDACTED``, or if a file in its folder is not as this r3con writes it.
@@ -425,7 +426,7 @@ def resume(
     )
 
 
-def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> Provenance:
+def trace(source: Answer | str | Path, rule: str = DEFAULT_RULE) -> AnswerProvenance:
     """The provenance of the answer ``source`` saved, its trail walked under ``rule``
     (:mod:`r3con.provenance`), built from the files of its folder alone, with the
     claims it saved: none for a folder saved without them, as before r3con made
