@@ -2077,18 +2077,16 @@ def test_a_server_with_no_save_dialog_refuses_a_save_for_its_page_to_download(
 
 @pytest.mark.enable_socket
 @pytest.mark.allow_hosts(["127.0.0.1"])
-@pytest.mark.parametrize(
-    ("dialog", "flag"), [(None, ""), (FakeSaveDialog(None), "&save=dialog")]
-)
-def test_only_a_server_with_a_save_dialog_opens_its_page_saying_so(
-    logs_dir: Path, dialog: FakeSaveDialog | None, flag: str
+@pytest.mark.parametrize("dialog", [None, FakeSaveDialog(None)])
+def test_the_servers_url_opens_its_page_with_its_token_alone(
+    logs_dir: Path, dialog: FakeSaveDialog | None
 ):
     listener = listen(0)
     try:
         _, url = _server(listener, logs_dir, None, choose_save_path=dialog)
     finally:
         listener.close()
-    assert re.fullmatch(rf"http://127\.0\.0\.1:\d+/#token=[\w-]+{flag}", url)
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+/#token=[\w-]+", url)
 
 
 def test_a_run_r3con_refuses_before_it_starts_ends_its_stream_and_cannot_be_asked(

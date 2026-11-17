@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple, Self
 
 import litellm
 import toga
@@ -668,26 +668,74 @@ class FakeUpdaterController:
         self.checks += 1
 
 
+class FakeNSPoint(NamedTuple):
+    """rubicon.objc's ``NSPoint``."""
+
+    x: float
+    y: float
+
+
+class FakeNSSize(NamedTuple):
+    """rubicon.objc's ``NSSize``."""
+
+    width: float
+    height: float
+
+
+class FakeNSRect(NamedTuple):
+    """rubicon.objc's ``NSRect``."""
+
+    origin: FakeNSPoint
+    size: FakeNSSize
+
+
+def fake_ns_make_rect(x: float, y: float, width: float, height: float) -> FakeNSRect:
+    """rubicon.objc's ``NSMakeRect``."""
+    return FakeNSRect(FakeNSPoint(x, y), FakeNSSize(width, height))
+
+
+class FakeNSView:
+    """AppKit's NSView, for a class defined on it: ``alloc().init()`` makes one, with
+    no size, in no view or window until a view adds it."""
+
+    superview: Any = None
+    window: Any = None
+    frame = fake_ns_make_rect(0, 0, 0, 0)
+
+    @classmethod
+    def alloc(cls) -> Self:
+        return cls()
+
+    def init(self) -> Self:
+        return self
+
+
 class FakeObjC:
     """rubicon.objc's ``ObjCClass``, as the Mac app's Objective-C runtime answers it.
     The main bundle's private Frameworks folder is ``frameworks``. NSBundle finds a
     bundle at a path only where there is a folder. Sparkle's loads unless ``loads`` is
     False, which makes its updater controller found unless ``has_controller`` is False.
     Each controller made is in ``controllers``; one answers its init with nil if
-    ``initializes`` is False, and its updater fails to start if ``starts`` is False."""
+    ``initializes`` is False, and its updater fails to start if ``starts`` is False.
+    The user's defaults are ``defaults``."""
 
     def __init__(self, frameworks: Path) -> None:
         self.frameworks = frameworks
         self.loads = self.has_controller = self.initializes = self.starts = True
         self.controllers: list[FakeUpdaterController] = []
+        self.defaults: dict[str, str] = {}
         main_bundle = SimpleNamespace(privateFrameworksPath=str(frameworks))
-        self.classes: dict[str, SimpleNamespace] = {
+        self.classes: dict[str, Any] = {
             "NSBundle": SimpleNamespace(
                 mainBundle=main_bundle, bundleWithPath=self._bundle_with_path
-            )
+            ),
+            "NSView": FakeNSView,
+            "NSUserDefaults": SimpleNamespace(
+                standardUserDefaults=SimpleNamespace(stringForKey=self.defaults.get)
+            ),
         }
 
-    def ObjCClass(self, name: str) -> SimpleNamespace:
+    def ObjCClass(self, name: str) -> Any:
         try:
             return self.classes[name]
         except KeyError:

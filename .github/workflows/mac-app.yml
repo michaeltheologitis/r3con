@@ -10,6 +10,7 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - "tests/app/bundle_check.py"
+      - "tests/app/window_drag_check.swift"
       - ".github/briefcase/**"
       - ".github/actions/sparkle/**"
       - ".github/workflows/mac-app.yml"
@@ -320,6 +321,9 @@ jobs:
             echo "::error::The app didn't start Sparkle's updater."
             exit 1
           fi
+          # A drag and a double-click on the window's top row, then the screenshot of where they left it.
+          dragged=true
+          swift tests/app/window_drag_check.swift "$pid" || dragged=false
           screencapture -x "$RUNNER_TEMP/window.png" || echo "::warning::No screenshot."
           # Quit as the Dock's Quit or a logout asks: the app must stop its server before it ends.
           gone() { case "$(ps -o stat= -p "$pid")" in "" | Z*) return 0 ;; *) return 1 ;; esac; }
@@ -339,6 +343,10 @@ jobs:
           # uvicorn's last line once its shutdown is done.
           if ! grep -F 'Finished server process' "$app_log"; then
             echo "::error::The app ended on a quit without stopping its server."
+            exit 1
+          fi
+          if [ "$dragged" = false ]; then
+            echo "::error::A drag or double-click on the window's top row didn't move or zoom it."
             exit 1
           fi
       # An app that writes into its own bundle breaks its signature.
