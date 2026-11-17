@@ -3069,13 +3069,16 @@ async function savedModels(page, checkAt) {
   await page.focus('#model-add');
   await page.keyboard.type(' ');
   const typed = await rows();
+  checkAt('a name typed and not yet added, and the server picked for it, stay as the name is typed on', typed.field === `${OTHER_MODEL} ` && typed.place === second, JSON.stringify(typed));
   await page.keyboard.press('Escape');
+  const onSecond = JSON.stringify([OTHER_MODEL, SECOND_ENDPOINT]);
+  const picked = await becomes(page, (id) => document.getElementById('model-pick').value === id, onSecond);
   await page.click('#settings-btn');
   const reopened = await rows();
-  const typedName = 'a name typed and not yet added, and the server picked for it, stay as the name is typed on and through the settings closing';
-  const stayed = typed.field === `${OTHER_MODEL} ` && typed.place === second && isDeepStrictEqual(reopened, typed);
-  checkAt(typedName, stayed, JSON.stringify({ typed, reopened }));
-  await page.press('#model-add', 'Enter');
+  const closed = { picked, rows: reopened.rows, field: reopened.field, stored: (await state()).stored.at(-1) };
+  const closedNow = { picked: true, rows: [`${OTHER_MODEL} · ${first}`, `${OTHER_MODEL} · ${second}`], field: '', stored: { model: OTHER_MODEL, endpoint: SECOND_ENDPOINT } };
+  const closedName = 'closing the settings adds a name typed there, on the server picked for it, picks it and empties its field';
+  checkAt(closedName, isDeepStrictEqual(closed, closedNow), JSON.stringify(closed));
   await page.fill('#model-add', SAVED_MODEL);
   await page.press('#model-add', 'Enter');
   const shared = await rows();
@@ -3093,14 +3096,14 @@ async function savedModels(page, checkAt) {
   checkAt(sharedName, servers && grouped && isDeepStrictEqual(sharedRows, sharedNow), JSON.stringify({ shared, menu }));
 
   const focused = [];
-  for (const selector of ['#model-list button', '#model-where']) {
+  for (const selector of ['#server-list button', '#model-list button', '#model-where']) {
     await page.fill('#key-gemini', TEST_KEY);
     await page.focus(selector);
     await becomes(page, () => document.getElementById('key-gemini').value === '');
     focused.push(await page.evaluate(() => document.activeElement.getAttribute('aria-label')));
   }
-  const focusedName = "focus on a saved model's remove button, or on where a model to add runs, stays there through a key save";
-  checkAt(focusedName, isDeepStrictEqual(focused, [shared.removes[0], 'runs on']), JSON.stringify(focused));
+  const focusedName = "focus on a server's or a saved model's remove button, or on where a model to add runs, stays there through a key save";
+  checkAt(focusedName, isDeepStrictEqual(focused, [`remove server ${TEST_ENDPOINT}`, shared.removes[0], 'runs on']), JSON.stringify(focused));
 
   await removeModel(`remove ${OTHER_MODEL} on ${first}`);
   const alone = (await rows()).rows;
@@ -3110,20 +3113,32 @@ async function savedModels(page, checkAt) {
   await page.getByRole('button', { name: `remove server ${SECOND_ENDPOINT}`, exact: true }).click();
   await becomes(page, () => document.querySelectorAll('#server-list li').length === 1);
   const serverGone = { rows: (await rows()).rows, state: await state(), groups: Object.keys(await page.evaluate(menuGroups)) };
-  const onFirst = [{ model: SAVED_MODEL, endpoint: TEST_ENDPOINT }];
-  const serverGoneNow = { rows: [SAVED_MODEL], state: { value: DEFAULT_MODEL, saved: [], stored: onFirst, focus: 'endpoint-other' }, groups: ['Anthropic', 'Google', first] };
-  const serverGoneName = 'removing a server drops its saved models from the settings, storage and the menu at once, and the model picked on it gives way to the default model';
+  const onServers = [{ model: OTHER_MODEL, endpoint: SECOND_ENDPOINT }, { model: SAVED_MODEL, endpoint: TEST_ENDPOINT }];
+  const serverGoneNow = { rows: [SAVED_MODEL], state: { value: DEFAULT_MODEL, saved: [], stored: onServers, focus: 'endpoint-other' }, groups: ['Anthropic', 'Google', first] };
+  const serverGoneName = 'removing a server hides its saved models from the settings and the menu at once but keeps them stored, and the model picked on it gives way to the default model';
   checkAt(serverGoneName, isDeepStrictEqual(serverGone, serverGoneNow), JSON.stringify(serverGone));
+  await page.fill('#endpoint-other', SECOND_ENDPOINT);
+  await saveByEnter(page, '#endpoint-other');
+  const back = { rows: (await rows()).rows, menu: (await page.evaluate(menuGroups))[second] };
+  const backName = 'adding a removed server back shows its saved models again, in the settings and in its group';
+  checkAt(backName, isDeepStrictEqual(back, { rows: [OTHER_MODEL, SAVED_MODEL], menu: [OTHER_MODEL] }), JSON.stringify(back));
 
+  await page.fill('#model-add', SAVED_MODEL);
+  await page.selectOption('#model-where', { label: OWN_PROVIDER });
+  await page.press('#model-add', 'Enter');
   await page.selectOption('#model-pick', JSON.stringify([SAVED_MODEL, TEST_ENDPOINT]));
   await page.keyboard.press('Escape');
   await page.reload();
-  const onNoServer = (await state()).value;
   await page.click('#settings-btn');
+  const { value, saved, stored } = await state();
+  const hidden = { rows: (await rows()).rows, value, saved, stored };
+  const hiddenNow = { rows: [SAVED_MODEL], value: SAVED_MODEL, saved: [SAVED_MODEL], stored: [...onServers, { model: SAVED_MODEL }] };
+  const hiddenName = "after a reload, which forgets the prototype's servers, the models saved on them are kept but listed nowhere, and one picked on them is picked on no server";
+  checkAt(hiddenName, isDeepStrictEqual(hidden, hiddenNow), JSON.stringify(hidden));
   await removeModel(`remove ${SAVED_MODEL}`);
-  const fellBack = { picked: onNoServer, after: await state(), remembered: await page.evaluate((key) => localStorage.getItem(key), MODEL_KEY) };
-  const fellBackNow = { picked: SAVED_MODEL, after: { value: DEFAULT_MODEL, saved: [], stored: null, focus: 'model-add' }, remembered: DEFAULT_MODEL };
-  const fellBackName = 'removing a saved model whose server is gone, picked in its place on no server, gives way to the default model';
+  const fellBack = { after: await state(), remembered: await page.evaluate((key) => localStorage.getItem(key), MODEL_KEY) };
+  const fellBackNow = { after: { value: DEFAULT_MODEL, saved: [], stored: onServers, focus: 'model-add' }, remembered: DEFAULT_MODEL };
+  const fellBackName = 'removing a saved model on no server, picked in place of its name remembered on a server that is gone, gives way to the default model';
   checkAt(fellBackName, isDeepStrictEqual(fellBack, fellBackNow), JSON.stringify(fellBack));
   await page.keyboard.press('Escape');
   const clean = composers.every(({ buttons, fields, unnamed }) => !buttons.some((name) => name.includes('remove')) && !fields.length && !unnamed.length);
@@ -5701,7 +5716,7 @@ async function liveServers(url) {
   const onProvider = 'anthropic/claude-sonnet-5-5';
   const [first, second] = ['10.0.0.7:8000', 'localhost:11434'];
   const sent = () => bodies.map(({ model, endpoint }) => [model, endpoint ?? null]);
-  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
     await page.click('#settings-btn');
     await page.fill('#endpoint-other', TEST_ENDPOINT);
     await page.fill('#key-other', TEST_KEY);
@@ -5727,6 +5742,11 @@ async function liveServers(url) {
     }
     const placesName = "a model to add runs by default where r3con app says: on the first server if self-hosted or a name litellm can't place, on its provider otherwise";
     check('live', placesName, isDeepStrictEqual(places, [OWN_PROVIDER, first, second]) && isDeepStrictEqual(placedAs, defaults), JSON.stringify({ places, placedAs }));
+    await page.route('**/api/models/place?*', (route) => route.abort());
+    await page.fill('#model-add', 'hosted_vllm/unplaced');
+    const lost = await becomes(page, statusIs, LOST_CONNECTION);
+    await page.unroute('**/api/models/place?*');
+    check('live', "a model's place asked of r3con app out of reach says so in the status", lost, await page.textContent('#run-status'));
     await page.fill('#model-add', onFirst);
     await page.press('#model-add', 'Enter');
     await page.fill('#model-add', onSecond);
@@ -5765,9 +5785,9 @@ async function liveServers(url) {
     const after = { rows: (await page.evaluate(savedModelRows)).rows, groups: await page.evaluate(menuGroups), picker: await page.evaluate(pickerState) };
     await askInNewTab(page, NEW_QUESTION);
     const fellBack = await becomes(page, statusMatches, `^● done · ${DEFAULT_MODEL} · `, LIVE_RUN_MS);
-    const dropped = isDeepStrictEqual(after.rows, [onFirst, onProvider]) && isDeepStrictEqual(Object.keys(after.groups), ['saved', first]);
-    const noDeadServer = dropped && after.picker.value === DEFAULT_MODEL && isDeepStrictEqual(sent().at(-1), [DEFAULT_MODEL, null]);
-    const removedName = 'removing a server forgets it and drops its saved models and its group, and the model picked on it gives way to the default model, never running on its URL';
+    const hidden = isDeepStrictEqual(after.rows, [onFirst, onProvider]) && isDeepStrictEqual(Object.keys(after.groups), ['saved', first]);
+    const noDeadServer = hidden && after.picker.value === DEFAULT_MODEL && isDeepStrictEqual(sent().at(-1), [DEFAULT_MODEL, null]);
+    const removedName = 'removing a server forgets it and hides its saved models and its group, and the model picked on it gives way to the default model, never running on its URL';
     check('live', removedName, removed && fellBack && noDeadServer, JSON.stringify({ after, sent: sent().at(-1) }));
 
     await page.evaluate((key) => localStorage.setItem(key, 'hosted_vllm/from-before'), MODEL_KEY);
@@ -5777,6 +5797,15 @@ async function liveServers(url) {
     const old = await fresh.inputValue('#model-pick');
     await fresh.close();
     check('live', 'a model remembered before servers loads as itself, on no server', old === 'hosted_vllm/from-before', old);
+
+    const rememberedOn = JSON.stringify(['hosted_vllm/from-before', TEST_ENDPOINT]);
+    await page.evaluate(([key, id]) => localStorage.setItem(key, id), [MODEL_KEY, rememberedOn]);
+    const unsaved = await page.context().newPage();
+    await unsaved.goto(url);
+    const named = await becomes(unsaved, (text) => document.getElementById('model-pick').selectedOptions[0]?.textContent === text, `hosted_vllm/from-before · ${first}`);
+    const picked = await unsaved.inputValue('#model-pick');
+    await unsaved.close();
+    check('live', 'a model remembered on a server and saved nowhere is picked, named with its server', named && picked === rememberedOn, picked);
   });
 }
 

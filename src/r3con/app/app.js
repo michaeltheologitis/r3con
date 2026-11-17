@@ -1820,6 +1820,7 @@
   const SAVED_GROUP = 'saved';
   // The settings' choice to run a model added there on its own provider, as their select's value; a server's is its URL.
   const OWN_PROVIDER = '';
+  const OWN_PROVIDER_LABEL = 'its provider';
   const SERVER_LABEL = 'Server';
   // The group of a server's URL and key fields, as their ids end.
   const SERVER_GROUP = 'other';
@@ -5976,7 +5977,7 @@
         h('span', {}, `${endpoint} · ${keyText(key)}`),
         h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove server ${endpoint}`, onclick: () => forget(() => forgetServer(endpoint), SERVER_LABEL, 'endpoint-other') }, 'remove'),
       );
-    fill($('server-list'), servers.map(row));
+    refill($('server-list'), servers.map(row));
     $('server-list').hidden = !servers.length;
   }
 
@@ -5995,11 +5996,11 @@
     readyStatus();
   }
 
-  // A server's saved models go with it: they can't run anywhere else.
+  // The model picked on a server removed gives way to the default model, not to its name on no server.
   /** @param {string} endpoint */
   async function forgetServer(endpoint) {
     const status = await mode.forgetServer(endpoint);
-    dropSavedModels((entry) => entry.endpoint === endpoint);
+    forgetPick((id) => parseModelId(id)[1] === endpoint);
     return status;
   }
 
@@ -6073,10 +6074,11 @@
   let keysNow = {};
   let keysRead = false;
 
-  // Reads the saved models and the servers once, for the settings' list and the picker.
+  // The settings' list and the picker show the saved models on no server or on one set; those on a server removed
+  // are kept, to come back with it.
   function renderModels() {
-    const saved = readSavedModels();
     const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
+    const saved = readSavedModels().filter(({ endpoint }) => !endpoint || servers.includes(endpoint));
     const labels = serverLabels(servers);
     renderSavedModels(saved, servers, labels);
     renderPicker(saved, servers, labels);
@@ -6108,7 +6110,8 @@
     if (!listed.has(pick)) pick = remembered;
     /** @param {[string, string]} option */
     const option = ([value, text]) => h('option', { value }, text);
-    const unlisted = listed.has(remembered) ? null : option(entry(...parseModelId(remembered)));
+    const where = rememberedEndpoint && labels.get(rememberedEndpoint);
+    const unlisted = listed.has(remembered) ? null : option([remembered, where ? `${rememberedModel} · ${where}` : rememberedModel]);
     fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))));
     modelPick.value = pick;
     $('model-hint').hidden = !live || providers.length > 0 || servers.length > 0;
@@ -6137,7 +6140,10 @@
     if (!model) placePicked = false;
     if (!model || modelWhere.hidden || placePicked) return;
     // If r3con app can't answer, which the status then says, the place stays as it is.
-    const onServer = await mode.runsOnServer(model).catch(/** @returns {null} */ () => null);
+    const onServer = await mode.runsOnServer(model).catch(/** @returns {null} */ () => {
+      readyStatus();
+      return null;
+    });
     if (onServer === null || placePicked || model !== modelAdd.value.trim()) return;
     const [first] = serversOf(keysNow);
     modelWhere.value = onServer && first ? first.endpoint : OWN_PROVIDER;
@@ -6158,7 +6164,7 @@
     refill($('model-list'), saved.map(row));
     $('model-list').hidden = !saved.length;
     const place = modelWhere.value;
-    refill(modelWhere, h('option', { value: OWN_PROVIDER }, 'its provider'), servers.map((endpoint) => h('option', { value: endpoint }, labels.get(endpoint))));
+    refill(modelWhere, h('option', { value: OWN_PROVIDER }, OWN_PROVIDER_LABEL), servers.map((endpoint) => h('option', { value: endpoint }, labels.get(endpoint))));
     modelWhere.hidden = !servers.length;
     modelWhere.value = place;
     // A place picked on a server since removed goes back to following the name.
@@ -6183,19 +6189,18 @@
     onPick();
   }
 
-  // The remembered model, if dropped, goes too, even one picked on no server as its server is gone: the picker falls back.
-  /** @param {(entry: SavedModel) => boolean} drop */
-  function dropSavedModels(drop) {
-    const saved = readSavedModels();
-    const dropped = new Set(saved.filter(drop).map(savedId));
-    writeSavedModels(saved.filter((entry) => !drop(entry)));
-    if ([modelPick.value, readStored(MODEL_KEY)].some((id) => id !== null && dropped.has(id))) removeStored(MODEL_KEY);
+  // The picker falls back to the default model if `matches` holds for the model picked or the one remembered, which
+  // differ while one remembered on a server that is gone is picked on no server.
+  /** @param {(id: string) => boolean} matches */
+  function forgetPick(matches) {
+    if ([modelPick.value, readStored(MODEL_KEY) ?? ''].some(matches)) removeStored(MODEL_KEY);
   }
 
   // Its button goes with its row, so focus moves to the field that adds one.
   /** @param {string} id */
   function removeSavedModel(id) {
-    dropSavedModels((entry) => savedId(entry) === id);
+    writeSavedModels(readSavedModels().filter((entry) => savedId(entry) !== id));
+    forgetPick((picked) => picked === id);
     renderModels();
     onPick();
     modelAdd.focus();
@@ -6294,8 +6299,11 @@
   // beforetoggle, not toggle, so the popover is placed and cleared before its first paint.
   /** @param {ToggleEvent} e */
   function onSettingsToggle(e) {
-    // Closing them, by Escape too, saves what was typed as leaving its field would.
-    if (e.newState === 'closed') edited.forEach((group) => commit(group));
+    // Closing them, by Escape too, saves what was typed as leaving its field would, and adds a model typed as add would.
+    if (e.newState === 'closed') {
+      edited.forEach((group) => commit(group));
+      addModel();
+    }
     clearSettings();
     if (e.newState === 'open') placeSettings();
   }
