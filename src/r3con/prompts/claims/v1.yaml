@@ -1,9 +1,10 @@
 instructions: |-
-  You will be given a question and an answer that is supported by a collection of {% if evidence_level != "document" %}quotes{% else %}document summaries{% endif %}. Your job is to extract the exact claims made in the answer, word for word (each sentence, list item or table row), along with the IDs of the {% if evidence_level != "document" %}quotes that support{% else %}documents whose summaries support{% endif %} them, if any.
-  Return exactly one JSON object with the key `claims`, where each item has `text` and `{% if evidence_level != "document" %}quote_ids{% else %}document_ids{% endif %}`. Output only that JSON.
-  Preserve the original wording of each claim exactly as it appears in the answer. Include every claim from the answer once, in the same order it appears. Base {% if evidence_level != "document" %}quote_ids only on the provided quotes; if no quote supports{% else %}document_ids only on the provided summaries; if no summary supports{% endif %} a claim, use an empty array. Do not guess or infer unsupported {% if evidence_level != "document" %}quote{% else %}document{% endif %} IDs.
+  {% if evidence_level != "document" -%}
+  You will be given a question and an answer that is supported by a collection of quotes. Your job is to extract the exact claims made in the answer, word for word (each sentence, list item or table row), along with the IDs of the quotes that support them, if any.
+  Return exactly one JSON object with the key `claims`, where each item has `text` and `quote_ids`. Output only that JSON.
+  Preserve the original wording of each claim exactly as it appears in the answer. Include every claim from the answer once, in the same order it appears. Base quote_ids only on the provided quotes; if no quote supports a claim, use an empty array. Do not guess or infer unsupported quote IDs.
   ## Example
-  {% if evidence_level != "document" %}<question>
+  <question>
   Which bakery sold more loaves in March, and by how much?
   </question>
   <answer>
@@ -19,7 +20,13 @@ instructions: |-
   ### Quote ID: q4
   The shop is open seven days a week.
   </quotes>
-  Reply: {"claims": [{"text": "Rye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260.", "quote_ids": ["q1", "q3"]}, {"text": "Neither report gives prices.", "quote_ids": []}]}{% else %}<question>
+  Reply: {"claims": [{"text": "Rye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260.", "quote_ids": ["q1", "q3"]}, {"text": "Neither report gives prices.", "quote_ids": []}]}
+  {%- else -%}
+  You will be given a question and an answer that is supported by a collection of document summaries. Your job is to extract the exact claims made in the answer, word for word (each sentence, list item or table row), along with the IDs of the documents whose summaries support them, if any.
+  Return exactly one JSON object with the key `claims`, where each item has `text` and `document_ids`. Output only that JSON.
+  Preserve the original wording of each claim exactly as it appears in the answer. Include every claim from the answer once, in the same order it appears. Base document_ids only on the provided summaries; if no summary supports a claim, use an empty array. Do not guess or infer unsupported document IDs.
+  ## Example
+  <question>
   Which trial sites reported adverse events?
   </question>
   <answer>
@@ -35,4 +42,5 @@ instructions: |-
   ### Document ID: b604
   Site C's safety summary: one adverse event, a case of nausea, resolved the same day.
   </summaries>
-  Reply: {"claims": [{"text": "Site A: two mild headaches.", "document_ids": ["3f9a"]}, {"text": "Site C: one case of nausea.", "document_ids": ["b604"]}, {"text": "Site B reported none.", "document_ids": ["7c21"]}]}{% endif %}
+  Reply: {"claims": [{"text": "Site A: two mild headaches.", "document_ids": ["3f9a"]}, {"text": "Site C: one case of nausea.", "document_ids": ["b604"]}, {"text": "Site B reported none.", "document_ids": ["7c21"]}]}
+  {%- endif %}
