@@ -324,7 +324,7 @@ NO_HOST_IN_URL = "must name a host"
 ONE_NAME_PER_DOCUMENT = "must give one name per document"
 NOT_A_SERVER_MODEL = (
     "isn't a self-hosted or openai/ model, so it can't run on a server: "
-    "pick other model… for it."
+    "add it in settings to run on its provider."
 )
 CUSTOM_HEADERS_WOULD_REACH_SERVER = (
     f"would send the server the headers in {CUSTOM_HEADERS_VARIABLE}: unset that "

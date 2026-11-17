@@ -349,15 +349,15 @@ p { margin: 0; }
   align-items: baseline;
   gap: 0.45em 2ch;
 }
-.keys label, .evidence label, .rounds label { font-weight: 600; }
+.keys label, #models-label, .evidence label, .rounds label { font-weight: 600; }
 #key-other, .key-state { grid-column: 2; }
 /* Two lines beside its URL and key, so the fields keep the width the providers' labels leave them. */
 #servers-label { width: min-content; grid-row: span 2; }
 #servers-label span { white-space: nowrap; }
-.server-list { grid-column: 1 / -1; margin: 0; padding: 0; list-style: none; }
-.key-state { display: flex; align-items: baseline; column-gap: 2ch; }
+.server-list, #model-list { grid-column: 1 / -1; margin: 0; padding: 0; list-style: none; }
+.key-state, .model-add { display: flex; align-items: baseline; column-gap: 2ch; }
 .key-state > span { min-width: 0; overflow-wrap: break-word; }
-.key-state .remove { min-height: 24px; }
+.key-state .remove, #model-add-btn { min-height: 24px; }
 .field {
   width: 100%;
   min-width: 0;
@@ -372,10 +372,13 @@ p { margin: 0; }
 /* A line kept for what a save says, so nothing moves when it does. */
 #settings-saved { min-height: 1lh; }
 .evidence, .rounds { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.45em 2ch; }
-.evidence { padding-top: 0.9em; border-top: 1px solid var(--line); }
+.models { display: flex; flex-direction: column; gap: 0.45em; }
+/* The name's field takes the room its server's select and add leave it. */
+#model-add { flex: 1; }
+.models, .evidence { padding-top: 0.9em; border-top: 1px solid var(--line); }
 /* As wide as the longer label, "relevance rounds", so the two selects line up. */
 .evidence label, .rounds label { min-width: 16ch; }
-#evidence, #rounds { width: auto; }
+#evidence, #rounds, #model-where { width: auto; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
@@ -577,7 +580,6 @@ mark[title] { cursor: help; }
 #model-pick optgroup, #model-pick option { color: var(--fg); background: var(--bg); }
 #model-hint { align-self: flex-start; }
 .ask-actions { display: flex; gap: 2ch; margin-left: auto; }
-#model-remove { margin-right: auto; }
 .run-btn { font-weight: 600; }
 .note { padding: 0 2ch 0.7em; color: var(--dim); }
 

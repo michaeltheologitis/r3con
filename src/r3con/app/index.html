@@ -26,6 +26,15 @@
       </div>
       <div class="keys" id="keys"></div>
       <p class="k" id="settings-saved" aria-live="polite"></p>
+      <div class="models">
+        <span id="models-label">saved models</span>
+        <ul id="model-list" aria-labelledby="models-label" hidden></ul>
+        <div class="model-add">
+          <input class="field" id="model-add" type="text" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="model to add">
+          <select class="field" id="model-where" aria-label="runs on" hidden></select>
+          <button class="btn" id="model-add-btn" type="button">add</button>
+        </div>
+      </div>
       <div class="evidence">
         <label for="evidence">evidence level</label>
         <select class="field" id="evidence"></select>
@@ -86,13 +95,11 @@
           </div>
           <div class="ask-foot">
             <span class="pick"><select id="model-pick" aria-label="model"></select></span>
-            <button class="btn" id="model-remove" type="button" hidden>remove</button>
             <span class="ask-actions">
               <button class="btn" id="stop-btn" type="button">stop</button>
               <button class="btn run-btn" id="run-btn" type="submit">ask ⏎</button>
             </span>
           </div>
-          <input class="field" id="model-other" type="text" spellcheck="false" autocapitalize="off" placeholder="any LiteLLM model, e.g. hosted_vllm/qwen3-32b" aria-label="other model" hidden disabled>
           <button class="btn" id="model-hint" type="button" popovertarget="settings">add a key in settings</button>
         </form>
       </section>

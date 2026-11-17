@@ -257,7 +257,6 @@
    * @typedef {object} Mode
    * @property {string} note
    * @property {(question: string) => string} nextRun
-   * @property {(question: string, asks: boolean) => boolean} needsModel
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File) => Promise<FileRead>} extract
    * @property {(file: File) => Promise<Unpacked>} unzip
@@ -1865,7 +1864,6 @@
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
-  const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
   const CONTINUE = 'continue';
@@ -2002,8 +2000,8 @@
   const inspector = $('inspector');
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
-  const modelOther = $('model-other', HTMLInputElement);
-  const modelRemove = $('model-remove', HTMLButtonElement);
+  const modelAdd = $('model-add', HTMLInputElement);
+  const modelWhere = $('model-where', HTMLSelectElement);
   const roundsPick = $('rounds', HTMLSelectElement);
   const evidencePick = $('evidence', HTMLSelectElement);
   const frame = $('frame');
@@ -4802,10 +4800,9 @@
     }
     const asks = landed(state.shown, RUN_ANSWER) || mode.runGoing(state.shown);
     // An ask needs only the run's representation; a run needs files.
-    const refused = asks || state.shown.files.length ? refusal(question, asks) : null;
+    const refused = asks || state.shown.files.length ? refusal(asks) : null;
     if (refused) {
       setStatus(refused);
-      if (refused === TYPE_A_MODEL) modelOther.focus();
       return;
     }
     if (asks) {
@@ -4820,10 +4817,9 @@
   }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
-  /** @param {string} question @param {boolean} asks */
-  function refusal(question, asks) {
+  /** @param {boolean} asks */
+  function refusal(asks) {
     if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
-    if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.shown.files);
   }
 
@@ -5431,10 +5427,11 @@
 
   /** @param {{ question: string, model: string }} ask */
   function prepareAsk({ question, model }) {
-    const listed = [...modelPick.options].some((option) => option.value === model);
-    modelPick.value = listed ? model : '';
-    if (!listed) modelOther.value = model;
-    onPick();
+    // Remembered first, so a model the menu doesn't list joins it as the remembered one does.
+    writeStored(MODEL_KEY, model);
+    modelPick.value = model;
+    renderPicker();
+    readyStatus();
     questionEl.value = question;
     questionEl.focus();
   }
@@ -5984,6 +5981,7 @@
       $(`remove-${provider}`).hidden = !removable;
     }
     renderServers(serversOf(status));
+    renderSavedModels();
     renderPicker();
     readyStatus();
   }
@@ -6012,10 +6010,7 @@
     return [id, null];
   }
 
-  function pickedModel() {
-    return parseModelId(modelPick.value)[0] || modelOther.value.trim();
-  }
-
+  const pickedModel = () => parseModelId(modelPick.value)[0];
   const pickedEndpoint = () => parseModelId(modelPick.value)[1];
 
   /** @param {string} endpoint */
@@ -6060,8 +6055,6 @@
   /** @type {KeyStatus} */
   let keysNow = {};
   let keysRead = false;
-  // The model last picked from the menu, for Escape in the other model field to go back to.
-  let menuModel = '';
 
   // The remembered model stays listed without its key, as after a reload, but never on a server known to be gone.
   function renderPicker() {
@@ -6072,7 +6065,7 @@
     const gone = keysRead && !/** @type {(string | null)[]} */ (servers).includes(rememberedEndpoint);
     const remembered = modelId(rememberedModel, gone ? null : rememberedEndpoint);
     /** @param {string} model @param {string | null} [endpoint] @returns {[string, string]} */
-    const entry = (model, endpoint, text = model) => [modelId(model, endpoint), text];
+    const entry = (model, endpoint) => [modelId(model, endpoint), model];
     const groups = Object.entries(PROVIDERS)
       .filter(([provider]) => providers.includes(provider))
       .map(([, { label, models }]) => ({ label, entries: models.map((model) => entry(model)) }));
@@ -6082,74 +6075,82 @@
       { label: SAVED_GROUP, entries: saved.filter((model) => !model.endpoint && !offered.has(savedId(model))).map(({ model }) => entry(model)) },
       ...servers.map((endpoint) => ({
         label: labels.get(endpoint),
-        entries: [...saved.filter((model) => model.endpoint === endpoint).map(({ model }) => entry(model, endpoint)), entry('', endpoint, `other model on ${labels.get(endpoint)}…`)],
+        entries: saved.filter((model) => model.endpoint === endpoint).map(({ model }) => entry(model, endpoint)),
       })),
     ].filter(({ entries }) => entries.length);
     const allGroups = [...groups, ...savedGroups];
-    const listed = new Set(['', ...allGroups.flatMap(({ entries }) => entries.map(([id]) => id))]);
+    const listed = new Set(allGroups.flatMap(({ entries }) => entries.map(([id]) => id)));
     let pick = modelPick.options.length ? modelPick.value : remembered;
-    if (!listed.has(pick)) pick = parseModelId(pick)[0] === '' ? '' : remembered;
-    // A model typed on a server and never saved comes back in that server's field, so the menu names its server.
-    const [pickModel, pickEndpoint] = parseModelId(pick);
-    if (pickModel && pickEndpoint && !listed.has(pick) && listed.has(modelId('', pickEndpoint))) {
-      modelOther.value = pickModel;
-      pick = modelId('', pickEndpoint);
-    }
-    const typed = parseModelId(pick)[0] === '' ? modelId(modelOther.value.trim(), parseModelId(pick)[1]) : null;
+    if (!listed.has(pick)) pick = remembered;
     /** @param {[string, string]} option */
     const option = ([value, text]) => h('option', { value }, text);
-    const unlisted = listed.has(remembered) || remembered === typed ? null : option(entry(...parseModelId(remembered)));
-    fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))), option(entry('', null, 'other model…')));
+    const unlisted = listed.has(remembered) ? null : option(entry(...parseModelId(remembered)));
+    fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))));
     modelPick.value = pick;
     $('model-hint').hidden = !live || providers.length > 0 || servers.length > 0;
-    showOtherModel();
-  }
-
-  function showOtherModel() {
-    const [model, endpoint] = parseModelId(modelPick.value);
-    modelOther.hidden = modelOther.disabled = model !== '';
-    if (model) menuModel = modelPick.value;
-    modelRemove.hidden = !readSavedModels().some((entry) => savedId(entry) === modelPick.value);
-    const where = endpoint ? ` on ${serverLabels(serversOf(keysNow).map((server) => server.endpoint)).get(endpoint) ?? endpoint}` : '';
-    modelRemove.setAttribute('aria-label', `remove ${model}${where}`);
   }
 
   function onPick() {
-    showOtherModel();
     const model = pickedModel();
     if (model) writeStored(MODEL_KEY, modelId(model, pickedEndpoint()));
     readyStatus();
   }
 
-  function saveTypedModel() {
-    const model = modelOther.value.trim();
+  // Where a model added in the settings runs follows its name, until one is picked for it.
+  let placePicked = false;
+
+  function placeModel() {
+    const model = modelAdd.value.trim();
+    if (!model) placePicked = false;
+    if (placePicked && modelWhere.selectedIndex >= 0) return;
+    const ownProvider = Object.keys(PROVIDERS).some((provider) => model.startsWith(`${provider}/`));
+    modelWhere.selectedIndex = ownProvider ? 0 : Math.min(1, modelWhere.length - 1);
+  }
+
+  // A saved model is listed by its name, and by its server too where that name is saved on more than one.
+  function renderSavedModels() {
+    const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
+    const labels = serverLabels(servers);
+    const saved = readSavedModels();
+    /** @param {SavedModel} entry */
+    const row = (entry) => {
+      const shared = saved.filter(({ model }) => model === entry.model).length > 1;
+      const where = shared && entry.endpoint ? (labels.get(entry.endpoint) ?? entry.endpoint) : '';
+      const remove = h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${entry.model}${where && ` on ${where}`}`, onclick: () => removeSavedModel(savedId(entry)) }, 'remove');
+      return h('li', { class: 'key-state' }, h('span', {}, entry.model, where && h('span', { class: 'dim' }, ` · ${where}`)), remove);
+    };
+    fill($('model-list'), saved.map(row));
+    $('model-list').hidden = !saved.length;
+    const place = modelWhere.value;
+    fill(modelWhere, h('option', { value: '' }, 'its provider'), servers.map((endpoint) => h('option', { value: endpoint }, labels.get(endpoint))));
+    modelWhere.hidden = !servers.length;
+    modelWhere.value = place;
+    placeModel();
+  }
+
+  function addModel() {
+    const model = modelAdd.value.trim();
     if (!model) return;
-    const endpoint = pickedEndpoint();
+    const endpoint = modelWhere.value;
     const id = modelId(model, endpoint);
     const saved = readSavedModels();
     if (!saved.some((entry) => savedId(entry) === id)) writeSavedModels([...saved, endpoint ? { model, endpoint } : { model }]);
-    modelOther.value = '';
+    modelAdd.value = '';
+    renderSavedModels();
     renderPicker();
     modelPick.value = id;
     onPick();
-    modelPick.focus();
   }
 
-  function cancelTypedModel() {
-    modelOther.value = '';
-    modelPick.value = menuModel;
-    if (modelPick.selectedIndex < 0) modelPick.selectedIndex = 0;
-    onPick();
-    modelPick.focus();
-  }
-
-  function removeSavedModel() {
-    const id = modelPick.value;
+  // Its button goes with its row, so focus moves to the field that adds one.
+  /** @param {string} id */
+  function removeSavedModel(id) {
     writeSavedModels(readSavedModels().filter((entry) => savedId(entry) !== id));
-    removeStored(MODEL_KEY);
+    if (modelPick.value === id) removeStored(MODEL_KEY);
+    renderSavedModels();
     renderPicker();
     onPick();
-    modelPick.focus();
+    modelAdd.focus();
   }
 
   // ---------- settings ----------
@@ -6214,6 +6215,7 @@
 
   function buildSettings() {
     fill($('keys'), keyRows());
+    renderSavedModels();
     fill(roundsPick, range(MAX_ROUNDS).map((k) => h('option', { value: k + 1 }, k + 1 === DEFAULT_ROUNDS ? `${k + 1} · default` : String(k + 1))));
     roundsPick.value = String(readRounds());
     const evidence = readStored(EVIDENCE_KEY);
@@ -6231,6 +6233,7 @@
   function clearSettings() {
     for (const input of $('settings').querySelectorAll('input')) input.value = '';
     edited.clear();
+    placeModel();
   }
 
   // Right-aligned under the button; CSS owns the width, so nothing needs measuring before it opens.
@@ -6677,19 +6680,10 @@
       $('ask-form', HTMLFormElement).requestSubmit();
     });
     modelPick.addEventListener('change', onPick);
-    modelOther.addEventListener('change', onPick);
-    // In the form, Enter would also send the question.
-    modelOther.addEventListener('keydown', (e) => {
-      if (e.isComposing) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        saveTypedModel();
-      } else if (e.key === 'Escape') {
-        e.stopPropagation();
-        cancelTypedModel();
-      }
-    });
-    modelRemove.addEventListener('click', removeSavedModel);
+    modelAdd.addEventListener('input', placeModel);
+    modelAdd.addEventListener('keydown', (e) => e.key === 'Enter' && !e.isComposing && addModel());
+    modelWhere.addEventListener('change', () => (placePicked = true));
+    $('model-add-btn').addEventListener('click', addModel);
     roundsPick.addEventListener('change', () => writeStored(ROUNDS_KEY, roundsPick.value));
     evidencePick.addEventListener('change', () => writeStored(EVIDENCE_KEY, evidencePick.value));
     questionEl.addEventListener('input', readyStatus);
@@ -7076,8 +7070,7 @@
   /** @type {Mode} */
   const prototypeMode = {
     note: PROTOTYPE_MODE_NOTE,
-    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
-    needsModel: (question, asks) => asks || !replaysRecording(question),
+    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel()}`),
     refuseFiles: () => null,
     extract: async () => ({ why: NEEDS_APP }),
     unzip: async (file) => oneDocument(file, { why: NEEDS_APP }),
@@ -7137,8 +7130,7 @@
   /** @type {Mode} */
   const liveMode = {
     note: '',
-    nextRun: () => pickedModel() || 'type a model',
-    needsModel: () => true,
+    nextRun: () => pickedModel(),
     refuseFiles: unreadableFiles,
     async extract(file) {
       try {
