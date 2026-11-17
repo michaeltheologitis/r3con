@@ -39,6 +39,7 @@ from r3con.app.server import (
     NO_SAVE_DIALOG,
     NOT_ONE_INDEX_EACH,
     REPRESENTATION_FILES,
+    SELF_HOSTED,
     TOO_MANY_BYTES,
     TOO_MANY_ENTRIES,
     UNREADABLE_IMPORT,
@@ -120,6 +121,7 @@ REPORT = [
     [["Site", "Incidents"], ["Halloran", "7"], ["Merrow", "3"]],
     "Merrow's count is provisional.",
 ]
+MODEL_PLACE = "/api/models/place"
 DOCUMENT_TEXT = "/api/documents/text"
 UNEXTRACTED = "name: must end in one of .pdf, .docx, .html, .htm"
 DOCUMENT_ZIP = "/api/documents/zip"
@@ -529,6 +531,7 @@ def test_the_page_and_its_files_are_revalidated_on_every_load(
     ("method", "path"),
     [
         ("GET", "/api/keys"),
+        ("GET", f"{MODEL_PLACE}?model=hosted_vllm/qwen"),
         ("POST", f"{DOCUMENT_TEXT}?name=memo.pdf"),
         ("POST", f"{DOCUMENT_ZIP}?name={ZIP_NAME}"),
         ("POST", f"{SAVES}?name={SAVED_NAME}"),
@@ -831,6 +834,36 @@ def test_a_hosted_vllm_model_on_a_server_runs_while_openai_custom_headers_is_set
     assert transport(llm) == [{"api_key": placeholder, "api_base": ENDPOINT}] * len(
         llm.requests
     )
+
+
+@pytest.mark.parametrize(
+    ("model_name", "server"),
+    [
+        *((f"{provider}/qwen", True) for provider in sorted(SELF_HOSTED)),
+        ("Qwen/Qwen3-32B", True),
+        ("qwen3-32b", True),
+        (MODEL, False),
+        (BARE_OPENAI_MODEL, False),
+        ("anthropic/claude-sonnet-5-5", False),
+        ("gemini/gemini-2.5-pro", False),
+        ("groq/llama", False),
+        ("mistral/small", False),
+        ("bedrock/claude", False),
+        ("github_copilot/x", False),
+    ],
+)
+def test_a_model_runs_on_a_server_by_default_only_if_self_hosted_or_unplaced(
+    client: TestClient, model_name: str, server: bool
+):
+    response = client.get(MODEL_PLACE, params={"model": model_name})
+    assert response.json() == {"server": server}
+
+
+@pytest.mark.parametrize("query", [{"model": " "}, {}, {"model": "x", "name": "y"}])
+def test_a_place_asked_for_no_model_is_refused(
+    client: TestClient, query: dict[str, str]
+):
+    assert client.get(MODEL_PLACE, params=query).status_code == 422
 
 
 def test_a_name_litellm_cannot_place_is_sent_to_its_server_which_litellm_then_refuses(

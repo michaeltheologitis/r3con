@@ -89,7 +89,9 @@ const THEME_KEY = 'r3con-proto-theme';
 const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
 const SAVED_MODEL = 'ollama_chat/llama3.3';
 const PROVIDER_MODEL = 'anthropic/claude-opus-5-5';
-// Enough Tab presses to reach the other model field from the picker, past the composer's buttons.
+// What the settings' select offers for a model to run on its own provider's service, not a server.
+const OWN_PROVIDER = 'its provider';
+// Enough Tab presses to reach a settings select from the server's key field, past the saved models.
 const MAX_TABS = 5;
 const RETIRED_SETTINGS_KEY = 'r3con-proto-settings';
 // Where a live tab keeps what r3con app opened it with, for a reload: in its sessionStorage.
@@ -113,12 +115,10 @@ const NO_HOST_REFUSED = 'Server · other.endpoint: must name a host';
 const NO_SCHEME = 'Server · needs a URL that starts with http:// or https://';
 const NO_SCHEME_ENDPOINT = 'localhost:8000/v1';
 const SERVER_LABEL = 'OpenAI-compatible server';
-const HALF_TYPED = 'hosted_vllm/half-typed';
 const LISTED_MODEL = 'gemini/gemini-3.8-flash';
 const OTHER_MODEL = 'hosted_vllm/qwen3-32b';
 const NEW_QUESTION = 'Which memo mentions the storm?';
 const RECORDED_MODEL = 'gpt-6-luna';
-const FIRST_TYPED_MODEL = 'hosted_vllm/foo';
 const ready = (kind, model) => `${SAMPLE_DOCS} documents ready · ${kind} · ${model}`;
 const FIELD_NAMES = {
   'OpenAI API key': 'key-openai',
@@ -126,6 +126,7 @@ const FIELD_NAMES = {
   'Google API key': 'key-gemini',
   'OpenAI-compatible server: URL': 'endpoint-other',
   'OpenAI-compatible server: API key': 'key-other',
+  'model to add': 'model-add',
 };
 const LARGE_RUN_DOCS = 40;
 const LARGE_RUN_COUNTS = { nodes: 162, edges: 3440 };
@@ -180,7 +181,6 @@ const INTRO = `${CHAT} > .line:first-child .t`;
 const ASKS_HEADER = 'recorded asks over this run · any other question or model is simulated';
 // Fewer memos than the shipped sample has, for a page shipped with another sample: one, to be counted in the singular.
 const FEWER_MEMOS = 1;
-const TYPE_A_MODEL = 'type a model first';
 // Its faint lines: each of the 5 round-2 summaries, and the 4 parses with records.
 const SAMPLE_ANSWER_INPUTS = 9;
 const ANSWERED_RUN_COUNTS = { nodes: SAMPLE_COUNTS.nodes, answers: 1 };
@@ -1239,10 +1239,6 @@ function failedNode(id) {
 function landedNode(id) {
   const el = document.querySelector(`.node[data-id="${id}"]`);
   return Boolean(el) && !el.classList.contains('working') && !el.classList.contains('failed');
-}
-
-function storedEntries() {
-  return Object.fromEntries(Object.entries(localStorage));
 }
 
 function hasFilledIcons(els) {
@@ -2749,15 +2745,15 @@ async function keys(page, checkAt) {
   const retired = await page.evaluate((key) => localStorage.getItem(key), RETIRED_SETTINGS_KEY);
   checkAt('loading removes the old settings entry', retired === null, retired);
   const fresh = await page.evaluate(pickerState);
-  const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL, ''], hint: false };
-  const freshName = 'with no keys the picker shows the default model and other model…, and no hint to add a key, which the prototype never needs';
+  const defaultOnly = { value: DEFAULT_MODEL, groups: [], models: [DEFAULT_MODEL], hint: false };
+  const freshName = 'with no keys the picker shows the default model alone, and no hint to add a key, which the prototype never needs';
   checkAt(freshName, isDeepStrictEqual(fresh, defaultOnly), JSON.stringify(fresh));
 
   await page.click(nodeSel('doc-0'));
   await page.click('#settings-btn');
   const extras = await page.evaluate(settingsExtras);
-  const quiet = isDeepStrictEqual(extras, { buttons: ['close settings'], paragraphs: ['settings-saved'] });
-  checkAt('the settings have no save button, no note under the keys and no server hint: only the line a save writes to', quiet, JSON.stringify(extras));
+  const quiet = isDeepStrictEqual(extras, { buttons: ['close settings', 'add'], paragraphs: ['settings-saved'] });
+  checkAt("the settings have no save button, no note under the keys and no server hint: only the line a save writes to, and a model's add", quiet, JSON.stringify(extras));
   const named = [];
   for (const [name, id] of Object.entries(FIELD_NAMES)) {
     const ids = await page.getByRole('textbox', { name, exact: true }).evaluateAll((els) => els.map((el) => el.id));
@@ -2812,8 +2808,8 @@ async function keys(page, checkAt) {
   checkAt('each key set here and each server has a remove button named for it, and there is no show keys', removesNamed && noShowKeys, rows.removes.join(', '));
   const keyed = await page.evaluate(pickerState);
   const noAnthropic = !keyed.models.some((model) => model.startsWith('anthropic/'));
-  const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google', '10.0.0.7:8000']) && noAnthropic && !keyed.hint;
-  checkAt('the picker offers only the providers with a key, and the server', onlyKeyed, keyed.groups.join(', '));
+  const onlyKeyed = isDeepStrictEqual(keyed.groups, ['OpenAI', 'Google']) && noAnthropic && !keyed.hint;
+  checkAt('the picker offers only the providers with a key, and no group for a server with no model saved on it', onlyKeyed, keyed.groups.join(', '));
   await page.fill('#key-anthropic', TEST_KEY);
   checkAt('an edit clears the last save message', (await saved()) === '', await saved());
 
@@ -2838,7 +2834,7 @@ async function keys(page, checkAt) {
   const removed = await becomes(page, () => !document.getElementById('state-openai').textContent && document.getElementById('settings-saved').textContent === 'removed');
   const afterRemove = await page.evaluate(keyRows);
   const dropped = (await page.evaluate(pickerState)).groups;
-  const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google', '10.0.0.7:8000']) && (await focusedId(page)) === 'key-openai';
+  const forgotten = removed && !('state-openai' in afterRemove.states) && isDeepStrictEqual(dropped, ['Google']) && (await focusedId(page)) === 'key-openai';
   checkAt("remove forgets the key, the picker drops its provider's models, and focus goes to its field", forgotten, `${JSON.stringify(afterRemove.states)}; ${dropped.join(', ')}`);
   await page.getByRole('button', { name: `remove server ${TEST_ENDPOINT}`, exact: true }).click();
   const noServers = await becomes(page, () => document.getElementById('server-list').hidden);
@@ -2860,10 +2856,10 @@ async function serverMenu(page, checkAt) {
     await saveByEnter(page, '#endpoint-other');
   }
   const listed = await servers();
-  const labels = Object.keys(await page.evaluate(menuGroups));
+  const labels = (await page.evaluate(savedModelRows)).places;
   const three = [TEST_ENDPOINT, OTHER_PATH_ENDPOINT, OTHER_SCHEME_ENDPOINT];
   const one = isDeepStrictEqual(listed, three.map((endpoint) => `${endpoint} · no key`));
-  const apart = isDeepStrictEqual(labels, ['Google', TEST_ENDPOINT, '10.0.0.7:8000/v2', OTHER_SCHEME_ENDPOINT]);
+  const apart = isDeepStrictEqual(labels, [OWN_PROVIDER, TEST_ENDPOINT, '10.0.0.7:8000/v2', OTHER_SCHEME_ENDPOINT]);
   const apartName = 'trailing slashes make no new server, and servers on one host are labelled by their paths, or their whole URLs when those match too';
   checkAt(apartName, one && apart, `${listed.join(', ')}; ${labels.join(', ')}`);
 
@@ -2878,71 +2874,26 @@ async function serverMenu(page, checkAt) {
   const kept = await page.evaluate(placesHolding, 'hunter2');
   const refused = isDeepStrictEqual(refusals, [CREDENTIALS_REFUSED, NO_HOST_REFUSED]) && isDeepStrictEqual(await servers(), listed) && kept.length === 0;
   checkAt('a server URL with a user or password, or with no host, is refused as r3con app refuses it, and kept nowhere', refused, `${refusals.join(' | ')}; ${kept.join(', ')}`);
-  await page.keyboard.press('Escape');
 
-  await page.selectOption('#model-pick', { label: `other model on ${OTHER_SCHEME_ENDPOINT}…` });
-  await page.fill('#model-other', HALF_TYPED);
-  await page.$eval('#model-other', (el) => el.blur());
-  await page.click('#settings-btn');
   for (const [i, endpoint] of three.entries()) {
     await page.getByRole('button', { name: `remove server ${endpoint}`, exact: true }).click();
     await becomes(page, (left) => document.querySelectorAll('#server-list li').length === left, three.length - 1 - i);
   }
+  const placeless = (await page.evaluate(savedModelRows)).places === null;
+  checkAt('with every server removed, a model to add offers no place to run it', placeless);
   await page.keyboard.press('Escape');
-  const typing = await page.evaluate(() => {
-    const select = document.getElementById('model-pick');
-    return { value: select.value, options: [...select.options].map((o) => o.textContent), field: document.getElementById('model-other').value };
-  });
-  const once = typing.value === '' && typing.field === HALF_TYPED && !typing.options.includes(HALF_TYPED);
-  checkAt('removing the server a model is being typed on leaves it typed on no server, and not listed besides', once, JSON.stringify(typing));
-  await page.press('#model-other', 'Escape');
 }
 
 async function picker(page, checkAt) {
   const status = () => page.textContent('#run-status');
-  const stored = () => page.evaluate(storedEntries);
-  const leaveField = () => page.$eval('#model-other', (el) => el.blur());
   const recordedReady = ready('recorded run', RECORDED_MODEL);
   await page.selectOption('#model-pick', LISTED_MODEL);
   const recordedCue = await status();
   const recordedName = "before a recorded run the status names the recording's model, not the picked one";
   checkAt(recordedName, recordedCue === recordedReady, recordedCue);
 
-  await page.selectOption('#model-pick', '');
-  await page.fill('#model-other', FIRST_TYPED_MODEL);
-  await leaveField();
-  await page.click('#settings-btn');
-  await page.fill('#key-anthropic', TEST_KEY);
-  const savedKeys = await saveByEnter(page, '#key-anthropic');
-  await page.keyboard.press('Escape');
-  const afterSave = await page.evaluate(pickerState);
-  const field = await page.$eval('#model-other', (el) => (el.hidden ? null : el.value));
-  const shownOnce = field === FIRST_TYPED_MODEL && !afterSave.models.includes(FIRST_TYPED_MODEL);
-  const stays = savedKeys && afterSave.value === '' && shownOnce && afterSave.groups.includes('Anthropic');
-  checkAt('other model… stays chosen through a key save, its model shown once', stays, JSON.stringify(afterSave));
-
-  await page.fill('#model-other', '');
-  await leaveField();
+  await addModel(page, OTHER_MODEL);
   await page.fill('#question', NEW_QUESTION);
-  await page.click('#run-btn');
-  const asked = await status();
-  const focused = await focusedId(page);
-  const questionKept = (await page.inputValue('#question')) === NEW_QUESTION && (await count(page, '.turn')) === 0;
-  const kept = await stored();
-  const lastChoice = isDeepStrictEqual(kept, { [MODEL_KEY]: FIRST_TYPED_MODEL });
-  const waits = asked === TYPE_A_MODEL && focused === 'model-other' && questionKept && lastChoice;
-  const waitsName = 'a simulated run with no model asks for one, keeps the question and the last choice';
-  checkAt(waitsName, waits, `${asked}; focus on #${focused}`);
-  await page.keyboard.type('abc');
-  await page.keyboard.press('Backspace');
-  const whileTyping = await stored();
-  await page.fill('#model-other', OTHER_MODEL);
-  await leaveField();
-  const typed = await stored();
-  const onLeave = isDeepStrictEqual(whileTyping, kept) && isDeepStrictEqual(typed, { [MODEL_KEY]: OTHER_MODEL });
-  const onLeaveName = 'a typed model is stored once the field is left, not while typing, and alone';
-  checkAt(onLeaveName, onLeave, `${JSON.stringify(whileTyping)} → ${JSON.stringify(typed)}`);
-
   const simulatedCue = await status();
   const cues = recordedCue === recordedReady && simulatedCue === ready('simulated run', OTHER_MODEL);
   const cueName = 'the status says whether a run replays the recording or is simulated';
@@ -2950,90 +2901,248 @@ async function picker(page, checkAt) {
   await page.click('#run-btn');
   const done = `● done · simulated run · ${OTHER_MODEL} · nothing was sent`;
   const namesModel = await becomes(page, (text) => document.getElementById('run-status').textContent === text, done);
-  checkAt("a simulated run's status names the typed model", namesModel, await status());
+  checkAt("a simulated run's status names the model added and picked", namesModel, await status());
 
   await page.reload();
   const after = await page.evaluate(pickerState);
-  const keysGone = after.groups.length === 0 && !after.hint && (await page.evaluate(keyStates)).length === 0;
+  const keysGone = isDeepStrictEqual(after.groups, ['saved']) && !after.hint && (await page.evaluate(keyStates)).length === 0;
   const survives = after.value === OTHER_MODEL && keysGone && (await status()) === recordedReady;
   checkAt('after a reload the choice is kept and the keys are not', survives, JSON.stringify(after));
-  await page.selectOption('#model-pick', '');
-  await page.click('#run-btn');
-  const statusIs = (text) => document.getElementById('run-status').textContent === text;
-  const replayed = await becomes(page, statusIs, SAMPLE_STATUS);
-  checkAt('with other model… left empty the recorded replay still starts', replayed, await status());
 }
 
-// The picker's value and its saved group, whether the other model field and the remove button are shown, the
-// remove button's name, the saved models stored, and the focus.
+// Adds `model` in the settings, to run on server `place` ('' for its provider) when given, and closes them.
+async function addModel(page, model, place) {
+  await page.click('#settings-btn');
+  await page.fill('#model-add', model);
+  if (place !== undefined) await page.selectOption('#model-where', place);
+  await page.press('#model-add', 'Enter');
+  await page.keyboard.press('Escape');
+}
+
+// In-page: the picker's value and its saved group, the saved models stored, and the focus.
 function savedState(savedModelsKey) {
   const select = document.getElementById('model-pick');
   const group = [...select.querySelectorAll('optgroup')].find((g) => g.label === 'saved');
-  const remove = document.getElementById('model-remove');
   return {
     value: select.value,
     saved: group ? [...group.children].map((o) => o.value) : [],
-    field: !document.getElementById('model-other').hidden,
-    remove: remove.hidden ? null : remove.getAttribute('aria-label'),
     stored: JSON.parse(localStorage.getItem(savedModelsKey)),
     focus: document.activeElement.id,
   };
 }
 
+// In-page: the settings' saved models, each row as it reads, the dim text in them and each remove button's name;
+// whether their list shows; the places offered to run a model to add, if any, the one chosen, and the name typed.
+function savedModelRows() {
+  const list = document.getElementById('model-list');
+  const where = document.getElementById('model-where');
+  return {
+    rows: [...list.children].map((li) => li.firstElementChild.textContent),
+    dim: [...list.querySelectorAll('.dim')].map((el) => el.textContent),
+    removes: [...list.querySelectorAll('button')].map((el) => el.getAttribute('aria-label')),
+    list: !list.hidden,
+    places: where.hidden ? null : [...where.options].map((o) => o.textContent),
+    place: where.hidden ? null : where.selectedOptions[0].textContent,
+    field: document.getElementById('model-add').value,
+  };
+}
+
+// In-page: whether the settings offer to run a model to add on `place`, by its label.
+function placedOn(place) {
+  return document.getElementById('model-where').selectedOptions[0]?.textContent === place;
+}
+
+// In-page: the composer's buttons in view, by name, its fields, and any menu entry that names no model.
+function composerExtras() {
+  const form = document.getElementById('ask-form');
+  return {
+    buttons: [...form.querySelectorAll('button')].filter((el) => el.checkVisibility()).map((el) => el.getAttribute('aria-label') ?? el.textContent),
+    fields: [...form.querySelectorAll('input')].map((el) => el.id),
+    unnamed: [...document.getElementById('model-pick').options].filter((o) => !o.value || o.textContent.endsWith('…')).map((o) => o.textContent),
+  };
+}
+
+// In-page: the focused control's name, and whether its focus ring shows.
+function focusedRing() {
+  const el = document.activeElement;
+  return { name: el.getAttribute('aria-label') ?? el.textContent, ring: el.matches(':focus-visible') && getComputedStyle(el).outlineStyle !== 'none' };
+}
+
 async function savedModels(page, checkAt) {
-  const turns = () => count(page, '.turn');
   const state = () => page.evaluate(savedState, SAVED_MODELS_KEY);
+  const rows = () => page.evaluate(savedModelRows);
+  const removeModel = (name) => page.getByRole('button', { name, exact: true }).click();
+  const composers = [await page.evaluate(composerExtras)];
+  const turns = await count(page, '.turn');
   await page.fill('#question', NEW_QUESTION);
-  await page.focus('#model-pick');
-  await page.keyboard.press('End');
-  await tabTo(page, 'model-other');
-  const before = await turns();
+
+  await page.click('#settings-btn');
+  const one = await rows();
+  await removeModel(`remove ${OTHER_MODEL}`);
+  const nothingSaved = { rows: [], dim: [], removes: [], list: false, places: null, place: null, field: '' };
+  const emptied = { rows: await rows(), state: await state(), adding: (await page.isVisible('#model-add')) && (await page.isVisible('#model-add-btn')) };
+  const emptyState = { value: DEFAULT_MODEL, saved: [], stored: null, focus: 'model-add' };
+  const gone = isDeepStrictEqual(one.rows, [OTHER_MODEL]) && isDeepStrictEqual(emptied, { rows: nothingSaved, state: emptyState, adding: true });
+  const goneName = 'remove in the settings takes the picked model out of their list, storage and the menu at once, the picker goes back to the default model, and the list hides once empty while the field to add one stays, focused';
+  checkAt(goneName, gone, JSON.stringify({ one, emptied }));
+
+  await page.focus('#model-add');
   await page.keyboard.type(SAVED_MODEL);
   await page.keyboard.press('Enter');
-  const saved = await state();
-  const savedNow = { value: SAVED_MODEL, saved: [SAVED_MODEL], field: false, remove: `remove ${SAVED_MODEL}`, stored: [{ model: SAVED_MODEL }], focus: 'model-pick' };
-  const sent = (await turns()) !== before || (await page.inputValue('#question')) !== NEW_QUESTION;
-  const savedName = 'from the keyboard alone, Enter in the other model field saves its model to the menu, picks it, hides the field and leaves the question unsent';
-  checkAt(savedName, isDeepStrictEqual(saved, savedNow) && !sent, JSON.stringify(saved));
+  const added = { rows: await rows(), state: await state() };
+  const savedRow = { ...nothingSaved, rows: [SAVED_MODEL], removes: [`remove ${SAVED_MODEL}`], list: true };
+  const addedNow = { rows: savedRow, state: { value: SAVED_MODEL, saved: [SAVED_MODEL], stored: [{ model: SAVED_MODEL }], focus: 'model-add' } };
+  const unsent = (await count(page, '.turn')) === turns && (await page.inputValue('#question')) === NEW_QUESTION;
+  const addedName = 'from the keyboard alone, Enter in the settings adds the model typed: listed there, saved, in the menu and picked, its field emptied, the question unsent';
+  checkAt(addedName, isDeepStrictEqual(added, addedNow) && unsent, JSON.stringify(added));
 
-  await page.selectOption('#model-pick', '');
-  await page.press('#model-other', 'Enter');
-  const empty = await state();
-  await page.fill('#model-other', ` ${SAVED_MODEL} `);
-  await page.press('#model-other', 'Enter');
-  const again = await state();
-  const harmless = empty.field && empty.value === '' && isDeepStrictEqual(again, savedNow) && (await turns()) === before;
-  checkAt('an empty name saves nothing, and a name already saved is picked, not saved twice', harmless, `${JSON.stringify(empty)} → ${JSON.stringify(again)}`);
+  await page.press('#model-add', 'Enter');
+  const blank = await rows();
+  await page.fill('#model-add', ` ${SAVED_MODEL} `);
+  await page.press('#model-add', 'Enter');
+  const again = { rows: await rows(), state: await state() };
+  const harmless = isDeepStrictEqual(blank, savedRow) && isDeepStrictEqual(again, addedNow);
+  checkAt('an empty name adds nothing, and a name already saved is not saved twice', harmless, `${JSON.stringify(blank)} → ${JSON.stringify(again)}`);
 
-  await page.selectOption('#model-pick', '');
-  await page.fill('#model-other', 'hosted_vllm/half-typed');
-  await page.press('#model-other', 'Escape');
-  const cancelled = await state();
-  checkAt('Escape in the other model field drops what was typed and goes back to the model picked before', isDeepStrictEqual(cancelled, savedNow), JSON.stringify(cancelled));
+  await page.fill('#model-add', OTHER_MODEL);
+  await page.click('#model-add-btn');
+  const two = await rows();
+  const names = [SAVED_MODEL, OTHER_MODEL];
+  const named = [];
+  for (const name of two.removes) named.push(await page.getByRole('button', { name, exact: true }).count());
+  const listedName = 'add adds too, and the settings list each saved model by its name alone, with a remove button named for it';
+  const listed = isDeepStrictEqual(two.rows, names) && isDeepStrictEqual(two.dim, []) && isDeepStrictEqual(two.removes, names.map((name) => `remove ${name}`));
+  checkAt(listedName, listed && isDeepStrictEqual(named, [1, 1]), JSON.stringify(two));
+  await page.focus('#key-other');
+  const reached = [];
+  for (const name of two.removes) {
+    await page.keyboard.press('Tab');
+    reached.push(await page.evaluate(focusedRing));
+  }
+  const ringed = isDeepStrictEqual(reached, two.removes.map((name) => ({ name, ring: true })));
+  checkAt('from the keyboard, Tab reaches each remove button in turn, its focus ring showing', ringed, JSON.stringify(reached));
+  await page.keyboard.press('Escape');
+  composers.push(await page.evaluate(composerExtras));
 
   await page.reload();
   const reloaded = await state();
-  const kept = reloaded.value === SAVED_MODEL && isDeepStrictEqual(reloaded.saved, [SAVED_MODEL]);
-  checkAt('after a reload the saved model is still in the menu, and still picked', kept, JSON.stringify(reloaded));
-
-  await page.getByRole('button', { name: `remove ${SAVED_MODEL}`, exact: true }).click();
-  const removed = await state();
-  const gone = { value: DEFAULT_MODEL, saved: [], field: false, remove: null, stored: null, focus: 'model-pick' };
-  checkAt('remove takes the saved model out of the menu and storage, and the picker goes back to the default model', isDeepStrictEqual(removed, gone), JSON.stringify(removed));
-
-  await page.selectOption('#model-pick', '');
-  await page.fill('#model-other', PROVIDER_MODEL);
-  await page.press('#model-other', 'Enter');
+  const kept = reloaded.value === OTHER_MODEL && isDeepStrictEqual(reloaded.saved, names);
+  checkAt('after a reload the saved models are still in the menu, and the last added still picked', kept, JSON.stringify(reloaded));
   await page.click('#settings-btn');
+  await removeModel(`remove ${SAVED_MODEL}`);
+  const left = { rows: (await rows()).rows, state: await state() };
+  const leftNow = { rows: [OTHER_MODEL], state: { value: OTHER_MODEL, saved: [OTHER_MODEL], stored: [{ model: OTHER_MODEL }], focus: 'model-add' } };
+  checkAt('removing a model not picked takes it out of the list, storage and the menu at once, and leaves the pick alone', isDeepStrictEqual(left, leftNow), JSON.stringify(left));
+  await removeModel(`remove ${OTHER_MODEL}`);
+
   await page.fill('#key-anthropic', TEST_KEY);
   await saveByEnter(page, '#key-anthropic');
-  await page.keyboard.press('Escape');
-  const listed = await state();
-  await page.getByRole('button', { name: `remove ${PROVIDER_MODEL}`, exact: true }).click();
+  await page.fill('#model-add', PROVIDER_MODEL);
+  await page.press('#model-add', 'Enter');
+  const provided = { rows: (await rows()).rows, state: await state() };
+  composers.push(await page.evaluate(composerExtras));
+  await removeModel(`remove ${PROVIDER_MODEL}`);
   const unsaved = await state();
-  const stays = listed.remove !== null && listed.saved.length === 0 && unsaved.value === PROVIDER_MODEL && unsaved.stored === null && unsaved.remove === null;
-  const staysName = "a saved model that a provider with a key also lists can be removed, and stays picked in its provider's group";
-  checkAt(staysName, listed.value === PROVIDER_MODEL && stays, `${JSON.stringify(listed)} → ${JSON.stringify(unsaved)}`);
+  const providedNow = { rows: [PROVIDER_MODEL], state: { value: PROVIDER_MODEL, saved: [], stored: [{ model: PROVIDER_MODEL }], focus: 'model-add' } };
+  const stays = isDeepStrictEqual(provided, providedNow) && unsaved.value === PROVIDER_MODEL && unsaved.stored === null;
+  const staysName = "a saved model that a provider with a key also lists is listed in the settings, and removed there stays picked in its provider's group";
+  checkAt(staysName, stays, `${JSON.stringify(provided)} → ${JSON.stringify(unsaved)}`);
+
+  const [first, second] = ['10.0.0.7:8000', 'localhost:11434'];
+  const placeOf = async (model) => {
+    await page.fill('#model-add', model);
+    return (await rows()).place;
+  };
+  await page.fill('#endpoint-other', TEST_ENDPOINT);
+  await saveByEnter(page, '#endpoint-other');
+  const oneServer = { places: (await rows()).places, hosted: await placeOf(OTHER_MODEL), own: await placeOf(PROVIDER_MODEL) };
+  const oneServerNow = { places: [OWN_PROVIDER, first], hosted: first, own: OWN_PROVIDER };
+  const oneServerName = "with a server, a model to add runs on its provider or the server: the server by default, its provider for a name that starts with a provider's";
+  checkAt(oneServerName, isDeepStrictEqual(oneServer, oneServerNow), JSON.stringify(oneServer));
+
+  await page.fill('#endpoint-other', SECOND_ENDPOINT);
+  await saveByEnter(page, '#endpoint-other');
+  await page.fill('#model-add', OTHER_MODEL);
+  await page.press('#model-add', 'Enter');
+  await page.fill('#model-add', OTHER_MODEL);
+  await page.selectOption('#model-where', SECOND_ENDPOINT);
+  await page.focus('#model-add');
+  await page.keyboard.type(' ');
+  const typed = await rows();
+  checkAt('a name typed and not yet added, and the server picked for it, stay as the name is typed on', typed.field === `${OTHER_MODEL} ` && typed.place === second, JSON.stringify(typed));
+  await page.keyboard.press('Escape');
+  const onSecond = JSON.stringify([OTHER_MODEL, SECOND_ENDPOINT]);
+  const picked = await becomes(page, (id) => document.getElementById('model-pick').value === id, onSecond);
+  await page.click('#settings-btn');
+  const reopened = await rows();
+  const closed = { picked, rows: reopened.rows, field: reopened.field, stored: (await state()).stored.at(-1) };
+  const closedNow = { picked: true, rows: [`${OTHER_MODEL} · ${first}`, `${OTHER_MODEL} · ${second}`], field: '', stored: { model: OTHER_MODEL, endpoint: SECOND_ENDPOINT } };
+  const closedName = 'closing the settings adds a name typed there, on the server picked for it, picks it and empties its field';
+  checkAt(closedName, isDeepStrictEqual(closed, closedNow), JSON.stringify(closed));
+  await page.fill('#model-add', SAVED_MODEL);
+  await page.press('#model-add', 'Enter');
+  const shared = await rows();
+  const menu = await page.evaluate(menuGroups);
+  composers.push(await page.evaluate(composerExtras));
+  const sharedNow = {
+    rows: [`${OTHER_MODEL} · ${first}`, `${OTHER_MODEL} · ${second}`, SAVED_MODEL],
+    dim: [` · ${first}`, ` · ${second}`],
+    removes: [`remove ${OTHER_MODEL} on ${first}`, `remove ${OTHER_MODEL} on ${second}`, `remove ${SAVED_MODEL}`],
+  };
+  const sharedRows = { rows: shared.rows, dim: shared.dim, removes: shared.removes };
+  const servers = isDeepStrictEqual(shared.places, [OWN_PROVIDER, first, second]);
+  const grouped = isDeepStrictEqual(menu[first], [OTHER_MODEL, SAVED_MODEL]) && isDeepStrictEqual(menu[second], [OTHER_MODEL]);
+  const sharedName = "a name saved on two servers shows each row's server, dim, a name saved once none, and each is in its server's group";
+  checkAt(sharedName, servers && grouped && isDeepStrictEqual(sharedRows, sharedNow), JSON.stringify({ shared, menu }));
+
+  const focused = [];
+  for (const selector of ['#server-list button', '#model-list button', '#model-where']) {
+    await page.fill('#key-gemini', TEST_KEY);
+    await page.focus(selector);
+    await becomes(page, () => document.getElementById('key-gemini').value === '');
+    focused.push(await page.evaluate(() => document.activeElement.getAttribute('aria-label')));
+  }
+  const focusedName = "focus on a server's or a saved model's remove button, or on where a model to add runs, stays there through a key save";
+  checkAt(focusedName, isDeepStrictEqual(focused, [`remove server ${TEST_ENDPOINT}`, shared.removes[0], 'runs on']), JSON.stringify(focused));
+
+  await removeModel(`remove ${OTHER_MODEL} on ${first}`);
+  const alone = (await rows()).rows;
+  checkAt('once a name is saved on one server only, its row no longer names it', isDeepStrictEqual(alone, [OTHER_MODEL, SAVED_MODEL]), alone.join(', '));
+
+  await page.selectOption('#model-pick', JSON.stringify([OTHER_MODEL, SECOND_ENDPOINT]));
+  await page.getByRole('button', { name: `remove server ${SECOND_ENDPOINT}`, exact: true }).click();
+  await becomes(page, () => document.querySelectorAll('#server-list li').length === 1);
+  const serverGone = { rows: (await rows()).rows, state: await state(), groups: Object.keys(await page.evaluate(menuGroups)) };
+  const onServers = [{ model: OTHER_MODEL, endpoint: SECOND_ENDPOINT }, { model: SAVED_MODEL, endpoint: TEST_ENDPOINT }];
+  const serverGoneNow = { rows: [SAVED_MODEL], state: { value: DEFAULT_MODEL, saved: [], stored: onServers, focus: 'endpoint-other' }, groups: ['Anthropic', 'Google', first] };
+  const serverGoneName = 'removing a server hides its saved models from the settings and the menu at once but keeps them stored, and the model picked on it gives way to the default model';
+  checkAt(serverGoneName, isDeepStrictEqual(serverGone, serverGoneNow), JSON.stringify(serverGone));
+  await page.fill('#endpoint-other', SECOND_ENDPOINT);
+  await saveByEnter(page, '#endpoint-other');
+  const back = { rows: (await rows()).rows, menu: (await page.evaluate(menuGroups))[second] };
+  const backName = 'adding a removed server back shows its saved models again, in the settings and in its group';
+  checkAt(backName, isDeepStrictEqual(back, { rows: [OTHER_MODEL, SAVED_MODEL], menu: [OTHER_MODEL] }), JSON.stringify(back));
+
+  await page.fill('#model-add', SAVED_MODEL);
+  await page.selectOption('#model-where', { label: OWN_PROVIDER });
+  await page.press('#model-add', 'Enter');
+  await page.selectOption('#model-pick', JSON.stringify([SAVED_MODEL, TEST_ENDPOINT]));
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await page.click('#settings-btn');
+  const { value, saved, stored } = await state();
+  const hidden = { rows: (await rows()).rows, value, saved, stored };
+  const hiddenNow = { rows: [SAVED_MODEL], value: SAVED_MODEL, saved: [SAVED_MODEL], stored: [...onServers, { model: SAVED_MODEL }] };
+  const hiddenName = "after a reload, which forgets the prototype's servers, the models saved on them are kept but listed nowhere, and one picked on them is picked on no server";
+  checkAt(hiddenName, isDeepStrictEqual(hidden, hiddenNow), JSON.stringify(hidden));
+  await removeModel(`remove ${SAVED_MODEL}`);
+  const fellBack = { after: await state(), remembered: await page.evaluate((key) => localStorage.getItem(key), MODEL_KEY) };
+  const fellBackNow = { after: { value: DEFAULT_MODEL, saved: [], stored: onServers, focus: 'model-add' }, remembered: DEFAULT_MODEL };
+  const fellBackName = 'removing a saved model on no server, picked in place of its name remembered on a server that is gone, gives way to the default model';
+  checkAt(fellBackName, isDeepStrictEqual(fellBack, fellBackNow), JSON.stringify(fellBack));
+  await page.keyboard.press('Escape');
+  const clean = composers.every(({ buttons, fields, unnamed }) => !buttons.some((name) => name.includes('remove')) && !fields.length && !unnamed.length);
+  checkAt('the composer offers no remove button, no field and no menu entry to type a model, whatever is picked', clean, JSON.stringify(composers));
 }
 
 // In-page: settings select `id`'s value, its options, what describes it, what its block holds, and what storage holds
@@ -4265,12 +4374,6 @@ async function askInNewTab(page, question) {
   await send(page, question);
 }
 
-async function pickModel(page, model) {
-  await page.selectOption('#model-pick', '');
-  await page.fill('#model-other', model);
-  await page.$eval('#model-other', (el) => el.blur());
-}
-
 async function answers() {
   const sample = recordedSample();
   const asks = recordedAsks();
@@ -4380,7 +4483,7 @@ async function answersOnTheRun(sample, asks) {
 
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: offerLabel(asks[1]), exact: true }).click();
-    const filled = await page.evaluate(() => [document.getElementById('question').value, document.getElementById('model-other').value]);
+    const filled = await page.evaluate(() => [document.getElementById('question').value, document.getElementById('model-pick').value]);
     await page.press('#question', 'Enter');
     const other = await page.evaluate(lastTurnLines);
     const fromOffer = isDeepStrictEqual(filled, [asks[1].question, OTHER_RECORDED_MODEL]) && asks[1].model === OTHER_RECORDED_MODEL;
@@ -4444,7 +4547,7 @@ async function answersOnTheRun(sample, asks) {
 
 async function answersInView(asks) {
   await withPage('answers', { sample: false }, async (page) => {
-    await pickModel(page, LONG_MODEL);
+    await addModel(page, LONG_MODEL);
     await send(page, NEW_QUESTION);
     const frame = await page.evaluate(panelBox);
     const outside = (await page.$$eval('.node', (els) => els.map((el) => [el.dataset.id, el.getBoundingClientRect().toJSON()])))
@@ -4455,7 +4558,7 @@ async function answersInView(asks) {
   await withPage('answers', {}, async (page) => {
     await dragNode(page, 'answer-0', 60, 50);
     const moved = await positionOf(page, 'answer-0');
-    await pickModel(page, LONG_MODEL);
+    await addModel(page, LONG_MODEL);
     await send(page, asks[0].question);
     const placed = await positionOf(page, 'answer-1');
     const aroundIt = placed.x === moved.x && placed.y === moved.y + ROW_GAP;
@@ -5511,8 +5614,8 @@ async function liveSession(url) {
 
     await page.click('#settings-btn');
     const extras = await page.evaluate(settingsExtras);
-    const quiet = isDeepStrictEqual(extras, { buttons: ['close settings'], paragraphs: ['settings-saved'] });
-    check('live', 'the settings have no save button and no note under the keys', quiet, JSON.stringify(extras));
+    const quiet = isDeepStrictEqual(extras, { buttons: ['close settings', 'add'], paragraphs: ['settings-saved'] });
+    check('live', "the settings have no save button and no note under the keys, only a model's add", quiet, JSON.stringify(extras));
     const hintWithout = (await page.evaluate(pickerState)).hint;
     await page.fill('#key-openai', TEST_KEY);
     const marked = (await saveByEnter(page, '#key-openai')) && isDeepStrictEqual(await page.evaluate(keyStates), ['state-openai']);
@@ -5610,12 +5713,10 @@ async function liveServers(url) {
   };
   const onFirst = 'hosted_vllm/qwen3-32b';
   const onSecond = 'ollama_chat/llama3.3';
-  const typedHosted = 'anthropic/claude-sonnet-5-5';
-  const typedOnServer = 'hosted_vllm/typed-only';
+  const onProvider = 'anthropic/claude-sonnet-5-5';
   const [first, second] = ['10.0.0.7:8000', 'localhost:11434'];
-  const otherOn = (label) => `other model on ${label}…`;
   const sent = () => bodies.map(({ model, endpoint }) => [model, endpoint ?? null]);
-  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+  await withPage('live', { url, sample: false, memos: true, before, expectedErrors: [ABORTED_LOG] }, async (page) => {
     await page.click('#settings-btn');
     await page.fill('#endpoint-other', TEST_ENDPOINT);
     await page.fill('#key-other', TEST_KEY);
@@ -5629,22 +5730,35 @@ async function liveServers(url) {
     const onServer = serversOn(await keysOnServer(url));
     const both = isDeepStrictEqual(listed, [`${TEST_ENDPOINT} · ${TEST_HINT}`, `${SECOND_ENDPOINT} · no key`]) && isDeepStrictEqual(onServer, [TEST_ENDPOINT, SECOND_ENDPOINT]);
     check('live', "settings list each server added, with its key's last four or no key, and its URL as stored, without a trailing slash", added && both, listed.join(', '));
-    await page.keyboard.press('Escape');
 
     const offered = await page.evaluate(menuGroups);
-    await page.selectOption('#model-pick', { label: otherOn(first) });
-    await page.fill('#model-other', onFirst);
-    await page.press('#model-other', 'Enter');
-    await page.selectOption('#model-pick', { label: otherOn(second) });
-    await page.fill('#model-other', onSecond);
-    await page.press('#model-other', 'Enter');
+    const places = (await page.evaluate(savedModelRows)).places;
+    // Each place differs from the one before, so each is r3con app's answer for its name.
+    const defaults = { [onFirst]: first, 'groq/llama': OWN_PROVIDER, 'Qwen/Qwen3-32B': first, [onProvider]: OWN_PROVIDER };
+    const placedAs = {};
+    for (const [model, place] of Object.entries(defaults)) {
+      await page.fill('#model-add', model);
+      placedAs[model] = (await becomes(page, placedOn, place)) ? place : (await page.evaluate(savedModelRows)).place;
+    }
+    const placesName = "a model to add runs by default where r3con app says: on the first server if self-hosted or a name litellm can't place, on its provider otherwise";
+    check('live', placesName, isDeepStrictEqual(places, [OWN_PROVIDER, first, second]) && isDeepStrictEqual(placedAs, defaults), JSON.stringify({ places, placedAs }));
+    await page.route('**/api/models/place?*', (route) => route.abort());
+    await page.fill('#model-add', 'hosted_vllm/unplaced');
+    const lost = await becomes(page, statusIs, LOST_CONNECTION);
+    await page.unroute('**/api/models/place?*');
+    check('live', "a model's place asked of r3con app out of reach says so in the status", lost, await page.textContent('#run-status'));
+    await page.fill('#model-add', onFirst);
+    await page.press('#model-add', 'Enter');
+    await page.fill('#model-add', onSecond);
+    await page.selectOption('#model-where', SECOND_ENDPOINT);
+    await page.press('#model-add', 'Enter');
+    await page.keyboard.press('Escape');
     const menu = await page.evaluate(menuGroups);
     const stored = await page.evaluate((key) => JSON.parse(localStorage.getItem(key)), SAVED_MODELS_KEY);
-    const places = isDeepStrictEqual(offered, { [first]: [otherOn(first)], [second]: [otherOn(second)] });
-    const grouped = isDeepStrictEqual(menu, { [first]: [onFirst, otherOn(first)], [second]: [onSecond, otherOn(second)] });
+    const grouped = isDeepStrictEqual(offered, {}) && isDeepStrictEqual(menu, { [first]: [onFirst], [second]: [onSecond] });
     const remembered = isDeepStrictEqual(stored, [{ model: onFirst, endpoint: TEST_ENDPOINT }, { model: onSecond, endpoint: SECOND_ENDPOINT }]);
-    const savedName = 'the menu offers other model on each server, and a model typed there is saved in that server\'s group, stored with its URL';
-    check('live', savedName, places && grouped && remembered, JSON.stringify({ offered, menu }));
+    const savedName = "a model added in the settings is saved in its server's group, stored with its URL";
+    check('live', savedName, grouped && remembered, JSON.stringify({ offered, menu, stored }));
 
     await page.click('#run-btn');
     const ran = await becomes(page, statusMatches, `^● done · ${onSecond} · `, LIVE_RUN_MS);
@@ -5654,13 +5768,12 @@ async function liveServers(url) {
     const routed = ran && asked && isDeepStrictEqual(sent(), [[onSecond, SECOND_ENDPOINT], [onFirst, TEST_ENDPOINT]]);
     check('live', "a run and an ask each send their saved model's server, which runs them", routed, `${await page.textContent('#run-status')}; ${JSON.stringify(sent())}`);
 
-    await page.selectOption('#model-pick', { label: 'other model…' });
-    await page.fill('#model-other', typedHosted);
-    await page.$eval('#model-other', (el) => el.blur());
+    await addModel(page, onProvider);
     await send(page, 'Which memo mentions the storm?');
-    const typedAsked = await becomes(page, (count) => document.querySelectorAll('.transcript:not([hidden]) .turn').length === count, 3, LIVE_RUN_MS);
-    const answered = typedAsked && (await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS));
-    check('live', 'a hosted model typed under other model… runs on no server', answered && isDeepStrictEqual(sent().at(-1), [typedHosted, null]), JSON.stringify(sent().at(-1)));
+    const providerAsked = await becomes(page, (count) => document.querySelectorAll('.transcript:not([hidden]) .turn').length === count, 3, LIVE_RUN_MS);
+    const answered = providerAsked && (await becomes(page, lastTurnSays, [SCRIPTED_ANSWER], LIVE_RUN_MS));
+    const providerName = "a model added with a provider's name runs on its provider by default, on no server";
+    check('live', providerName, answered && isDeepStrictEqual(sent().at(-1), [onProvider, null]), JSON.stringify(sent().at(-1)));
 
     await page.selectOption('#model-pick', { label: onSecond });
     await page.click('#settings-btn');
@@ -5669,34 +5782,30 @@ async function liveServers(url) {
     const left = (await page.evaluate(keyRows)).servers;
     const removed = isDeepStrictEqual(left, [`${TEST_ENDPOINT} · ${TEST_HINT}`]) && isDeepStrictEqual(serversOn(await keysOnServer(url)), [TEST_ENDPOINT]);
     await page.keyboard.press('Escape');
-    const after = { groups: await page.evaluate(menuGroups), picker: await page.evaluate(pickerState) };
+    const after = { rows: (await page.evaluate(savedModelRows)).rows, groups: await page.evaluate(menuGroups), picker: await page.evaluate(pickerState) };
     await askInNewTab(page, NEW_QUESTION);
-    const fellBack = await becomes(page, statusMatches, `^● done · ${onSecond} · `, LIVE_RUN_MS);
-    const noDeadServer = isDeepStrictEqual(Object.keys(after.groups), [first]) && after.picker.value === onSecond && isDeepStrictEqual(sent().at(-1), [onSecond, null]);
-    const removedName = "removing a server forgets it and drops its group from the menu, and the model picked on it runs on no server, never its URL";
+    const fellBack = await becomes(page, statusMatches, `^● done · ${DEFAULT_MODEL} · `, LIVE_RUN_MS);
+    const hidden = isDeepStrictEqual(after.rows, [onFirst, onProvider]) && isDeepStrictEqual(Object.keys(after.groups), ['saved', first]);
+    const noDeadServer = hidden && after.picker.value === DEFAULT_MODEL && isDeepStrictEqual(sent().at(-1), [DEFAULT_MODEL, null]);
+    const removedName = 'removing a server forgets it and hides its saved models and its group, and the model picked on it gives way to the default model, never running on its URL';
     check('live', removedName, removed && fellBack && noDeadServer, JSON.stringify({ after, sent: sent().at(-1) }));
-
-    await page.selectOption('#model-pick', { label: otherOn(first) });
-    await page.fill('#model-other', typedOnServer);
-    await page.$eval('#model-other', (el) => el.blur());
-    const restoring = await page.context().newPage();
-    await restoring.goto(url);
-    await becomes(restoring, () => document.querySelectorAll('#model-pick optgroup').length > 0);
-    const restored = await restoring.evaluate(() => {
-      const select = document.getElementById('model-pick');
-      return { picked: select.selectedOptions[0].textContent, options: [...select.options].map((o) => o.textContent), field: document.getElementById('model-other').value };
-    });
-    await restoring.close();
-    const named = restored.picked === otherOn(first) && restored.field === typedOnServer && !restored.options.includes(typedOnServer);
-    check('live', "a model typed on a server and never saved comes back after a reload in that server's field, listed nowhere else", named, JSON.stringify(restored));
 
     await page.evaluate((key) => localStorage.setItem(key, 'hosted_vllm/from-before'), MODEL_KEY);
     const fresh = await page.context().newPage();
     await fresh.goto(url);
     await becomes(fresh, () => document.querySelectorAll('#model-pick optgroup').length > 0);
-    const old = { value: await fresh.inputValue('#model-pick'), remove: await fresh.isVisible('#model-remove'), field: await fresh.isVisible('#model-other') };
+    const old = await fresh.inputValue('#model-pick');
     await fresh.close();
-    check('live', 'a model remembered before servers loads as itself, on no server', isDeepStrictEqual(old, { value: 'hosted_vllm/from-before', remove: false, field: false }), JSON.stringify(old));
+    check('live', 'a model remembered before servers loads as itself, on no server', old === 'hosted_vllm/from-before', old);
+
+    const rememberedOn = JSON.stringify(['hosted_vllm/from-before', TEST_ENDPOINT]);
+    await page.evaluate(([key, id]) => localStorage.setItem(key, id), [MODEL_KEY, rememberedOn]);
+    const unsaved = await page.context().newPage();
+    await unsaved.goto(url);
+    const named = await becomes(unsaved, (text) => document.getElementById('model-pick').selectedOptions[0]?.textContent === text, `hosted_vllm/from-before · ${first}`);
+    const picked = await unsaved.inputValue('#model-pick');
+    await unsaved.close();
+    check('live', 'a model remembered on a server and saved nowhere is picked, named with its server', named && picked === rememberedOn, picked);
   });
 }
 
@@ -7650,9 +7759,7 @@ async function liveContinueFixable(url, server) {
     fetch(new URL('/api/keys', url), { method, headers: { Authorization: `Bearer ${tokenOf(url)}`, 'Content-Type': 'application/json' }, body: JSON.stringify(stored) });
   await keys('POST');
   await withPage('live', { url, sample: false, memos: true, expectedErrors: [REFUSED_LOG] }, async (page) => {
-    await page.selectOption('#model-pick', { label: 'other model on 10.0.0.7:8000…' });
-    await page.fill('#model-other', model);
-    await page.press('#model-other', 'Enter');
+    await addModel(page, model, TEST_ENDPOINT);
     await stoppedRun(page, server);
     await keys('DELETE');
     const unknown = await continueAnswered(page);

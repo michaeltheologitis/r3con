@@ -257,7 +257,7 @@
    * @typedef {object} Mode
    * @property {string} note
    * @property {(question: string) => string} nextRun
-   * @property {(question: string, asks: boolean) => boolean} needsModel
+   * @property {(model: string) => Promise<boolean>} runsOnServer Whether a model of that name runs on a server by default.
    * @property {(files: LoadedFile[]) => string | null} refuseFiles
    * @property {(file: File) => Promise<FileRead>} extract
    * @property {(file: File) => Promise<Unpacked>} unzip
@@ -1818,6 +1818,9 @@
   const SIDE_STEP_PX = 16;
   const SAVED_MODELS_KEY = 'r3con-proto-saved-models';
   const SAVED_GROUP = 'saved';
+  // The settings' choice to run a model added there on its own provider, as their select's value; a server's is its URL.
+  const OWN_PROVIDER = '';
+  const OWN_PROVIDER_LABEL = 'its provider';
   const SERVER_LABEL = 'Server';
   // The group of a server's URL and key fields, as their ids end.
   const SERVER_GROUP = 'other';
@@ -1865,7 +1868,6 @@
   const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
   /** @param {Tab} tab */
   const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
-  const TYPE_A_MODEL = 'type a model first';
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
   const CONTINUE = 'continue';
@@ -2002,8 +2004,8 @@
   const inspector = $('inspector');
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
-  const modelOther = $('model-other', HTMLInputElement);
-  const modelRemove = $('model-remove', HTMLButtonElement);
+  const modelAdd = $('model-add', HTMLInputElement);
+  const modelWhere = $('model-where', HTMLSelectElement);
   const roundsPick = $('rounds', HTMLSelectElement);
   const evidencePick = $('evidence', HTMLSelectElement);
   const frame = $('frame');
@@ -2154,6 +2156,13 @@
   /** @param {Element} el @param {...Child} children */
   function fill(el, ...children) {
     el.replaceChildren(...flatChildren(children));
+  }
+
+  // Replaces `el`'s children only if they differ, so a focused one keeps the focus.
+  /** @param {Element} el @param {...Child} children */
+  function refill(el, ...children) {
+    const next = h('div', {}, children);
+    if (next.innerHTML !== el.innerHTML) el.replaceChildren(...next.childNodes);
   }
 
   // TypeScript can't type what flat(Infinity) returns, hence the casts.
@@ -4804,10 +4813,9 @@
     }
     const asks = landed(state.shown, RUN_ANSWER) || mode.runGoing(state.shown);
     // An ask needs only the run's representation; a run needs files.
-    const refused = asks || state.shown.files.length ? refusal(question, asks) : null;
+    const refused = asks || state.shown.files.length ? refusal(asks) : null;
     if (refused) {
       setStatus(refused);
-      if (refused === TYPE_A_MODEL) modelOther.focus();
       return;
     }
     if (asks) {
@@ -4822,10 +4830,9 @@
   }
 
   // Why the question can't be sent yet, if it can't; it then stays in the box.
-  /** @param {string} question @param {boolean} asks */
-  function refusal(question, asks) {
+  /** @param {boolean} asks */
+  function refusal(asks) {
     if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
-    if (!pickedModel() && mode.needsModel(question, asks)) return TYPE_A_MODEL;
     return asks ? null : mode.refuseFiles(state.shown.files);
   }
 
@@ -5433,10 +5440,11 @@
 
   /** @param {{ question: string, model: string }} ask */
   function prepareAsk({ question, model }) {
-    const listed = [...modelPick.options].some((option) => option.value === model);
-    modelPick.value = listed ? model : '';
-    if (!listed) modelOther.value = model;
-    onPick();
+    // Remembered first, so a model the menu doesn't list joins it as the remembered one does.
+    rememberModel(model);
+    renderModels();
+    modelPick.value = modelId(model);
+    readyStatus();
     questionEl.value = question;
     questionEl.focus();
   }
@@ -5969,9 +5977,9 @@
         'li',
         { class: 'key-state' },
         h('span', {}, `${endpoint} · ${keyText(key)}`),
-        h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove server ${endpoint}`, onclick: () => forget(() => mode.forgetServer(endpoint), SERVER_LABEL, 'endpoint-other') }, 'remove'),
+        h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove server ${endpoint}`, onclick: () => forget(() => forgetServer(endpoint), SERVER_LABEL, 'endpoint-other') }, 'remove'),
       );
-    fill($('server-list'), servers.map(row));
+    refill($('server-list'), servers.map(row));
     $('server-list').hidden = !servers.length;
   }
 
@@ -5986,8 +5994,16 @@
       $(`remove-${provider}`).hidden = !removable;
     }
     renderServers(serversOf(status));
-    renderPicker();
+    renderModels();
     readyStatus();
+  }
+
+  // The model picked on a server removed gives way to the default model, not to its name on no server.
+  /** @param {string} endpoint */
+  async function forgetServer(endpoint) {
+    const status = await mode.forgetServer(endpoint);
+    forgetPick((id) => parseModelId(id)[1] === endpoint);
+    return status;
   }
 
   async function refreshKeys() {
@@ -6014,10 +6030,7 @@
     return [id, null];
   }
 
-  function pickedModel() {
-    return parseModelId(modelPick.value)[0] || modelOther.value.trim();
-  }
-
+  const pickedModel = () => parseModelId(modelPick.value)[0];
   const pickedEndpoint = () => parseModelId(modelPick.value)[1];
 
   /** @param {string} endpoint */
@@ -6062,96 +6075,137 @@
   /** @type {KeyStatus} */
   let keysNow = {};
   let keysRead = false;
-  // The model last picked from the menu, for Escape in the other model field to go back to.
-  let menuModel = '';
+
+  // The settings' list and the picker show the saved models on no server or on one set; those on a server removed
+  // are kept, to come back with it.
+  function renderModels() {
+    const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
+    const saved = readSavedModels().filter(({ endpoint }) => !endpoint || servers.includes(endpoint));
+    const labels = serverLabels(servers);
+    renderSavedModels(saved, servers, labels);
+    renderPicker(saved, servers, labels);
+  }
 
   // The remembered model stays listed without its key, as after a reload, but never on a server known to be gone.
-  function renderPicker() {
+  /** @param {SavedModel[]} saved @param {string[]} servers @param {Map<string, string>} labels */
+  function renderPicker(saved, servers, labels) {
     const providers = keyedProviders(keysNow);
-    const servers = serversOf(keysNow).map(({ endpoint }) => endpoint);
-    const labels = serverLabels(servers);
     const [rememberedModel, rememberedEndpoint] = parseModelId(readStored(MODEL_KEY) || DEFAULT_MODEL);
     const gone = keysRead && !/** @type {(string | null)[]} */ (servers).includes(rememberedEndpoint);
     const remembered = modelId(rememberedModel, gone ? null : rememberedEndpoint);
     /** @param {string} model @param {string | null} [endpoint] @returns {[string, string]} */
-    const entry = (model, endpoint, text = model) => [modelId(model, endpoint), text];
+    const entry = (model, endpoint) => [modelId(model, endpoint), model];
     const groups = Object.entries(PROVIDERS)
       .filter(([provider]) => providers.includes(provider))
       .map(([, { label, models }]) => ({ label, entries: models.map((model) => entry(model)) }));
     const offered = new Set(groups.flatMap(({ entries }) => entries.map(([id]) => id)));
-    const saved = readSavedModels();
     const savedGroups = [
       { label: SAVED_GROUP, entries: saved.filter((model) => !model.endpoint && !offered.has(savedId(model))).map(({ model }) => entry(model)) },
       ...servers.map((endpoint) => ({
         label: labels.get(endpoint),
-        entries: [...saved.filter((model) => model.endpoint === endpoint).map(({ model }) => entry(model, endpoint)), entry('', endpoint, `other model on ${labels.get(endpoint)}…`)],
+        entries: saved.filter((model) => model.endpoint === endpoint).map(({ model }) => entry(model, endpoint)),
       })),
     ].filter(({ entries }) => entries.length);
     const allGroups = [...groups, ...savedGroups];
-    const listed = new Set(['', ...allGroups.flatMap(({ entries }) => entries.map(([id]) => id))]);
+    const listed = new Set(allGroups.flatMap(({ entries }) => entries.map(([id]) => id)));
     let pick = modelPick.options.length ? modelPick.value : remembered;
-    if (!listed.has(pick)) pick = parseModelId(pick)[0] === '' ? '' : remembered;
-    // A model typed on a server and never saved comes back in that server's field, so the menu names its server.
-    const [pickModel, pickEndpoint] = parseModelId(pick);
-    if (pickModel && pickEndpoint && !listed.has(pick) && listed.has(modelId('', pickEndpoint))) {
-      modelOther.value = pickModel;
-      pick = modelId('', pickEndpoint);
-    }
-    const typed = parseModelId(pick)[0] === '' ? modelId(modelOther.value.trim(), parseModelId(pick)[1]) : null;
+    if (!listed.has(pick)) pick = remembered;
     /** @param {[string, string]} option */
     const option = ([value, text]) => h('option', { value }, text);
-    const unlisted = listed.has(remembered) || remembered === typed ? null : option(entry(...parseModelId(remembered)));
-    fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))), option(entry('', null, 'other model…')));
+    const where = rememberedEndpoint && labels.get(rememberedEndpoint);
+    const unlisted = listed.has(remembered) ? null : option([remembered, where ? `${rememberedModel} · ${where}` : rememberedModel]);
+    fill(modelPick, unlisted, allGroups.map(({ label, entries }) => h('optgroup', { label }, entries.map(option))));
     modelPick.value = pick;
     $('model-hint').hidden = !live || providers.length > 0 || servers.length > 0;
-    showOtherModel();
   }
 
-  function showOtherModel() {
-    const [model, endpoint] = parseModelId(modelPick.value);
-    modelOther.hidden = modelOther.disabled = model !== '';
-    if (model) menuModel = modelPick.value;
-    modelRemove.hidden = !readSavedModels().some((entry) => savedId(entry) === modelPick.value);
-    const where = endpoint ? ` on ${serverLabels(serversOf(keysNow).map((server) => server.endpoint)).get(endpoint) ?? endpoint}` : '';
-    modelRemove.setAttribute('aria-label', `remove ${model}${where}`);
-  }
+  /** @param {string} model @param {string | null} [endpoint] */
+  const rememberModel = (model, endpoint) => writeStored(MODEL_KEY, modelId(model, endpoint));
 
   function onPick() {
-    showOtherModel();
     const model = pickedModel();
-    if (model) writeStored(MODEL_KEY, modelId(model, pickedEndpoint()));
+    if (model) rememberModel(model, pickedEndpoint());
     readyStatus();
   }
 
-  function saveTypedModel() {
-    const model = modelOther.value.trim();
+  // Where a model added in the settings runs follows its name, until one is picked for it; `placing` settles once it has.
+  let placePicked = false;
+  let placing = Promise.resolve();
+
+  function placeModel() {
+    placing = followName(modelAdd.value.trim());
+  }
+
+  // Answers come back in any order: only the one for the name still typed counts.
+  /** @param {string} model */
+  async function followName(model) {
+    if (!model) placePicked = false;
+    if (!model || modelWhere.hidden || placePicked) return;
+    // If r3con app can't answer, which the status then says, the place stays as it is.
+    const onServer = await mode.runsOnServer(model).catch(/** @returns {null} */ () => {
+      readyStatus();
+      return null;
+    });
+    if (onServer === null || placePicked || model !== modelAdd.value.trim()) return;
+    const [first] = serversOf(keysNow);
+    modelWhere.value = onServer && first ? first.endpoint : OWN_PROVIDER;
+  }
+
+  // A saved model is listed by its name, and by its server too where that name is saved on more than one.
+  /** @param {SavedModel[]} saved @param {string[]} servers @param {Map<string, string>} labels */
+  function renderSavedModels(saved, servers, labels) {
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    for (const { model } of saved) counts.set(model, (counts.get(model) ?? 0) + 1);
+    /** @param {SavedModel} entry */
+    const row = (entry) => {
+      const where = (counts.get(entry.model) ?? 0) > 1 && entry.endpoint ? (labels.get(entry.endpoint) ?? entry.endpoint) : '';
+      const remove = h('button', { class: 'btn remove', type: 'button', 'aria-label': `remove ${entry.model}${where && ` on ${where}`}`, onclick: () => removeSavedModel(savedId(entry)) }, 'remove');
+      return h('li', {}, h('span', {}, entry.model, where && h('span', { class: 'dim' }, ` · ${where}`)), remove);
+    };
+    refill($('model-list'), saved.map(row));
+    $('model-list').hidden = !saved.length;
+    const place = modelWhere.value;
+    refill(modelWhere, h('option', { value: OWN_PROVIDER }, OWN_PROVIDER_LABEL), servers.map((endpoint) => h('option', { value: endpoint }, labels.get(endpoint))));
+    modelWhere.hidden = !servers.length;
+    modelWhere.value = place;
+    // A place picked on a server since removed goes back to following the name.
+    if (modelWhere.selectedIndex < 0) {
+      placePicked = false;
+      modelWhere.value = OWN_PROVIDER;
+    }
+    placeModel();
+  }
+
+  async function addModel() {
+    await placing;
+    const model = modelAdd.value.trim();
     if (!model) return;
-    const endpoint = pickedEndpoint();
+    const endpoint = modelWhere.value;
     const id = modelId(model, endpoint);
     const saved = readSavedModels();
     if (!saved.some((entry) => savedId(entry) === id)) writeSavedModels([...saved, endpoint ? { model, endpoint } : { model }]);
-    modelOther.value = '';
-    renderPicker();
+    modelAdd.value = '';
+    renderModels();
     modelPick.value = id;
     onPick();
-    modelPick.focus();
   }
 
-  function cancelTypedModel() {
-    modelOther.value = '';
-    modelPick.value = menuModel;
-    if (modelPick.selectedIndex < 0) modelPick.selectedIndex = 0;
-    onPick();
-    modelPick.focus();
+  // The picker falls back to the default model if `matches` holds for the model picked or the one remembered, which
+  // differ while one remembered on a server that is gone is picked on no server.
+  /** @param {(id: string) => boolean} matches */
+  function forgetPick(matches) {
+    if ([modelPick.value, readStored(MODEL_KEY) ?? ''].some(matches)) removeStored(MODEL_KEY);
   }
 
-  function removeSavedModel() {
-    const id = modelPick.value;
+  // Its button goes with its row, so focus moves to the field that adds one.
+  /** @param {string} id */
+  function removeSavedModel(id) {
     writeSavedModels(readSavedModels().filter((entry) => savedId(entry) !== id));
-    removeStored(MODEL_KEY);
-    renderPicker();
+    forgetPick((picked) => picked === id);
+    renderModels();
     onPick();
-    modelPick.focus();
+    modelAdd.focus();
   }
 
   // ---------- settings ----------
@@ -6231,7 +6285,7 @@
   const groupOf = (el) => (el instanceof HTMLInputElement ? el.id.replace(/^(key|endpoint)-/, '') : '');
 
   function clearSettings() {
-    for (const input of $('settings').querySelectorAll('input')) input.value = '';
+    for (const input of $('keys').querySelectorAll('input')) input.value = '';
     edited.clear();
   }
 
@@ -6247,8 +6301,11 @@
   // beforetoggle, not toggle, so the popover is placed and cleared before its first paint.
   /** @param {ToggleEvent} e */
   function onSettingsToggle(e) {
-    // Closing them, by Escape too, saves what was typed as leaving its field would.
-    if (e.newState === 'closed') edited.forEach((group) => commit(group));
+    // Closing them, by Escape too, saves what was typed as leaving its field would, and adds a model typed as add would.
+    if (e.newState === 'closed') {
+      edited.forEach((group) => commit(group));
+      addModel();
+    }
     clearSettings();
     if (e.newState === 'open') placeSettings();
   }
@@ -6679,19 +6736,10 @@
       $('ask-form', HTMLFormElement).requestSubmit();
     });
     modelPick.addEventListener('change', onPick);
-    modelOther.addEventListener('change', onPick);
-    // In the form, Enter would also send the question.
-    modelOther.addEventListener('keydown', (e) => {
-      if (e.isComposing) return;
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        saveTypedModel();
-      } else if (e.key === 'Escape') {
-        e.stopPropagation();
-        cancelTypedModel();
-      }
-    });
-    modelRemove.addEventListener('click', removeSavedModel);
+    modelAdd.addEventListener('input', placeModel);
+    modelAdd.addEventListener('keydown', (e) => e.key === 'Enter' && !e.isComposing && addModel());
+    modelWhere.addEventListener('change', () => (placePicked = true));
+    $('model-add-btn').addEventListener('click', addModel);
     roundsPick.addEventListener('change', () => writeStored(ROUNDS_KEY, roundsPick.value));
     evidencePick.addEventListener('change', () => writeStored(EVIDENCE_KEY, evidencePick.value));
     questionEl.addEventListener('input', readyStatus);
@@ -7078,8 +7126,9 @@
   /** @type {Mode} */
   const prototypeMode = {
     note: PROTOTYPE_MODE_NOTE,
-    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel() || 'type a model'}`),
-    needsModel: (question, asks) => asks || !replaysRecording(question),
+    nextRun: (question) => (replaysRecording(question) ? `recorded run · ${SAMPLE.model}` : `simulated run · ${pickedModel()}`),
+    // With no litellm to place a name, a model of a provider listed here runs on it, and any other on a server.
+    runsOnServer: async (model) => !Object.keys(PROVIDERS).some((provider) => model.startsWith(`${provider}/`)),
     refuseFiles: () => null,
     extract: async () => ({ why: NEEDS_APP }),
     unzip: async (file) => oneDocument(file, { why: NEEDS_APP }),
@@ -7139,8 +7188,8 @@
   /** @type {Mode} */
   const liveMode = {
     note: '',
-    nextRun: () => pickedModel() || 'type a model',
-    needsModel: () => true,
+    nextRun: () => pickedModel(),
+    runsOnServer: async (model) => (await (await api(`/api/models/place?model=${encodeURIComponent(model)}`)).json()).server,
     refuseFiles: unreadableFiles,
     async extract(file) {
       try {
@@ -7208,7 +7257,7 @@
     showTabContents(state.shown);
     syncDocNodes(state.shown);
     updateComposer();
-    renderPicker();
+    renderModels();
     readyStatus();
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('files-locked').textContent = FILES_LOCKED;
