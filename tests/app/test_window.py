@@ -50,12 +50,12 @@ NS_WINDOW_TITLE_HIDDEN = 1
 NS_VIEW_WIDTH_SIZABLE = 1 << 1
 NS_VIEW_MAX_Y_MARGIN = 1 << 5
 TOGGLE_FULL_SCREEN = "document.documentElement.classList.toggle"
-# The title bar's height, and where the page says its top row's controls are.
+# The default title bar's height.
 TITLE_BAR_PX = 28
-# AppKit's traffic lights, close to zoom, by their x in a title bar of TITLE_BAR_PX: 14
-# points wide and 16 high, centred in it.
+# AppKit's traffic lights, close to zoom: their x and size, centred in the title bar.
 NS_WINDOW_BUTTONS = {0: 7, 1: 27, 2: 47}
 NS_WINDOW_BUTTON_SIZE = (14, 16)
+# Where the page says its top row's controls are: left, top, right and bottom.
 SETTINGS = (1000.0, 3.5, 1065.0, 24.5)
 THEME = (1081.0, 3.5, 1186.0, 24.5)
 HELD_RUN = {
@@ -421,14 +421,20 @@ def test_a_window_that_cant_hide_its_title_bar_keeps_it_and_the_page_its_top_row
     )
 
 
-@pytest.fixture
-def titled(objc: FakeObjC) -> tuple[FakeWindow, FakeWebView]:
-    """A window whose title bar is hidden, its page loaded."""
-    shown, webview = FakeWindow(), FakeWebView()
+def hide_title_bar_and_load(shown: FakeWindow) -> FakeWebView:
+    """Hide ``shown``'s title bar, then load its page in the web view it returns."""
+    webview = FakeWebView()
     window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
     assert webview.on_webview_load is not None
     asyncio.run(webview.on_webview_load(webview))
-    return shown, webview
+    return webview
+
+
+@pytest.fixture
+def titled(objc: FakeObjC) -> tuple[FakeWindow, FakeWebView]:
+    """A window whose title bar is hidden, its page loaded."""
+    shown = FakeWindow()
+    return shown, hide_title_bar_and_load(shown)
 
 
 def band_of(shown: FakeWindow) -> Any:
@@ -455,13 +461,11 @@ def page_properties(webview: FakeWebView) -> list[str]:
 def test_the_page_learns_where_the_traffic_lights_are_and_the_band_their_height(
     objc: FakeObjC,
 ):
-    shown, webview = FakeWindow(), FakeWebView()
+    shown = FakeWindow()
     # Larger and lower than in a title bar of TITLE_BAR_PX, as some macOS draws them.
     for kind, x in {0: 10, 1: 34, 2: 58}.items():
         shown._impl.native.buttons[kind].in_content = fake_ns_make_rect(x, 9, 16, 16)
-    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
-    assert webview.on_webview_load is not None
-    asyncio.run(webview.on_webview_load(webview))
+    webview = hide_title_bar_and_load(shown)
     set_property = "document.documentElement.style.setProperty"
     centre = f'{set_property}("--titlebar-center", "17.0px")'
     inset = f'{set_property}("--titlebar-inset", "86px")'
@@ -475,14 +479,12 @@ def test_the_page_learns_where_the_traffic_lights_are_and_the_band_their_height(
 def test_without_the_traffic_lights_to_read_the_page_and_band_keep_their_defaults(
     objc: FakeObjC, full_screen: bool
 ):
-    shown, webview = FakeWindow(), FakeWebView()
+    shown = FakeWindow()
     if full_screen:
         shown.state = WindowState.FULLSCREEN
     else:
         shown._impl.native.buttons.clear()
-    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
-    assert webview.on_webview_load is not None
-    asyncio.run(webview.on_webview_load(webview))
+    webview = hide_title_bar_and_load(shown)
     assert page_properties(webview) == []
     assert band_of(shown).frame.size.height == TITLE_BAR_PX
 
@@ -533,7 +535,7 @@ def test_a_press_on_the_band_drags_the_window_and_a_double_click_does_as_set(
     moves: list[str],
 ):
     if setting is not None:
-        objc.defaults["AppleActionOnDoubleClick"] = setting
+        objc.defaults[window.DOUBLE_CLICK_ACTION] = setting
     shown, _ = titled
     event = SimpleNamespace(clickCount=clicks)
     band_of(shown).mouseDown_(event)
@@ -603,10 +605,8 @@ def test_the_page_knows_while_the_window_is_in_full_screen_and_after_a_reload(
 def test_hiding_two_title_bars_defines_the_bands_objective_c_class_once(
     titled: tuple[FakeWindow, FakeWebView],
 ):
-    other, webview = FakeWindow(), FakeWebView()
-    window.hide_title_bar(other, webview)  # pyright: ignore[reportArgumentType]
-    assert webview.on_webview_load is not None
-    asyncio.run(webview.on_webview_load(webview))
+    other = FakeWindow()
+    hide_title_bar_and_load(other)
     assert type(band_of(other)) is type(band_of(titled[0]))
 
 

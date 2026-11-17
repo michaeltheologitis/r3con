@@ -13,12 +13,13 @@ app's menu or in the Dock, or logging out hides it, then stops the server as
 still in flight is cut off, and its run folder left without ``run_failed``. If Toga
 can't start the app, the server stops before the error goes on. Its web view has no
 downloads, so a tab is saved through a Save dialog on the window. Its title bar is
-hidden but its traffic lights, which sit in the page's top row (``hide_title_bar``).
-It updates itself
-through Sparkle (:mod:`r3con.app.updates`), and opens without updates whatever stops
-them. Toga is the Mac app's own: neither r3con nor its ``app`` extra installs it.
+hidden, all but its traffic lights, which sit in the page's top row
+(``hide_title_bar``). It updates itself through Sparkle (:mod:`r3con.app.updates`),
+and opens without updates whatever stops them. Toga is the Mac app's own: neither
+r3con nor its ``app`` extra installs it.
 """
 
+# No `from __future__ import annotations`: rubicon needs hitTest_'s real annotations.
 import asyncio
 import json
 import os

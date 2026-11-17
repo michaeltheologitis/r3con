@@ -346,6 +346,7 @@ jobs:
             exit 1
           fi
           if [ "$dragged" = false ]; then
+            echo "::error::A drag or double-click on the window's top row didn't move or zoom it."
             exit 1
           fi
       # An app that writes into its own bundle breaks its signature.
