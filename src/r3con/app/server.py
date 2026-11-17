@@ -122,10 +122,10 @@ a reload reads.
   the server's ``choose_save_path`` where to save it, suggesting ``name``, and writes
   it there, whole or not at all, answering 204, also when nothing is chosen. ``name``
   must be a file name, no folder in it, ending in ``.html`` (422). Only a server with
-  a ``choose_save_path``, as the Mac app's, has it (404 otherwise), and it opens its
-  page with ``save=dialog`` beside its token: a page opened without it downloads the
-  file. A file that can't be written is refused (500), the log naming where and the
-  error's class; a file it was to replace stays as it was.
+  a ``choose_save_path``, as the Mac app's, has it (404 otherwise), and the Mac app
+  opens its page with ``SAVE_DIALOG`` beside its token: a page opened without it
+  downloads the file. A file that can't be written is refused (500), the log naming
+  where and the error's class; a file it was to replace stays as it was.
 - ``POST /api/imports``, with what a saved tab's file holds of its run's folder, as
   ``GET /api/runs/{run_id}/representation`` answers it, makes that folder again, in a
   new folder of its own in the logs dir, and answers ``{run_id}``: a run that has
@@ -1392,8 +1392,7 @@ def _server(
         # Typed int upstream; only asyncio.wait_for reads it, so a float works.
         timeout_graceful_shutdown=SHUTDOWN_GRACE_SECONDS,  # pyright: ignore[reportArgumentType]
     )
-    saves = "" if choose_save_path is None else f"&{SAVE_DIALOG}"
-    url = f"http://{HOST}:{port}/#token={token}{saves}"
+    url = f"http://{HOST}:{port}/#token={token}"
     return _Server(config, state, stop_within), url
 
 

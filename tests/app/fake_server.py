@@ -21,7 +21,7 @@ The server keeps the keys it is given in a credential store of its own, in memor
 never the system's. With ``--save-dialog`` after LOGS_DIR, it saves a tab as the Mac
 app does, through a Save dialog, faked: it saves in LOGS_DIR's ``saved``, under the
 name it suggests, cancels for a name holding ``CANCELS_SAVE``, and picks a folder
-that isn't there for one holding ``NO_ROOM``.
+that isn't there for one holding ``NO_ROOM``; and its URL opens the page saying so.
 """
 
 import os
@@ -43,6 +43,7 @@ import litellm
 from litellm.exceptions import ContextWindowExceededError
 
 from r3con.app import serve
+from r3con.app.server import SAVE_DIALOG
 from tests.fakes import (
     PARSE_HEADING,
     SCHEMA_REPLY,
@@ -72,7 +73,7 @@ PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
 ANSWER = "The check's scripted model answers this."
 CITED_PER_VIEW = 2
-SAVE_DIALOG = "--save-dialog"
+SAVE_DIALOG_OPTION = "--save-dialog"
 SAVED = "saved"
 CANCELS_SAVE = "cancel-the-save"
 NO_ROOM = "no-room-to-save"
@@ -182,13 +183,13 @@ def choose_save_path(name: str) -> Path | None:
 
 def main() -> None:
     keyring.set_keyring(FakeKeyring())
-    dialog = choose_save_path if SAVE_DIALOG in sys.argv[2:] else None
+    dialog = choose_save_path if SAVE_DIALOG_OPTION in sys.argv[2:] else None
     url, _ = serve(
         logs_dir=Path(sys.argv[1]),
         completion=scripted_model,
         choose_save_path=dialog,
     )
-    print(url, flush=True)
+    print(f"{url}&{SAVE_DIALOG}" if dialog else url, flush=True)
     with contextlib.suppress(KeyboardInterrupt):
         never.wait()
 

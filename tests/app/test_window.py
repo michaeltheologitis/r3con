@@ -1,19 +1,23 @@
 """The Mac app's window (r3con.app.window), with Toga faked at the screen."""
 
 import asyncio
+import json
 import os
 import runpy
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx2
 import pytest
 import toga
+from toga.constants import WindowState
 
 from r3con.app import updates, window
 from r3con.app.server import APP_KEY_SERVICE, MAC_APP_KEY_SERVICE, listen, serve
@@ -23,7 +27,9 @@ from tests.fakes import (
     FakeCommands,
     FakeKeyring,
     FakeLLM,
+    FakeNSPoint,
     FakeObjC,
+    fake_ns_make_rect,
 )
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
@@ -36,6 +42,22 @@ CHOSEN_NAME = "chosen.html"
 SAVED_TAB = b"<!doctype html><title>a saved tab</title>"
 # AppKit's NSTerminateNow: what Toga answers a Dock Quit or a logout with.
 NS_TERMINATE_NOW = 1
+# AppKit's values, and the style mask of the window Toga makes.
+TOGA_STYLE_MASK = 0b1111
+NS_FULL_SIZE_CONTENT_VIEW = 1 << 15
+NS_WINDOW_TITLE_VISIBLE = 0
+NS_WINDOW_TITLE_HIDDEN = 1
+NS_VIEW_WIDTH_SIZABLE = 1 << 1
+NS_VIEW_MAX_Y_MARGIN = 1 << 5
+TOGGLE_FULL_SCREEN = "document.documentElement.classList.toggle"
+# The default title bar's height.
+TITLE_BAR_PX = 28
+# AppKit's traffic lights, close to zoom: their x and size, centred in the title bar.
+NS_WINDOW_BUTTONS = {0: 7, 1: 27, 2: 47}
+NS_WINDOW_BUTTON_SIZE = (14, 16)
+# Where the page says its top row's controls are: left, top, right and bottom.
+SETTINGS = (1000.0, 3.5, 1065.0, 24.5)
+THEME = (1081.0, 3.5, 1186.0, 24.5)
 HELD_RUN = {
     "question": "Which memo?",
     "model": "openai/held-model",
@@ -47,8 +69,73 @@ WINDOW_THREAD = "window"
 
 
 class FakeWebView:
-    def __init__(self, *, url: str) -> None:
+    """Toga's web view: it keeps the scripts it is asked to run, in ``scripts``, and
+    answers the window's query of the page's controls with ``controls``, or, for a
+    page that isn't R3Con's, None."""
+
+    controls: tuple[tuple[float, ...], ...] | None = (SETTINGS, THEME)
+
+    def __init__(self, *, url: str | None = None) -> None:
         self.url = url
+        self.on_webview_load: Callable[..., Any] | None = None
+        self.scripts: list[str] = []
+
+    def evaluate_javascript(self, javascript: str) -> asyncio.Future[str | None]:
+        self.scripts.append(javascript)
+        answer: asyncio.Future[str | None] = asyncio.get_running_loop().create_future()
+        query = javascript == window.CONTROLS_QUERY
+        answer.set_result(json.dumps(self.controls) if query else None)
+        return answer
+
+
+class FakeContentView:
+    """Toga's view that fills the window, flipped: each view it adds is in
+    ``subviews``, and a window button's rect in it is the button's ``in_content``."""
+
+    def __init__(self, native: "FakeNSWindow") -> None:
+        self.native = native
+        self.frame = SimpleNamespace(size=SimpleNamespace(width=TOGA_WINDOW_SIZE[0]))
+        self.subviews: list[Any] = []
+
+    def addSubview(self, view: Any) -> None:
+        view.superview, view.window = self, self.native
+        self.subviews.append(view)
+
+    def convertRect(self, rect: object, *, fromView: Any) -> Any:
+        return fromView.in_content
+
+
+class FakeNSWindow:
+    """AppKit's window under Toga's, its title bar shown, with its traffic lights,
+    ``buttons``: it keeps each drag, by its event, and each zoom and minimize it is
+    asked for, in ``moves``."""
+
+    def __init__(self) -> None:
+        self.styleMask = TOGA_STYLE_MASK
+        self.titlebarAppearsTransparent = False
+        self.titleVisibility = NS_WINDOW_TITLE_VISIBLE
+        self.contentView = FakeContentView(self)
+        top = (TITLE_BAR_PX - NS_WINDOW_BUTTON_SIZE[1]) / 2
+        self.buttons = {
+            kind: SimpleNamespace(
+                bounds=None,
+                in_content=fake_ns_make_rect(x, top, *NS_WINDOW_BUTTON_SIZE),
+            )
+            for kind, x in NS_WINDOW_BUTTONS.items()
+        }
+        self.moves: list[tuple[str, object]] = []
+
+    def standardWindowButton(self, kind: int) -> Any:
+        return self.buttons.get(kind)
+
+    def performWindowDragWithEvent(self, event: object) -> None:
+        self.moves.append(("drag", event))
+
+    def performZoom(self, sender: object) -> None:
+        self.moves.append(("zoom", sender))
+
+    def performMiniaturize(self, sender: object) -> None:
+        self.moves.append(("minimize", sender))
 
 
 def fake_save_file_dialog(
@@ -66,6 +153,9 @@ class FakeWindow:
 
     def __init__(self) -> None:
         self.size = TOGA_WINDOW_SIZE
+        self._impl = SimpleNamespace(native=FakeNSWindow())
+        self.state = WindowState.NORMAL
+        self.on_resize: Callable[..., Any] | None = None
         self.hidden = False
         self.dialogs: list[tuple[str, str, threading.Thread]] = []
         self.opened = threading.Event()
@@ -125,7 +215,9 @@ class FakeApp:
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.main_thread = threading.current_thread()
-        self.url = self.startup(self).url
+        self.webview = self.startup(self)
+        assert self.webview.url is not None, "the window loaded no page"
+        self.url = self.webview.url
         reading = asyncio.create_task(asyncio.to_thread(self.read_page))
         if self.quits_mid_save:
             await asyncio.to_thread(self.main_window.opened.wait, TIMEOUT_SECONDS)
@@ -210,6 +302,11 @@ def refuses(url: str) -> bool:
     return False
 
 
+def launch_of(app: FakeApp) -> dict[str, list[str]]:
+    """What the window opens its page with, in its URL's fragment."""
+    return parse_qs(urlsplit(app.url).fragment)
+
+
 def test_the_window_opens_the_page_this_launch_serves_with_its_token(
     opened: list[FakeApp],
 ):
@@ -273,7 +370,7 @@ def test_the_window_opens_whatever_stops_the_apps_updates(
     opened: list[FakeApp], objc: FakeObjC, capsys: pytest.CaptureFixture[str]
 ):
     # A runtime without NSBundle, which updates.start does not expect.
-    objc.classes.clear()
+    del objc.classes["NSBundle"]
     window.main()
     (app,) = opened
     assert app.page.status_code == 200
@@ -289,6 +386,230 @@ def test_the_window_opens_at_its_size(opened: list[FakeApp]):
     assert [shown.size for shown in app.windows] == [window.WINDOW_SIZE]
 
 
+def test_the_window_hides_its_title_bar_and_opens_its_page_saying_so(
+    opened: list[FakeApp],
+):
+    window.main()
+    (app,) = opened
+    native = app.main_window._impl.native
+    assert native.titlebarAppearsTransparent
+    assert native.titleVisibility == NS_WINDOW_TITLE_HIDDEN
+    assert native.styleMask == TOGA_STYLE_MASK | NS_FULL_SIZE_CONTENT_VIEW
+    assert app.main_window.on_resize is app.webview.on_webview_load is not None
+    assert launch_of(app)["titlebar"] == ["hidden"]
+
+
+def test_a_window_that_cant_hide_its_title_bar_keeps_it_and_the_page_its_top_row(
+    opened: list[FakeApp],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+):
+    # A rubicon without it, as if it had moved.
+    monkeypatch.delattr(sys.modules["rubicon.objc"], "NSMakeRect")
+    window.main()
+    (app,) = opened
+    native = app.main_window._impl.native
+    assert (native.titlebarAppearsTransparent, native.styleMask) == (
+        False,
+        TOGA_STYLE_MASK,
+    )
+    assert app.main_window.on_resize is None
+    assert launch_of(app).keys() == {"token", "save"}
+    assert app.page.status_code == 200
+    assert (
+        "The window keeps its title bar: hiding it failed." in capsys.readouterr().err
+    )
+
+
+def hide_title_bar_and_load(shown: FakeWindow) -> FakeWebView:
+    """Hide ``shown``'s title bar, then load its page in the web view it returns."""
+    webview = FakeWebView()
+    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    return webview
+
+
+@pytest.fixture
+def titled(objc: FakeObjC) -> tuple[FakeWindow, FakeWebView]:
+    """A window whose title bar is hidden, its page loaded."""
+    shown = FakeWindow()
+    return shown, hide_title_bar_and_load(shown)
+
+
+def band_of(shown: FakeWindow) -> Any:
+    (band,) = shown._impl.native.contentView.subviews
+    return band
+
+
+def test_once_its_page_loads_the_window_lays_one_band_over_its_top_row(
+    titled: tuple[FakeWindow, FakeWebView],
+):
+    shown, webview = titled
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    band = band_of(shown)
+    assert band.frame == fake_ns_make_rect(0, 0, TOGA_WINDOW_SIZE[0], TITLE_BAR_PX)
+    assert band.autoresizingMask == NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MAX_Y_MARGIN
+    assert band.acceptsFirstMouse_(None)
+
+
+def page_properties(webview: FakeWebView) -> list[str]:
+    return [script for script in webview.scripts if "setProperty" in script]
+
+
+def test_the_page_learns_where_the_traffic_lights_are_and_the_band_their_height(
+    objc: FakeObjC,
+):
+    shown = FakeWindow()
+    # Larger and lower than in a title bar of TITLE_BAR_PX, as some macOS draws them.
+    for kind, x in {0: 10, 1: 34, 2: 58}.items():
+        shown._impl.native.buttons[kind].in_content = fake_ns_make_rect(x, 9, 16, 16)
+    webview = hide_title_bar_and_load(shown)
+    set_property = "document.documentElement.style.setProperty"
+    centre = f'{set_property}("--titlebar-center", "17.0px")'
+    inset = f'{set_property}("--titlebar-inset", "86px")'
+    assert page_properties(webview) == [f"{centre};{inset}"]
+    assert band_of(shown).frame == fake_ns_make_rect(0, 0, TOGA_WINDOW_SIZE[0], 34)
+
+
+@pytest.mark.parametrize(
+    "full_screen", [False, True], ids=["no buttons", "full screen"]
+)
+def test_without_the_traffic_lights_to_read_the_page_and_band_keep_their_defaults(
+    objc: FakeObjC, full_screen: bool
+):
+    shown = FakeWindow()
+    if full_screen:
+        shown.state = WindowState.FULLSCREEN
+    else:
+        shown._impl.native.buttons.clear()
+    webview = hide_title_bar_and_load(shown)
+    assert page_properties(webview) == []
+    assert band_of(shown).frame.size.height == TITLE_BAR_PX
+
+
+@pytest.mark.parametrize(
+    ("point", "drags"),
+    [
+        ((200, 14), True),
+        ((10, 1), True),
+        ((1066, 14), True),
+        ((1000, 14), False),
+        ((1185, 24), False),
+        ((200, TITLE_BAR_PX), False),
+        ((200, 300), False),
+    ],
+    ids=["status", "corner", "between", "settings", "theme", "below", "page"],
+)
+def test_the_band_takes_presses_on_the_top_row_off_its_controls_and_no_other(
+    titled: tuple[FakeWindow, FakeWebView], point: tuple[float, float], drags: bool
+):
+    band = band_of(titled[0])
+    assert (band.hitTest_(FakeNSPoint(*point)) is band) == drags
+
+
+def test_until_the_page_says_where_its_controls_are_every_press_goes_to_it(
+    objc: FakeObjC,
+):
+    band = window._drag_band().alloc().init()
+    assert band.hitTest_(FakeNSPoint(200, 14)) is None
+
+
+@pytest.mark.parametrize(
+    ("clicks", "setting", "moves"),
+    [
+        (1, "Minimize", ["drag"]),
+        (2, None, ["zoom"]),
+        (2, "Maximize", ["zoom"]),
+        (2, "Minimize", ["minimize"]),
+        (2, "None", []),
+    ],
+    ids=["press", "unset", "zoom", "minimize", "do nothing"],
+)
+def test_a_press_on_the_band_drags_the_window_and_a_double_click_does_as_set(
+    titled: tuple[FakeWindow, FakeWebView],
+    objc: FakeObjC,
+    clicks: int,
+    setting: str | None,
+    moves: list[str],
+):
+    if setting is not None:
+        objc.defaults[window.DOUBLE_CLICK_ACTION] = setting
+    shown, _ = titled
+    event = SimpleNamespace(clickCount=clicks)
+    band_of(shown).mouseDown_(event)
+    senders = {"drag": event, "zoom": None, "minimize": None}
+    assert shown._impl.native.moves == [(move, senders[move]) for move in moves]
+
+
+def test_a_press_the_window_cant_take_is_logged_never_raised_into_appkit(
+    titled: tuple[FakeWindow, FakeWebView],
+    objc: FakeObjC,
+    caplog: pytest.LogCaptureFixture,
+):
+    del objc.classes["NSUserDefaults"]
+    band_of(titled[0]).mouseDown_(SimpleNamespace(clickCount=2))
+    assert [record.getMessage() for record in caplog.records] == [
+        "The window couldn't take a press on its top row."
+    ]
+
+
+def test_the_band_learns_the_controls_again_on_each_load_and_resize(
+    titled: tuple[FakeWindow, FakeWebView], monkeypatch: pytest.MonkeyPatch
+):
+    shown, _ = titled
+    band = band_of(shown)
+    assert band.controls == [SETTINGS, THEME]
+    moved = ((1300.0, 3.5, 1365.0, 24.5),)
+    monkeypatch.setattr(FakeWebView, "controls", moved)
+    assert shown.on_resize is not None
+    asyncio.run(shown.on_resize(shown))
+    assert band.controls == list(moved)
+
+
+def test_a_page_that_isnt_r3cons_has_no_controls_so_the_band_takes_no_press(
+    titled: tuple[FakeWindow, FakeWebView],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    shown, webview = titled
+    monkeypatch.setattr(FakeWebView, "controls", None)
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    band = band_of(shown)
+    assert band.controls is None
+    assert band.hitTest_(FakeNSPoint(200, 14)) is None
+    assert caplog.records == []
+
+
+def test_the_page_knows_while_the_window_is_in_full_screen_and_after_a_reload(
+    titled: tuple[FakeWindow, FakeWebView],
+):
+    shown, webview = titled
+    assert shown.on_resize is not None and webview.on_webview_load is not None
+    for state in (WindowState.FULLSCREEN, WindowState.NORMAL):
+        shown.state = state
+        asyncio.run(shown.on_resize(shown))
+    shown.state = WindowState.FULLSCREEN
+    asyncio.run(webview.on_webview_load(webview))
+    toggles = [script for script in webview.scripts if TOGGLE_FULL_SCREEN in script]
+    assert toggles == [
+        f'{TOGGLE_FULL_SCREEN}("full-screen", false)',
+        f'{TOGGLE_FULL_SCREEN}("full-screen", true)',
+        f'{TOGGLE_FULL_SCREEN}("full-screen", false)',
+        f'{TOGGLE_FULL_SCREEN}("full-screen", true)',
+    ]
+
+
+def test_hiding_two_title_bars_defines_the_bands_objective_c_class_once(
+    titled: tuple[FakeWindow, FakeWebView],
+):
+    other = FakeWindow()
+    hide_title_bar_and_load(other)
+    assert type(band_of(other)) is type(band_of(titled[0]))
+
+
 def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     opened: list[FakeApp], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -297,7 +618,7 @@ def test_a_tab_saved_in_the_window_is_written_where_its_save_dialog_chose(
     monkeypatch.setattr(FakeWindow, "chooses", chosen)
     window.main()
     (app,) = opened
-    assert app.url.endswith("&save=dialog")
+    assert launch_of(app)["save"] == ["dialog"]
     assert app.saved.status_code == 204
     shown = [(window.SAVE_DIALOG_TITLE, SAVED_NAME, app.main_thread)]
     assert app.main_window.dialogs == shown

@@ -1363,7 +1363,7 @@ async function load() {
 async function beforeRun() {
   await withPage('before a run', { sample: false }, async (page) => {
     const names = { title: await page.title(), brand: await page.textContent('.brand') };
-    check('before a run', 'the browser tab is titled ❀ R3Con and the header brand is ❀ r3con', isDeepStrictEqual(names, { title: '❀ R3Con', brand: '❀ r3con' }), JSON.stringify(names));
+    check('before a run', 'the browser tab is titled ❀ R3Con and the header brand is r3con', isDeepStrictEqual(names, { title: '❀ R3Con', brand: 'r3con' }), JSON.stringify(names));
     const docs = await count(page, '.node.doc');
     const onlyDocs = docs === SAMPLE_DOCS && (await count(page, '.node')) === docs;
     check('before a run', `the ${SAMPLE_DOCS} sample documents are the only nodes`, onlyDocs);
@@ -8207,6 +8207,89 @@ async function liveSaveDialog(url, server) {
   });
 }
 
+// What r3con app's Mac window opens the page with: its traffic lights then sit in the top row.
+const TITLE_BAR = 'titlebar=hidden';
+const TITLE_BAR_PX = 28;
+const TRAFFIC_LIGHTS_PX = 70;
+// What the window may measure where macOS draws larger, lower traffic lights.
+const MEASURED_CENTRE_PX = 17;
+const MEASURED_INSET_PX = 86;
+const GUTTER_PX = 16;
+// The class the window puts on the page's root while it is in full screen, which hides the traffic lights.
+const FULL_SCREEN = 'full-screen';
+
+function topRows() {
+  const box = (selector) => document.querySelector(selector).getBoundingClientRect().toJSON();
+  const [top, brand, status, settings, theme, frame, tabRow, sideTabs] = ['.topbar', '.brand', '#run-status', '#settings-btn', '#theme-btn', '#frame', '.tab-row', '.tabs'].map(box);
+  const centred = [brand, status, settings, theme].every((r) => Math.abs(r.top + r.bottom - top.top - top.bottom) < 1);
+  return {
+    top: [top.top, top.height],
+    brandLeft: brand.left,
+    status: Boolean(document.getElementById('run-status').textContent) && status.width > 1,
+    actions: [settings.right, theme.right],
+    centred,
+    middles: [brand, status, settings, theme].map((r) => (r.top + r.bottom) / 2),
+    below: { frame: [frame.left, frame.width, frame.bottom], tabRow: [tabRow.height, tabRow.top - frame.top], sideTabs: [sideTabs.left, sideTabs.height] },
+    frameTop: frame.top,
+  };
+}
+
+const controlRects = () => ['#settings-btn', '#theme-btn'].map((selector) => {
+  const { left, top, right, bottom } = document.querySelector(selector).getBoundingClientRect();
+  return [left, top, right, bottom];
+});
+
+// In the Mac app, the window's traffic lights sit in the top row, which keeps its brand, status and actions; the rest is
+// as in a browser.
+async function liveTitleBar(url) {
+  let browser;
+  await withPage('live', { url, sample: false }, async (page) => {
+    browser = await page.evaluate(topRows);
+    const undefinedQuery = await page.evaluate(() => typeof window.r3conTitleBarControls);
+    const name = 'opened without it, as in a browser, the page keeps its top row as it was, and answers no window query';
+    check('live', name, !(await page.evaluate(() => document.documentElement.classList.contains('titlebar'))) && undefinedQuery === 'undefined' && browser.brandLeft === GUTTER_PX, JSON.stringify(browser));
+  });
+  await withPage('live', { url: `${url}&${TITLE_BAR}`, sample: false }, async (page) => {
+    const row = await page.evaluate(topRows);
+    const rowName = "in the Mac app, the top row is the title bar's height, its brand after the traffic lights' room, its status and its actions where they were, all centred in it";
+    const kept = isDeepStrictEqual(row.top, [0, TITLE_BAR_PX]) && row.brandLeft === TRAFFIC_LIGHTS_PX && row.status && isDeepStrictEqual(row.actions, browser?.actions) && row.centred;
+    check('live', rowName, kept, JSON.stringify(row));
+    const below = isDeepStrictEqual(row.below, browser?.below) && row.frameTop === TITLE_BAR_PX;
+    check('live', 'in the Mac app, the tab row and all below it are as in a browser, only nearer the top', below, JSON.stringify({ row: row.below, browser: browser?.below }));
+
+    const lights = { '--titlebar-center': MEASURED_CENTRE_PX, '--titlebar-inset': MEASURED_INSET_PX };
+    await page.evaluate((values) => Object.entries(values).forEach(([name, px]) => document.documentElement.style.setProperty(name, `${px}px`)), lights);
+    const measured = await page.evaluate(topRows);
+    await page.evaluate((names) => names.forEach((name) => document.documentElement.style.removeProperty(name)), Object.keys(lights));
+    const onLine = isDeepStrictEqual(measured.top, [0, 2 * MEASURED_CENTRE_PX]) && measured.middles.every((y) => Math.abs(y - MEASURED_CENTRE_PX) < 1);
+    const measuredName = "with the window's measure of its traffic lights, the top row's text and controls centre on their line, and its brand starts past them";
+    check('live', measuredName, onLine && measured.brandLeft === MEASURED_INSET_PX, JSON.stringify(measured));
+    const defaults = await page.evaluate(topRows);
+    check('live', 'without it, the top row keeps the default title bar and inset', isDeepStrictEqual(defaults.top, [0, TITLE_BAR_PX]) && defaults.brandLeft === TRAFFIC_LIGHTS_PX, JSON.stringify(defaults));
+
+    const answers = [];
+    for (let i = 0; i < 2; i += 1) {
+      answers.push([JSON.parse(await page.evaluate(() => window.r3conTitleBarControls())), await page.evaluate(controlRects)]);
+      await page.click('#theme-btn');
+    }
+    const sameName = "in the Mac app, the page answers the window's query with its top row's controls, settings and theme, in either theme where they were";
+    const near = (a, b) => a.length === b.length && a.every((rect, i) => rect.every((px, k) => Math.abs(px - b[i][k]) < 1));
+    const same = answers.every(([answered, shown]) => isDeepStrictEqual(answered, shown)) && near(answers[0][0], answers[1][0]);
+    check('live', sameName, same, JSON.stringify(answers));
+
+    const insets = [];
+    for (const full of [true, false]) {
+      await page.evaluate(([name, on]) => document.documentElement.classList.toggle(name, on), [FULL_SCREEN, full]);
+      insets.push((await page.evaluate(topRows)).brandLeft);
+    }
+    check('live', 'in full screen, which hides the traffic lights, the top row drops its room for them, and keeps it again after', isDeepStrictEqual(insets, [GUTTER_PX, TRAFFIC_LIGHTS_PX]), JSON.stringify(insets));
+    // As ⌘R does in the Mac app.
+    await page.reload();
+    const reloaded = await page.evaluate(topRows);
+    check('live', 'after a reload, the Mac app still has the traffic lights in the top row', isDeepStrictEqual(reloaded.top, row.top) && reloaded.brandLeft === TRAFFIC_LIGHTS_PX, JSON.stringify(reloaded));
+  });
+}
+
 // The prototype sends nothing, so a saved tab's file is a web page there, which it has no r3con app to read.
 async function prototypeImports() {
   const html = '<!doctype html><title>A saved tab</title><script type="application/json" id="r3con-tab">{"version":1}</script>\n';
@@ -8269,6 +8352,7 @@ async function live() {
     await liveRemoveWhileReading(url);
     await liveRefusalWhileChatting(url);
     await liveRefusalsThenFailure(url);
+    await liveTitleBar(url);
   });
   const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
   for (const body of stateful) await withFakeServer(body);

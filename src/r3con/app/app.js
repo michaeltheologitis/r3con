@@ -2017,10 +2017,12 @@
   // Served by r3con app on this computer the page runs r3con; anywhere else it is the prototype,
   // which sends nothing.
   const live = !savedBlock && ['http:', 'https:'].includes(location.protocol) && LOOPBACK.includes(location.hostname);
-  // The launch token, and save=dialog in the Mac app: off the address bar at once, kept for a reload in this tab's sessionStorage.
+  // The launch token, and save=dialog and titlebar=hidden in the Mac app: off the address bar at once, kept for a reload in this tab's sessionStorage.
   const launch = live ? takeLaunch() : new URLSearchParams();
   // The Mac app's web view has no downloads, so r3con app there opens the page with this, and saves a tab itself.
   const saveDialog = launch.get('save') === 'dialog';
+  // The Mac app's window has no title bar: its traffic lights sit in the top row.
+  const titleBar = launch.get('titlebar') === 'hidden';
   const token = launch.get('token');
 
   function takeLaunch() {
@@ -7184,7 +7186,18 @@
 
   const mode = live ? liveMode : savedBlock ? savedMode : prototypeMode;
 
+  // The Mac app's window asks where the top row's controls are, and lets presses on them through to the page.
+  function titleBarControls() {
+    const controls = [...document.querySelectorAll('.topbar :is(button, a, input, select, label)')].filter((el) => el.checkVisibility());
+    const rects = controls.map((el) => el.getBoundingClientRect());
+    return JSON.stringify(rects.map(({ left, top, right, bottom }) => [left, top, right, bottom]));
+  }
+
   function init() {
+    if (titleBar) {
+      root.classList.add('titlebar');
+      Object.assign(window, { r3conTitleBarControls: titleBarControls });
+    }
     restoreTheme();
     resizer.ariaValueMin = String(SIDE_MIN_PX);
     fitSideToFrame();
