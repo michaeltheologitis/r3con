@@ -53,7 +53,10 @@ DOUBLE_CLICK_ACTION = "AppleActionOnDoubleClick"
 MINIMIZE = "Minimize"
 NO_ACTION = "None"
 FULL_SCREEN = "full-screen"
-CONTROLS_QUERY = "r3conTitleBarControls()"
+# JSON either way: null from a page that isn't R3Con's, as about:blank before it.
+CONTROLS_QUERY = (
+    "typeof r3conTitleBarControls === 'function' ? r3conTitleBarControls() : 'null'"
+)
 
 logger = get_logger("app")
 
@@ -101,8 +104,8 @@ def hide_title_bar(window: toga.Window, webview: toga.WebView) -> None:
             "document.documentElement.classList.toggle("
             f"{json.dumps(FULL_SCREEN)}, {json.dumps(full)})"
         )
-        answer = await webview.evaluate_javascript(CONTROLS_QUERY)
-        band.controls = [tuple(map(float, rect)) for rect in json.loads(answer)]
+        rects = json.loads(await webview.evaluate_javascript(CONTROLS_QUERY))
+        band.controls = None if rects is None else [tuple(map(float, r)) for r in rects]
 
     window.on_resize = refresh
     # Toga runs a coroutine handler as a task, which its type leaves out.

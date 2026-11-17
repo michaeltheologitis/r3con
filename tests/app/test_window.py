@@ -66,9 +66,10 @@ WINDOW_THREAD = "window"
 
 class FakeWebView:
     """Toga's web view: it keeps the scripts it is asked to run, in ``scripts``, and
-    answers the window's query of the page's controls with ``controls``."""
+    answers the window's query of the page's controls with ``controls``, or, for a
+    page that isn't R3Con's, None."""
 
-    controls: tuple[tuple[float, ...], ...] = (SETTINGS, THEME)
+    controls: tuple[tuple[float, ...], ...] | None = (SETTINGS, THEME)
 
     def __init__(self, *, url: str | None = None) -> None:
         self.url = url
@@ -504,6 +505,21 @@ def test_the_band_learns_the_controls_again_on_each_load_and_resize(
     assert shown.on_resize is not None
     asyncio.run(shown.on_resize(shown))
     assert band.controls == list(moved)
+
+
+def test_a_page_that_isnt_r3cons_has_no_controls_so_the_band_takes_no_press(
+    titled: tuple[FakeWindow, FakeWebView],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    shown, webview = titled
+    monkeypatch.setattr(FakeWebView, "controls", None)
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    band = band_of(shown)
+    assert band.controls is None
+    assert band.hitTest_(FakeNSPoint(200, 14)) is None
+    assert caplog.records == []
 
 
 def test_the_page_knows_while_the_window_is_in_full_screen_and_after_a_reload(
