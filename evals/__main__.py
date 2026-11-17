@@ -96,12 +96,12 @@ def evaluate(
     evidence_level: EvidenceLevel | None = None,
 ) -> dict[str, Any] | None:
     """Run each pinned task, or the first ``limit`` of each benchmark, that has no
-    record in ``folder`` yet, with the default config at ``evidence_level`` when given.
-    Once every one has a record, return the results line; a full run also writes it to
-    ``results``, in place of an earlier line of the same run. Else log what is missing
-    and return ``None``."""
+    record in ``folder`` yet, with the default config at ``evidence_level`` when given,
+    and claims off, as the eval judges only the answers. Once every one has a record,
+    return the results line; a full run also writes it to ``results``, in place of an
+    earlier line of the same run. Else log what is missing and return ``None``."""
     earlier = _results_lines(results) if limit is None else []
-    config = load_config(evidence_level=evidence_level)
+    config = load_config(evidence_level=evidence_level, claims=False)
     _as_run(folder)
     header = _start(folder, "label", config.label())
     selection = {name: pinned[name][:limit] for name in BENCHMARKS}

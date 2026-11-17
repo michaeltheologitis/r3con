@@ -97,6 +97,9 @@ ASK_FILES = {
     "reasoning/calls.json",
     "reasoning/result.json",
     "reasoning/transcript.yaml",
+    "claims/calls.json",
+    "claims/result.json",
+    "claims/transcript.yaml",
 }
 
 
@@ -347,11 +350,13 @@ def test_the_answer_cites_the_documents_it_used_in_the_result_and_the_run_folder
         "parse_ids": result.document_ids,
         "documents": [],
         "quotes": [],
+        "claims": [],
     }
     assert result.relevance_provenance == [[], []]
     assert result.parsing_provenance == [[], []]
     folder = json.loads((result.run_dir / "reasoning" / "result.json").read_text())
-    assert (folder["path"], folder["provenance"]) == (reasoning, result.provenance)
+    saved = {**folder["provenance"], "claims": []}
+    assert (folder["path"], saved) == (reasoning, result.provenance)
 
 
 def test_a_reasoning_path_r3con_does_not_have_is_refused_before_any_request(
@@ -822,18 +827,28 @@ def test_an_ask_quotes_the_round_one_summaries_its_answer_reaches_through_citati
         "match": "exact",
         "score": None,
     }
+    # The claims call claims the whole answer, supported by the one quote shown.
+    claim = {
+        "text": "Halloran memo",
+        "start": 0,
+        "end": 13,
+        "documents": [ids[1]],
+        "quotes": [{"document": ids[1], "start": 0, "end": 11}],
+    }
     assert without_trail(asked.provenance) == {
         "summary_ids": [ids[0]],
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
         "quotes": [merrow],
+        "claims": [claim],
     }
     assert asked.provenance == quoted_run.provenance
     assert asked.document_names == quoted_run.document_names == NAMES
+    claims = asked.provenance["claims"]
     folder = json.loads((asked.run_dir / "reasoning" / "result.json").read_text())
-    assert folder["provenance"] == asked.provenance
+    assert {**folder["provenance"], "claims": claims} == asked.provenance
     [finished] = [e for e in events if e["type"] == "reasoning_finished"]
-    assert finished["provenance"] == asked.provenance
+    assert {**finished["provenance"], "claims": claims} == asked.provenance
 
 
 def test_an_ask_over_a_run_that_pruned_every_memo_reads_its_round_1_notes(
@@ -870,6 +885,7 @@ def test_a_run_folder_whose_snippets_have_no_quotes_can_be_asked_and_quotes_noth
         "parse_ids": [],
         "documents": named_documents(asked, 0, 1),
         "quotes": [],
+        "claims": [],
     }
 
 
@@ -937,7 +953,8 @@ def test_trace_gives_the_saved_provenance_and_a_parse_rule_adds_its_documents_on
     cited_run,
 ):
     assert trace(cited_run.run_dir) == trace(cited_run) == cited_run.provenance
-    assert saved_provenance(cited_run.run_dir) == cited_run.provenance
+    saved = saved_provenance(cited_run.run_dir)
+    assert {**saved, "claims": cited_run.provenance["claims"]} == cited_run.provenance
     last = cited_run.document_ids[-1]
     lit = trace(str(cited_run.run_dir), "parses-light-documents")
     trail = cited_run.provenance["trail"]
@@ -1265,9 +1282,11 @@ def test_an_ask_reports_its_own_events_into_its_folder(
         "ask_started",
         "reasoning_started",
         "reasoning_finished",
+        "claims_started",
+        "claims_finished",
         "ask_finished",
     ]
-    started, reasoning, answered, finished = asked
+    started, reasoning, answered, _, claimed, finished = asked
     folder = Path(started["ask_dir"])
     assert folder == answer.run_dir
     assert folder.parent == built.run_dir / "asks"
@@ -1277,6 +1296,7 @@ def test_an_ask_reports_its_own_events_into_its_folder(
         "openai/gpt-6-luna",
     )
     assert answered["answer"] == JOINED
+    assert claimed["claims"] == answer.provenance["claims"] == []
     assert finished["ask_dir"] == started["ask_dir"]
     assert finished["tokens"] == {"prompt": 10, "completion": 20, "total": 30}
     assert events_in(folder) == asked
@@ -2350,7 +2370,8 @@ def test_a_run_that_finished_while_its_resume_waited_is_not_resumed(
         """The run's own lock, held until the run finished."""
 
         def acquire(self, *args, **kwargs):
-            shutil.copy(run_dir / "manifest.json", run_dir / "reasoning/result.json")
+            (run_dir / "claims").mkdir()
+            shutil.copy(run_dir / "manifest.json", run_dir / "claims/result.json")
             return super().acquire(*args, **kwargs)
 
     monkeypatch.setattr("r3con.runs.FileLock", FinishingFirst)

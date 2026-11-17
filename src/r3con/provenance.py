@@ -29,6 +29,11 @@ its citations, the trail under a rule, the documents the trail reaches, and the 
 the trail's ``summarizes`` edges carry. A run builds it under :data:`DEFAULT_RULE`
 (:attr:`r3con.pipeline.Answer.provenance`); :func:`r3con.trace` builds it again from a
 saved run's folder, under any rule.
+
+An answer's provenance adds its ``claims`` (:class:`AnswerProvenance`), which a last
+model call finds after reasoning (:mod:`r3con.stages.claims`). A claim names its quotes
+by their place, the same under any rule, so it finds them among the ``quotes`` of a
+trail under any rule.
 """
 
 from __future__ import annotations
@@ -117,6 +122,35 @@ class Provenance(Citations):
     documents: list[NamedDocument]
     quotes: list[NamedQuote]
     trail: Trail
+
+
+class QuotePlace(TypedDict):
+    """Which quote behind an answer a claim rests on, ``{document, start, end}``: its
+    document's id and where it is there, as its entry of ``quotes`` gives them."""
+
+    document: str
+    start: int
+    end: int
+
+
+class Claim(TypedDict):
+    """A claim the answer makes, ``{text, start, end, documents, quotes}``: one of its
+    sentences, list items or table rows, ``text``, which is ``answer[start:end]``; the
+    ids of the documents whose evidence supports it, in document order; and the quotes
+    that support it, by place, in the order of ``quotes``, none at the document
+    evidence level."""
+
+    text: str
+    start: int
+    end: int
+    documents: list[str]
+    quotes: list[QuotePlace]
+
+
+class AnswerProvenance(Provenance):
+    """An answer's provenance with its ``claims``, in the order of the answer."""
+
+    claims: list[Claim]
 
 
 @dataclass(frozen=True)

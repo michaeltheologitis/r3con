@@ -8,7 +8,7 @@ This project's Notion page (todos, changelog, notes): https://app.notion.com/p/4
 ## Goals and non-goals
 
 - Answer one question over many documents in one call: `r3con.run(question, documents)` or `r3con run`.
-- No model call reads more than one document's text, or a part of it when the request would not fit the model's window; the other documents reach it as relevance notes and, in reasoning, as parsed records.
+- No model call reads more than one document's text, or a part of it when the request would not fit the model's window; the other documents reach it as relevance notes, in reasoning as parsed records, and in the claims call as the sentences the notes quoted.
 - Show the work: by default a run writes every stage's output and model calls to `./logs/<run>/`, because the answer alone rarely says whether to trust it.
 - Not a provider layer: models, connections and credentials are LiteLLM's, and r3con adds no model registry or credential variable of its own.
 - Not the paper's evaluation: benchmarks, baselines and evaluation code live in [r3con-evaluation](https://github.com/michaeltheologitis/r3con-evaluation); `evals/` is only a small regression check.

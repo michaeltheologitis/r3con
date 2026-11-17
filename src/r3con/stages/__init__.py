@@ -6,4 +6,7 @@
   parse into it every document relevance did not prune.
 - :mod:`r3con.stages.reasoning` — stage 3, reasoning: answer over the structured
   parse and the relevant context.
+
+After them, :mod:`r3con.stages.claims` links each claim of the answer to the evidence
+on its trail that supports it.
 """

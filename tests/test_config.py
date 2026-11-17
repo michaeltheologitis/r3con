@@ -14,7 +14,10 @@ FULL = {
     "relevance_rounds": 3,
     "prompts": PROMPTS,
 }
-V1_PROMPTS = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1)"
+V1_PIPELINE = "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v1"
+V1_PROMPTS = f"{V1_PIPELINE},claims=v1)"
+# The pins of every stage but claims, as a config from before claims has them.
+BEFORE_CLAIMS = {stage: v for stage, v in PROMPTS.items() if stage != "claims"}
 DEFAULT_PROMPTS = {
     **PROMPTS,
     "relevance/first-round": "v3",
@@ -25,7 +28,7 @@ DEFAULT_PROMPTS = {
     CODING: "v4",
 }
 DEFAULT_LABEL_PROMPTS = (
-    "prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4)"
+    "prompts=(rel1=v3,rel2=v4,schema=v2,parse=v4,direct=v5,coding=v4,claims=v1)"
 )
 # Relevance prompts with a document-level form, the rest at v1.
 DOCUMENT_FORM_PROMPTS = {
@@ -51,8 +54,9 @@ def test_the_default_config_loads_with_its_shipped_values():
         config.relevance_rounds,
         config.reasoning,
         config.evidence_level,
+        config.claims,
         config.params,
-    ) == (2, "direct", "sentence", {})
+    ) == (2, "direct", "sentence", True, {})
     assert config.prompts == DEFAULT_PROMPTS
     assert "seed" not in config.model_dump()
     assert config.label() == (
@@ -89,11 +93,17 @@ def test_the_default_config_loads_with_its_shipped_values():
             "default[model=gpt-6-luna,rounds=2,reasoning=direct,evidence=document,",
         ),
         (
+            {"claims": False},
+            {"claims": False},
+            "default[model=gpt-6-luna,rounds=2,reasoning=direct,prompts=(",
+        ),
+        (
             {
                 "model": None,
                 "relevance_rounds": None,
                 "reasoning": None,
                 "evidence_level": None,
+                "claims": None,
                 "params": None,
             },
             {},
@@ -130,7 +140,7 @@ def test_the_label_is_every_axis_of_the_resolved_identity(configs, tmp_path):
     )
     assert load_config("exp2").label() == (
         "exp2[model=gpt-6-luna,rounds=3,reasoning=coding,"
-        "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v9)]"
+        "prompts=(rel1=v1,rel2=v1,schema=v1,parse=v1,direct=v1,coding=v9,claims=v1)]"
     )
 
 
@@ -145,7 +155,53 @@ def test_the_evidence_level_set_in_a_config_is_in_the_label_only_when_document(
     assert (config.evidence_level, config.overrides) == (level, {})
     assert config.label() == (
         f"exp[model=gpt-6-luna,rounds=3,reasoning=direct,{tag}"
-        "prompts=(rel1=v3,rel2=v4,schema=v1,parse=v1,direct=v1,coding=v1)]"
+        "prompts=(rel1=v3,rel2=v4,schema=v1,parse=v1,direct=v1,coding=v1,claims=v1)]"
+    )
+
+
+# Claims off read no claims prompt, so their output, and their label, is as before.
+@pytest.mark.parametrize(
+    ("claims", "prompts"), [(True, V1_PROMPTS), (False, f"{V1_PIPELINE})")]
+)
+def test_claims_set_in_a_config_label_it_by_the_prompts_they_read(
+    configs, claims, prompts
+):
+    configs(exp={**FULL, "claims": claims}, pre={**FULL, "prompts": BEFORE_CLAIMS})
+    config = load_config("exp")
+    assert (config.claims, config.overrides) == (claims, {})
+    assert (
+        config.label() == f"exp[model=gpt-6-luna,rounds=3,reasoning=direct,{prompts}]"
+    )
+    before = load_config("pre").label().removeprefix("pre")
+    assert (config.label().removeprefix("exp") == before) is not claims
+
+
+@pytest.mark.parametrize(
+    ("fields", "claims"),
+    [
+        ({"prompts": PROMPTS}, True),
+        ({"prompts": BEFORE_CLAIMS}, False),
+        ({"prompts": BEFORE_CLAIMS, "claims": True}, True),
+        ({"prompts": PROMPTS, "claims": False}, False),
+    ],
+    ids=["pinned", "before-claims", "set-on", "set-off"],
+)
+def test_claims_left_out_are_on_only_where_the_claims_prompt_is_pinned(fields, claims):
+    assert RunConfig.model_validate({"model": "openai/m", **fields}).claims is claims
+
+
+def test_a_config_from_before_claims_loads_with_them_off(configs):
+    configs(pre={**FULL, "prompts": BEFORE_CLAIMS})
+    config = load_config("pre")
+    assert (config.claims, config.prompt_stages) == (False, PROMPT_STAGES[:-1])
+
+
+def test_a_config_with_claims_on_needs_the_claims_prompt(configs):
+    configs(on={**FULL, "claims": True, "prompts": BEFORE_CLAIMS})
+    with pytest.raises(ValueError) as refused:
+        load_config("on")
+    assert str(refused.value) == (
+        "config 'on' is missing prompt versions for stage(s): ['claims']"
     )
 
 
@@ -163,7 +219,8 @@ def test_params_are_part_of_the_identity_only_when_set(configs):
 
 NO_MODEL = "config 'bad': `model` is empty or missing."
 MISSING_PROMPTS = "config 'bad' is missing prompt versions for stage(s): "
-NO_PROMPTS = f"{MISSING_PROMPTS}{list(PROMPT_STAGES)}"
+# A config that pins no claims prompt makes no claims (RunConfig.claims).
+NO_PROMPTS = f"{MISSING_PROMPTS}{list(PROMPT_STAGES[:-1])}"
 
 
 @pytest.mark.parametrize(
@@ -176,7 +233,7 @@ NO_PROMPTS = f"{MISSING_PROMPTS}{list(PROMPT_STAGES)}"
         ({"model": "openai/m", "prompts": {}}, NO_PROMPTS),
         (
             {**FULL, "prompts": {CODING: "v1"}},
-            f"{MISSING_PROMPTS}{list(PROMPT_STAGES[:-1])}",
+            f"{MISSING_PROMPTS}{[s for s in PROMPT_STAGES[:-1] if s != CODING]}",
         ),
     ],
     ids=[
@@ -203,8 +260,8 @@ def test_a_config_without_a_model_loads_when_the_model_is_overridden(configs):
 
 THE_STAGES = (
     "Input should be 'relevance/first-round', 'relevance/later-rounds', "
-    "'structuring/schema', 'structuring/parsing', 'reasoning/direct' or "
-    "'reasoning/coding'"
+    "'structuring/schema', 'structuring/parsing', 'reasoning/direct', "
+    "'reasoning/coding' or 'claims'"
 )
 
 
@@ -244,6 +301,11 @@ BAD_SETTINGS = [
     ("relevance_rounds", -1, "Input should be greater than or equal to 0"),
     ("reasoning", "Direct", "Input should be 'direct' or 'coding'"),
     ("evidence_level", "paragraph", "Input should be 'sentence' or 'document'"),
+    (
+        "claims",
+        "sometimes",
+        "Input should be a valid boolean, unable to interpret input",
+    ),
     ("model", 5, "Input should be a valid string"),
     ("model", "", "String should have at least 1 character"),
 ]
@@ -378,6 +440,40 @@ def test_a_document_level_config_pinning_a_prompt_without_that_form_is_refused(
         "which has no document-level form: pin a version that has one, or run at the "
         "sentence level."
     )
+
+
+def unrenderable_claims(configs, tmp_path, *, claims: bool) -> None:
+    """Writes configs ``missing``, pinning a claims prompt with no file, and
+    ``levelless``, document-level, pinning one with no document-level form."""
+    v2 = tmp_path / "prompts" / "claims" / "v2.yaml"
+    v2.parent.mkdir(parents=True)
+    v2.write_text("instructions: |-\n  No level.\n")
+    document = {**FULL, "evidence_level": "document", "claims": claims}
+    configs(
+        missing={**FULL, "claims": claims, "prompts": {**PROMPTS, "claims": "v9"}},
+        levelless={**document, "prompts": {**DOCUMENT_FORM_PROMPTS, "claims": "v2"}},
+    )
+
+
+def test_a_config_with_claims_on_refuses_a_claims_prompt_it_cannot_render(
+    configs, tmp_path
+):
+    unrenderable_claims(configs, tmp_path, claims=True)
+    with pytest.raises(FileNotFoundError, match="'claims' version 'v9'"):
+        load_config("missing")
+    with pytest.raises(ValueError) as refused:
+        load_config("levelless")
+    assert str(refused.value) == (
+        "this run is document-level, but config 'levelless' pins claims v2, which "
+        "has no document-level form: pin a version that has one, or run at the "
+        "sentence level."
+    )
+
+
+def test_a_config_with_claims_off_leaves_its_claims_prompt_unchecked(configs, tmp_path):
+    unrenderable_claims(configs, tmp_path, claims=False)
+    assert not load_config("missing").claims
+    assert not load_config("levelless").claims
 
 
 def test_an_unknown_config_is_refused_by_name():

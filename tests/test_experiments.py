@@ -19,7 +19,13 @@ QUESTION = (
 # registry grown to 40,000 characters is refused whole at 24,000, and its halves (about
 # 20,000) at 12,000; the model's own mapped window never splits these sizes.
 LIMITS = {1: None, 2: 24_000, 4: 12_000}
-STAGES = ("relevance", "structuring/schema", "structuring/parsing", "reasoning")
+STAGES = (
+    "relevance",
+    "structuring/schema",
+    "structuring/parsing",
+    "reasoning",
+    "claims",
+)
 
 pytestmark = [
     pytest.mark.live,
