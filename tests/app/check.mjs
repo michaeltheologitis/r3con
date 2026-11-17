@@ -8211,6 +8211,9 @@ async function liveSaveDialog(url, server) {
 const TITLE_BAR = 'titlebar=hidden';
 const TITLE_BAR_PX = 28;
 const TRAFFIC_LIGHTS_PX = 70;
+// What the window may measure where macOS draws larger, lower traffic lights.
+const MEASURED_CENTRE_PX = 17;
+const MEASURED_INSET_PX = 86;
 const GUTTER_PX = 16;
 // The class the window puts on the page's root while it is in full screen, which hides the traffic lights.
 const FULL_SCREEN = 'full-screen';
@@ -8225,6 +8228,7 @@ function topRows() {
     status: Boolean(document.getElementById('run-status').textContent) && status.width > 1,
     actions: [settings.right, theme.right],
     centred,
+    middles: [brand, status, settings, theme].map((r) => (r.top + r.bottom) / 2),
     below: { frame: [frame.left, frame.width, frame.bottom], tabRow: [tabRow.height, tabRow.top - frame.top], sideTabs: [sideTabs.left, sideTabs.height] },
     frameTop: frame.top,
   };
@@ -8252,6 +8256,16 @@ async function liveTitleBar(url) {
     check('live', rowName, kept, JSON.stringify(row));
     const below = isDeepStrictEqual(row.below, browser?.below) && row.frameTop === TITLE_BAR_PX;
     check('live', 'in the Mac app, the tab row and all below it are as in a browser, only nearer the top', below, JSON.stringify({ row: row.below, browser: browser?.below }));
+
+    const lights = { '--titlebar-center': MEASURED_CENTRE_PX, '--titlebar-inset': MEASURED_INSET_PX };
+    await page.evaluate((values) => Object.entries(values).forEach(([name, px]) => document.documentElement.style.setProperty(name, `${px}px`)), lights);
+    const measured = await page.evaluate(topRows);
+    await page.evaluate((names) => names.forEach((name) => document.documentElement.style.removeProperty(name)), Object.keys(lights));
+    const onLine = isDeepStrictEqual(measured.top, [0, 2 * MEASURED_CENTRE_PX]) && measured.middles.every((y) => Math.abs(y - MEASURED_CENTRE_PX) < 1);
+    const measuredName = "with the window's measure of its traffic lights, the top row's text and controls centre on their line, and its brand starts past them";
+    check('live', measuredName, onLine && measured.brandLeft === MEASURED_INSET_PX, JSON.stringify(measured));
+    const defaults = await page.evaluate(topRows);
+    check('live', 'without it, the top row keeps the default title bar and inset', isDeepStrictEqual(defaults.top, [0, TITLE_BAR_PX]) && defaults.brandLeft === TRAFFIC_LIGHTS_PX, JSON.stringify(defaults));
 
     const answers = [];
     for (let i = 0; i < 2; i += 1) {

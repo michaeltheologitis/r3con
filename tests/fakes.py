@@ -675,21 +675,32 @@ class FakeNSPoint(NamedTuple):
     y: float
 
 
-class FakeNSRect(NamedTuple):
-    """rubicon.objc's ``NSMakeRect``, and what it makes."""
+class FakeNSSize(NamedTuple):
+    """rubicon.objc's ``NSSize``."""
 
-    x: float
-    y: float
     width: float
     height: float
 
 
+class FakeNSRect(NamedTuple):
+    """rubicon.objc's ``NSRect``."""
+
+    origin: FakeNSPoint
+    size: FakeNSSize
+
+
+def fake_ns_make_rect(x: float, y: float, width: float, height: float) -> FakeNSRect:
+    """rubicon.objc's ``NSMakeRect``."""
+    return FakeNSRect(FakeNSPoint(x, y), FakeNSSize(width, height))
+
+
 class FakeNSView:
-    """AppKit's NSView, for a class defined on it: ``alloc().init()`` makes one, in no
-    view or window until a view adds it."""
+    """AppKit's NSView, for a class defined on it: ``alloc().init()`` makes one, with
+    no size, in no view or window until a view adds it."""
 
     superview: Any = None
     window: Any = None
+    frame = fake_ns_make_rect(0, 0, 0, 0)
 
     @classmethod
     def alloc(cls) -> Self:

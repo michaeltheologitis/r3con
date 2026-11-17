@@ -28,8 +28,8 @@ from tests.fakes import (
     FakeKeyring,
     FakeLLM,
     FakeNSPoint,
-    FakeNSRect,
     FakeObjC,
+    fake_ns_make_rect,
 )
 
 pytestmark = [pytest.mark.enable_socket, pytest.mark.allow_hosts(["127.0.0.1"])]
@@ -52,6 +52,10 @@ NS_VIEW_MAX_Y_MARGIN = 1 << 5
 TOGGLE_FULL_SCREEN = "document.documentElement.classList.toggle"
 # The title bar's height, and where the page says its top row's controls are.
 TITLE_BAR_PX = 28
+# AppKit's traffic lights, close to zoom, by their x in a title bar of TITLE_BAR_PX: 14
+# points wide and 16 high, centred in it.
+NS_WINDOW_BUTTONS = {0: 7, 1: 27, 2: 47}
+NS_WINDOW_BUTTON_SIZE = (14, 16)
 SETTINGS = (1000.0, 3.5, 1065.0, 24.5)
 THEME = (1081.0, 3.5, 1186.0, 24.5)
 HELD_RUN = {
@@ -85,7 +89,8 @@ class FakeWebView:
 
 
 class FakeContentView:
-    """Toga's view that fills the window: each view it adds is in ``subviews``."""
+    """Toga's view that fills the window, flipped: each view it adds is in
+    ``subviews``, and a window button's rect in it is the button's ``in_content``."""
 
     def __init__(self, native: "FakeNSWindow") -> None:
         self.native = native
@@ -96,17 +101,32 @@ class FakeContentView:
         view.superview, view.window = self, self.native
         self.subviews.append(view)
 
+    def convertRect(self, rect: object, *, fromView: Any) -> Any:
+        return fromView.in_content
+
 
 class FakeNSWindow:
-    """AppKit's window under Toga's, its title bar shown: it keeps each drag, by its
-    event, and each zoom and minimize it is asked for, in ``moves``."""
+    """AppKit's window under Toga's, its title bar shown, with its traffic lights,
+    ``buttons``: it keeps each drag, by its event, and each zoom and minimize it is
+    asked for, in ``moves``."""
 
     def __init__(self) -> None:
         self.styleMask = TOGA_STYLE_MASK
         self.titlebarAppearsTransparent = False
         self.titleVisibility = NS_WINDOW_TITLE_VISIBLE
         self.contentView = FakeContentView(self)
+        top = (TITLE_BAR_PX - NS_WINDOW_BUTTON_SIZE[1]) / 2
+        self.buttons = {
+            kind: SimpleNamespace(
+                bounds=None,
+                in_content=fake_ns_make_rect(x, top, *NS_WINDOW_BUTTON_SIZE),
+            )
+            for kind, x in NS_WINDOW_BUTTONS.items()
+        }
         self.moves: list[tuple[str, object]] = []
+
+    def standardWindowButton(self, kind: int) -> Any:
+        return self.buttons.get(kind)
 
     def performWindowDragWithEvent(self, event: object) -> None:
         self.moves.append(("drag", event))
@@ -423,9 +443,48 @@ def test_once_its_page_loads_the_window_lays_one_band_over_its_top_row(
     assert webview.on_webview_load is not None
     asyncio.run(webview.on_webview_load(webview))
     band = band_of(shown)
-    assert band.frame == FakeNSRect(0, 0, TOGA_WINDOW_SIZE[0], TITLE_BAR_PX)
+    assert band.frame == fake_ns_make_rect(0, 0, TOGA_WINDOW_SIZE[0], TITLE_BAR_PX)
     assert band.autoresizingMask == NS_VIEW_WIDTH_SIZABLE | NS_VIEW_MAX_Y_MARGIN
     assert band.acceptsFirstMouse_(None)
+
+
+def page_properties(webview: FakeWebView) -> list[str]:
+    return [script for script in webview.scripts if "setProperty" in script]
+
+
+def test_the_page_learns_where_the_traffic_lights_are_and_the_band_their_height(
+    objc: FakeObjC,
+):
+    shown, webview = FakeWindow(), FakeWebView()
+    # Larger and lower than in a title bar of TITLE_BAR_PX, as some macOS draws them.
+    for kind, x in {0: 10, 1: 34, 2: 58}.items():
+        shown._impl.native.buttons[kind].in_content = fake_ns_make_rect(x, 9, 16, 16)
+    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    set_property = "document.documentElement.style.setProperty"
+    centre = f'{set_property}("--titlebar-center", "17.0px")'
+    inset = f'{set_property}("--titlebar-inset", "86px")'
+    assert page_properties(webview) == [f"{centre};{inset}"]
+    assert band_of(shown).frame == fake_ns_make_rect(0, 0, TOGA_WINDOW_SIZE[0], 34)
+
+
+@pytest.mark.parametrize(
+    "full_screen", [False, True], ids=["no buttons", "full screen"]
+)
+def test_without_the_traffic_lights_to_read_the_page_and_band_keep_their_defaults(
+    objc: FakeObjC, full_screen: bool
+):
+    shown, webview = FakeWindow(), FakeWebView()
+    if full_screen:
+        shown.state = WindowState.FULLSCREEN
+    else:
+        shown._impl.native.buttons.clear()
+    window.hide_title_bar(shown, webview)  # pyright: ignore[reportArgumentType]
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    assert page_properties(webview) == []
+    assert band_of(shown).frame.size.height == TITLE_BAR_PX
 
 
 @pytest.mark.parametrize(
@@ -532,7 +591,7 @@ def test_the_page_knows_while_the_window_is_in_full_screen_and_after_a_reload(
         asyncio.run(shown.on_resize(shown))
     shown.state = WindowState.FULLSCREEN
     asyncio.run(webview.on_webview_load(webview))
-    toggles = [script for script in webview.scripts if script != window.CONTROLS_QUERY]
+    toggles = [script for script in webview.scripts if TOGGLE_FULL_SCREEN in script]
     assert toggles == [
         f'{TOGGLE_FULL_SCREEN}("full-screen", false)',
         f'{TOGGLE_FULL_SCREEN}("full-screen", true)',

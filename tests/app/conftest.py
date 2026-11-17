@@ -5,7 +5,7 @@ from types import ModuleType
 import pytest
 
 from r3con.app.server import KEY_VARIABLES
-from tests.fakes import FakeNSPoint, FakeNSRect, FakeObjC
+from tests.fakes import FakeNSPoint, FakeObjC, fake_ns_make_rect
 
 
 # In place of the root's: no fake model or recorded resend waits, as the server's
@@ -26,7 +26,7 @@ def objc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeObjC:
         ObjCClass=runtime.ObjCClass,
         ObjCInstance=object,
         NSPoint=FakeNSPoint,
-        NSMakeRect=FakeNSRect,
+        NSMakeRect=fake_ns_make_rect,
         objc_method=lambda method: method,
         objc_property=lambda *types, **options: None,
     )

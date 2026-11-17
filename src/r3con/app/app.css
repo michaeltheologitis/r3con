@@ -128,12 +128,12 @@ p { margin: 0; }
   .topbar { flex-wrap: wrap; row-gap: 0.1em; }
   .status { order: 3; flex-basis: 100%; }
 }
-/* The Mac app: the top row is the window's title bar, its traffic lights at the row's left. */
+/* The Mac app: the top row is the window's title bar, centred on its traffic lights, which the window measures. */
 :root.titlebar {
-  --title-bar-height: 28px;
-  --traffic-lights-width: 70px;
+  --titlebar-center: 14px;
+  --titlebar-inset: 70px;
 }
-.titlebar .topbar { padding: 0 0 0 calc(var(--traffic-lights-width) - var(--gutter)); line-height: var(--title-bar-height); }
+.titlebar .topbar { padding: 0 0 0 calc(var(--titlebar-inset) - var(--gutter)); line-height: calc(2 * var(--titlebar-center)); }
 .titlebar.full-screen .topbar { padding-left: 0; }
 /* One box for both its labels, so the controls stay where the window last heard they are. */
 .titlebar #theme-btn { min-width: 13ch; }

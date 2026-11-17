@@ -39,8 +39,14 @@ WINDOW_SIZE = (1280, 820)
 PORT = 47313
 SAVE_DIALOG_TITLE = "Save this tab"
 TITLE_BAR_HIDDEN = "titlebar=hidden"
-# The default title bar's height on macOS 11 and later, which the page's top row takes.
+# The default title bar's height on macOS 11 and later, until its buttons are read.
 TITLE_BAR_HEIGHT = 28
+# AppKit's NSWindowCloseButton, NSWindowMiniaturizeButton and NSWindowZoomButton.
+CLOSE_BUTTON = 0
+MINIATURIZE_BUTTON = 1
+ZOOM_BUTTON = 2
+# Between the zoom button and the page's brand.
+TRAFFIC_LIGHTS_GAP = 12
 # AppKit's NSWindowStyleMaskFullSizeContentView and NSWindowTitleHidden.
 FULL_SIZE_CONTENT_VIEW = 1 << 15
 TITLE_HIDDEN = 1
@@ -92,14 +98,20 @@ def hide_title_bar(window: toga.Window, webview: toga.WebView) -> None:
     native = window._impl.native
     band = _drag_band().alloc().init()
     band.autoresizingMask = WIDTH_SIZABLE | MAX_Y_MARGIN
+    height = TITLE_BAR_HEIGHT
 
     async def refresh(widget: object, **kwargs: Any) -> None:
+        nonlocal height
+        full = window.state == WindowState.FULLSCREEN
+        lights = None if full else _traffic_lights(native)
+        if lights is not None:
+            centre, inset = lights
+            height = 2 * centre
+            webview.evaluate_javascript(_root_properties(centre, inset))
+        band.frame = NSMakeRect(0, 0, native.contentView.frame.size.width, height)
         # Once Toga has put the web view in the window: over it.
         if band.superview is None:
-            width = native.contentView.frame.size.width
-            band.frame = NSMakeRect(0, 0, width, TITLE_BAR_HEIGHT)
             native.contentView.addSubview(band)
-        full = window.state == WindowState.FULLSCREEN
         webview.evaluate_javascript(
             "document.documentElement.classList.toggle("
             f"{json.dumps(FULL_SCREEN)}, {json.dumps(full)})"
@@ -136,7 +148,8 @@ def _drag_band() -> Any:
 
         @objc_method
         def hitTest_(self, point: NSPoint) -> ObjCInstance:
-            return self if _in_drag_area(self.controls, point.x, point.y) else None
+            height = self.frame.size.height
+            return self if _in_drag_area(self.controls, height, point) else None
 
         @objc_method
         def mouseDown_(self, event) -> None:
@@ -145,13 +158,40 @@ def _drag_band() -> Any:
     return R3ConDragBand
 
 
-def _in_drag_area(controls: list[tuple[float, ...]] | None, x: float, y: float) -> bool:
-    """Whether the page's point ``x``, ``y`` is on its top row, off its ``controls``'
-    rects; with none known yet, nowhere is."""
-    if controls is None or not 0 <= y < TITLE_BAR_HEIGHT:
+def _traffic_lights(native: Any) -> tuple[float, float] | None:
+    """The NSWindow ``native``'s traffic lights' centre line and the inset past them,
+    in its content view's top-left points, or None where AppKit gives no buttons."""
+    content = native.contentView
+    kinds = (CLOSE_BUTTON, MINIATURIZE_BUTTON, ZOOM_BUTTON)
+    buttons = [native.standardWindowButton(kind) for kind in kinds]
+    if any(button is None for button in buttons):
+        return None
+    frames = [content.convertRect(button.bounds, fromView=button) for button in buttons]
+    zoom = frames[-1]
+    right = max(frame.origin.x + frame.size.width for frame in frames)
+    return zoom.origin.y + zoom.size.height / 2, right + TRAFFIC_LIGHTS_GAP
+
+
+def _root_properties(centre: float, inset: float) -> str:
+    """The script that hands the page the traffic lights' ``centre`` and ``inset``."""
+    values = {"--titlebar-center": centre, "--titlebar-inset": inset}
+    return ";".join(
+        "document.documentElement.style.setProperty("
+        f"{json.dumps(name)}, {json.dumps(f'{px}px')})"
+        for name, px in values.items()
+    )
+
+
+def _in_drag_area(
+    controls: list[tuple[float, ...]] | None, height: float, point: Any
+) -> bool:
+    """Whether the page's ``point`` is on its top row, ``height`` tall, off its
+    ``controls``' rects; with none known yet, nowhere is."""
+    if controls is None or not 0 <= point.y < height:
         return False
     return not any(
-        left <= x < right and top <= y < bottom for left, top, right, bottom in controls
+        left <= point.x < right and top <= point.y < bottom
+        for left, top, right, bottom in controls
     )
 
 
