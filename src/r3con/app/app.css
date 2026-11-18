@@ -353,7 +353,6 @@ p { margin: 0; }
 }
 .settings-body { display: flex; flex-direction: column; gap: 0.9em; }
 .save-note { inset: auto; margin: 0; max-width: calc(100vw - 2 * var(--gutter)); color: var(--fg); }
-/* A linked sentence's evidence, under the sentence. */
 .claim-note {
   inset: auto;
   margin: 0;

@@ -83,9 +83,9 @@
    */
   /** @typedef {TextRange & { document: number }} PlacedQuote A claim's quote in document `document`, by index. */
   /**
-   * Claim k of an answer, one with evidence, as the page draws it: where it is in the answer, and its quotes, in UTF-16
-   * code units, and its documents, by index.
-   * @typedef {TextRange & { k: number, documents: number[], quotes: PlacedQuote[] }} Link
+   * Claim k of an answer, one with evidence, as the page draws it: where it is in the answer, its quotes and their
+   * sentences, those that overlap joined, in UTF-16 code units, and its documents, by index.
+   * @typedef {TextRange & { k: number, documents: number[], quotes: PlacedQuote[], sentences: PlacedQuote[] }} Link
    */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
   /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
@@ -209,8 +209,9 @@
    * @property {Set<string>} placed the nodes the user dragged since the panel was last laid out
    */
   /**
-   * @typedef {object} SavedTabV1
-   * @property {1} version
+   * A saved tab, of either version: version 2 adds each answer's claims, null for one never linked.
+   * @typedef {object} SavedTab
+   * @property {1 | 2} version
    * @property {{ name: string, size: number, folder?: string }[]} files
    * @property {string} texts the files' texts, a JSON list in their order, gzipped, in base64
    * @property {[string, boolean][]} folders
@@ -268,7 +269,7 @@
    * @typedef {Record<string, KeyState | Server[] | null>} KeyStatus
    */
   /** @typedef {{ model: string, endpoint?: string }} SavedModel A model saved to the menu, and its server, if any. */
-  /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean, name?: string }} LineOptions A line's node is its link; an answer's names its mark. */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
   /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
@@ -1751,7 +1752,6 @@
   };
   const MARK = '❀';
   const LINKING = 'linking sentences…';
-  const ANSWER_MARK_NAME = 'show the answer in the run panel';
   // How long a sentence stays lit after the pointer leaves it, so that crossing to the next one doesn't flicker.
   const CLAIM_LEAVE_MS = 80;
   const SPIN_FRAMES = ['·', '✾', '✿', '❀', '❁', '❀', '✿', '✾'];
@@ -1806,6 +1806,9 @@
   const WHEEL_LINE_PX = 16;
   const DRAG_THRESHOLD = 4;
   const POPOVER_GAP = 12;
+  // A sentence's popup sits this far from it, and is never shorter than this.
+  const CLAIM_NOTE_GAP = POPOVER_GAP / 2;
+  const CLAIM_NOTE_MIN_PX = 120;
   const POPOVER_MARGIN = 10;
   const JUMP_MARGIN = 40;
   const GLIDE_MS = 350;
@@ -1995,7 +1998,7 @@
   const DROP_ADDS = 'drop to add files';
   const DROP_LOCKED = 'this tab has run · press + for a new tab';
   const SAVED_TAB_ID = 'r3con-tab';
-  const SAVED_VERSION = 1;
+  const SAVED_VERSION = 2;
   // The page's files as r3con app serves them, which a saved tab's file holds inline, and where it links the last two.
   const PAGE_FILES = ['/', '/app.css', '/app.js'];
   const PAGE_CHARSET = '<meta charset="utf-8">';
@@ -2768,6 +2771,9 @@
   }
 
   /** @param {{ question: string, model: string }} answer */
+  const answerName = ({ question, model }) => `answer to ${question} · ${model}`;
+
+  /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
   // An answer and a parse cite contextRound's summaries, and a summary of round k, those of round k - 1.
@@ -2810,19 +2816,25 @@
   function trailOf(run, answerId) {
     const trail = answerAt(run, answerId).provenance?.trail;
     if (!trail) return null;
-    const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
     /** @type {Trail} */
     const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
-    for (const id of named.values()) if (id) drawn.nodes.add(id);
-    for (const [from, to, kind] of trail.edges) {
-      const [pageFrom, pageTo] = [named.get(from), named.get(to)];
-      if (!pageFrom || !pageTo) continue;
-      drawn.edges.add(`${pageTo}>${pageFrom}`);
-      if (kind === 'cites' && to.startsWith('summary:') && !drawn.citedBy.has(pageTo)) drawn.citedBy.set(pageTo, pageFrom);
-      if (kind === 'summarizes') drawn.quoting.add(from);
+    for (const id of trail.nodes.map((node) => pageNode(run, answerId, node))) if (id) drawn.nodes.add(id);
+    for (const { edge: [source, target, kind], from, to, key } of pageEdges(run, answerId, trail.edges)) {
+      drawn.edges.add(key);
+      if (kind === 'cites' && target.startsWith('summary:') && !drawn.citedBy.has(to)) drawn.citedBy.set(to, from);
+      if (kind === 'summarizes') drawn.quoting.add(source);
     }
     drawn.quoted = run.docs.map((_, d) => quotedIn(run, drawn.quoting, d));
     return drawn.edges.size ? drawn : null;
+  }
+
+  // The edges of an answer's trail whose ends the page draws, each with its ends as the page names them and its line's key.
+  /** @param {Run} run @param {string} answerId @param {Iterable<TrailEdge>} edges */
+  function pageEdges(run, answerId, edges) {
+    return [...edges].flatMap((edge) => {
+      const [from, to] = [pageNode(run, answerId, edge[0]), pageNode(run, answerId, edge[1])];
+      return from && to ? [{ edge, from, to, key: `${to}>${from}` }] : [];
+    });
   }
 
   // The lit answer's trail is the tab's, unless its panel was cleared since.
@@ -2837,6 +2849,12 @@
     );
     const cuts = cutsOf(quotes);
     const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
+    return { spans: spans.filter((span) => span.by.length), sentences: sentencesOf(quotes) };
+  }
+
+  // `quotes` as sentences, in order: quotes that overlap join, quotes that only meet don't.
+  /** @param {TextRange[]} quotes */
+  function sentencesOf(quotes) {
     /** @type {TextRange[]} */
     const sentences = [];
     for (const { start, end } of quotes.toSorted((a, b) => a.start - b.start)) {
@@ -2844,7 +2862,7 @@
       if (last && start < last.end) last.end = Math.max(last.end, end);
       else sentences.push({ start, end });
     }
-    return { spans: spans.filter((span) => span.by.length), sentences };
+    return sentences;
   }
 
   /** @param {Trail} trail */
@@ -3035,10 +3053,7 @@
   /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
   function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
-    if (node.kind === 'answer') {
-      const { question, model } = answerAt(runTab(tab).run, node.id);
-      return `answer to ${question} · ${model}${stopped}`;
-    }
+    if (node.kind === 'answer') return `${answerName(answerAt(runTab(tab).run, node.id))}${stopped}`;
     const what = isRound(node.kind) ? `${roundName(node.kind)} relevance snippet` : ARIA_KIND[node.kind];
     if (!node.file) return `${nodeName(tab, node.id)}, ${what}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}`;
@@ -3448,7 +3463,6 @@
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', nodes.has(id));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
-      if (n.fold?.folder && n.kind === 'doc') labelFold(tab, n);
     }
     for (const e of tab.edges.values()) {
       const on = edges.has(e.key);
@@ -3460,14 +3474,10 @@
     lightClaim(tab);
   }
 
-  // A claim's path on its answer's trail: from the answer, the shortest ways to the summaries nearest it that carry
-  // each piece of its evidence, and on to their documents. A quote is carried by the summaries that quote it, the
-  // answer's quotes being its summaries' own; a document, at the document level, by those that summarize it.
-  /** @param {Run} run @param {string} answerId @param {Link} link @returns {Pick<Trail, 'nodes' | 'edges'>} */
-  function claimPath(run, answerId, link) {
-    const { edges } = /** @type {Provenance} */ (answerAt(run, answerId).provenance).trail;
-    // Breadth first from the answer: how far each node is, and the edges into it on a shortest way there.
-    const far = new Map([[TRAIL_ANSWER, 0]]);
+  // Breadth first from the answer: how many steps each node is from it, and the edges into it on a shortest way there.
+  /** @param {TrailEdge[]} edges */
+  function shortestWays(edges) {
+    const steps = new Map([[TRAIL_ANSWER, 0]]);
     /** @type {Map<string, TrailEdge[]>} */
     const into = new Map();
     for (let reached = [TRAIL_ANSWER]; reached.length; ) {
@@ -3475,45 +3485,51 @@
       const next = [];
       for (const edge of edges.filter(([from]) => reached.includes(from))) {
         const [from, to] = edge;
-        const steps = /** @type {number} */ (far.get(from)) + 1;
-        if (!far.has(to)) {
-          far.set(to, steps);
+        const step = /** @type {number} */ (steps.get(from)) + 1;
+        if (!steps.has(to)) {
+          steps.set(to, step);
           next.push(to);
         }
-        if (far.get(to) === steps) into.set(to, [...(into.get(to) ?? []), edge]);
+        if (steps.get(to) === step) into.set(to, [...(into.get(to) ?? []), edge]);
       }
       reached = next;
     }
+    return { steps, into };
+  }
+
+  /** @type {WeakMap<Link, Pick<Trail, 'nodes' | 'edges'>>} */
+  const claimPaths = new WeakMap();
+
+  // A claim's path: every shortest way from the answer to the summaries nearest it carrying its evidence, and their documents.
+  /** @param {Run} run @param {string} answerId @param {Link} link @returns {Pick<Trail, 'nodes' | 'edges'>} */
+  function claimPath(run, answerId, link) {
+    const kept = claimPaths.get(link);
+    if (kept) return kept;
+    const { edges } = /** @type {Provenance} */ (answerAt(run, answerId).provenance).trail;
+    const { steps, into } = shortestWays(edges);
     /** @param {PlacedQuote} q */
-    const quoting = (q) =>
-      run.rounds.flatMap((summaries) => summaries[q.document]?.quotes ?? []).filter((r) => r.start === q.start && r.end === q.end).map((r) => r.summary);
+    const quoting = (q) => run.rounds.flatMap((summaries) => summaries[q.document]?.quotes ?? []).filter((r) => r.start === q.start && r.end === q.end).map((r) => r.summary);
     /** @param {number} d */
     const summarizing = (d) => edges.filter(([, to, kind]) => kind === 'summarizes' && to === documentNode(run.ids[d])).map(([from]) => from);
     const carriers = link.quotes.length ? link.quotes.map(quoting) : link.documents.map(summarizing);
-    /** @type {Set<TrailEdge>} */
-    const path = new Set();
-    for (const summaries of carriers.map((ids) => ids.filter((id) => far.has(id)))) {
-      const nearest = Math.min(...summaries.map((id) => /** @type {number} */ (far.get(id))));
-      for (const summary of summaries.filter((id) => far.get(id) === nearest)) {
-        for (const edge of edges) if (edge[0] === summary && edge[2] === 'summarizes') path.add(edge);
-        for (const back = [summary]; back.length; ) {
-          for (const edge of into.get(/** @type {string} */ (back.pop())) ?? []) {
-            if (!path.has(edge)) back.push(edge[0]);
-            path.add(edge);
-          }
-        }
+    const nearest = carriers.flatMap((summaries) => {
+      const onTrail = summaries.filter((id) => steps.has(id));
+      const least = Math.min(...onTrail.map((id) => /** @type {number} */ (steps.get(id))));
+      return onTrail.filter((id) => steps.get(id) === least);
+    });
+    const path = new Set(edges.filter(([from, , kind]) => kind === 'summarizes' && nearest.includes(from)));
+    for (const back = [...nearest]; back.length; ) {
+      for (const edge of into.get(/** @type {string} */ (back.pop())) ?? []) {
+        if (!path.has(edge)) back.push(edge[0]);
+        path.add(edge);
       }
     }
-    /** @param {string} node */
-    const named = (node) => pageNode(run, answerId, node);
-    const lines = [...path].flatMap(([from, to]) => {
-      const [pageFrom, pageTo] = [named(from), named(to)];
-      return pageFrom && pageTo ? [[pageFrom, pageTo]] : [];
-    });
-    return { nodes: new Set(lines.flat()), edges: new Set(lines.map(([from, to]) => `${to}>${from}`)) };
+    const lines = pageEdges(run, answerId, path);
+    const drawn = { nodes: new Set(lines.flatMap(({ from, to }) => [from, to])), edges: new Set(lines.map(({ key }) => key)) };
+    claimPaths.set(link, drawn);
+    return drawn;
   }
 
-  // The sentence under the pointer, the one with the keyboard focus, and the one whose evidence is open.
   /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null }} */
   const litClaims = { hovered: null, focused: null, open: null };
 
@@ -3541,7 +3557,7 @@
 
   // How many sentences of document d the panel highlights: the lit sentence's quotes there, else the trail's.
   /** @param {Tab} tab @param {number} d */
-  const highlighted = (tab, d) => (tab.litLink ? tab.litLink.quotes.filter((q) => q.document === d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
+  const highlighted = (tab, d) => (tab.litLink ? tab.litLink.sentences.filter((q) => q.document === d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
   function countSentences(tab, node, sentences) {
@@ -4739,13 +4755,13 @@
   // ---------- chat ----------
 
   /** @param {string} kind @param {Child} text @param {LineOptions} [options] */
-  function line(kind, text, { node = null, glyph = null, dim = false } = {}) {
+  function line(kind, text, { node = null, glyph = null, dim = false, name = '' } = {}) {
     const g = glyph ?? { sub: '⎿', user: '›' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
     // An answer's sentences may link to their evidence, so its line is no button but its mark is; a click anywhere on
     // it but on a linked sentence opens its node all the same.
     if (kind === 'answer' && node) {
-      const mark = h('button', { class: 'btn g answer-mark', type: 'button', 'aria-label': ANSWER_MARK_NAME }, g);
+      const mark = h('button', { class: 'btn g answer-mark', type: 'button', 'aria-label': name }, g);
       return h('div', { class: classes, 'data-node': node }, mark, h('span', { class: 't' }, text));
     }
     return h(
@@ -4794,6 +4810,7 @@
   // Only the shown tab's chat is in view, so its links are to the shown tab's nodes.
   /** @param {MouseEvent} e */
   function onChatClick(e) {
+    if (endsSelecting(e)) return;
     const claim = claimAt(e.target);
     if (claim) return openClaim(claim);
     /** @type {HTMLElement | null} */
@@ -4802,6 +4819,15 @@
     const { node, offer } = link.dataset;
     if (node) jumpTo(node);
     if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
+  }
+
+  // Whether a click on an answer's line, off its mark, is the end of selecting some of its text.
+  /** @param {MouseEvent} e */
+  function endsSelecting(e) {
+    const said = targetOf(e).closest('.line.answer');
+    const selection = getSelection();
+    if (!said || targetOf(e).closest('.answer-mark') || !selection || selection.isCollapsed) return false;
+    return selection.containsNode(said, true);
   }
 
   let nextLog = 0;
@@ -5157,20 +5183,18 @@
     drawAnswer(tab, id);
     const answer = answerOf(tab.run, id);
     const flag = answer.simulated ? narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL)) : null;
-    const said = narr.say('answer', answer.text, { node: id });
+    const said = narr.say('answer', answer.text, { node: id, name: answerName(answer) });
     tab.chatAnswer = flag ?? said;
     const sentences = sentenceList(tab, id);
     if (sentences) said.after(sentences);
     updateComposer();
   }
 
-  // A document's name, which opens its popup, and what is said of it under the name.
   /** @param {LoadedFile} file @param {Child} said */
   function docGroup(file, said) {
     return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name), said);
   }
 
-  // A document's sentences under its name, each opening its popup there.
   /** @param {LoadedFile} file @param {TextRange[]} sentences */
   function quotedGroup(file, sentences) {
     return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))));
@@ -5223,18 +5247,21 @@
       const quotes = all.filter((q) => docIndex(run, q.document) === d);
       quotesInUnits(file.text, quotes).forEach(({ start, end }, i) => placed.set(quotes[i], { document: d, start, end }));
     });
-    const links = quotesInUnits(text, claims).flatMap(({ start, end, documents, quotes }, k) =>
-      documents.length ? [{ k, start, end, documents: docIndices(run, documents), quotes: quotes.flatMap((q) => placed.get(q) ?? []) }] : [],
-    );
+    /** @param {PlacedQuote[]} quotes */
+    const sentences = (quotes) => [...new Set(quotes.map((q) => q.document))].sort((a, b) => a - b).flatMap((d) => sentencesOf(quotes.filter((q) => q.document === d)).map((r) => ({ ...r, document: d })));
+    const links = quotesInUnits(text, claims).flatMap(({ start, end, documents, quotes }, k) => {
+      const own = quotes.flatMap((q) => placed.get(q) ?? []);
+      return documents.length ? [{ k, start, end, documents: docIndices(run, documents), quotes: own, sentences: sentences(own) }] : [];
+    });
     placedLinks.set(claims, links);
     return links;
   }
 
   // What a linked sentence's evidence is: its quotes from its documents, or at the document level the documents.
   /** @param {Link} link */
-  function evidenceLine({ quotes, documents }) {
+  function evidenceLine({ sentences, documents }) {
     const from = plural(documents.length, 'document');
-    return quotes.length ? `${plural(quotes.length, 'quote')} from ${from}` : from;
+    return sentences.length ? `${plural(sentences.length, 'quote')} from ${from}` : from;
   }
 
   // The claims have landed: the linking line goes, and each sentence with evidence becomes a control of its own.
@@ -5263,10 +5290,11 @@
   function claimAt(target) {
     const el = target instanceof Element ? /** @type {HTMLElement | null} */ (target.closest('.claim')) : null;
     const answer = /** @type {HTMLElement | null | undefined} */ (el?.closest('[data-node]'))?.dataset.node;
-    if (!el || !answer || !state.shown.run) return null;
-    const tab = runTab(state.shown);
-    const link = linksOf(tab.run, answerAt(tab.run, answer)).find((l) => l.k === Number(el.dataset.claim));
-    return link ? { tab, answer, link, el } : null;
+    const tab = el && state.tabs.find((t) => t.chat.contains(el));
+    const said = answer && tab?.run ? answerAt(tab.run, answer) : null;
+    if (!el || !answer || !tab?.run || !said) return null;
+    const link = linksOf(tab.run, said).find((l) => l.k === Number(el.dataset.claim));
+    return link ? { tab: runTab(tab), answer, link, el } : null;
   }
 
   /** @param {keyof typeof litClaims} which @param {ClaimRef | null} claim */
@@ -5277,21 +5305,21 @@
     for (const tab of new Set([was?.tab, claim?.tab])) if (tab) lightClaim(tab);
   }
 
-  let claimLeft = 0;
+  let claimLeaveTimer = 0;
 
   /** @param {PointerEvent} e */
   function onClaimOver(e) {
     const claim = claimAt(e.target);
     if (!claim) return;
-    clearTimeout(claimLeft);
+    clearTimeout(claimLeaveTimer);
     setClaim('hovered', claim);
   }
 
   /** @param {PointerEvent} e */
   function onClaimOut(e) {
     if (!claimAt(e.target)) return;
-    clearTimeout(claimLeft);
-    claimLeft = setTimeout(() => setClaim('hovered', null), CLAIM_LEAVE_MS);
+    clearTimeout(claimLeaveTimer);
+    claimLeaveTimer = setTimeout(() => setClaim('hovered', null), CLAIM_LEAVE_MS);
   }
 
   /** @param {FocusEvent} e */
@@ -5308,13 +5336,16 @@
     openClaim(claim);
   }
 
-  // The summary of document d that the claims call was shown: its round-1 summary, or if that is empty its latest.
+  // Document d's summary as the claims call was shown it (r3con.stages.claims._shown_summaries): round 1's notes, each
+  // stripped, or if all are blank the latest round's that are not.
   /** @param {Run} run @param {number} d */
-  const shownSummary = (run, d) => [run.rounds[0], ...run.rounds.slice(1).reverse()].map((summaries) => summaries[d]?.summary).find(Boolean) ?? '';
+  function shownSummary(run, d) {
+    /** @param {Summary | undefined} summary */
+    const notes = (summary) => (summary ? [...(summary.parts?.values() ?? [summary])].map((part) => part.summary.trim()).filter(Boolean) : []);
+    return [run.rounds[0], ...run.rounds.slice(1).reverse()].map((summaries) => notes(summaries[d])).find((said) => said.length)?.join('\n\n') ?? '';
+  }
 
-  // A sentence's evidence in a popup under it: its quotes by document, as the fold under the answer lists its
-  // sentences, or at the document level its documents, each with its summary. Pressing one opens it, and the sentence
-  // and its answer stay lit while the popup is open.
+  // A sentence's evidence in a popup under it, by document: its quotes, or at the document level each one's summary.
   /** @param {ClaimRef} ref */
   function openClaim(ref) {
     const note = $('claim-note');
@@ -5322,25 +5353,34 @@
     const { run } = tab;
     if (run.lit !== ref.answer) lightAnswer(tab, ref.answer);
     /** @param {number} d */
-    const sentences = (d) => link.quotes.filter((q) => q.document === d).sort((a, b) => a.start - b.start);
-    const groups = link.quotes.length
-      ? [...new Set(link.quotes.map((q) => q.document))].sort((a, b) => a - b).map((d) => quotedGroup(run.docs[d], sentences(d)))
+    const sentences = (d) => link.sentences.filter((q) => q.document === d);
+    const groups = link.sentences.length
+      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
       : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
     fill(note, h('div', { class: 'k' }, evidenceLine(link)), groups);
-    note.setAttribute('aria-label', link.quotes.length ? "the sentence's quotes" : "the sentence's documents");
+    note.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
     if (note.matches(':popover-open')) note.hidePopover();
-    note.style.maxHeight = '';
     note.showPopover();
-    // Under the sentence if it fits there, else over it; if neither, on the roomier side, scrolling, never over it.
-    const box = ref.el.getBoundingClientRect();
-    const below = box.bottom + POPOVER_GAP / 2;
-    const room = { below: innerHeight - POPOVER_MARGIN - below, above: box.top - POPOVER_GAP / 2 - POPOVER_MARGIN };
-    const under = note.offsetHeight <= room.below || (note.offsetHeight > room.above && room.below >= room.above);
-    note.style.maxHeight = `${under ? room.below : room.above}px`;
-    note.style.left = `${clamp(box.left, POPOVER_MARGIN, frame.getBoundingClientRect().right - note.offsetWidth)}px`;
-    note.style.top = `${under ? below : box.top - POPOVER_GAP / 2 - note.offsetHeight}px`;
     setClaim('open', ref);
+    placeClaimNote();
     note.focus({ preventScroll: true });
+  }
+
+  // Under its sentence if it fits there, else over it, else on the roomier side, scrolling; always in view.
+  function placeClaimNote() {
+    const note = $('claim-note');
+    const ref = litClaims.open;
+    if (!ref || !note.matches(':popover-open')) return;
+    note.style.maxHeight = '';
+    const box = ref.el.getBoundingClientRect();
+    const below = box.bottom + CLAIM_NOTE_GAP;
+    const above = box.top - CLAIM_NOTE_GAP;
+    const room = { below: innerHeight - POPOVER_MARGIN - below, above: above - POPOVER_MARGIN };
+    const under = note.offsetHeight <= room.below || (note.offsetHeight > room.above && room.below >= room.above);
+    note.style.maxHeight = `${Math.max(CLAIM_NOTE_MIN_PX, under ? room.below : room.above)}px`;
+    const top = under ? below : above - note.offsetHeight;
+    note.style.left = `${clamp(box.left, POPOVER_MARGIN, frame.getBoundingClientRect().right - note.offsetWidth)}px`;
+    note.style.top = `${clamp(top, POPOVER_MARGIN, innerHeight - POPOVER_MARGIN - note.offsetHeight)}px`;
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {number} round */
@@ -7083,6 +7123,8 @@
     // A quote or a document's name opens the document's popup, so the sentence's own popup closes first.
     $('claim-note').addEventListener('click', (e) => targetOf(e).closest('button') && $('claim-note').hidePopover(), true);
     $('claim-note').addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
+    $('chat-pane').addEventListener('scroll', placeClaimNote, { capture: true, passive: true });
+    window.addEventListener('resize', placeClaimNote);
     $('theme-btn').addEventListener('click', toggleTheme);
 
     $('tab-chat').addEventListener('click', () => showTab('chat'));
@@ -7206,12 +7248,12 @@
     return new Blob(chunks).text();
   }
 
-  /** @param {RunTab} tab @returns {Promise<SavedTabV1>} */
+  /** @param {RunTab} tab @returns {Promise<SavedTab>} */
   async function savedTab(tab) {
     const { files, run } = tab;
     const representation = await (await api(`/api/runs/${run.id}/representation`)).json();
     // An ask that never landed has no answer to show.
-    const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals, claims }) => ({ question, model, text, provenance, totals, claims }));
+    const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals, claims }) => ({ question, model, text, provenance, totals, claims: claims ?? null }));
     return {
       version: SAVED_VERSION,
       files: files.map(({ name, size, folder }) => ({ name, size, folder })),
@@ -7223,7 +7265,7 @@
   }
 
   // Its policy admits only its own script, and every < in the data is escaped, so no data can end its element.
-  /** @param {SavedTabV1} tab */
+  /** @param {SavedTab} tab */
   async function savedPage(tab) {
     const [page, style, served] = await Promise.all(PAGE_FILES.map(async (path) => (await api(path)).text()));
     // Hashed as the browser parses it, line ends as \n; a </script would end it inline, and escaped reads the same.
@@ -7316,28 +7358,23 @@
     provenance: ['string'],
     [OTHER_KEYS]: anything,
   };
-  /** @type {Shape} */
-  const SAVED_TAB_V1 = {
-    version: (version) => version === 1,
+  /** @type {Record<string, Shape>} */
+  const SAVED_ANSWER_V1 = {
+    question: 'string',
+    model: 'string',
+    text: 'string',
+    provenance: { summary_ids: [isCount], parse_ids: [isCount], trail: { rule: 'string', nodes: ['string'], edges: [(edge) => fits(edge, ['string']) && edge.length === 3] } },
+    'totals?': orNull(TOTALS),
+  };
+  const CLAIM = { text: 'string', start: isCount, end: isCount, documents: ['string'], quotes: [{ document: 'string', start: isCount, end: isCount }] };
+  /** @param {number} version @param {Shape} answer @returns {Shape} */
+  const savedShape = (version, answer) => ({
+    version: (/** @type {unknown} */ v) => v === version,
     files: [{ name: isPath, size: isCount, 'folder?': isPath }],
     texts: 'string',
     folders: [(pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
     // A file saved before the run was drawn from its representation also holds the run as drawn, which isn't read.
-    run: {
-      [OTHER_KEYS]: anything,
-      totals: orNull(TOTALS),
-      answers: [
-        {
-          question: 'string',
-          model: 'string',
-          text: 'string',
-          provenance: { summary_ids: [isCount], parse_ids: [isCount], trail: { rule: 'string', nodes: ['string'], edges: [(edge) => fits(edge, ['string']) && edge.length === 3] } },
-          'totals?': orNull(TOTALS),
-          // A file saved before the page linked an answer's sentences has no claims.
-          'claims?': orNull([{ text: 'string', start: isCount, end: isCount, documents: ['string'], quotes: [{ document: 'string', start: isCount, end: isCount }] }]),
-        },
-      ],
-    },
+    run: { [OTHER_KEYS]: anything, totals: orNull(TOTALS), answers: [answer] },
     representation: {
       'manifest.json': isObject,
       'ids.json': recordOf(isCount),
@@ -7350,9 +7387,14 @@
       'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
       'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
     },
-  };
+  });
+  // Each version this page reads, by its number.
+  const SAVED_SHAPES = new Map([
+    [1, savedShape(1, SAVED_ANSWER_V1)],
+    [2, savedShape(2, { ...SAVED_ANSWER_V1, claims: orNull([CLAIM]) })],
+  ]);
 
-  /** @param {SavedTabV1} saved */
+  /** @param {SavedTab} saved */
   function consistent({ files, run, representation: r }) {
     const n = files.length;
     const ids = r['ids.json'];
@@ -7431,9 +7473,10 @@
       throw new ServerError(DAMAGED_SAVE);
     }
     const version = saved?.version;
-    if (version !== SAVED_VERSION) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
-    if (!fits(saved, SAVED_TAB_V1) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
-    const { files, texts, folders, run, representation } = /** @type {SavedTabV1} */ (saved);
+    const shape = SAVED_SHAPES.get(version);
+    if (!shape) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
+    if (!fits(saved, shape) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
+    const { files, texts, folders, run, representation } = /** @type {SavedTab} */ (saved);
     /** @type {string[]} */
     const text = await gunzipped(texts, MAX_SAVED_TEXT_BYTES)
       .then(JSON.parse)
