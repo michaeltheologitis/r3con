@@ -5559,6 +5559,7 @@
       case 'reasoning_finished':
         Object.assign(run.answers[0], { text: event.answer, provenance: provenanceOf(run, event.provenance) });
         showAnswer(tab, narr);
+        lightRun(tab);
         break;
       case 'claims_started':
         startLinking(tab, RUN_ANSWER);
@@ -5570,7 +5571,6 @@
       case 'run_finished':
         run.totals = totalsOf(event);
         finishRun(tab, narr);
-        lightRun(tab);
         break;
       case 'run_failed':
         failRun(tab, narr, endingOf(stopping(tab), event));
