@@ -14,16 +14,23 @@ unedited from the ``logs/`` r3con wrote it to:
 - Its ``asks/``: ``r3con.ask(run_folder, question, model=model)``, in this order: "Which
   sites does Halloran Services maintain?" on ``openai/gpt-6-luna``, the same on
   ``openai/gpt-6.1-terra``, then "How many incidents did Merrow Facilities Group's sites
-  log?" on ``openai/gpt-6-luna``.
+  log?" on ``openai/gpt-6-luna``. They predate claims, so they have none.
+- Its ``claims/``, and the ``claims_started`` and ``claims_finished`` at the end of its
+  ``events.jsonl``: the run predates claims, so they were added later, on 2026-11-17,
+  by one real call: r3con's claims stage (``pipeline._claims_stage``, with r3con at
+  1b3ff45) run once on the run's saved answer, on the run's own model at the sentence
+  level with claims prompt v1, over its provenance as ``r3con.trace`` builds it, each
+  quote's ``document_text`` its memo's words. The stage wrote them as a run does; the
+  run's own ``run_finished``, before them, leaves out their cost.
 
 Building calls no model: each document's name, text and size come from
-``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder but for
-its claims, each quote's ``document_text``, which the run predates, its memo's words
-from ``start`` to ``end``, and every other value is read from the folder as it is. Each
-quote names the snippet it is from, so the app can match it to the trail. Every document
-in this run was read whole, and this handles only that. A sample with a document read in
-parts would need part handling: joining its parts' summaries as the app does, counting
-its ``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
+``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder, each
+quote's ``document_text``, which the run predates, its memo's words from ``start`` to
+``end``, and every other value is read from the folder as it is. Each quote names the
+snippet it is from, so the app can match it to the trail. Every document in this run
+was read whole, and this handles only that. A sample with a document read in parts
+would need part handling: joining its parts' summaries as the app does, counting its
+``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
 one call per node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
@@ -68,11 +75,11 @@ def memo_texts(run: Path, memos: Path) -> dict[str, str]:
 def provenance(
     folder: Path, saved: dict[str, Any], texts: dict[str, str]
 ) -> dict[str, Any]:
-    """The provenance of the answer saved in ``folder``, as r3con.trace gives it but for
-    its claims, which the page does not read yet, each quote's document_text read from
-    its document's text in ``texts``. Before 0.6.5, r3con saved only its citations; it
-    saves its quotes since, its trail since 0.6.9, and its documents since 0.6.33. The
-    recorded run predates document_text, which trace then gives as None."""
+    """The provenance of the answer saved in ``folder``, as r3con.trace gives it, each
+    quote's document_text read from its document's text in ``texts``. Before 0.6.5,
+    r3con saved only its citations; it saves its quotes since, its trail since 0.6.9,
+    and its documents since 0.6.33. The recorded run predates document_text, which
+    trace then gives as None."""
     traced = r3con.trace(folder)
     assert saved.items() <= traced.items(), (
         f"{folder.name}: trace gives the saved provenance"
@@ -81,8 +88,7 @@ def provenance(
         {**q, "document_text": texts[q["document"]][q["start"] : q["end"]]}
         for q in traced["quotes"]
     ]
-    shown = {key: value for key, value in traced.items() if key != "claims"}
-    return {**shown, "quotes": quotes}
+    return {**traced, "quotes": quotes}
 
 
 def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
