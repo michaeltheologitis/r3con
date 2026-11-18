@@ -98,6 +98,8 @@ def hide_title_bar(window: toga.Window, webview: toga.WebView) -> None:
 
     native = window._impl.native
     band = _drag_band().alloc().init()
+    # Before AppKit can hit-test it: rubicon's getter raises on a property never set.
+    band.controls = None
     band.autoresizingMask = WIDTH_SIZABLE | MAX_Y_MARGIN
     height = TITLE_BAR_HEIGHT
 
@@ -149,8 +151,7 @@ def _drag_band() -> Any:
 
         @objc_method
         def hitTest_(self, point: NSPoint) -> ObjCInstance:
-            height = self.frame.size.height
-            return self if _in_drag_area(self.controls, height, point) else None
+            return self if _drags(self, point) else None
 
         @objc_method
         def mouseDown_(self, event) -> None:
@@ -181,6 +182,17 @@ def _root_properties(centre: float, inset: float) -> str:
         f"{json.dumps(name)}, {json.dumps(f'{px}px')})"
         for name, px in values.items()
     )
+
+
+def _drags(band: Any, point: Any) -> bool:
+    """Whether a press at ``point`` drags the window by the view ``band``; log, never
+    raise into AppKit: for a hitTest: that raises, ctypes returns whatever its result
+    slot held, and AppKit retains that as a view."""
+    try:
+        return _in_drag_area(band.controls, band.frame.size.height, point)
+    except Exception:
+        logger.exception("The window couldn't hit-test its top row.")
+        return False
 
 
 def _in_drag_area(
