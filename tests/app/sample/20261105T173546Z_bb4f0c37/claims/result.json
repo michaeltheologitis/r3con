@@ -1,0 +1,66 @@
+{
+  "claims": [
+    {
+      "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
+      "start": 0,
+      "end": 126,
+      "documents": [
+        "17f027",
+        "964bc2",
+        "9e02b3",
+        "d9add2"
+      ],
+      "quotes": [
+        {
+          "document": "17f027",
+          "start": 45,
+          "end": 88
+        },
+        {
+          "document": "17f027",
+          "start": 141,
+          "end": 218
+        },
+        {
+          "document": "964bc2",
+          "start": 45,
+          "end": 88
+        },
+        {
+          "document": "964bc2",
+          "start": 136,
+          "end": 213
+        },
+        {
+          "document": "9e02b3",
+          "start": 45,
+          "end": 88
+        },
+        {
+          "document": "9e02b3",
+          "start": 164,
+          "end": 241
+        },
+        {
+          "document": "d9add2",
+          "start": 54,
+          "end": 127
+        },
+        {
+          "document": "d9add2",
+          "start": 128,
+          "end": 189
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "n_steps": 1,
+    "tokens": {
+      "prompt": 729,
+      "completion": 407,
+      "total": 1136
+    },
+    "usd": 0.0002764
+  }
+}

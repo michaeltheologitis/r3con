@@ -201,6 +201,8 @@ p { margin: 0; }
 .drawing.is-lit .edge.context { opacity: calc(0.07 * var(--context-fade, 1)); }
 .drawing.is-lit .edge.hl { opacity: 0.55; }
 .drawing.is-lit .edge.lit { opacity: 1; stroke: var(--accent); stroke-width: calc(1.6px / var(--k, 1)); }
+/* A hovered or focused sentence lights its own path; the rest of the trail dims, still in the accent. */
+.drawing.is-lit.has-claim .edge.lit:not(.on-claim) { opacity: 0.15; }
 .edge.draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 0.7s ease-out forwards; }
 .edge.fade { animation: fade 0.6s ease-out; }
 
@@ -263,6 +265,7 @@ p { margin: 0; }
 .drawing.is-lit .node.on-path { opacity: 1; }
 .drawing.is-lit .node.on-path .icon { color: var(--accent); }
 .drawing.is-lit .node.on-path .label { color: var(--fg); }
+.drawing.is-lit.has-claim .node.on-path:not(.on-claim) { opacity: 0.3; }
 /* Off the trail a fold's icons dim with the other nodes, while its text keeps 4.5:1: it marks where its documents are. */
 .drawing.is-lit .node.fold { opacity: 1; }
 .drawing.is-lit .node.fold .icon { opacity: 0.3; }
@@ -321,7 +324,7 @@ p { margin: 0; }
   color: var(--dim);
 }
 
-.inspector, .settings, .save-note {
+.inspector, .settings, .save-note, .claim-note {
   overflow: auto;
   padding: 0.9em 2ch 1em;
   background: var(--bg);
@@ -350,6 +353,13 @@ p { margin: 0; }
 }
 .settings-body { display: flex; flex-direction: column; gap: 0.9em; }
 .save-note { inset: auto; margin: 0; max-width: calc(100vw - 2 * var(--gutter)); color: var(--fg); }
+.claim-note {
+  inset: auto;
+  margin: 0;
+  width: min(46ch, calc(100vw - 2 * var(--gutter)));
+  max-height: calc(100vh - 2 * var(--gutter));
+  color: var(--fg);
+}
 .save-actions { display: flex; justify-content: flex-end; gap: 2ch; margin-top: 0.7em; }
 .save-actions .btn { min-height: 24px; }
 .keys {
@@ -527,11 +537,21 @@ mark[title] { cursor: help; }
 .sentences { margin: 0.3em 0 0 2ch; }
 .quoted { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3em; margin-top: 0.6em; }
 .quoted-name { font-weight: 600; }
-.sentence { padding-left: 1.5ch; border-left: 1px solid var(--line); overflow-wrap: anywhere; }
+.sentence, .doc-summary { padding-left: 1.5ch; border-left: 1px solid var(--line); overflow-wrap: anywhere; }
+/* A sentence linked to its evidence: faint until hovered or focused, or while its evidence is open. */
+.claim {
+  cursor: pointer;
+  text-decoration: underline dotted 1px;
+  text-decoration-color: var(--dim);
+  text-underline-offset: 3px;
+}
+.claim:hover, .claim.lit { text-decoration-color: var(--accent); background: var(--mark); border-radius: 2px; }
+.line.linking { margin-top: 0.3em; }
 .log { color: var(--dim); }
 .log-head { grid-template-columns: 2ch 2ch minmax(0, 1fr); }
-/* A 24px target, centred on the glyph column, that doesn't grow its line. */
-.log-toggle {
+/* A 24px target, centred on the glyph column, that doesn't grow its line: a log's chevron, or the mark that opens an
+   answer's node. */
+.log-toggle, .answer-mark {
   display: grid;
   place-items: center;
   width: 24px;

@@ -7,11 +7,13 @@ panel: each summary is its document's first line that is not ``QUIET`` (none if 
 are), quoting that line, and each parse its first line as a memo's title, its other
 lines nested under it, or nothing for a document holding ``UNPARSED``; each round
 after the first cites the first summary it is shown, each parse its own document's
-note, and the answer the first two documents' summaries and parses. A document
-holding ``FADES`` gets no summary from its ``FADES_FROM_READ``-th read on, its reads
-counted from the server's start, so that a check reading it whole once a round, with
-text of its own, has its note go empty in that round. It refuses a document over
-``PART_CHARS`` as too long, so that r3con reads it in parts.
+note, and the answer, two sentences, the first two documents' summaries and parses.
+Of the answer's claims, its first sentence rests on the first two pieces of evidence
+the claims call is shown, and its second on none. A document holding ``FADES`` gets no
+summary from its ``FADES_FROM_READ``-th read on, its reads counted from the server's
+start, so that a check reading it whole once a round, with text of its own, has its
+note go empty in that round. It refuses a document over ``PART_CHARS`` as too long, so
+that r3con reads it in parts.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, one holding a marker of
@@ -48,7 +50,9 @@ from tests.fakes import (
     PARSE_HEADING,
     SCHEMA_REPLY,
     FakeKeyring,
+    claims_reply,
     mock_completion,
+    shown_evidence,
     stage_of,
     unscripted,
 )
@@ -60,7 +64,12 @@ HANGS = "(the model hangs)"
 STALLS = "(the model stalls)"
 BREAKS = "(the parser breaks)"
 REASONING_BREAKS = "(the reasoning breaks)"
-BROKEN_STAGES = {BREAKS: "parsing", REASONING_BREAKS: "reasoning"}
+CLAIMS_BREAK = "(the claims break)"
+BROKEN_STAGES = {
+    BREAKS: "parsing",
+    REASONING_BREAKS: "reasoning",
+    CLAIMS_BREAK: "claims",
+}
 RELEASE = "release"
 RELEASE_POLL_SECONDS = 0.05
 OFF_SCHEMA = "(the model answers off schema)"
@@ -71,7 +80,9 @@ FADES = "(nothing relevant from round 3 on)"
 FADES_FROM_READ = 3
 PART_CHARS = 2000
 READS_A_DOCUMENT = frozenset({"relevance", "parsing"})
-ANSWER = "The check's scripted model answers this."
+LINKED = "The check's scripted model answers this."
+UNLINKED = "Nothing backs this second sentence."
+ANSWER = f"{LINKED} {UNLINKED}"
 CITED_PER_VIEW = 2
 SAVE_DIALOG_OPTION = "--save-dialog"
 SAVED = "saved"
@@ -125,6 +136,9 @@ def content(request: dict[str, Any]) -> str:
     if "response_format" not in request:
         raise unscripted(request)
     schema = request["response_format"]["json_schema"]["schema"]
+    if stage == "claims":
+        supported = shown_evidence(request)[:CITED_PER_VIEW]
+        return json.dumps(claims_reply((LINKED, supported), (UNLINKED, []))(request))
     if stage == "relevance":
         summary = "" if faded(user) else summary_of(user)
         reply = {

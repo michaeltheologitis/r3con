@@ -34,6 +34,7 @@
    * here is indexed, while SAMPLE and an event hold r3con's own.
    * @typedef {{ text: string, start: number | null, end: number | null }} Quote
    */
+  /** @typedef {Pick<Quote, 'start' | 'end'>} Place Where a quote or a claim is in its text, in r3con's code points or the page's code units. */
   /** @typedef {Quote & { snippet: string }} RecordedQuote A quote, and the id of the snippet quoting it. */
   /** @typedef {Quote & { summary: string }} RunQuote A quote, and the trail node of the summary quoting it. */
   /** @typedef {{ summary: string, provenance: number[], quotes: RecordedQuote[] }} RecordedSummary */
@@ -68,9 +69,23 @@
    * @typedef {{ summary_ids: number[], parse_ids: number[], trail: ProvenanceTrail }} Provenance
    */
   /**
-   * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id.
+   * An answer's provenance as r3con gives it (r3con.pipeline.Answer.provenance), citing by id, but for its claims.
    * @typedef {{ summary_ids: string[], parse_ids: string[], documents: NamedDocument[], quotes: NamedQuote[],
    *   trail: ProvenanceTrail }} R3conProvenance
+   */
+  /** @typedef {R3conProvenance & { claims: Claim[] }} TracedProvenance An answer's provenance as r3con.trace gives it. */
+  /** @typedef {{ document: string, start: number, end: number }} QuotePlace A quote behind an answer, as a claim names it. */
+  /**
+   * A claim an answer makes, as r3con gives it (r3con.provenance.Claim): one of its sentences, list items or table rows,
+   * the answer's text from start to end, in code points; the ids of the documents whose evidence supports it; and the
+   * quotes that do, by place, none at the document evidence level.
+   * @typedef {{ text: string, start: number, end: number, documents: string[], quotes: QuotePlace[] }} Claim
+   */
+  /** @typedef {TextRange & { document: number }} PlacedQuote A claim's quote in document `document`, by index. */
+  /**
+   * Claim k of an answer, one with evidence, as the page draws it: where it is in the answer, its quotes and their
+   * sentences, those that overlap joined, in UTF-16 code units, and its documents, by index.
+   * @typedef {TextRange & { k: number, documents: number[], quotes: PlacedQuote[], sentences: PlacedQuote[] }} Link
    */
   /** @typedef {{ step: number, tokens: number, usd: number }} Call */
   /** @typedef {{ tokens?: number | null, usd?: number | null }} Totals */
@@ -86,6 +101,7 @@
    * @property {'recorded' | 'simulated' | 'live'} [source]
    * @property {Totals | null} [totals]
    * @property {string | null} [id]
+   * @property {Claim[] | null} [claims] its claims, once linked; an answer saved before r3con linked them has none
    */
   /**
    * A recorded, simulated or live run; answers[0] is its own, the rest asks over it. A live run has the server's id
@@ -120,13 +136,13 @@
    * @property {RecordedSummary[][]} rounds
    * @property {Schema} schema
    * @property {Parse[]} parsed
-   * @property {{ text: string, provenance: R3conProvenance }} answer
+   * @property {{ text: string, provenance: TracedProvenance }} answer
    * @property {Record<string, Call>} calls
    * @property {Totals} totals
    */
   /**
    * @typedef {{ question: string, model: string, folder: string, created: string, text: string,
-   *   provenance: R3conProvenance, totals: Totals }} RecordedAsk
+   *   provenance: TracedProvenance, totals: Totals }} RecordedAsk
    */
   /** @typedef {{ id: string, kind: NodeKind, file: LoadedFile | null, x: number, y: number, el: HTMLElement, fold?: FoldRow }} PanelNode A fold's node has its fold. */
   /** @typedef {{ key: string, from: string, to: string, kind: EdgeKind, el: SVGPathElement }} PanelEdge */
@@ -186,14 +202,16 @@
    * @property {Narrator | null} narr
    * @property {number} arrangeFrame
    * @property {Trail | null} trail the lit answer's, while the panel has one lit
+   * @property {Link | null} litLink the sentence of the lit answer whose path the panel lights, while one is
    * @property {Folding | null} fold while it has more than FOLD_FROM_DOCS documents, or folders
    * @property {Map<string, boolean>} folders whether the user left each folder open, by path
    * @property {SVGPathElement} tree the file column's tree lines
    * @property {Set<string>} placed the nodes the user dragged since the panel was last laid out
    */
   /**
-   * @typedef {object} SavedTabV1
-   * @property {1} version
+   * A saved tab, of either version: version 2 adds each answer's claims, null for one never linked.
+   * @typedef {object} SavedTab
+   * @property {1 | 2} version
    * @property {{ name: string, size: number, folder?: string }[]} files
    * @property {string} texts the files' texts, a JSON list in their order, gzipped, in base64
    * @property {[string, boolean][]} folders
@@ -209,7 +227,7 @@
    *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][] }
    * }} Representation
    */
-  /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals'>} SavedAnswer */
+  /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals' | 'claims'>} SavedAnswer */
   /**
    * A saved tab, read.
    * @typedef {{ files: LoadedFile[], folders: Map<string, boolean>, run: Run, asks: Answer[], representation: Representation }} OpenedTab
@@ -221,6 +239,7 @@
   /** @typedef {Tab & { run: Run, turn: HTMLElement }} RunTab A tab with a run, the only kind with nodes other than documents. */
   /** @typedef {ReturnType<typeof narrator>} Narrator */
   /** @typedef {{ kind: 'run' | 'ask', tab: Tab, job: Run | Answer, stopping: boolean }} Stream */
+  /** @typedef {{ tab: RunTab, answer: string, link: Link, el: HTMLElement }} ClaimRef A linked sentence in the chat, and its answer's node. */
   /**
    * An event r3con app streams, with the fields this page reads (r3con.pipeline.run_pipeline lists
    * them all).
@@ -235,6 +254,8 @@
    *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
    *   | { type: 'reasoning_finished', answer: string,
    *       provenance: R3conProvenance }
+   *   | { type: 'claims_started' }
+   *   | { type: 'claims_finished', claims: Claim[] }
    *   | { type: 'run_finished' | 'ask_finished', tokens: { total: number } | null, usd: number | null }
    *   | { type: 'run_failed' | 'ask_failed', stage: string | null, error: string, code?: string }
    * } ServerEvent
@@ -248,7 +269,7 @@
    * @typedef {Record<string, KeyState | Server[] | null>} KeyStatus
    */
   /** @typedef {{ model: string, endpoint?: string }} SavedModel A model saved to the menu, and its server, if any. */
-  /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean }} LineOptions */
+  /** @typedef {{ node?: string | null, glyph?: string | null, dim?: boolean, name?: string }} LineOptions A line's node is its link; an answer's names its mark. */
   /** @typedef {{ outcome: string, error: string }} Ending How a run or an ask stopped or failed, and the error if it failed. */
   /** @typedef {Node | string | null | undefined | false | Child[]} Child */
   /** @typedef {Record<string, string | number | boolean | null | undefined | EventListener>} Props */
@@ -833,7 +854,62 @@
       "summarizes"
      ]
     ]
-   }
+   },
+   "claims": [
+    {
+     "text": "Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).",
+     "start": 0,
+     "end": 126,
+     "documents": [
+      "17f027",
+      "964bc2",
+      "9e02b3",
+      "d9add2"
+     ],
+     "quotes": [
+      {
+       "document": "17f027",
+       "start": 45,
+       "end": 88
+      },
+      {
+       "document": "17f027",
+       "start": 141,
+       "end": 218
+      },
+      {
+       "document": "964bc2",
+       "start": 45,
+       "end": 88
+      },
+      {
+       "document": "964bc2",
+       "start": 136,
+       "end": 213
+      },
+      {
+       "document": "9e02b3",
+       "start": 45,
+       "end": 88
+      },
+      {
+       "document": "9e02b3",
+       "start": 164,
+       "end": 241
+      },
+      {
+       "document": "d9add2",
+       "start": 54,
+       "end": 127
+      },
+      {
+       "document": "d9add2",
+       "start": 128,
+       "end": 189
+      }
+     ]
+    }
+   ]
   }
  },
  "calls": {
@@ -1175,7 +1251,8 @@
       "summarizes"
      ]
     ]
-   }
+   },
+   "claims": []
   },
   "totals": {
    "tokens": 3313,
@@ -1425,7 +1502,8 @@
       "summarizes"
      ]
     ]
-   }
+   },
+   "claims": []
   },
   "totals": {
    "tokens": 3288,
@@ -1646,7 +1724,8 @@
       "summarizes"
      ]
     ]
-   }
+   },
+   "claims": []
   },
   "totals": {
    "tokens": 3353,
@@ -1665,12 +1744,16 @@
     schemaWork: 1400,
     answerWork: 1700,
     litDelay: 650,
+    linkWork: 1500,
   };
   const PACE = {
     read: { appearStagger: 150, settleFirst: 450, settleStagger: 150, minWork: 350 },
     model: { appearStagger: 260, settleFirst: 900, settleStagger: 380, minWork: 500 },
   };
   const MARK = '❀';
+  const LINKING = 'linking sentences…';
+  // How long a sentence stays lit after the pointer leaves it, so that crossing to the next one doesn't flicker.
+  const CLAIM_LEAVE_MS = 80;
   const SPIN_FRAMES = ['·', '✾', '✿', '❀', '❁', '❀', '✿', '✾'];
   const SPIN_FRAME_MS = 140;
 
@@ -1723,6 +1806,9 @@
   const WHEEL_LINE_PX = 16;
   const DRAG_THRESHOLD = 4;
   const POPOVER_GAP = 12;
+  // A sentence's popup sits this far from it, and is never shorter than this.
+  const CLAIM_NOTE_GAP = POPOVER_GAP / 2;
+  const CLAIM_NOTE_MIN_PX = 120;
   const POPOVER_MARGIN = 10;
   const JUMP_MARGIN = 40;
   const GLIDE_MS = 350;
@@ -1912,7 +1998,7 @@
   const DROP_ADDS = 'drop to add files';
   const DROP_LOCKED = 'this tab has run · press + for a new tab';
   const SAVED_TAB_ID = 'r3con-tab';
-  const SAVED_VERSION = 1;
+  const SAVED_VERSION = 2;
   // The page's files as r3con app serves them, which a saved tab's file holds inline, and where it links the last two.
   const PAGE_FILES = ['/', '/app.css', '/app.js'];
   const PAGE_CHARSET = '<meta charset="utf-8">';
@@ -2101,6 +2187,7 @@
       narr: null,
       arrangeFrame: 0,
       trail: null,
+      litLink: null,
       fold: null,
       folders: new Map(),
       tree,
@@ -2526,7 +2613,7 @@
 
   // ---------- runs ----------
 
-  /** @template {Quote} Q @param {Q} quote @returns {quote is Q & TextRange} */
+  /** @template {Place} Q @param {Q} quote @returns {quote is Q & TextRange} */
   const located = (quote) => quote.start !== null;
 
   // r3con's names for the nodes of a trail.
@@ -2543,7 +2630,7 @@
   const cutsOf = (ranges) => [...new Set(ranges.flatMap((r) => [r.start, r.end]))].sort((a, b) => a - b);
 
   // `quotes`, found in `text`, with their places in UTF-16 code units, walking the text once up to the last of them.
-  /** @template {Quote} Q @param {string} text @param {Q[]} quotes @returns {Q[]} */
+  /** @template {Place} Q @param {string} text @param {Q[]} quotes @returns {Q[]} */
   function quotesInUnits(text, quotes) {
     /** @type {Map<number, number>} */
     const units = new Map();
@@ -2578,7 +2665,8 @@
       source: RECORDED_SOURCE,
     };
     const { text, provenance } = SAMPLE.answer;
-    return { ...run, answers: [{ question: SAMPLE.question, model: SAMPLE.model, text, provenance: provenanceOf(run, provenance) }] };
+    const own = { question: SAMPLE.question, model: SAMPLE.model, text, provenance: provenanceOf(run, provenance), claims: provenance.claims };
+    return { ...run, answers: [own] };
   }
 
   /** @param {number} i @param {number} n */
@@ -2683,6 +2771,9 @@
   }
 
   /** @param {{ question: string, model: string }} answer */
+  const answerName = ({ question, model }) => `answer to ${question} · ${model}`;
+
+  /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
   // An answer and a parse cite contextRound's summaries, and a summary of round k, those of round k - 1.
@@ -2725,19 +2816,25 @@
   function trailOf(run, answerId) {
     const trail = answerAt(run, answerId).provenance?.trail;
     if (!trail) return null;
-    const named = new Map(trail.nodes.map((node) => [node, pageNode(run, answerId, node)]));
     /** @type {Trail} */
     const drawn = { nodes: new Set(), edges: new Set(), citedBy: new Map(), quoting: new Set(), quoted: [] };
-    for (const id of named.values()) if (id) drawn.nodes.add(id);
-    for (const [from, to, kind] of trail.edges) {
-      const [pageFrom, pageTo] = [named.get(from), named.get(to)];
-      if (!pageFrom || !pageTo) continue;
-      drawn.edges.add(`${pageTo}>${pageFrom}`);
-      if (kind === 'cites' && to.startsWith('summary:') && !drawn.citedBy.has(pageTo)) drawn.citedBy.set(pageTo, pageFrom);
-      if (kind === 'summarizes') drawn.quoting.add(from);
+    for (const id of trail.nodes.map((node) => pageNode(run, answerId, node))) if (id) drawn.nodes.add(id);
+    for (const { edge: [source, target, kind], from, to, key } of pageEdges(run, answerId, trail.edges)) {
+      drawn.edges.add(key);
+      if (kind === 'cites' && target.startsWith('summary:') && !drawn.citedBy.has(to)) drawn.citedBy.set(to, from);
+      if (kind === 'summarizes') drawn.quoting.add(source);
     }
     drawn.quoted = run.docs.map((_, d) => quotedIn(run, drawn.quoting, d));
     return drawn.edges.size ? drawn : null;
+  }
+
+  // The edges of an answer's trail whose ends the page draws, each with its ends as the page names them and its line's key.
+  /** @param {Run} run @param {string} answerId @param {Iterable<TrailEdge>} edges */
+  function pageEdges(run, answerId, edges) {
+    return [...edges].flatMap((edge) => {
+      const [from, to] = [pageNode(run, answerId, edge[0]), pageNode(run, answerId, edge[1])];
+      return from && to ? [{ edge, from, to, key: `${to}>${from}` }] : [];
+    });
   }
 
   // The lit answer's trail is the tab's, unless its panel was cleared since.
@@ -2752,6 +2849,12 @@
     );
     const cuts = cutsOf(quotes);
     const spans = cuts.slice(1).map((end, i) => ({ start: cuts[i], end, by: [...new Set(quotes.filter((q) => q.start <= cuts[i] && q.end >= end).map((q) => q.by))] }));
+    return { spans: spans.filter((span) => span.by.length), sentences: sentencesOf(quotes) };
+  }
+
+  // `quotes` as sentences, in order: quotes that overlap join, quotes that only meet don't.
+  /** @param {TextRange[]} quotes */
+  function sentencesOf(quotes) {
     /** @type {TextRange[]} */
     const sentences = [];
     for (const { start, end } of quotes.toSorted((a, b) => a.start - b.start)) {
@@ -2759,7 +2862,7 @@
       if (last && start < last.end) last.end = Math.max(last.end, end);
       else sentences.push({ start, end });
     }
-    return { spans: spans.filter((span) => span.by.length), sentences };
+    return sentences;
   }
 
   /** @param {Trail} trail */
@@ -2950,10 +3053,7 @@
   /** @param {Tab} tab @param {PanelNode} node @param {number} [sentences] the highlighted ones, for a document */
   function ariaName(tab, node, sentences = 0) {
     const stopped = node.el.classList.contains('failed') ? ', stopped' : '';
-    if (node.kind === 'answer') {
-      const { question, model } = answerAt(runTab(tab).run, node.id);
-      return `answer to ${question} · ${model}${stopped}`;
-    }
+    if (node.kind === 'answer') return `${answerName(answerAt(runTab(tab).run, node.id))}${stopped}`;
     const what = isRound(node.kind) ? `${roundName(node.kind)} relevance snippet` : ARIA_KIND[node.kind];
     if (!node.file) return `${nodeName(tab, node.id)}, ${what}${stopped}`;
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}`;
@@ -3338,6 +3438,20 @@
     for (const n of tab.nodes.values()) n.el.classList.toggle('selected', n.id === state.selected);
   }
 
+  // A path's nodes and lines as the panel draws them: on a folded panel it runs through the nodes that show its own, a
+  // closed folder's for what is in it.
+  /** @param {Tab} tab @param {Pick<Trail, 'nodes' | 'edges'> | null} path */
+  function shownPath(tab, path) {
+    const nodes = new Set([...(path?.nodes ?? [])].map((id) => shownAs(tab, id)));
+    const edges = new Set(
+      [...(path?.edges ?? [])].map((key) => {
+        const [from, to] = key.split('>');
+        return shownEnds(tab, from, to)?.join('>');
+      }),
+    );
+    return { nodes, edges };
+  }
+
   // Lights the trail of the tab's lit answer; an answer that cites nothing lights nothing.
   /** @param {RunTab} tab */
   function lightPath(tab) {
@@ -3345,23 +3459,11 @@
     const trail = run.lit ? trailOf(run, run.lit) : null;
     tab.trail = trail;
     tab.drawing.classList.toggle('is-lit', Boolean(trail));
-    // On a folded panel the trail runs through the nodes that show its own: a closed folder's, for what is in it.
-    const nodes = new Set([...(trail?.nodes ?? [])].map((id) => shownAs(tab, id)));
-    const edges = new Set(
-      [...(trail?.edges ?? [])].map((key) => {
-        const [from, to] = key.split('>');
-        return shownEnds(tab, from, to)?.join('>');
-      }),
-    );
+    const { nodes, edges } = shownPath(tab, trail);
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-path', nodes.has(id));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
-      if (n.fold?.folder && n.kind === 'doc') labelFold(tab, n);
     }
-    run.docs.forEach((file, d) => {
-      const node = tab.nodes.get(docId(file));
-      if (node) countSentences(tab, node, trail?.quoted[d].sentences.length ?? 0);
-    });
     for (const e of tab.edges.values()) {
       const on = edges.has(e.key);
       const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
@@ -3369,7 +3471,93 @@
       if (e.el.parentNode !== layer) layer.append(e.el);
     }
     showTrail(tab);
+    lightClaim(tab);
   }
+
+  // Breadth first from the answer: how many steps each node is from it, and the edges into it on a shortest way there.
+  /** @param {TrailEdge[]} edges */
+  function shortestWays(edges) {
+    const steps = new Map([[TRAIL_ANSWER, 0]]);
+    /** @type {Map<string, TrailEdge[]>} */
+    const into = new Map();
+    for (let reached = [TRAIL_ANSWER]; reached.length; ) {
+      /** @type {string[]} */
+      const next = [];
+      for (const edge of edges.filter(([from]) => reached.includes(from))) {
+        const [from, to] = edge;
+        const step = /** @type {number} */ (steps.get(from)) + 1;
+        if (!steps.has(to)) {
+          steps.set(to, step);
+          next.push(to);
+        }
+        if (steps.get(to) === step) into.set(to, [...(into.get(to) ?? []), edge]);
+      }
+      reached = next;
+    }
+    return { steps, into };
+  }
+
+  /** @type {WeakMap<Link, Pick<Trail, 'nodes' | 'edges'>>} */
+  const claimPaths = new WeakMap();
+
+  // A claim's path: every shortest way from the answer to the summaries nearest it carrying its evidence, and their documents.
+  /** @param {Run} run @param {string} answerId @param {Link} link @returns {Pick<Trail, 'nodes' | 'edges'>} */
+  function claimPath(run, answerId, link) {
+    const kept = claimPaths.get(link);
+    if (kept) return kept;
+    const { edges } = /** @type {Provenance} */ (answerAt(run, answerId).provenance).trail;
+    const { steps, into } = shortestWays(edges);
+    /** @param {PlacedQuote} q */
+    const quoting = (q) => run.rounds.flatMap((summaries) => summaries[q.document]?.quotes ?? []).filter((r) => r.start === q.start && r.end === q.end).map((r) => r.summary);
+    /** @param {number} d */
+    const summarizing = (d) => edges.filter(([, to, kind]) => kind === 'summarizes' && to === documentNode(run.ids[d])).map(([from]) => from);
+    const carriers = link.quotes.length ? link.quotes.map(quoting) : link.documents.map(summarizing);
+    const nearest = carriers.flatMap((summaries) => {
+      const onTrail = summaries.filter((id) => steps.has(id));
+      const least = Math.min(...onTrail.map((id) => /** @type {number} */ (steps.get(id))));
+      return onTrail.filter((id) => steps.get(id) === least);
+    });
+    const path = new Set(edges.filter(([from, , kind]) => kind === 'summarizes' && nearest.includes(from)));
+    for (const back = [...nearest]; back.length; ) {
+      for (const edge of into.get(/** @type {string} */ (back.pop())) ?? []) {
+        if (!path.has(edge)) back.push(edge[0]);
+        path.add(edge);
+      }
+    }
+    const lines = pageEdges(run, answerId, path);
+    const drawn = { nodes: new Set(lines.flatMap(({ from, to }) => [from, to])), edges: new Set(lines.map(({ key }) => key)) };
+    claimPaths.set(link, drawn);
+    return drawn;
+  }
+
+  /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null }} */
+  const litClaims = { hovered: null, focused: null, open: null };
+
+  // Lights the path of the tab's hovered or focused sentence, or else of the one whose evidence is open, while its answer
+  // is the lit one: the rest of the trail dims, and each document, or closed folder, counts that sentence's quotes.
+  /** @param {RunTab} tab */
+  function lightClaim(tab) {
+    const { run, trail } = tab;
+    const claims = [litClaims.hovered, litClaims.focused, litClaims.open];
+    const claim = trail ? claims.find((c) => c?.tab === tab && c.el.isConnected && c.answer === run.lit) : null;
+    tab.litLink = claim?.link ?? null;
+    const { nodes, edges } = shownPath(tab, claim ? claimPath(run, claim.answer, claim.link) : null);
+    tab.drawing.classList.toggle('has-claim', nodes.size > 0);
+    for (const [id, n] of tab.nodes) {
+      n.el.classList.toggle('on-claim', nodes.has(id));
+      if (n.fold?.folder && n.kind === 'doc') labelFold(tab, n);
+    }
+    for (const e of tab.edges.values()) e.el.classList.toggle('on-claim', edges.has(e.key));
+    for (const el of tab.chat.querySelectorAll('.claim')) el.classList.toggle('lit', el === claim?.el);
+    run.docs.forEach((file, d) => {
+      const node = tab.nodes.get(docId(file));
+      if (node) countSentences(tab, node, highlighted(tab, d));
+    });
+  }
+
+  // How many sentences of document d the panel highlights: the lit sentence's quotes there, else the trail's.
+  /** @param {Tab} tab @param {number} d */
+  const highlighted = (tab, d) => (tab.litLink ? tab.litLink.sentences.filter((q) => q.document === d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
   function countSentences(tab, node, sentences) {
@@ -3759,7 +3947,7 @@
     const sources = foldDocs(folder).filter((d) => onTrail.has(d)).length;
     const counted = !open && sources > 0 && plural(sources, 'source');
     // Only a closed folder counts its documents' sentences, at any depth in it: an open one's documents show their own.
-    const sentences = counted ? foldDocs(folder).reduce((sum, d) => sum + (trail?.quoted[d].sentences.length ?? 0), 0) : 0;
+    const sentences = counted ? foldDocs(folder).reduce((sum, d) => sum + highlighted(tab, d), 0) : 0;
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
     name.textContent = `${shortLabel(folder.name)} · ${files}`;
     sub.textContent = counted || (isRound(node.kind) ? roundName(node.kind) : '');
@@ -4567,9 +4755,15 @@
   // ---------- chat ----------
 
   /** @param {string} kind @param {Child} text @param {LineOptions} [options] */
-  function line(kind, text, { node = null, glyph = null, dim = false } = {}) {
+  function line(kind, text, { node = null, glyph = null, dim = false, name = '' } = {}) {
     const g = glyph ?? { sub: '⎿', user: '›' }[kind] ?? '●';
     const classes = `line ${kind}${node ? ' link' : ''}${dim ? ' dim' : ''}`;
+    // An answer's sentences may link to their evidence, so its line is no button but its mark is; a click anywhere on
+    // it but on a linked sentence opens its node all the same.
+    if (kind === 'answer' && node) {
+      const mark = h('button', { class: 'btn g answer-mark', type: 'button', 'aria-label': name }, g);
+      return h('div', { class: classes, 'data-node': node }, mark, h('span', { class: 't' }, text));
+    }
     return h(
       node ? 'button' : 'div',
       { class: classes, type: node ? 'button' : null, 'data-node': node },
@@ -4616,12 +4810,24 @@
   // Only the shown tab's chat is in view, so its links are to the shown tab's nodes.
   /** @param {MouseEvent} e */
   function onChatClick(e) {
+    if (endsSelecting(e)) return;
+    const claim = claimAt(e.target);
+    if (claim) return openClaim(claim);
     /** @type {HTMLElement | null} */
-    const link = targetOf(e).closest('button[data-node], button[data-offer]');
+    const link = targetOf(e).closest('[data-node], button[data-offer]');
     if (!link) return;
     const { node, offer } = link.dataset;
     if (node) jumpTo(node);
     if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
+  }
+
+  // Whether a click on an answer's line, off its mark, is the end of selecting some of its text.
+  /** @param {MouseEvent} e */
+  function endsSelecting(e) {
+    const said = targetOf(e).closest('.line.answer');
+    const selection = getSelection();
+    if (!said || targetOf(e).closest('.answer-mark') || !selection || selection.isCollapsed) return false;
+    return selection.containsNode(said, true);
   }
 
   let nextLog = 0;
@@ -4977,11 +5183,21 @@
     drawAnswer(tab, id);
     const answer = answerOf(tab.run, id);
     const flag = answer.simulated ? narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL)) : null;
-    const said = narr.say('answer', answer.text, { node: id });
+    const said = narr.say('answer', answer.text, { node: id, name: answerName(answer) });
     tab.chatAnswer = flag ?? said;
     const sentences = sentenceList(tab, id);
     if (sentences) said.after(sentences);
     updateComposer();
+  }
+
+  /** @param {LoadedFile} file @param {Child} said */
+  function docGroup(file, said) {
+    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name), said);
+  }
+
+  /** @param {LoadedFile} file @param {TextRange[]} sentences */
+  function quotedGroup(file, sentences) {
+    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))));
   }
 
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
@@ -4990,16 +5206,181 @@
     const trail = answerTrail(tab, id);
     const line = trail && sentencesFrom(trail);
     if (!trail || !line) return null;
-    /** @param {LoadedFile} file @param {TextRange[]} sentences */
-    const group = (file, sentences) =>
-      h(
-        'div',
-        { class: 'quoted' },
-        h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name),
-        sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))),
-      );
-    const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? group(file, trail.quoted[d].sentences) : null));
+    const groups = tab.run.docs.map((file, d) => (trail.quoted[d].sentences.length ? quotedGroup(file, trail.quoted[d].sentences) : null));
     return fold(line, groups, 'fold sentences');
+  }
+
+  // ---------- sentence links ----------
+  // Once the answer is in, one more call links each of its sentences to the evidence that supports it. A linked
+  // sentence lights its own path on the trail while hovered or focused, and opens its evidence when pressed.
+
+  /** @param {Tab} tab @param {string} id */
+  const saidAnswer = (tab, id) => /** @type {HTMLElement | null} */ (tab.chat.querySelector(`.line.answer[data-node="${id}"]`));
+
+  // Under the answer and its sentences, a line with the running mark while the call is out.
+  /** @param {RunTab} tab @param {string} id */
+  function startLinking(tab, id) {
+    const said = saidAnswer(tab, id);
+    if (!said) return;
+    const under = said.nextElementSibling?.matches('.sentences') ? said.nextElementSibling : said;
+    const mark = h('span', { class: 'g log-spin', 'aria-hidden': 'true' }, MARK);
+    under.after(h('div', { class: 'line sub linking', 'data-linking': id }, mark, h('span', { class: 't' }, LINKING)));
+    scrollChat(tab);
+  }
+
+  /** @param {Tab} tab @param {string} id */
+  const stopLinking = (tab, id) => tab.chat.querySelector(`[data-linking="${id}"]`)?.remove();
+
+  /** @type {WeakMap<Claim[], Link[]>} */
+  const placedLinks = new WeakMap();
+
+  // An answer's claims with evidence, as the page draws them, each document's text walked once for all its quotes.
+  /** @param {Run} run @param {Answer} answer @returns {Link[]} */
+  function linksOf(run, { text, claims }) {
+    if (!text || !claims) return [];
+    const kept = placedLinks.get(claims);
+    if (kept) return kept;
+    const all = claims.flatMap((claim) => claim.quotes);
+    /** @type {Map<QuotePlace, PlacedQuote>} */
+    const placed = new Map();
+    run.docs.forEach((file, d) => {
+      const quotes = all.filter((q) => docIndex(run, q.document) === d);
+      quotesInUnits(file.text, quotes).forEach(({ start, end }, i) => placed.set(quotes[i], { document: d, start, end }));
+    });
+    /** @param {PlacedQuote[]} quotes */
+    const sentences = (quotes) => [...new Set(quotes.map((q) => q.document))].sort((a, b) => a - b).flatMap((d) => sentencesOf(quotes.filter((q) => q.document === d)).map((r) => ({ ...r, document: d })));
+    const links = quotesInUnits(text, claims).flatMap(({ start, end, documents, quotes }, k) => {
+      const own = quotes.flatMap((q) => placed.get(q) ?? []);
+      return documents.length ? [{ k, start, end, documents: docIndices(run, documents), quotes: own, sentences: sentences(own) }] : [];
+    });
+    placedLinks.set(claims, links);
+    return links;
+  }
+
+  // What a linked sentence's evidence is: its quotes from its documents, or at the document level the documents.
+  /** @param {Link} link */
+  function evidenceLine({ sentences, documents }) {
+    const from = plural(documents.length, 'document');
+    return sentences.length ? `${plural(sentences.length, 'quote')} from ${from}` : from;
+  }
+
+  // The claims have landed: the linking line goes, and each sentence with evidence becomes a control of its own.
+  /** @param {RunTab} tab @param {string} id */
+  function showLinks(tab, id) {
+    stopLinking(tab, id);
+    const said = saidAnswer(tab, id);
+    const answer = answerAt(tab.run, id);
+    if (!said || !answer.text) return;
+    /** @type {Child[]} */
+    const parts = [];
+    let at = 0;
+    for (const link of linksOf(tab.run, answer)) {
+      const text = answer.text.slice(link.start, link.end);
+      const props = { class: 'claim', role: 'button', tabindex: '0', 'aria-haspopup': 'dialog', 'aria-label': `${text} · ${evidenceLine(link)}`, 'data-claim': link.k };
+      parts.push(answer.text.slice(at, link.start), h('span', props, text));
+      at = link.end;
+    }
+    const t = /** @type {Element} */ (said.querySelector('.t'));
+    // The chat announces what is added to it, and the answer was read out as it landed.
+    t.setAttribute('aria-live', 'off');
+    fill(t, parts, answer.text.slice(at));
+  }
+
+  /** @param {EventTarget | null} target @returns {ClaimRef | null} */
+  function claimAt(target) {
+    const el = target instanceof Element ? /** @type {HTMLElement | null} */ (target.closest('.claim')) : null;
+    const answer = /** @type {HTMLElement | null | undefined} */ (el?.closest('[data-node]'))?.dataset.node;
+    const tab = el && state.tabs.find((t) => t.chat.contains(el));
+    const said = answer && tab?.run ? answerAt(tab.run, answer) : null;
+    if (!el || !answer || !tab?.run || !said) return null;
+    const link = linksOf(tab.run, said).find((l) => l.k === Number(el.dataset.claim));
+    return link ? { tab: runTab(tab), answer, link, el } : null;
+  }
+
+  /** @param {keyof typeof litClaims} which @param {ClaimRef | null} claim */
+  function setClaim(which, claim) {
+    const was = litClaims[which];
+    if (was?.el === claim?.el) return;
+    litClaims[which] = claim;
+    for (const tab of new Set([was?.tab, claim?.tab])) if (tab) lightClaim(tab);
+  }
+
+  let claimLeaveTimer = 0;
+
+  /** @param {PointerEvent} e */
+  function onClaimOver(e) {
+    const claim = claimAt(e.target);
+    if (!claim) return;
+    clearTimeout(claimLeaveTimer);
+    setClaim('hovered', claim);
+  }
+
+  /** @param {PointerEvent} e */
+  function onClaimOut(e) {
+    if (!claimAt(e.target)) return;
+    clearTimeout(claimLeaveTimer);
+    claimLeaveTimer = setTimeout(() => setClaim('hovered', null), CLAIM_LEAVE_MS);
+  }
+
+  /** @param {FocusEvent} e */
+  function onClaimFocus(e) {
+    const claim = claimAt(e.target);
+    if (claim) setClaim('focused', e.type === 'focusin' ? claim : null);
+  }
+
+  /** @param {KeyboardEvent} e */
+  function onClaimKey(e) {
+    const claim = claimAt(e.target);
+    if (!claim || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    openClaim(claim);
+  }
+
+  // Document d's summary as the claims call was shown it (r3con.stages.claims._shown_summaries): round 1's notes, each
+  // stripped, or if all are blank the latest round's that are not.
+  /** @param {Run} run @param {number} d */
+  function shownSummary(run, d) {
+    /** @param {Summary | undefined} summary */
+    const notes = (summary) => (summary ? [...(summary.parts?.values() ?? [summary])].map((part) => part.summary.trim()).filter(Boolean) : []);
+    return [run.rounds[0], ...run.rounds.slice(1).reverse()].map((summaries) => notes(summaries[d])).find((said) => said.length)?.join('\n\n') ?? '';
+  }
+
+  // A sentence's evidence in a popup under it, by document: its quotes, or at the document level each one's summary.
+  /** @param {ClaimRef} ref */
+  function openClaim(ref) {
+    const note = $('claim-note');
+    const { tab, link } = ref;
+    const { run } = tab;
+    if (run.lit !== ref.answer) lightAnswer(tab, ref.answer);
+    /** @param {number} d */
+    const sentences = (d) => link.sentences.filter((q) => q.document === d);
+    const groups = link.sentences.length
+      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
+      : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
+    fill(note, h('div', { class: 'k' }, evidenceLine(link)), groups);
+    note.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
+    if (note.matches(':popover-open')) note.hidePopover();
+    note.showPopover();
+    setClaim('open', ref);
+    placeClaimNote();
+    note.focus({ preventScroll: true });
+  }
+
+  // Under its sentence if it fits there, else over it, else on the roomier side, scrolling; always in view.
+  function placeClaimNote() {
+    const note = $('claim-note');
+    const ref = litClaims.open;
+    if (!ref || !note.matches(':popover-open')) return;
+    note.style.maxHeight = '';
+    const box = ref.el.getBoundingClientRect();
+    const below = box.bottom + CLAIM_NOTE_GAP;
+    const above = box.top - CLAIM_NOTE_GAP;
+    const room = { below: innerHeight - POPOVER_MARGIN - below, above: above - POPOVER_MARGIN };
+    const under = note.offsetHeight <= room.below || (note.offsetHeight > room.above && room.below >= room.above);
+    note.style.maxHeight = `${Math.max(CLAIM_NOTE_MIN_PX, under ? room.below : room.above)}px`;
+    const top = under ? below : above - note.offsetHeight;
+    note.style.left = `${clamp(box.left, POPOVER_MARGIN, frame.getBoundingClientRect().right - note.offsetWidth)}px`;
+    note.style.top = `${clamp(top, POPOVER_MARGIN, innerHeight - POPOVER_MARGIN - note.offsetHeight)}px`;
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {number} round */
@@ -5108,6 +5489,11 @@
     });
     t += TIMING.litDelay;
     at(t, () => lightRun(tab));
+    if (run.answers[0].claims) {
+      at(t, () => startLinking(tab, RUN_ANSWER));
+      t += TIMING.linkWork;
+      at(t, () => showLinks(tab, RUN_ANSWER));
+    }
     return steps;
   }
 
@@ -5173,6 +5559,13 @@
       case 'reasoning_finished':
         Object.assign(run.answers[0], { text: event.answer, provenance: provenanceOf(run, event.provenance) });
         showAnswer(tab, narr);
+        break;
+      case 'claims_started':
+        startLinking(tab, RUN_ANSWER);
+        break;
+      case 'claims_finished':
+        run.answers[0].claims = event.claims;
+        showLinks(tab, RUN_ANSWER);
         break;
       case 'run_finished':
         run.totals = totalsOf(event);
@@ -5264,6 +5657,7 @@
       code = error instanceof ServerError ? error.code : undefined;
     } finally {
       closeStream(stream);
+      stopLinking(tab, RUN_ANSWER);
     }
     if (continuable(run, code)) offerContinue(tab, narr);
   }
@@ -5316,6 +5710,11 @@
         showAnswer(tab, narr, id);
         lightLanded(tab, id);
       }
+      if (event.type === 'claims_started') startLinking(tab, id);
+      if (event.type === 'claims_finished') {
+        ask.claims = event.claims;
+        showLinks(tab, id);
+      }
       if (event.type === 'ask_finished') {
         ask.totals = totalsOf(event);
         sayReady(narr, model, false, ask.totals);
@@ -5335,6 +5734,7 @@
       failed({ outcome: 'failed', error: explain(error, /** @type {Error} */ (error).message, 'the ask stopped') });
     } finally {
       closeStream(stream);
+      stopLinking(tab, id);
       if (stopped && tab === state.shown && !stopping(tab)) errorStatus(stopped);
     }
   }
@@ -5416,7 +5816,7 @@
   function prototypeAsk(tab, question, model) {
     const { run } = tab;
     const recorded = !run.simulated && RECORDED_ASKS.find((entry) => entry.question === question && entry.model === model);
-    landAsk(tab, recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), source: 'recorded' } : simulatedAsk(run, question, model));
+    landAsk(tab, recorded ? { ...recorded, provenance: provenanceOf(run, recorded.provenance), claims: recorded.provenance.claims, source: 'recorded' } : simulatedAsk(run, question, model));
   }
 
   /** @param {RunTab} tab @param {Answer} ask */
@@ -5424,6 +5824,7 @@
     const id = addAsk(tab, ask);
     const narr = askTurn(tab, ask.question, ask.model);
     showAnswer(tab, narr, id);
+    if (ask.claims) showLinks(tab, id);
     sayReady(narr, ask.model, ask.source === 'simulated', ask.totals);
     lightLanded(tab, id);
   }
@@ -6714,6 +7115,16 @@
     });
     for (const button of removeAllButtons) button.addEventListener('click', removeAllOrUndo);
     $('chat-pane').addEventListener('click', onChatClick);
+    $('chat-pane').addEventListener('keydown', onClaimKey);
+    $('chat-pane').addEventListener('pointerover', onClaimOver);
+    $('chat-pane').addEventListener('pointerout', onClaimOut);
+    $('chat-pane').addEventListener('focusin', onClaimFocus);
+    $('chat-pane').addEventListener('focusout', onClaimFocus);
+    // A quote or a document's name opens the document's popup, so the sentence's own popup closes first.
+    $('claim-note').addEventListener('click', (e) => targetOf(e).closest('button') && $('claim-note').hidePopover(), true);
+    $('claim-note').addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
+    $('chat-pane').addEventListener('scroll', placeClaimNote, { capture: true, passive: true });
+    window.addEventListener('resize', placeClaimNote);
     $('theme-btn').addEventListener('click', toggleTheme);
 
     $('tab-chat').addEventListener('click', () => showTab('chat'));
@@ -6837,12 +7248,12 @@
     return new Blob(chunks).text();
   }
 
-  /** @param {RunTab} tab @returns {Promise<SavedTabV1>} */
+  /** @param {RunTab} tab @returns {Promise<SavedTab>} */
   async function savedTab(tab) {
     const { files, run } = tab;
     const representation = await (await api(`/api/runs/${run.id}/representation`)).json();
     // An ask that never landed has no answer to show.
-    const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals }) => ({ question, model, text, provenance, totals }));
+    const answers = run.answers.filter((a) => a.text !== null).map(({ question, model, text, provenance, totals, claims }) => ({ question, model, text, provenance, totals, claims: claims ?? null }));
     return {
       version: SAVED_VERSION,
       files: files.map(({ name, size, folder }) => ({ name, size, folder })),
@@ -6854,7 +7265,7 @@
   }
 
   // Its policy admits only its own script, and every < in the data is escaped, so no data can end its element.
-  /** @param {SavedTabV1} tab */
+  /** @param {SavedTab} tab */
   async function savedPage(tab) {
     const [page, style, served] = await Promise.all(PAGE_FILES.map(async (path) => (await api(path)).text()));
     // Hashed as the browser parses it, line ends as \n; a </script would end it inline, and escaped reads the same.
@@ -6947,26 +7358,23 @@
     provenance: ['string'],
     [OTHER_KEYS]: anything,
   };
-  /** @type {Shape} */
-  const SAVED_TAB_V1 = {
-    version: (version) => version === 1,
+  /** @type {Record<string, Shape>} */
+  const SAVED_ANSWER_V1 = {
+    question: 'string',
+    model: 'string',
+    text: 'string',
+    provenance: { summary_ids: [isCount], parse_ids: [isCount], trail: { rule: 'string', nodes: ['string'], edges: [(edge) => fits(edge, ['string']) && edge.length === 3] } },
+    'totals?': orNull(TOTALS),
+  };
+  const CLAIM = { text: 'string', start: isCount, end: isCount, documents: ['string'], quotes: [{ document: 'string', start: isCount, end: isCount }] };
+  /** @param {number} version @param {Shape} answer @returns {Shape} */
+  const savedShape = (version, answer) => ({
+    version: (/** @type {unknown} */ v) => v === version,
     files: [{ name: isPath, size: isCount, 'folder?': isPath }],
     texts: 'string',
     folders: [(pair) => Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && typeof pair[1] === 'boolean'],
     // A file saved before the run was drawn from its representation also holds the run as drawn, which isn't read.
-    run: {
-      [OTHER_KEYS]: anything,
-      totals: orNull(TOTALS),
-      answers: [
-        {
-          question: 'string',
-          model: 'string',
-          text: 'string',
-          provenance: { summary_ids: [isCount], parse_ids: [isCount], trail: { rule: 'string', nodes: ['string'], edges: [(edge) => fits(edge, ['string']) && edge.length === 3] } },
-          'totals?': orNull(TOTALS),
-        },
-      ],
-    },
+    run: { [OTHER_KEYS]: anything, totals: orNull(TOTALS), answers: [answer] },
     representation: {
       'manifest.json': isObject,
       'ids.json': recordOf(isCount),
@@ -6979,9 +7387,14 @@
       'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
       'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
     },
-  };
+  });
+  // Each version this page reads, by its number.
+  const SAVED_SHAPES = new Map([
+    [1, savedShape(1, SAVED_ANSWER_V1)],
+    [2, savedShape(2, { ...SAVED_ANSWER_V1, claims: orNull([CLAIM]) })],
+  ]);
 
-  /** @param {SavedTabV1} saved */
+  /** @param {SavedTab} saved */
   function consistent({ files, run, representation: r }) {
     const n = files.length;
     const ids = r['ids.json'];
@@ -6995,7 +7408,17 @@
     const perDocument = order.length === n && order.every((d, i) => d === i) && provenance.length === n;
     const after = Object.entries(r['relevance/result.json'].pruned_after ?? {});
     const pruned = after.every(([id, round]) => Object.hasOwn(ids, id) && round >= FIRST_PRUNING_ROUND && round <= rounds.length);
-    return n > 0 && perDocument && named && snippets && sourced && pruned && rounds.length >= 1 && rounds.length <= MAX_ROUNDS && run.answers.length > 0 && cited.every((d) => d < n);
+    const claimed = run.answers.every((a) => claimsFit(/** @type {string} */ (a.text), a.claims ?? [], ids));
+    return n > 0 && perDocument && named && snippets && sourced && pruned && claimed && rounds.length >= 1 && rounds.length <= MAX_ROUNDS && run.answers.length > 0 && cited.every((d) => d < n);
+  }
+
+  // Each claim is in its answer, after the one before it, and names only the run's documents, as r3con gives them.
+  /** @param {string} text @param {Claim[]} claims @param {Record<string, number>} ids */
+  function claimsFit(text, claims, ids) {
+    const length = [...text].length;
+    const inOrder = claims.every((claim, k) => claim.start < claim.end && claim.end <= length && (k === 0 || claims[k - 1].end <= claim.start));
+    const quoted = claims.flatMap((claim) => claim.quotes).every((q) => q.start < q.end && Object.hasOwn(ids, q.document));
+    return inOrder && quoted && claims.flatMap((claim) => claim.documents).every((id) => Object.hasOwn(ids, id));
   }
 
   // Drawn from its representation alone, as a live run is from its events, so that what shows is what an ask reads.
@@ -7050,9 +7473,10 @@
       throw new ServerError(DAMAGED_SAVE);
     }
     const version = saved?.version;
-    if (version !== SAVED_VERSION) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
-    if (!fits(saved, SAVED_TAB_V1) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
-    const { files, texts, folders, run, representation } = /** @type {SavedTabV1} */ (saved);
+    const shape = SAVED_SHAPES.get(version);
+    if (!shape) throw new ServerError(typeof version === 'number' && version > SAVED_VERSION ? NEWER_SAVE : DAMAGED_SAVE);
+    if (!fits(saved, shape) || !consistent(saved)) throw new ServerError(DAMAGED_SAVE);
+    const { files, texts, folders, run, representation } = /** @type {SavedTab} */ (saved);
     /** @type {string[]} */
     const text = await gunzipped(texts, MAX_SAVED_TEXT_BYTES)
       .then(JSON.parse)

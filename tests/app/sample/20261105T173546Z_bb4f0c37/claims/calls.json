@@ -1,0 +1,49 @@
+[
+  {
+    "step": 1,
+    "kind": "claims",
+    "doc": null,
+    "chunk": null,
+    "tokens": {
+      "prompt": 729,
+      "completion": 407,
+      "total": 1136
+    },
+    "usage": {
+      "completion_tokens": 407,
+      "prompt_tokens": 729,
+      "total_tokens": 1136,
+      "completion_tokens_details": {
+        "accepted_prediction_tokens": 0,
+        "audio_tokens": 0,
+        "reasoning_tokens": 328,
+        "rejected_prediction_tokens": 0
+      },
+      "prompt_tokens_details": {
+        "audio_tokens": 0,
+        "cache_write_tokens": 0,
+        "cached_tokens": 0
+      }
+    },
+    "usd": 0.0002764,
+    "sends": 1,
+    "resend_wait_seconds": 0.0,
+    "seconds": 4.83,
+    "finish_reason": "stop",
+    "error": null,
+    "served_model": "gpt-6-luna",
+    "fingerprint": null,
+    "prompt": [
+      {
+        "role": "system",
+        "content": "You will be given a question and an answer that is supported by a collection of quotes. Your job is to extract the exact claims made in the answer, word for word (each sentence, list item or table row), along with the IDs of the quotes that support them, if any.\nReturn exactly one JSON object with the key `claims`, where each item has `text` and `quote_ids`. Output only that JSON.\nPreserve the original wording of each claim exactly as it appears in the answer. Include every claim from the answer once, in the same order it appears. Base quote_ids only on the provided quotes; if no quote supports a claim, use an empty array. Do not guess or infer unsupported quote IDs.\n## Example\n<question>\nWhich bakery sold more loaves in March, and by how much?\n</question>\n<answer>\nRye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260. Neither report gives prices.\n</answer>\n<quotes>\n### Quote ID: q1\nLoaves sold in March: 1,240.\n### Quote ID: q2\nAll flour is milled on site.\n### Quote ID: q3\nLoaves sold in March: 980.\n### Quote ID: q4\nThe shop is open seven days a week.\n</quotes>\nReply: {\"claims\": [{\"text\": \"Rye & Co. sold more loaves in March: 1,240 against Hearth's 980, a difference of 260.\", \"quote_ids\": [\"q1\", \"q3\"]}, {\"text\": \"Neither report gives prices.\", \"quote_ids\": []}]}"
+      },
+      {
+        "role": "user",
+        "content": "<question>\nWhich maintenance contractor's sites logged the most equipment incidents in Q3 in total, and how many?\n</question>\n<answer>\nHalloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).\n</answer>\n<quotes>\n### Quote ID: q1\nEquipment incidents logged this quarter: 5.\n### Quote ID: q2\nPlanned maintenance at this site is carried out under contractor code CT-118.\n### Quote ID: q3\nEquipment incidents logged this quarter: 9.\n### Quote ID: q4\nPlanned maintenance at this site is carried out under contractor code CT-204.\n### Quote ID: q5\nEquipment incidents logged this quarter: 6.\n### Quote ID: q6\nPlanned maintenance at this site is carried out under contractor code CT-118.\n### Quote ID: q7\nCT-118 .... Halloran Services Ltd — mechanical and electrical maintenance\n### Quote ID: q8\nCT-204 .... Merrow Facilities Group — HVAC and compressed air\n### Quote ID: q9\nCodes are used in site paperwork; the registry is the authority for the mapping.\n</quotes>"
+      }
+    ],
+    "reasoning": null,
+    "output": "{\"claims\":[{\"text\":\"Halloran Services Ltd’s sites logged the most equipment incidents in Q3, with 11 in total (5 at Northgate and 6 at Riverside).\",\"quote_ids\":[\"q1\",\"q2\",\"q3\",\"q4\",\"q5\",\"q6\",\"q7\",\"q8\"]}]}"
+  }
+]

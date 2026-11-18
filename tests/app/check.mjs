@@ -249,7 +249,11 @@ const REFUSED_ROUNDS = ['7', '0', '2.5', 'three'];
 // Frames drawn while a run's request is held, before r3con app has said anything of the run.
 const HELD_FRAMES = 3;
 const SIMULATED_DONE = /^● done · simulated run · .+ · nothing was sent$/;
-const SCRIPTED_ANSWER = "The check's scripted model answers this.";
+// fake_server.py's answer: of its claims, its first sentence rests on the first two pieces of evidence the claims call is
+// shown, and its second on none.
+const SCRIPTED_LINKED = "The check's scripted model answers this.";
+const SCRIPTED_UNLINKED = 'Nothing backs this second sentence.';
+const SCRIPTED_ANSWER = `${SCRIPTED_LINKED} ${SCRIPTED_UNLINKED}`;
 // The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
 const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
@@ -4052,6 +4056,344 @@ async function quotesArea() {
   });
 }
 
+// ---------- claims: each sentence of an answer linked to the evidence that supports it ----------
+
+// The page's LINKING: the line under an answer while its sentences are linked.
+const LINKING = 'linking sentences…';
+const ANSWER_MARK = '.line.answer .answer-mark';
+// The sample's answer's popup, as its title names it.
+const SAMPLE_ANSWER_TITLE = '● Which maintenance… · gpt-6-luna';
+// What a linked sentence's evidence is, as its name and its popup's line say: its quotes, or at the document level its
+// documents.
+const evidenceOf = ({ quotes, documents }) => (quotes.length ? `${counted(quotes.length, 'quote')} from ${counted(documents.length, 'document')}` : counted(documents.length, 'document'));
+// The sample with its answer's claims taken through `change`, as r3con.trace gave them.
+const withClaims = (change) => withSample((sample) => ({ ...sample, answer: { ...sample.answer, provenance: { ...sample.answer.provenance, claims: change(sample.answer.provenance.claims) } } }));
+// Code points `start` to `end` of `text`, as r3con places a claim or a quote.
+const codePoints = (text, start, end) => Array.from(text).slice(start, end).join('');
+
+// In-page: each linked sentence in the shown chat: its answer, its text, whether it is a control the keyboard reaches,
+// and its name.
+function claimsShown() {
+  return [...document.querySelectorAll('.transcript:not([hidden]) .claim')].map((el) => ({
+    answer: el.closest('[data-node]').dataset.node,
+    text: el.textContent,
+    control: el.getAttribute('role') === 'button' && el.tabIndex === 0,
+    name: el.getAttribute('aria-label'),
+  }));
+}
+
+// In-page: what the panel lights for a sentence: whether one is lit, its nodes and lines, each document's pill as a count,
+// and the sentences lit in the chat.
+function claimLight() {
+  const keys = (selector, key) => [...document.querySelectorAll(selector)].map((el) => el.dataset[key]).sort();
+  const pill = (el) => (el.querySelector('.pill').hidden ? 0 : Number(el.querySelector('.pill').textContent));
+  return {
+    lit: document.querySelector('#world .has-claim') !== null,
+    nodes: keys('#world .node.on-claim', 'id'),
+    edges: keys('#world .edge.on-claim', 'key'),
+    pills: [...document.querySelectorAll('#world .node.doc')].map(pill),
+    sentences: [...document.querySelectorAll('.transcript:not([hidden]) .claim.lit')].map((el) => el.textContent),
+  };
+}
+
+// In-page: the open popup of a sentence's evidence: its line, each document's name then what it shows of it, its name,
+// whether it holds the focus, and whether it sits clear of the sentence; null while closed.
+function claimNote() {
+  const note = document.getElementById('claim-note');
+  if (!note.matches(':popover-open')) return null;
+  const lit = document.querySelector('.transcript:not([hidden]) .claim.lit')?.getBoundingClientRect();
+  const box = note.getBoundingClientRect();
+  return {
+    line: note.querySelector('.k').textContent,
+    groups: [...note.querySelectorAll('.quoted')].map((g) => [g.querySelector('.quoted-name').textContent, ...[...g.querySelectorAll('.sentence, .doc-summary')].map((el) => el.textContent)]),
+    name: note.getAttribute('aria-label'),
+    focused: note.contains(document.activeElement),
+    clear: Boolean(lit) && (box.top >= lit.bottom || box.bottom <= lit.top),
+  };
+}
+
+// The sample's one claim, lit, as its trail gives it, listed by hand: round 2's summary of each of the first four memos
+// quotes the claim's quotes there, one step from the answer, which cites them; the registry's second quote only its
+// round-1 summary does, two steps away, through the round-2 summaries that cite it, the first three memos'.
+const SAMPLE_CLAIM_PATH = {
+  nodes: ['answer-0', 'doc-0', 'doc-1', 'doc-2', 'doc-3', 'r1-3', 'r2-0', 'r2-1', 'r2-2', 'r2-3'],
+  edges: ['doc-0>r2-0', 'doc-1>r2-1', 'doc-2>r2-2', 'doc-3>r1-3', 'doc-3>r2-3', 'r1-3>r2-0', 'r1-3>r2-1', 'r1-3>r2-2', 'r2-0>answer-0', 'r2-1>answer-0', 'r2-2>answer-0', 'r2-3>answer-0'],
+};
+// Its quotes in each memo: two in each of the first four.
+const SAMPLE_CLAIM_PILLS = [2, 2, 2, 2, 0];
+// The same claim at the document level, naming the first four memos: round 2's summary of each summarizes it, one step
+// from the answer, nearer than round 1's.
+const SAMPLE_DOCUMENTS_PATH = {
+  nodes: ['answer-0', 'doc-0', 'doc-1', 'doc-2', 'doc-3', 'r2-0', 'r2-1', 'r2-2', 'r2-3'],
+  edges: ['doc-0>r2-0', 'doc-1>r2-1', 'doc-2>r2-2', 'doc-3>r2-3', 'r2-0>answer-0', 'r2-1>answer-0', 'r2-2>answer-0', 'r2-3>answer-0'],
+};
+// A copy of a quote of the claim's in the first memo, cut short, so that the two overlap.
+const OVERLAP_CUT = 20;
+// The sample's answer said this many times over, as one claim: taller than SHORT_DESKTOP's whole page.
+const LONG_CLAIM_TIMES = 12;
+// The page's CLAIM_NOTE_GAP and CLAIM_NOTE_MIN_PX: a sentence's popup sits this far from it, and is never shorter.
+const CLAIM_NOTE_GAP = 6;
+const CLAIM_NOTE_MIN_PX = 120;
+// How far the chat is scrolled, and the window narrowed, with a sentence's popup open.
+const SCROLL_BY_PX = 20;
+const NARROWED_BY_PX = 240;
+
+// Hovers the shown chat's first linked sentence, then moves away; what the panel lit then, and once restored.
+async function hoverClaim(page) {
+  await page.hover(`${CHAT} .claim`);
+  await becomes(page, () => document.querySelector('#world .has-claim') !== null);
+  const hovered = await page.evaluate(claimLight);
+  await page.mouse.move(0, 0);
+  await becomes(page, () => document.querySelector('#world .has-claim') === null);
+  return { hovered, left: await page.evaluate(claimLight) };
+}
+
+// Drags along the first line of `selector`'s text from its start, selecting some of it, and gives what is selected.
+async function dragToSelect(page, selector) {
+  const target = page.locator(selector).first();
+  await target.scrollIntoViewIfNeeded();
+  const box = await target.evaluate((el) => el.getClientRects()[0].toJSON());
+  const y = box.top + LINE_PX / 2;
+  await page.mouse.move(box.left + 2, y);
+  await page.mouse.down();
+  await page.mouse.move(box.left + box.width / 2, y, { steps: 5 });
+  await page.mouse.up();
+  return page.evaluate(() => String(getSelection()));
+}
+
+// In-page: the open sentence popup's box, and its sentence's, rounded; null while closed.
+function claimNoteBoxes() {
+  const note = document.getElementById('claim-note');
+  const lit = document.querySelector('.transcript:not([hidden]) .claim.lit');
+  if (!note.matches(':popover-open') || !lit) return null;
+  const rounded = (r) => Object.fromEntries(['left', 'top', 'right', 'bottom', 'height'].map((k) => [k, Math.round(r[k])]));
+  return { note: rounded(note.getBoundingClientRect()), sentence: rounded(lit.getBoundingClientRect()), view: innerHeight };
+}
+
+// Opens the first linked sentence's popup from the keyboard, the chat scrolled as it is.
+async function openClaimByKey(page) {
+  await page.evaluate(() => document.querySelector('.transcript:not([hidden]) .claim').focus({ preventScroll: true }));
+  await page.keyboard.press('Enter');
+}
+
+const nextFrame = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+async function claimsArea() {
+  const sample = recordedSample();
+  const [ask] = recordedAsks();
+  const [claim] = sample.answer.provenance.claims;
+  const evidence = evidenceOf(claim);
+
+  // With motion on, as a replay plays it.
+  await withPage('claims', { sample: false }, async (page) => {
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.click('#run-btn');
+    const linking = await becomes(page, () => document.querySelector('.line.linking') !== null, null, REPLAY_MS);
+    const going = await page.evaluate(() => {
+      const el = document.querySelector('.line.linking');
+      return { text: el.querySelector('.t').textContent, spins: el.querySelector('.g').classList.contains('log-spin'), under: el.previousElementSibling.matches('details.sentences'), linked: document.querySelectorAll('.claim').length };
+    });
+    const linked = await becomes(page, () => document.querySelector('.claim') !== null && document.querySelector('.line.linking') === null, null, REPLAY_MS);
+    const goingName = "a replay lands its answer plain, then a line under its sentences, with the running mark, says it is linking sentences, and goes once they are linked";
+    check('claims', goingName, linking && linked && isDeepStrictEqual(going, { text: LINKING, spins: true, under: true, linked: 0 }), JSON.stringify(going));
+  });
+
+  await withPage('claims', {}, async (page) => {
+    const shown = await page.evaluate(claimsShown);
+    const look = await page.$eval(`${CHAT} .claim`, (el) => getComputedStyle(el).textDecorationStyle);
+    const answer = await page.textContent(`${CHAT} .line.answer .t`);
+    const expected = [{ answer: 'answer-0', text: codePoints(sample.answer.text, claim.start, claim.end), control: true, name: `${claim.text} · ${evidence}` }];
+    const shownName = "once linked, the sample's one claim, its whole answer, is a control of its own, underlined dotted and named for its sentence and its evidence, and the answer reads as before";
+    check('claims', shownName, isDeepStrictEqual(shown, expected) && look === 'dotted' && answer === sample.answer.text, `${JSON.stringify(shown)}; ${look}`);
+
+    const trail = await litOnPanel(page);
+    const { hovered, left } = await hoverClaim(page);
+    const own = { lit: true, ...SAMPLE_CLAIM_PATH, pills: SAMPLE_CLAIM_PILLS, sentences: [expected[0].text] };
+    const within = own.edges.every((key) => trail.edges.includes(key)) && own.edges.length < trail.edges.length;
+    const hoverName = "hovering the linked sentence lights only its path, for each quote the trail's summaries nearest the answer that quote it and its document, and each pill counts its quotes";
+    check('claims', hoverName, isDeepStrictEqual(hovered, own) && within, JSON.stringify(hovered));
+    const restored = { lit: false, nodes: [], edges: [], pills: SAMPLE_QUOTED.pills, sentences: [] };
+    const leftName = 'leaving it restores the whole trail, and the pills count the trail again';
+    check('claims', leftName, isDeepStrictEqual(left, restored) && isDeepStrictEqual(await litOnPanel(page), trail), JSON.stringify(left));
+
+    await page.focus(ANSWER_MARK);
+    await page.keyboard.press('Tab');
+    const focused = await page.evaluate(() => ({ claim: document.activeElement.matches('.claim'), ring: document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none' }));
+    const byFocus = await page.evaluate(claimLight);
+    await page.keyboard.press('Shift+Tab');
+    const unfocused = await page.evaluate(claimLight);
+    const focusName = "Tab from the answer's mark reaches the sentence, its focus ring showing, and lights its path as a hover does; Shift+Tab away restores the trail";
+    check('claims', focusName, focused.claim && focused.ring && isDeepStrictEqual(byFocus, own) && isDeepStrictEqual(unfocused, restored), JSON.stringify({ focused, byFocus: byFocus.edges.length }));
+
+    await page.click(`${CHAT} .claim`);
+    await page.mouse.move(0, 0);
+    const note = await page.evaluate(claimNote);
+    const openLight = await page.evaluate(claimLight);
+    const listed = { line: evidence, groups: quotesListed(sample.docs, sample.ids, claim.quotes), name: "the sentence's quotes", focused: true, clear: true };
+    const noteName = "a click on it opens a popup clear of it, holding the focus: its quotes by document, as the answer's sentences list them; it stays lit while the popup is open";
+    check('claims', noteName, isDeepStrictEqual(note, listed) && isDeepStrictEqual(openLight, own), JSON.stringify(note));
+    await page.click('#claim-note .sentence >> nth=0');
+    const flash = await page.evaluate(flashed);
+    const [firstDoc] = listed.groups;
+    const opened = { note: await page.evaluate(claimNote), title: (await popup(page))?.title, flash: flash?.text, marked: flash?.marked };
+    const quoteName = "a quote in it closes it and opens its document's popup there, the quote marked";
+    check('claims', quoteName, isDeepStrictEqual(opened, { note: null, title: `● ${firstDoc[0]}`, flash: firstDoc[1], marked: true }), JSON.stringify(opened));
+
+    await page.keyboard.press('Escape');
+    await page.focus(`${CHAT} .claim`);
+    await page.keyboard.press('Enter');
+    const byEnter = await page.evaluate(claimNote);
+    await page.keyboard.press('Escape');
+    const back = { note: await page.evaluate(claimNote), focus: await page.evaluate(() => document.activeElement.matches('.claim')) };
+    await page.keyboard.press(' ');
+    const bySpace = await page.evaluate(claimNote);
+    const keyName = "from the keyboard, Enter or Space on the sentence opens the same popup, and Escape closes it, giving the focus back to the sentence";
+    check('claims', keyName, isDeepStrictEqual(byEnter, listed) && isDeepStrictEqual(back, { note: null, focus: true }) && isDeepStrictEqual(bySpace, listed), JSON.stringify(back));
+    await page.keyboard.press('Escape');
+
+    const markBox = await rect(page, ANSWER_MARK);
+    await page.click(ANSWER_MARK);
+    const byMark = (await popup(page))?.title;
+    await page.keyboard.press('Escape');
+    await page.focus(ANSWER_MARK);
+    await page.keyboard.press('Enter');
+    const byMarkKey = (await popup(page))?.title;
+    const big = markBox.width >= MIN_TARGET_PX && markBox.height >= MIN_TARGET_PX;
+    const markName = `the answer's mark, a ${MIN_TARGET_PX}px target, still opens the answer's popup, clicked or by Enter`;
+    check('claims', markName, big && [byMark, byMarkKey].every((title) => title === SAMPLE_ANSWER_TITLE), `${byMark}; ${byMarkKey}; ${markBox.width}×${markBox.height}`);
+    await page.keyboard.press('Escape');
+
+    await page.focus(`${CHAT} .claim`);
+    const whileFocused = (await page.evaluate(claimLight)).lit;
+    await page.evaluate(() => document.getElementById('new-tab-btn').click());
+    await page.evaluate(() => document.querySelector('.run-tab').click());
+    const hidden = await page.evaluate(claimLight);
+    const hiddenName = "a focused sentence whose tab is hidden, its focus going to the new tab's question, lets its tab's trail go back to whole";
+    check('claims', hiddenName, whileFocused && isDeepStrictEqual(hidden, restored), JSON.stringify({ whileFocused, hidden }));
+
+    await send(page, ask.question);
+    await becomes(page, landedNode, 'answer-1');
+    const marks = await page.$$eval(ANSWER_MARK, (els) => els.map((el) => el.getAttribute('aria-label')));
+    const named = [`answer to ${sample.question} · ${sample.model}`, `answer to ${ask.question} · ${ask.model}`];
+    check('claims', "each answer's mark is named for its own answer, as its node is", isDeepStrictEqual(marks, named), JSON.stringify(marks));
+
+    const askText = `${CHAT} .line.answer[data-node="answer-1"] .t`;
+    await page.keyboard.press('Escape');
+    const selected = [await dragToSelect(page, askText), await dragToSelect(page, `${CHAT} .claim`)];
+    const after = { inspector: (await popup(page))?.title ?? null, note: await page.evaluate(claimNote) };
+    // Whatever opened, so that it can't stand in front of the mark.
+    await page.keyboard.press('Escape');
+    await page.click(`${CHAT} .line.answer[data-node="answer-1"] .answer-mark`);
+    const byAskMark = (await popup(page))?.title;
+    const selectName = "selecting some of an answer's text, plain or linked, opens nothing, and its mark still opens its popup with the text selected";
+    const nothing = selected.every((text) => text.length > 0) && isDeepStrictEqual(after, { inspector: null, note: null });
+    check('claims', selectName, nothing && byAskMark === `● ${ASK_LABEL}`, `${JSON.stringify(selected)}; ${JSON.stringify(after)}; ${byAskMark}`);
+    await page.keyboard.press('Escape');
+
+  });
+
+  // The registry memo, quoted three times on the trail and twice by the claim, alone in a folder closed before the run.
+  const withRegistryInFolder = withSample((sample) => {
+    sample.docs[3] = { ...sample.docs[3], folder: 'registry' };
+    return sample;
+  });
+  await withPage('claims', { sample: false, before: serving(withRegistryInFolder) }, async (page) => {
+    await pressNode(page, folderSel('registry'));
+    await runSample(page);
+    const pill = async () => (await pillsByName(page))['registry folder']?.[0];
+    const onTrail = await pill();
+    await page.hover(`${CHAT} .claim`);
+    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
+    const lit = await pill();
+    const counts = [SAMPLE_QUOTED.pills[3], SAMPLE_CLAIM_PILLS[3]].map(String);
+    check('claims', "a closed folder's pill counts the lit sentence's quotes in it while it is lit, and the trail's otherwise", isDeepStrictEqual([onTrail, lit], counts), `${onTrail} → ${lit}`);
+  });
+
+  // The claim with a second copy of its first quote, cut short: the two overlap, so they are one sentence.
+  const withOverlap = withClaims(([c]) => [{ ...c, quotes: [...c.quotes, { ...c.quotes[0], end: c.quotes[0].end - OVERLAP_CUT }] }]);
+  await withPage('claims', { before: serving(withOverlap) }, async (page) => {
+    const name = await page.getAttribute(`${CHAT} .claim`, 'aria-label');
+    await page.hover(`${CHAT} .claim`);
+    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
+    const { pills } = await page.evaluate(claimLight);
+    await page.click(`${CHAT} .claim`);
+    const note = await page.evaluate(claimNote);
+    const shown = { name, pills, line: note?.line, first: note?.groups[0] };
+    const once = { name: `${claim.text} · ${evidence}`, pills: SAMPLE_CLAIM_PILLS, line: evidence, first: quotesListed(sample.docs, sample.ids, claim.quotes)[0] };
+    check('claims', "two of a sentence's quotes that overlap count and list as one sentence, as the trail's do", isDeepStrictEqual(shown, once), JSON.stringify(shown));
+  });
+
+  // At the document level, its claim names the memos only. Round 1 summarizes the first memo as blank space, so the
+  // claims call was shown its latest round's summary, and the second memo's with space around it, which it strips.
+  const withDocumentLevel = withSample((s) => {
+    s.answer.provenance.claims = s.answer.provenance.claims.map((c) => ({ ...c, quotes: [] }));
+    s.rounds[0][0].summary = ' \n ';
+    s.rounds[0][1].summary = `  ${s.rounds[0][1].summary}  `;
+    return s;
+  });
+  await withPage('claims', { before: serving(withDocumentLevel) }, async (page) => {
+    const { hovered } = await hoverClaim(page);
+    const lights = { lit: true, ...SAMPLE_DOCUMENTS_PATH, pills: [0, 0, 0, 0, 0], sentences: [sample.answer.text] };
+    check('claims', 'at the document level, hovering it lights the way from the answer to each of its documents, through the summaries nearest it', isDeepStrictEqual(hovered, lights), JSON.stringify(hovered));
+    await page.click(`${CHAT} .claim`);
+    const note = await page.evaluate(claimNote);
+    const summaries = [sample.rounds[1][0].summary, ...[1, 2, 3].map((d) => sample.rounds[0][d].summary)].map((text) => text.trim());
+    const groups = summaries.map((summary, d) => [sample.docs[d].name, summary]);
+    const docName = "its popup lists its documents, each with the summary its call was shown: round 1's, stripped, or the latest round's where round 1's is blank";
+    check('claims', docName, isDeepStrictEqual(note, { line: counted(4, 'document'), groups, name: "the sentence's documents", focused: true, clear: true }), JSON.stringify(note?.groups));
+  });
+
+  const short = { name: '1440×450 light', options: { ...LAYOUTS.desktop.options, viewport: SHORT_DESKTOP } };
+  await withPage('claims', { layout: short }, async (page) => {
+    await page.click(`${CHAT} .claim`);
+    const before = await page.evaluate(claimNoteBoxes);
+    await page.$eval(CHAT, (chat, by) => (chat.scrollTop += by), SCROLL_BY_PX);
+    await nextFrame(page);
+    const scrolled = await page.evaluate(claimNoteBoxes);
+    await page.setViewportSize({ width: SHORT_DESKTOP.width - NARROWED_BY_PX, height: SHORT_DESKTOP.height });
+    await nextFrame(page);
+    const narrowed = await page.evaluate(claimNoteBoxes);
+    const apart = (b) => b && [b.note.top - b.sentence.bottom, b.note.left - b.sentence.left];
+    const moved = (a, b) => a && b && [b.sentence.top - a.sentence.top, b.sentence.left - a.sentence.left];
+    const follows = isDeepStrictEqual(apart(before)?.[0], CLAIM_NOTE_GAP) && isDeepStrictEqual(apart(scrolled), apart(before)) && isDeepStrictEqual(apart(narrowed), apart(before));
+    const shifted = isDeepStrictEqual(moved(before, scrolled), [-SCROLL_BY_PX, 0]) && moved(scrolled, narrowed)?.[1] === -NARROWED_BY_PX;
+    check('claims', "a sentence's popup stays under it as the chat scrolls and the window narrows", follows && shifted, JSON.stringify({ before, scrolled, narrowed }));
+  });
+
+  const withLongClaim = withSample((s) => {
+    const text = Array(LONG_CLAIM_TIMES).fill(s.answer.text).join(' ');
+    const [c] = s.answer.provenance.claims;
+    s.answer = { ...s.answer, text, provenance: { ...s.answer.provenance, claims: [{ ...c, text, end: Array.from(text).length }] } };
+    return s;
+  });
+  await withPage('claims', { layout: short, before: serving(withLongClaim) }, async (page) => {
+    await page.$eval(`${CHAT} .claim`, (el) => {
+      const chat = el.closest('.transcript');
+      chat.scrollTop += el.getBoundingClientRect().top - chat.getBoundingClientRect().top + (el.offsetHeight - chat.clientHeight) / 2;
+    });
+    await openClaimByKey(page);
+    const boxes = await page.evaluate(claimNoteBoxes);
+    const tall = boxes && boxes.sentence.top < 0 && boxes.sentence.bottom > boxes.view;
+    const inView = boxes && boxes.note.top >= 0 && boxes.note.bottom <= boxes.view && boxes.note.height >= CLAIM_NOTE_MIN_PX;
+    check('claims', `a sentence taller than the window opens its popup in view, at least ${CLAIM_NOTE_MIN_PX}px tall`, tall && inView, JSON.stringify(boxes));
+  });
+
+  // The claim stripped of its evidence, then none, then none at all, as an answer saved before r3con linked them.
+  const plainly = {
+    'a sentence with no evidence stays plain text': withClaims((claims) => claims.map((c) => ({ ...c, documents: [], quotes: [] }))),
+    'an answer whose call found no claims shows nothing extra': withClaims(() => []),
+    'an answer with no claims, as one saved before r3con linked them, shows nothing extra': withClaims(() => undefined),
+  };
+  for (const [name, edit] of Object.entries(plainly)) {
+    await withPage('claims', { before: serving(edit) }, async (page) => {
+      const turn = await page.evaluate(logOf);
+      const plain = { claims: await count(page, '.claim'), linking: await count(page, '.line.linking'), answer: await page.textContent(`${CHAT} .line.answer .t`) };
+      const expected = { claims: 0, linking: 0, answer: sample.answer.text };
+      check('claims', name, isDeepStrictEqual(plain, expected) && turn.after[0] === sample.answer.text && turn.after[1] === SAMPLE_QUOTED.line, JSON.stringify(plain));
+    });
+  }
+}
+
 async function gestures() {
   await withPage('gestures', {}, async (page) => {
     const panel = await rect(page, '#panel');
@@ -4464,7 +4806,7 @@ async function answersOnTheRun(sample, asks) {
     const named = name === `answer to ${asks[0].question} · ${asks[0].model}`;
     check('answers', 'an answer node is named for its question and model, takes focus, and Enter on it lights it', named && byKey, name);
     await page.keyboard.press('Escape');
-    await page.locator('.turn').first().locator('.line.answer').click();
+    await page.locator('.turn').first().locator(ANSWER_MARK).click();
     const byLine = isDeepStrictEqual(await litEdges(page), runPath) && isDeepStrictEqual(await litAnswers(page), ['answer-0']);
     check('answers', 'selecting the first answer by its chat line lights its path again', byLine);
 
@@ -8004,10 +8346,11 @@ const SAVED_ANSWERS = 2;
 const DETAIL_CHARS = 300;
 const savedHolds = (n) => `The file includes the full text of this tab's ${n} files.`;
 const SAVED_NOTE = 'open this file in R3Con to ask more';
-const SAVED_VERSION = 1;
+// The page's SAVED_VERSION, whose files add each answer's claims to version 1's.
+const SAVED_VERSION = 2;
 const SAVED_BLOCK = /<script type="application\/json" id="r3con-tab">([\s\S]*?)<\/script>/;
 // What an answer in the file holds: what the page shows of it, and never the server it ran on.
-const SAVED_ANSWER_FIELDS = ['model', 'provenance', 'question', 'text', 'totals'];
+const SAVED_ANSWER_FIELDS = ['claims', 'model', 'provenance', 'question', 'text', 'totals'];
 // r3con app's REPRESENTATION_FILES: each file of a run's folder an ask reads.
 const REPRESENTATION_FILES = ['manifest.json', 'ids.json', 'names.json', 'relevance/result.json', 'structuring/schema/result.json', 'structuring/parsing/result.json'];
 const NEWER_SAVE = 'It holds a tab saved by a newer R3Con: update R3Con to open it.';
@@ -8031,6 +8374,7 @@ function tabShown() {
     return `${el.getAttribute('aria-label')} · ${icon}${el.classList.contains('on-path') ? ' · lit' : ''}`;
   });
   const turns = [...document.querySelectorAll('.transcript:not([hidden]) .turn')].map((turn) => texts('.line.user .t, .log-head .t, .line.answer .t', turn));
+  const claims = [...document.querySelectorAll('.transcript:not([hidden]) .claim')].map((el) => `${el.closest('[data-node]').dataset.node} ${el.getAttribute('aria-label')}`);
   return {
     tab: document.querySelector('.run-tab[aria-selected="true"]').textContent,
     status: document.getElementById('run-status').textContent,
@@ -8038,18 +8382,22 @@ function tabShown() {
     edges: document.querySelectorAll('#world .edge').length,
     lit: document.querySelectorAll('#world .edge.lit').length,
     turns,
+    claims,
     files: texts('#file-list .file'),
   };
 }
 
 async function answerAndFileShown(page) {
   await page.click('#tab-chat');
-  await page.click(`${CHAT} .line.answer[data-node="answer-0"]`);
+  await page.click(`${CHAT} .line.answer[data-node="answer-0"] .claim`);
+  const note = await page.evaluate(claimNote);
+  await page.keyboard.press('Escape');
+  await page.click(`${CHAT} .line.answer[data-node="answer-0"] .answer-mark`);
   const lit = (await page.evaluate(tabShown)).nodes.filter((node) => node.endsWith(' · lit'));
   await page.keyboard.press('Escape');
   await page.click('#tab-files');
   await page.click('#file-list .file');
-  return { lit, marks: await page.evaluate(marksIn, '#file-view') };
+  return { lit, note, marks: await page.evaluate(marksIn, '#file-view') };
 }
 
 // The tab every saved-tab check saves: the sample memos and DROPPED_FOLDER, run, asked again, with a folder closed.
@@ -8082,6 +8430,17 @@ const withConfig = (change) => (b) => {
   const manifest = b.representation['manifest.json'];
   return { ...b, representation: { ...b.representation, 'manifest.json': { ...manifest, config: { ...manifest.config, ...change } } } };
 };
+// A saved block whose every answer's claims each take `change`, or which keeps no claims, as a file saved before the
+// page linked them.
+const withAnswerClaims = (change) => (b) => ({ ...b, run: { ...b.run, answers: b.run.answers.map((a) => ({ ...a, claims: a.claims.map(change) })) } });
+const withoutClaims = (b) => ({ ...b, run: { ...b.run, answers: b.run.answers.map(({ claims, ...a }) => a) } });
+// A saved block as version 1 wrote it, its answers without claims.
+const asVersion1 = (b) => ({ ...withoutClaims(b), version: 1 });
+// Each answer's claims made to overlap: its second starting where its first does.
+const withClaimsOverlapping = (b) => ({ ...b, run: { ...b.run, answers: b.run.answers.map((a) => ({ ...a, claims: [a.claims[0], { ...a.claims[1], start: a.claims[0].start }] })) } });
+// Code points past any answer's end, and a document id no run here has.
+const PAST_ANSWER = 1000;
+const UNKNOWN_DOCUMENT = 'ffffff';
 const runFolders = (server) => readdirSync(server.logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length;
 const tabCount = (page) => page.$$eval('.run-tab', (els) => els.length);
 
@@ -8110,6 +8469,8 @@ async function liveImport(url, server) {
     const asked = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
     const askedName = 'it is live: a new ask goes to r3con app over the run it made again from the file, and lands as the third answer';
     check('live', askedName, asked && posts.length === 2 && posts[0] === '/api/imports' && /^\/api\/runs\/\w+\/asks$/.test(posts[1]), posts.join(' '));
+    const linked = await becomes(page, () => document.querySelector('.line.answer[data-node="answer-2"] .claim') !== null, null, LIVE_RUN_MS);
+    check('live', "the new ask's answer is linked by its own claims, beside those the file kept", linked && (await count(page, `${CHAT} .claim`)) === SAVED_ANSWERS + 1);
 
     const again = savedBlockOf(await savedHtml(page));
     const resavedName = 'saved again, the file holds the asks it was saved with and the new one';
@@ -8169,6 +8530,12 @@ async function liveImport(url, server) {
     "a file named with ..": [withBlock(html, (b) => ({ ...b, files: [{ ...b.files[0], name: '../escape.txt' }, ...b.files.slice(1)] })), DAMAGED_SAVE],
     "a run file named with ..": [withBlock(html, (b) => ({ ...b, representation: { ...b.representation, '../escape.json': {} } })), DAMAGED_SAVE],
     'a run set to reason with code the model writes': [withBlock(html, withConfig({ reasoning: 'coding' })), UNREADABLE_IMPORT],
+    'a claim past the end of its answer': [withBlock(html, withAnswerClaims((c) => ({ ...c, end: c.end + PAST_ANSWER }))), DAMAGED_SAVE],
+    'a claim naming a document not in the run': [withBlock(html, withAnswerClaims((c) => ({ ...c, documents: [...c.documents, UNKNOWN_DOCUMENT] }))), DAMAGED_SAVE],
+    "a claim's quote naming a document not in the run": [withBlock(html, withAnswerClaims((c) => ({ ...c, quotes: [...c.quotes, { document: UNKNOWN_DOCUMENT, start: 0, end: 1 }] }))), DAMAGED_SAVE],
+    'claims that overlap': [withBlock(html, withClaimsOverlapping), DAMAGED_SAVE],
+    'version 1 holding claims, which only version 2 has': [withBlock(html, (b) => ({ ...b, version: 1 })), DAMAGED_SAVE],
+    "version 2 with an answer's claims left out": [withBlock(html, withoutClaims), DAMAGED_SAVE],
     'texts that unzip past what a run takes': [withBlock(html, (b) => ({ ...b, texts: bomb })), TOO_BIG_SAVE],
   };
   await withPage('live', { url, sample: false, expectedErrors: [REFUSED_LOG] }, async (page) => {
@@ -8220,8 +8587,11 @@ async function liveSaved(url) {
       texts: JSON.parse(gunzipSync(Buffer.from(block.texts, 'base64')).toString()),
       representation: Object.keys(block.representation),
     };
-    const holdsName = "the file holds the tab as one JSON block of version 1: each file's name and dropped folder, their texts gzipped, and r3con app's representation of the run";
+    const holdsName = `the file holds the tab as one JSON block of version ${SAVED_VERSION}: each file's name and dropped folder, their texts gzipped, and r3con app's representation of the run`;
     check('live', holdsName, isDeepStrictEqual(held, { version: SAVED_VERSION, names, folders, texts, representation: REPRESENTATION_FILES }), JSON.stringify({ ...held, texts: held.texts.length }));
+    const claimed = block.run.answers.map((answer) => answer.claims?.map((c) => [c.text, c.documents.length > 0]));
+    const claimedName = "each answer in it keeps its claims as r3con gave them: the scripted sentence with its evidence, and the one without";
+    check('live', claimedName, isDeepStrictEqual(claimed, Array(SAVED_ANSWERS).fill([[SCRIPTED_LINKED, true], [SCRIPTED_UNLINKED, false]])), JSON.stringify(claimed));
     const kept = [TEST_KEY, ENVIRONMENT_KEY, TEST_ENDPOINT, tokenOf(url)].filter((secret) => html.includes(secret));
     const fields = [...new Set(block.run.answers.flatMap((answer) => Object.keys(answer)))].sort();
     const keptName = "it holds no key, no server from the settings and no launch token, and its answers only what the page shows of them";
@@ -8250,6 +8620,15 @@ async function liveSaved(url) {
       const clicked = await answerAndFileShown(page);
       const clickedName = "the run's answer, clicked in its chat, lights its sources, and a file opened marks the sentences quoted, as in the live page";
       check('live', clickedName, clicked.lit.length > 0 && clicked.marks?.marks.length > 0 && isDeepStrictEqual(clicked, liveClicked), JSON.stringify(clicked));
+    });
+
+    const unlinked = join(dir, 'unlinked.html');
+    writeFileSync(unlinked, withBlock(html, asVersion1));
+    await withPage('live', { url: pathToFileURL(unlinked).href, sample: false }, async (page) => {
+      const opened = await becomes(page, statusMatches, LIVE_DONE.source);
+      const shown = await page.evaluate(tabShown);
+      const asBefore = isDeepStrictEqual({ ...shown, claims: live.claims }, live) && shown.claims.length === 0 && (await count(page, '.line.linking')) === 0;
+      check('live', 'a version-1 file, saved before the page linked sentences, opens as it was, its answers plain, with no links and no linking line', opened && asBefore, JSON.stringify(shown.claims));
     });
 
     const unread = join(dir, 'unread.html');
@@ -8418,6 +8797,119 @@ async function prototypeSaves() {
   });
 }
 
+// ---------- live claims: fake_server.py's claims, through r3con's claims events ----------
+
+// fake_server.py's CLAIMS_BREAK: a question holding it has every claims call raise.
+const CLAIMS_BREAK = '(the claims break)';
+
+// In-page: each claims_finished event in window.events, its claims, in the order they came.
+const claimsRead = () => window.events.filter((e) => e.type === 'claims_finished').map((e) => e.claims);
+
+// The scripted run's linked sentence, lit, listed by hand: it rests on the first two pieces of evidence its call is
+// shown, the first line of each of the first two memos or at the document level the memos, which round 2's summaries,
+// one step from the answer that cites them, quote and summarize, nearer than round 1's.
+const scriptedClaimPath = ([first, second]) => ({
+  nodes: ['answer-0', first, second, 'r2-0', 'r2-1'],
+  edges: [`${first}>r2-0`, `${second}>r2-1`, 'r2-0>answer-0', 'r2-1>answer-0'],
+});
+const SCRIPTED_CLAIM_PILLS = [1, 1, 0, 0, 0];
+
+// A run over the sample memos, its claims held back, then its claims, the panel lit for its linked sentence, and its
+// popup; then an ask's.
+async function liveClaims(url) {
+  const before = async (page) => {
+    await page.addInitScript(recordEvents);
+    await page.addInitScript(holdFrom, 'claims_finished');
+  };
+  await withPage('live', { url, sample: false, memos: true, before }, async (page) => {
+    await page.click('#run-btn');
+    const linking = await becomes(page, () => document.querySelector('.line.linking') !== null, null, LIVE_RUN_MS);
+    const held = await page.evaluate(() => {
+      const el = document.querySelector('.line.linking');
+      return { text: el.querySelector('.t').textContent, under: el.previousElementSibling.matches('details.sentences'), linked: document.querySelectorAll('.claim').length };
+    });
+    const heldName = "on claims_started, a line under the answer's sentences says it is linking them, and nothing is linked yet";
+    check('live', heldName, linking && isDeepStrictEqual(held, { text: LINKING, under: true, linked: 0 }), JSON.stringify(held));
+    await page.evaluate(() => (window.release = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+
+    const [claims] = await page.evaluate(claimsRead);
+    const [answer] = await page.evaluate(answersRead);
+    const docIds = await docIdsOf(page);
+    const [linked, unlinked] = claims ?? [];
+    const shown = await page.evaluate(claimsShown);
+    const plain = { linking: await count(page, '.line.linking'), answer: await page.textContent(`${CHAT} .line.answer .t`), turn: (await page.evaluate(logOf)).after };
+    const expected = [{ answer: 'answer-0', text: SCRIPTED_LINKED, control: true, name: `${SCRIPTED_LINKED} · ${evidenceOf(linked)}` }];
+    const evidenced = isDeepStrictEqual(linked?.documents, answer.ids.slice(0, 2)) && linked.quotes.length === 2 && unlinked?.text === SCRIPTED_UNLINKED && unlinked.documents.length === 0;
+    const linkedName = 'on claims_finished, the line goes and the sentence with evidence is a control of its own; the one without stays plain text, and the answer reads as before';
+    const same = isDeepStrictEqual(plain, { linking: 0, answer: SCRIPTED_ANSWER, turn: [SCRIPTED_ANSWER, SCRIPTED_SENTENCES] });
+    check('live', linkedName, done && evidenced && isDeepStrictEqual(shown, expected) && same, `${JSON.stringify(shown)}; ${JSON.stringify(plain)}`);
+
+    const { hovered, left } = await hoverClaim(page);
+    const own = { lit: true, ...scriptedClaimPath(docIds), pills: SCRIPTED_CLAIM_PILLS, sentences: [SCRIPTED_LINKED] };
+    check('live', "hovering it lights only its path to the quotes the claims_finished event gave it, and each pill counts them; leaving restores the trail", isDeepStrictEqual(hovered, own) && !left.lit, JSON.stringify(hovered));
+
+    await page.click(`${CHAT} .claim`);
+    const note = await page.evaluate(claimNote);
+    const docs = sampleMemos().map((m) => ({ name: m.name, text: m.buffer.toString() }));
+    const listed = { line: evidenceOf(linked), groups: quotesListed(docs, answer.ids, linked.quotes), name: "the sentence's quotes", focused: true, clear: true };
+    check('live', 'a click on it lists exactly those quotes, by document', isDeepStrictEqual(note, listed), JSON.stringify(note));
+    await page.keyboard.press('Escape');
+
+    await send(page, 'Which memo is the registry?');
+    const asked = await becomes(page, () => document.querySelector('.line.answer[data-node="answer-1"] .claim') !== null, null, LIVE_RUN_MS);
+    const [, askClaims] = await page.evaluate(claimsRead);
+    const askShown = await page.evaluate(claimsShown);
+    const ownClaims = [...expected, { answer: 'answer-1', text: SCRIPTED_LINKED, control: true, name: `${SCRIPTED_LINKED} · ${evidenceOf(askClaims?.[0] ?? linked)}` }];
+    const askName = "an ask's answer is linked by its own claims events, and the run's answer keeps its own";
+    check('live', askName, asked && askClaims?.length === 2 && isDeepStrictEqual(askShown, ownClaims), JSON.stringify(askShown));
+  });
+}
+
+// At the document level a claim names documents, not quotes: its popup lists them, each with the summary the claims
+// call was shown.
+async function liveClaimsDocumentLevel(url) {
+  await withPage('live', { url, sample: false, memos: true, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+    await page.click('#settings-btn');
+    await page.selectOption('#evidence', 'document');
+    await page.keyboard.press('Escape');
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const [[linked] = []] = await page.evaluate(claimsRead);
+    const [answer] = await page.evaluate(answersRead);
+    const docIds = await docIdsOf(page);
+    const shown = await page.evaluate(claimsShown);
+    const named = linked?.quotes.length === 0 && isDeepStrictEqual(linked.documents, answer.ids.slice(0, 2)) && shown[0]?.name === `${SCRIPTED_LINKED} · ${counted(2, 'document')}`;
+    check('live', 'at the document level, the sentence with evidence is linked, named for the documents its claim names', done && named && shown.length === 1, JSON.stringify(shown));
+
+    const { hovered } = await hoverClaim(page);
+    const hoverName = "hovering it lights the path from the answer to exactly its documents, and no pill shows";
+    check('live', hoverName, isDeepStrictEqual(hovered, { lit: true, ...scriptedClaimPath(docIds), pills: docIds.map(() => 0), sentences: [SCRIPTED_LINKED] }), JSON.stringify(hovered));
+
+    await page.click(`${CHAT} .claim`);
+    const note = await page.evaluate(claimNote);
+    const memos = sampleMemos();
+    const groups = linked.documents.map((id) => answer.ids.indexOf(id)).sort((a, b) => a - b).map((d) => [memos[d].name, scriptedSummary(memos[d].buffer.toString())]);
+    const listed = { line: counted(linked.documents.length, 'document'), groups, name: "the sentence's documents", focused: true, clear: true };
+    check('live', "a click on it lists its documents by name, each with its round-1 summary", isDeepStrictEqual(note, listed), JSON.stringify(note));
+    await page.click('#claim-note .quoted-name');
+    const opened = { note: await page.evaluate(claimNote), title: (await popup(page))?.title };
+    check('live', "a document's name in it opens the document", isDeepStrictEqual(opened, { note: null, title: `● ${groups[0][0]}` }), JSON.stringify(opened));
+  });
+}
+
+// A claims call that fails, as fake_server.py's does for CLAIMS_BREAK, leaves the run its answer, with nothing extra.
+async function liveClaimsFailed(url) {
+  await withPage('live', { url, sample: false, memos: true, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+    await send(page, `${SAVED_QUESTION} ${CLAIMS_BREAK}`);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const read = await page.evaluate(claimsRead);
+    const plain = { claims: await count(page, '.claim'), linking: await count(page, '.line.linking'), turn: (await page.evaluate(logOf)).after };
+    const name = "a claims call that fails finishes the run with no claims, and the chat shows nothing extra: no line, no link";
+    check('live', name, done && isDeepStrictEqual(read, [[]]) && isDeepStrictEqual(plain, { claims: 0, linking: 0, turn: [SCRIPTED_ANSWER, SCRIPTED_SENTENCES] }), JSON.stringify({ read, plain }));
+  });
+}
+
 // A check that leaves state on its server, a key or a hanging call, gets a server of its own.
 async function live() {
   await withFakeServer(async (url) => {
@@ -8435,6 +8927,9 @@ async function live() {
     await liveQuotes(url);
     await livePartQuotes(url);
     await liveDocumentLevel(url);
+    await liveClaims(url);
+    await liveClaimsDocumentLevel(url);
+    await liveClaimsFailed(url);
     await liveRounds(url);
     await liveRoundsKept(url);
     await liveFailure(url);
@@ -8473,7 +8968,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, folderQuotes, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
+  const areas = [load, beforeRun, folds, folders, folderQuotes, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, claimsArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);
