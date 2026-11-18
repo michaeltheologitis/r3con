@@ -510,10 +510,35 @@ def test_the_band_takes_presses_on_the_top_row_off_its_controls_and_no_other(
 
 
 def test_until_the_page_says_where_its_controls_are_every_press_goes_to_it(
-    objc: FakeObjC,
+    objc: FakeObjC, monkeypatch: pytest.MonkeyPatch
 ):
-    band = window._drag_band().alloc().init()
-    assert band.hitTest_(FakeNSPoint(200, 14)) is None
+    shown = FakeWindow()
+    answers: list[object] = []
+    add = FakeContentView.addSubview
+
+    def add_and_hit_test(content: FakeContentView, view: Any) -> None:
+        add(content, view)
+        # As AppKit's cursor update does once a view joins the window, the pointer on it.
+        answers.append(view.hitTest_(FakeNSPoint(200, 14)))
+
+    monkeypatch.setattr(FakeContentView, "addSubview", add_and_hit_test)
+    hide_title_bar_and_load(shown)
+    assert answers == [None]
+
+
+def test_a_hit_test_the_band_cant_answer_is_logged_never_raised_into_appkit(
+    titled: tuple[FakeWindow, FakeWebView],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    shown, webview = titled
+    monkeypatch.setattr(FakeWebView, "controls", ((1000.0, 3.5, 1065.0),))
+    assert webview.on_webview_load is not None
+    asyncio.run(webview.on_webview_load(webview))
+    assert band_of(shown).hitTest_(FakeNSPoint(200, 14)) is None
+    assert [record.getMessage() for record in caplog.records] == [
+        "The window couldn't hit-test its top row."
+    ]
 
 
 @pytest.mark.parametrize(

@@ -11,6 +11,7 @@ on:
       - "uv.lock"
       - "tests/app/bundle_check.py"
       - "tests/app/window_drag_check.swift"
+      - "tests/app/launch_pointer_check.swift"
       - ".github/briefcase/**"
       - ".github/actions/sparkle/**"
       - ".github/workflows/mac-app.yml"
@@ -349,6 +350,14 @@ jobs:
             echo "::error::A drag or double-click on the window's top row didn't move or zoom it."
             exit 1
           fi
+      # As after Sparkle's Install and Relaunch: 0.6.36 could crash at launch when the pointer
+      # was already on its window. SUEnableAutomaticChecks answers Sparkle's second-launch
+      # question, whose window would otherwise open over the app's.
+      - name: Open the app again and again with the pointer on its top row
+        timeout-minutes: 10
+        run: |
+          defaults write io.github.michaeltheologitis.r3con SUEnableAutomaticChecks -bool false
+          swift tests/app/launch_pointer_check.swift "$APP" "$RUNNER_TEMP/launches"
       # An app that writes into its own bundle breaks its signature.
       - name: Check that running the app left its signature intact
         run: codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tee "$RUNNER_TEMP/codesign-after-a-run.txt"
@@ -360,6 +369,13 @@ jobs:
             cat "$RUNNER_TEMP/app.log"
           fi
           log show --last 10m --style compact --predicate 'process == "R3Con"' | tail -n 200
+          # A crash's report, with the stack it died on.
+          for report in "$HOME"/Library/Logs/DiagnosticReports/R3Con*.ips; do
+            if [ -f "$report" ]; then
+              echo "$report:"
+              head -n 120 "$report"
+            fi
+          done
       - name: The app's identity, signature and sizes
         env:
           SIGNED_BY: ${{ steps.identity.outputs.name }}

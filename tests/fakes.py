@@ -747,6 +747,23 @@ class FakeNSView:
         return self
 
 
+class FakeObjCProperty:
+    """rubicon.objc's ``objc_property(object)``: as its getter does, reading one never
+    set raises, since ctypes reads its empty ivar as a NULL ``py_object``."""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.ivar = f"_{name}"
+
+    def __get__(self, view: object, owner: type | None = None) -> Any:
+        try:
+            return vars(view)[self.ivar]
+        except KeyError:
+            raise ValueError("PyObject is NULL") from None
+
+    def __set__(self, view: object, value: object) -> None:
+        vars(view)[self.ivar] = value
+
+
 class FakeObjC:
     """rubicon.objc's ``ObjCClass``, as the Mac app's Objective-C runtime answers it.
     The main bundle's private Frameworks folder is ``frameworks``. NSBundle finds a
