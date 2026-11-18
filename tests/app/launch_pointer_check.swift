@@ -2,10 +2,14 @@
 // .github/workflows/mac-app.yml: swift tests/app/launch_pointer_check.swift APP LOG_DIR
 // As after Sparkle's Install and Relaunch, the pointer is where the window opens, so AppKit hit-tests
 // the band over the top row as soon as it joins the window, before the page has said where its
-// controls are: that crashed 0.6.36 at launch. It fails if the app dies before it is asked to quit, or
-// if its log shows a Python method raising into AppKit, for which ctypes hands AppKit garbage. The
-// first launch only finds where the window opens. Where the runner drops synthetic events, it warns
-// that the check is untested. Each launch's log is LOG_DIR/launch-N.log.
+// controls are: that crashed 0.6.36 at launch. AppKit does that only for the app in front, so each
+// launch is asked to come forward as soon as its window shows, and if it hasn't a moment later the
+// check clicks where the pointer rests, which macOS always lets activate it. It fails if the app isn't
+// active when its page loads, as that launch would prove nothing; if it dies before it is asked to
+// quit; or if its log shows a Python method raising into AppKit, for which ctypes hands AppKit garbage.
+// The first launch also finds where the window opens, for the pointer to wait there before the rest.
+// Where the runner drops synthetic events, it warns that the check is untested. Each launch's log is
+// LOG_DIR/launch-N.log.
 import AppKit
 import CoreGraphics
 import Foundation
@@ -19,6 +23,9 @@ let launches = 5
 let restAt = CGPoint(x: 160, y: 14)
 let pointerTolerance: CGFloat = 1
 let pollSeconds = 0.25
+// How long after its window shows a launch may take to come forward before the check clicks on it.
+let activateSeconds = 0.25
+let clickPauseSeconds = 0.05
 // Up to this long for the window and its page, which then asks the server for its keys...
 let openSeconds = 90.0
 let pageLoaded = "\"GET /api/keys HTTP/1.1\" 200"
@@ -39,6 +46,11 @@ func finish(_ level: String, _ message: String, failing: Bool = false) -> Never 
     exit(failing ? 1 : 0)
 }
 
+// Sleeps in the run loop, where Process and NSRunningApplication learn of changes.
+func sleepInRunLoop(_ seconds: TimeInterval) {
+    RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+}
+
 func windowFrame(of pid: pid_t) -> CGRect? {
     let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
     let window = windows.first {
@@ -48,22 +60,34 @@ func windowFrame(of pid: pid_t) -> CGRect? {
     return CGRect(dictionaryRepresentation: bounds as CFDictionary)
 }
 
+func topRow(of window: CGRect) -> CGPoint {
+    CGPoint(x: window.minX + restAt.x, y: window.minY + restAt.y)
+}
+
 func rest(at point: CGPoint) {
     let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
     move?.post(tap: .cghidEventTap)
+}
+
+func click(at point: CGPoint) {
+    for phase in [CGEventType.leftMouseDown, CGEventType.leftMouseUp] {
+        let event = CGEvent(mouseEventSource: nil, mouseType: phase, mouseCursorPosition: point, mouseButton: .left)
+        event?.setIntegerValueField(.mouseEventClickState, value: 1)
+        event?.post(tap: .cghidEventTap)
+        sleepInRunLoop(clickPauseSeconds)
+    }
 }
 
 func pointer() -> CGPoint {
     CGEvent(source: nil)?.location ?? .zero
 }
 
-func text(of url: URL) -> String {
-    (try? Data(contentsOf: url)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+func isActive(_ pid: pid_t) -> Bool {
+    NSRunningApplication(processIdentifier: pid)?.isActive ?? false
 }
 
-// Sleeps in the run loop, where Process and NSRunningApplication learn of changes.
-func sleepInRunLoop(_ seconds: TimeInterval) {
-    RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+func text(of url: URL) -> String {
+    (try? Data(contentsOf: url)).map { String(decoding: $0, as: UTF8.self) } ?? ""
 }
 
 func ending(of process: Process) -> String {
@@ -104,6 +128,7 @@ func launch(_ number: Int) -> (Process, URL) {
     return (process, log)
 }
 
+// Where the pointer waits before each launch: the top row of the window the launch before opened.
 var target: CGPoint?
 var rested = 0
 for number in 0...launches {
@@ -115,26 +140,44 @@ for number in 0...launches {
         }
     }
     let (process, log) = launch(number)
+    let pid = process.processIdentifier
     let started = Date()
     var frame: CGRect?
+    // Where the pointer rests once the window shows, and when it showed.
+    var spot: CGPoint?
+    var shown: Date?
+    var clicked = false
     var loaded: Date?
     while true {
         sleepInRunLoop(pollSeconds)
         let elapsed = Date().timeIntervalSince(started)
         if !process.isRunning {
-            let pointed = target.map { " with the pointer at \($0)" } ?? ""
+            let pointed = (spot ?? target).map { " with the pointer at \($0)" } ?? ""
             fail("R3Con died \(Int(elapsed)) s into launch \(number)\(pointed), by \(ending(of: process)).", process, log)
         }
-        if let target {
-            rest(at: target)
-        }
-        if frame == nil, let opened = windowFrame(of: process.processIdentifier) {
+        if frame == nil, let opened = windowFrame(of: pid) {
             frame = opened
-            let active = NSRunningApplication(processIdentifier: process.processIdentifier)?.isActive ?? false
-            print("Launch \(number): the window opened at \(opened) after \(Int(elapsed)) s, the pointer at \(pointer()); the app is active: \(active).")
+            shown = Date()
+            spot = target ?? topRow(of: opened)
+            // Without ignoringOtherApps, which has done nothing since macOS 14.
+            _ = NSRunningApplication(processIdentifier: pid)?.activate(options: [])
+            print("Launch \(number): the window opened at \(opened) after \(Int(elapsed)) s, the pointer at \(pointer()).")
+        }
+        if let resting = spot ?? target {
+            rest(at: resting)
+        }
+        let active = isActive(pid)
+        if !active, !clicked, let shown, let spot, Date().timeIntervalSince(shown) >= activateSeconds {
+            click(at: spot)
+            clicked = true
+            print("Launch \(number) didn't come forward when asked: the check clicked its top row at \(spot).")
         }
         if loaded == nil, text(of: log).contains(pageLoaded) {
             loaded = Date()
+            if !active {
+                fail("Launch \(number) wasn't the active app when its page loaded, so AppKit may not have hit-tested its window: it proves nothing.", process, log)
+            }
+            print("Launch \(number): its page loaded after \(Int(elapsed)) s, the app active, the pointer at \(pointer()).")
         }
         if frame != nil, let loaded, Date().timeIntervalSince(loaded) >= settleSeconds, elapsed >= restSeconds {
             break
@@ -151,10 +194,10 @@ for number in 0...launches {
         }
     }
     if let frame {
-        target = CGPoint(x: frame.minX + restAt.x, y: frame.minY + restAt.y)
+        target = topRow(of: frame)
     }
 
-    _ = NSRunningApplication(processIdentifier: process.processIdentifier)?.terminate()
+    _ = NSRunningApplication(processIdentifier: pid)?.terminate()
     let asked = Date()
     while process.isRunning && Date().timeIntervalSince(asked) < quitSeconds {
         sleepInRunLoop(pollSeconds)
@@ -175,4 +218,4 @@ for number in 0...launches {
 if rested < launches {
     finish("warning", "Only \(rested) of \(launches) launches opened under the pointer: the rest are untested.")
 }
-print("R3Con opened \(launches) times with the pointer resting on its top row, and lived until each quit.")
+print("R3Con opened \(launches) times with the pointer resting on its top row, active as its page loaded, and lived until each quit.")
