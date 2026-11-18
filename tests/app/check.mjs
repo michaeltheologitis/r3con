@@ -4058,8 +4058,9 @@ async function quotesArea() {
 
 // ---------- claims: each sentence of an answer linked to the evidence that supports it ----------
 
-// The page's LINKING: the line under an answer while its sentences are linked.
+// The page's LINKING: the line under an answer while its sentences are linked; and the status meanwhile.
 const LINKING = 'linking sentences…';
+const LINKING_STATUS = 'running · linking sentences';
 const ANSWER_MARK = '.line.answer .answer-mark';
 // The sample's answer's popup, as its title names it.
 const SAMPLE_ANSWER_TITLE = '● Which maintenance… · gpt-6-luna';
@@ -4191,11 +4192,22 @@ async function claimsArea() {
     const linking = await becomes(page, () => document.querySelector('.line.linking') !== null, null, REPLAY_MS);
     const going = await page.evaluate(() => {
       const el = document.querySelector('.line.linking');
-      return { text: el.querySelector('.t').textContent, spins: el.querySelector('.g').classList.contains('log-spin'), under: el.previousElementSibling.matches('details.sentences'), linked: document.querySelectorAll('.claim').length };
+      const logMark = [...document.querySelectorAll('.transcript:not([hidden]) .log-head > span[aria-hidden]')].at(-1);
+      return {
+        text: el.querySelector('.t').textContent,
+        spins: el.querySelector('.g').classList.contains('log-spin'),
+        under: el.previousElementSibling.matches('details.sentences'),
+        linked: document.querySelectorAll('.claim').length,
+        lit: document.querySelector('#world .is-lit') !== null,
+        logMark: logMark.className,
+        status: document.getElementById('run-status').textContent,
+      };
     });
     const linked = await becomes(page, () => document.querySelector('.claim') !== null && document.querySelector('.line.linking') === null, null, REPLAY_MS);
-    const goingName = "a replay lands its answer plain, then a line under its sentences, with the running mark, says it is linking sentences, and goes once they are linked";
-    check('claims', goingName, linking && linked && isDeepStrictEqual(going, { text: LINKING, spins: true, under: true, linked: 0 }), JSON.stringify(going));
+    const goingName =
+      "a replay lands its answer plain, settling its log's line, and lights its trail; then a line under its sentences, with the running mark, says it is linking sentences, as the status does, and goes once they are linked";
+    const goingExpected = { text: LINKING, spins: true, under: true, linked: 0, lit: true, logMark: '', status: LINKING_STATUS };
+    check('claims', goingName, linking && linked && isDeepStrictEqual(going, goingExpected), JSON.stringify(going));
   });
 
   await withPage('claims', {}, async (page) => {
@@ -8830,12 +8842,19 @@ async function liveClaims(url) {
     });
     const heldName = "on claims_started, a line under the answer's sentences says it is linking them, and nothing is linked yet";
     check('live', heldName, linking && isDeepStrictEqual(held, { text: LINKING, under: true, linked: 0 }), JSON.stringify(held));
+    const [answer] = await page.evaluate(answersRead);
+    const docIds = await docIdsOf(page);
+    const lit = { answers: await litAnswers(page), trail: await litOnPanel(page) };
+    const litName = "the answer's trail lights as the answer lands, so it is lit while the line says it is linking sentences";
+    check('live', litName, linking && isDeepStrictEqual(lit, { answers: ['answer-0'], trail: trailOnPage(answer.trail, answer.ids, docIds) }), JSON.stringify(lit));
+    const { mark, folded } = await page.evaluate(logOf);
+    const step = { mark, folded, status: await page.textContent('#run-status') };
+    const stepName = "meanwhile the log's reasoning line is settled, its mark no longer running, and the status says it is linking sentences";
+    check('live', stepName, linking && isDeepStrictEqual(step, { mark: '', folded: 'reasoning', status: LINKING_STATUS }), JSON.stringify(step));
     await page.evaluate(() => (window.release = true));
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
 
     const [claims] = await page.evaluate(claimsRead);
-    const [answer] = await page.evaluate(answersRead);
-    const docIds = await docIdsOf(page);
     const [linked, unlinked] = claims ?? [];
     const shown = await page.evaluate(claimsShown);
     const plain = { linking: await count(page, '.line.linking'), answer: await page.textContent(`${CHAT} .line.answer .t`), turn: (await page.evaluate(logOf)).after };

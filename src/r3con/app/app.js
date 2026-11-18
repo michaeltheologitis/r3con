@@ -1751,7 +1751,8 @@
     model: { appearStagger: 260, settleFirst: 900, settleStagger: 380, minWork: 500 },
   };
   const MARK = '❀';
-  const LINKING = 'linking sentences…';
+  const LINKING_STEP = 'linking sentences';
+  const LINKING = `${LINKING_STEP}…`;
   // How long a sentence stays lit after the pointer leaves it, so that crossing to the next one doesn't flicker.
   const CLAIM_LEAVE_MS = 80;
   const SPIN_FRAMES = ['·', '✾', '✿', '❀', '❁', '❀', '✿', '✾'];
@@ -4890,6 +4891,12 @@
         begun = kind;
         return true;
       },
+      // Its answer has landed: its stages are done, so the mark stops, as a done stage's line has, while what is left
+      // has a line of its own.
+      settle() {
+        mark.className = '';
+        mark.textContent = '●';
+      },
       /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
       finish(text, tone) {
         latest.textContent = text;
@@ -5181,6 +5188,7 @@
   /** @param {RunTab} tab @param {Narrator} narr */
   function showAnswer(tab, narr, id = RUN_ANSWER) {
     drawAnswer(tab, id);
+    narr.settle();
     const answer = answerOf(tab.run, id);
     const flag = answer.simulated ? narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL)) : null;
     const said = narr.say('answer', answer.text, { node: id, name: answerName(answer) });
@@ -5481,18 +5489,25 @@
       appear(tab, RUN_ANSWER);
     });
     t += TIMING.answerWork;
+    const { claims } = run.answers[0];
     at(t, () => {
       showAnswer(tab, narr);
-      finishRun(tab, narr);
+      if (!claims) finishRun(tab, narr);
       for (let k = 1; k < run.answers.length; k += 1) redrawAsk(tab, answerId(k));
       if (run.source === RECORDED_SOURCE) offerRecordedAsks(narr);
     });
     t += TIMING.litDelay;
     at(t, () => lightRun(tab));
-    if (run.answers[0].claims) {
-      at(t, () => startLinking(tab, RUN_ANSWER));
+    if (claims) {
+      at(t, () => {
+        startLinking(tab, RUN_ANSWER);
+        tabStatus(tab, `running · ${LINKING_STEP}`);
+      });
       t += TIMING.linkWork;
-      at(t, () => showLinks(tab, RUN_ANSWER));
+      at(t, () => {
+        showLinks(tab, RUN_ANSWER);
+        finishRun(tab, narr);
+      });
     }
     return steps;
   }
@@ -5559,9 +5574,11 @@
       case 'reasoning_finished':
         Object.assign(run.answers[0], { text: event.answer, provenance: provenanceOf(run, event.provenance) });
         showAnswer(tab, narr);
+        lightRun(tab);
         break;
       case 'claims_started':
         startLinking(tab, RUN_ANSWER);
+        tabStatus(tab, `running · ${LINKING_STEP}`);
         break;
       case 'claims_finished':
         run.answers[0].claims = event.claims;
@@ -5570,7 +5587,6 @@
       case 'run_finished':
         run.totals = totalsOf(event);
         finishRun(tab, narr);
-        lightRun(tab);
         break;
       case 'run_failed':
         failRun(tab, narr, endingOf(stopping(tab), event));
