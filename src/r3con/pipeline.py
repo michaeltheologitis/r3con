@@ -76,6 +76,7 @@ from r3con.provenance import (
 )
 from r3con.quotes import Match, Quote
 from r3con.runs import (
+    SKIPPED,
     Emit,
     EventRecorder,
     StageRun,
@@ -226,8 +227,8 @@ NO_RECORDS = "no records"
 
 
 def kept_note(round_: int) -> str:
-    """What stands for a note of the relevant context skipped in its round, round
-    ``round_``'s note of the part kept in its place."""
+    """The ``used_instead`` of a skipped note of the relevant context whose part keeps
+    its round-``round_`` note."""
     return f"kept its round-{round_} note"
 
 
@@ -951,7 +952,7 @@ def _build_and_answer(
     stage_runs.append(claims_run)
     skipped = _skips(relevance, extraction.skipped, names)
     if task_logger is not None:
-        task_logger.write_json("skipped", [asdict(skip) for skip in skipped])
+        task_logger.write_json(SKIPPED, [asdict(skip) for skip in skipped])
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs, saved.totals))
     return _answer(
         result,
@@ -2104,28 +2105,18 @@ def _skips(
     order."""
     ids = list(names)
     context, rounds = relevance.context_round, relevance.note_rounds
-    found = [
-        (
-            RELEVANCE_STAGE,
-            k,
-            relevance_call(k),
-            d,
-            part_number(p, len(parts)),
-            record.skipped,
-            _instead_of_note(k, rounds[record.id] if k == context else k),
-        )
-        for k, round_ in enumerate(relevance.records, start=1)
-        for d, parts in enumerate(round_)
-        for p, record in enumerate(parts)
-        if record.skipped is not None
-    ]
-    found += [
-        (PARSING_STAGE, None, PARSE_CALL, d, part["part"], part["reason"], NO_RECORDS)
-        for d, parts in enumerate(parts_skipped)
-        for part in parts
-    ]
-    return [
-        Skip(
+
+    def skip(
+        *,
+        stage: str,
+        k: int | None,
+        call: str,
+        d: int,
+        part: int | None,
+        reason: str,
+        used_instead: str,
+    ) -> Skip:
+        return Skip(
             stage=stage,
             round=k,
             doc_id=ids[d],
@@ -2135,8 +2126,36 @@ def _skips(
             call=call_kind(call, d, part),
             used_instead=used_instead,
         )
-        for stage, k, call, d, part, reason, used_instead in found
+
+    notes = [
+        skip(
+            stage=RELEVANCE_STAGE,
+            k=k,
+            call=relevance_call(k),
+            d=d,
+            part=part_number(p, len(parts)),
+            reason=record.skipped,
+            used_instead=_instead_of_note(k, rounds[record.id] if k == context else k),
+        )
+        for k, round_ in enumerate(relevance.records, start=1)
+        for d, parts in enumerate(round_)
+        for p, record in enumerate(parts)
+        if record.skipped is not None
     ]
+    parses = [
+        skip(
+            stage=PARSING_STAGE,
+            k=None,
+            call=PARSE_CALL,
+            d=d,
+            part=part["part"],
+            reason=part["reason"],
+            used_instead=NO_RECORDS,
+        )
+        for d, (_, parts) in enumerate(zip(ids, parts_skipped, strict=True))
+        for part in parts
+    ]
+    return notes + parses
 
 
 def _instead_of_note(k: int, kept: int) -> str:

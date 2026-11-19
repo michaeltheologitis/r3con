@@ -208,6 +208,8 @@ _log = get_logger("runs")
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
 _EVENTS = "events.jsonl"
 _LOCK = "run.lock"
+SKIPPED = "skipped"
+"""The run folder's ``skipped.json``, by the name :meth:`TaskLogger.write_json` takes."""
 
 Emit = Callable[..., None]
 """Reports one progress event, ``emit(event_type, **fields)``, as

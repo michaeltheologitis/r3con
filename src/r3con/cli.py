@@ -54,7 +54,7 @@ from r3con.pipeline import (
     resume_pipeline,
     run_pipeline,
 )
-from r3con.runs import RunFolderBusy, TaskLogger, new_run_folder
+from r3con.runs import SKIPPED, RunFolderBusy, TaskLogger, new_run_folder
 from r3con.runtime.llm import register_credentials
 from r3con.settings import active_logs_dir, check_cap, settings_snapshot
 
@@ -351,7 +351,8 @@ def _report_skipped(result: Answer) -> None:
     if not result.skipped:
         return
     listed = first_few([_describe(skip) for skip in result.skipped])
-    where = "" if result.run_dir is None else f". See {result.run_dir / 'skipped.json'}"
+    folder = result.run_dir
+    where = "" if folder is None else f". See {folder / f'{SKIPPED}.json'}"
     print(f"{len(result.skipped)} skipped: {listed}{where}", file=sys.stderr)
 
 
