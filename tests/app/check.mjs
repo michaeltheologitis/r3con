@@ -6576,6 +6576,38 @@ async function liveSkips(url, server) {
   });
 }
 
+// Each run folder's events.jsonl in `logsDir` as r3con wrote it before it skipped: without its events' skipped fields.
+function withoutSkippedEvents(logsDir) {
+  for (const folder of readdirSync(logsDir, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+    const file = join(logsDir, folder.name, 'events.jsonl');
+    if (!existsSync(file)) continue;
+    const events = readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => {
+      const { skipped, ...event } = JSON.parse(line);
+      return JSON.stringify(event);
+    });
+    writeFileSync(file, `${events.join('\n')}\n`);
+  }
+}
+
+// A continue replays a run's events, which a folder written before r3con skipped holds without skips.
+async function liveContinueOlderEvents(url, server) {
+  await withPage('live', { url, sample: false, memos: true }, async (page) => {
+    await send(page, `Which site logged the most incidents? ${REASONING_BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in reasoning · ${REASONING_ERROR}`, LIVE_RUN_MS);
+    withoutSkippedEvents(server.logsDir);
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const popups = await skipPopups(page, ['r2-0', 'parsed-0']);
+    const expected = [
+      { note: '', outputs: ['.insp-text', '.trail-line', 'details'] },
+      { note: '', outputs: ['pre.code', 'details'] },
+    ];
+    const olderName = "a run continued from events written before r3con skipped shows its notes' and parses' popups, with no skips";
+    check('live', olderName, failed && done && isDeepStrictEqual(popups, expected), JSON.stringify(popups));
+  });
+}
+
 // A memo read in two parts in each round, its first part quiet, its second holding both markers.
 const SPLIT_MEMO_INDEX = 0;
 const SPLIT_SKIPPED = '00_split_skipped';
@@ -9261,7 +9293,7 @@ async function live() {
     await liveRefusalsThenFailure(url);
     await liveTitleBar(url);
   });
-  const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined, liveSkips];
+  const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined, liveSkips, liveContinueOlderEvents];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);

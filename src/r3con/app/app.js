@@ -164,7 +164,7 @@
    * @property {LoadedFile[]} files the tab's files, or its run's documents
    * @property {Folder} tree their folders, the top level as one with no name
    * @property {number} depth how many folders the deepest file is in
-   * @property {Set<string>} sourced the folders, by path, that hold an answer's sources
+   * @property {Set<string>} sourced the folders, by path, that hold an answer's sources or a skip
    * @property {Map<string, number>} index each document node's document
    * @property {Map<string, CallState>} calls each call by its node's id; a document node's is reading the file
    * @property {Map<NodeKind, number>} settled how many calls of each kind are back, not counting those the run stopped first
@@ -252,12 +252,12 @@
    * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
    *   | { type: 'relevance_started', round: number, doc_id: string }
    *   | { type: 'relevance_finished', round: number, doc_id: string, part: number | null, summary: string, quotes: Quote[],
-   *       provenance: string[], skipped: string | null }
+   *       provenance: string[], skipped?: string | null }
    *   | { type: 'documents_pruned', round: number, doc_ids: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
-   *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[], skipped: Skip[] }
+   *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[], skipped?: Skip[] }
    *   | { type: 'reasoning_finished', answer: string,
    *       provenance: R3conProvenance }
    *   | { type: 'claims_started' }
@@ -3846,7 +3846,7 @@
     return a !== b && tab.nodes.has(a) && tab.nodes.has(b) ? [a, b] : null;
   }
 
-  // Open in a tab of at most FOLD_FROM_DOCS files, or holding an answer's sources, unless the user left it otherwise.
+  // Open in a tab of at most FOLD_FROM_DOCS files, or holding an answer's sources or a skip, unless the user left it otherwise.
   /** @param {Tab} tab @param {Folder} folder */
   function folderOpen(tab, folder) {
     const fold = foldingOf(tab);
@@ -4145,7 +4145,7 @@
     setCall(fold, id, failed ? 'failed' : 'done');
     const [kind] = splitId(id);
     const skipped = !failed && skipsAt(runTab(tab).run, id).length > 0;
-    const comesOut = ((isRound(kind) && !empty) || skipped) && !failed && !fold.relevant.has(d);
+    const comesOut = ((isRound(kind) && !empty && !failed) || skipped) && !fold.relevant.has(d);
     const goesIn = kind === roundKind(1) && empty && !failed && fold.kept.has(d);
     const folders = skipped ? folderPaths(fold.files[d]).filter((path) => !fold.sourced.has(path)) : [];
     if (comesOut) fold.relevant.add(d);
@@ -5302,10 +5302,16 @@
     const [kind, i] = splitId(id);
     if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'structure ready';
     const done = isRound(kind) ? (summariesIn(run, kind)[i].summary ? 'snippet ready' : 'nothing relevant') : hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed';
-    const skips = skipsAt(run, id);
-    // A document read whole and skipped has nothing else to say.
-    const said = skips.some((skip) => skip.part === null) ? [] : [done];
-    return `${docLabel(run, i)} — ${[...said, ...skips.map(skipSaid)].join(' · ')}`;
+    const said = skippedWhole(run, id) ? [] : [done];
+    return `${docLabel(run, i)} — ${[...said, ...skipsAt(run, id).map(skipSaid)].join(' · ')}`;
+  }
+
+  // Whether r3con skipped every part of node `id`'s call; a parse's parts show only in its records.
+  /** @param {Run} run @param {string} id */
+  function skippedWhole(run, id) {
+    const [kind, d] = splitId(id);
+    if (!skipsAt(run, id).length) return false;
+    return isRound(kind) ? [...partsOf(run, roundOf(kind), d).values()].every((part) => part.skipped.length > 0) : !hasRecords(run.parsed[d]);
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
@@ -5729,7 +5735,8 @@
         appear(tab, `parsed-${doc(event.doc_id)}`);
         break;
       case 'parsing_finished':
-        run.parsed[doc(event.doc_id)] = { parse: event.parse, provenance: event.provenance, skipped: event.skipped };
+        // A continue replays the events of a run folder, which r3con wrote without skips before it skipped.
+        run.parsed[doc(event.doc_id)] = { parse: event.parse, provenance: event.provenance, skipped: event.skipped ?? [] };
         settle(tab, narr, `parsed-${doc(event.doc_id)}`);
         break;
       case 'reasoning_finished':

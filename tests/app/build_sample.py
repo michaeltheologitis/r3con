@@ -46,6 +46,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ APP_JS = REPO / "src" / "r3con" / "app" / "app.js"
 SAMPLE_ROUNDS = 2
 # What the page reads of each quote: its text, and where it is in its document, in code points.
 QUOTE_FIELDS = ("text", "start", "end")
-# A call kind's suffix on its resends, as calls.json records them.
+# A note's or a parse's call kind's suffix on its resends, as calls.json records them.
 RESEND = re.compile(r"-retry-\d+$")
 
 
@@ -142,8 +143,13 @@ def run_totals(run: Path) -> dict[str, Any]:
 
 
 def call_costs(run: Path) -> dict[str, Any]:
-    """Each node's model call, keyed by the page's node for it: the step its last send
-    finished at, and the tokens and cost of it and its resends together."""
+    """Each node's model calls, keyed by the page's node for them: the step the last
+    finished at, and their tokens and cost together.
+
+    Raises:
+        ValueError: if a note or a parse took more than one call besides its resends,
+            as a document read in parts does, which the page draws as one.
+    """
     relevance = [
         (f"{c['kind'].split('-')[1]}-{c['doc']}", c)
         for c in load(run / "relevance/calls.json")
@@ -153,20 +159,19 @@ def call_costs(run: Path) -> dict[str, Any]:
     ]
     schema = [("schema", c) for c in load(run / "structuring/schema/calls.json")]
     answer = [("answer", c) for c in load(run / "reasoning/calls.json")]
-    every = relevance + parsing + schema + answer
-    first_sends = [(key, c) for key, c in every if not RESEND.search(c["kind"])]
-    calls = {
-        key: {"step": c["step"], "tokens": c["tokens"]["total"], "usd": c["usd"]}
-        for key, c in first_sends
-    }
-    assert len(calls) == len(first_sends), "one call per node"
-    for key, c in every:
-        if RESEND.search(c["kind"]):
-            total = calls[key]
-            total["step"] = max(total["step"], c["step"])
-            total["tokens"] += c["tokens"]["total"]
-            total["usd"] += c["usd"]
-    return calls
+    sent = Counter(
+        key for key, c in relevance + parsing if not RESEND.search(c["kind"])
+    )
+    for key, calls in sent.items():
+        if calls > 1:
+            raise ValueError(f"{run.name}: {calls} calls for {key}, drawn as one")
+    costs: dict[str, Any] = {}
+    for key, c in relevance + parsing + schema + answer:
+        total = costs.setdefault(key, {"step": 0, "tokens": 0, "usd": 0})
+        total["step"] = max(total["step"], c["step"])
+        total["tokens"] += c["tokens"]["total"]
+        total["usd"] += c["usd"]
+    return costs
 
 
 def build_sample(run: Path, memos: Path) -> dict[str, Any]:
