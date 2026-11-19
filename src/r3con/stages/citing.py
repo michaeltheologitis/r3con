@@ -1,16 +1,20 @@
-"""Replies that cite the notes their call was shown."""
+"""Replies that cite the notes their call was shown, and the skip of a read whose reply
+stays unusable."""
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
-from typing import Annotated, Any, NamedTuple
+from collections.abc import Callable, Collection, Sequence
+from typing import Annotated, Any, NamedTuple, ParamSpec, TypeVar
 
 from pydantic import BaseModel, BeforeValidator, Field, create_model
 
 from r3con.logging_setup import get_logger
-from r3con.runtime.llm import send_until_valid
+from r3con.runtime.llm import UnusableReply, send_until_valid
 
 _log = get_logger("citing")
+
+P = ParamSpec("P")
+T = TypeVar("T")
 
 
 class CitingRequest(NamedTuple):
@@ -83,7 +87,11 @@ def read_citing(
     """``text`` read under ``request`` by :func:`~r3con.runtime.llm.send_until_valid`,
     which sends it again with ``rewrite`` when a reply does not fit: the reply, and
     the citable ids it cites (:func:`cited`), none when its schema has no
-    ``provenance_ids``."""
+    ``provenance_ids``.
+
+    Raises:
+        UnusableReply: as :func:`~r3con.runtime.llm.send_until_valid` does.
+    """
     reply = send_until_valid(
         request.system_prompt,
         text,
@@ -94,3 +102,15 @@ def read_citing(
         **llm_call,
     )
     return reply, cited(getattr(reply, "provenance_ids", []), request.citable, kind)
+
+
+def read_or_skip(
+    nothing: T, read: Callable[P, T], *args: P.args, **kwargs: P.kwargs
+) -> tuple[T, UnusableReply | None]:
+    """``read(*args, **kwargs)``, and ``None``; or, when its reply stays unusable,
+    ``nothing`` and the :class:`~r3con.runtime.llm.UnusableReply` that says why, which
+    the caller records and reports as a skip. Any other exception passes through."""
+    try:
+        return read(*args, **kwargs), None
+    except UnusableReply as unusable:
+        return nothing, unusable

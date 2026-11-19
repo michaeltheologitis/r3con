@@ -35,13 +35,16 @@ from importlib import metadata as _metadata
 from r3con import provenance, r3con, settings
 from r3con.config import RunConfig, load_config
 from r3con.documents import read_documents
-from r3con.pipeline import Answer, run_pipeline
+from r3con.pipeline import Answer, Skip, run_pipeline
 from r3con.prompts import load_prompt
 from r3con.r3con import ask, resume, run, trace
 from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
 from r3con.runtime.llm import (
     Cancelled,
+    EmptyReply,
+    UnfitReply,
+    UnusableReply,
     litellm_chat_completion,
     litellm_chat_completion_full,
 )
@@ -75,6 +78,7 @@ __all__ = [
     "Cancelled",
     "CodeActResult",
     "CodeActTurn",
+    "EmptyReply",
     "ParseResult",
     "ProposalAttempt",
     "ProposalResult",
@@ -82,8 +86,11 @@ __all__ = [
     "RelevantContext",
     "RunConfig",
     "SchemaError",
+    "Skip",
     "StageRun",
     "TaskLogger",
+    "UnfitReply",
+    "UnusableReply",
     "ask",
     "check_schema",
     "litellm_chat_completion",

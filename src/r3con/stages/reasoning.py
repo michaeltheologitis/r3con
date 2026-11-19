@@ -66,7 +66,12 @@ from r3con.runtime.codeact import (
     CodeActTurn,
     run_codeact,
 )
-from r3con.runtime.llm import count_tokens, schema_as_sent, send_until_valid
+from r3con.runtime.llm import (
+    UnfitReply,
+    count_tokens,
+    schema_as_sent,
+    send_until_valid,
+)
 from r3con.splitting import Splits
 from r3con.stages.citing import cited, ids_field
 from r3con.stages.relevance import Snippet, citable_ids, render_relevance
@@ -445,13 +450,13 @@ def _reason_directly(
             "instead"
         )
         return {"cause": "refusal", "error": masked(str(refusal))}
-    except ValidationError as invalid:
+    except UnfitReply as unfit:
         _log.warning(
             "reasoning's direct reply did not fit its schema in %d send(s); reasoning "
             "with code instead",
             max_attempts,
         )
-        return {"cause": "invalid", "error": one_line(invalid)}
+        return {"cause": "invalid", "error": one_line(unfit.error)}
     reply = cast(_DirectReply, reply)
     return ReasoningResult(
         answer=reply.answer.strip(),

@@ -30,9 +30,9 @@ Layout per ``logs/<run-folder>/``:
   that the documents the run read can be told apart from any others. Written with the
   manifest.
 - ``relevance/`` (stage 1, surfacing relevance) — ``result.json`` (``{n_rounds, n_docs,
-  pruned_after, rounds: [{round, snippets: [{id, summary, quotes, provenance}]}],
-  totals}`` — ``pruned_after`` the id of each document relevance pruned, in document
-  order, mapped to the round after which it was pruned
+  pruned_after, rounds: [{round, snippets: [{id, summary, quotes, provenance,
+  skipped}]}], totals}`` — ``pruned_after`` the id of each document relevance pruned,
+  in document order, mapped to the round after which it was pruned
   (:attr:`r3con.stages.relevance.RelevantContext.pruned`); within
   a round every relevance snippet in document order, a document read in parts as one
   per part, each with its id (the document's, or ``<id>.<k>`` for part ``k`` in that
@@ -40,21 +40,27 @@ Layout per ``logs/<run-folder>/``:
   sentence the snippet says it is based on, where it is in the whole document, the
   document's own words there, and how it was found there (``exact``, ``normalized`` or
   ``elided``, verbatim, or ``fuzzy``, only like the text, with its ``score``; all
-  ``None`` when it was not: :mod:`r3con.quotes`), and the ids of the previous round's
-  snippets it used; the summaries of
-  :attr:`r3con.stages.relevance.RelevantContext.context_round` are the relevant context
-  that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call, tagged
-  ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a part,
-  and ``-retry-{n}`` added to the n-th resend of a reply that did not fit its schema).
+  ``None`` when it was not: :mod:`r3con.quotes`), the ids of the previous round's
+  snippets it used, and ``skipped``, ``null``, or why the note was skipped, its other
+  fields then empty (:attr:`r3con.stages.relevance.SnippetRecord.skipped`); the
+  summaries of :attr:`r3con.stages.relevance.RelevantContext.context_round`, a skipped
+  one's place taken by an earlier round's note where one is kept
+  (:attr:`r3con.stages.relevance.RelevantContext.note_rounds`), are the relevant
+  context that feeds downstream) + ``calls.json`` (one per ``relevance_snippet`` call,
+  tagged ``relevance-r{round}-d{doc}``, or ``relevance-r{round}-d{doc}c{part}`` for a
+  part, and ``-retry-{n}`` added to the n-th resend of a reply that did not fit its
+  schema).
 - ``structuring/schema/`` (stage 2, the schema proposal) — ``result.json``
   (``{schema_code, thought, attempts, totals}``) + ``calls.json`` + ``transcript.yaml``;
   with nothing to structure, a schema of no field and no call
   (:attr:`r3con.stages.relevance.RelevantContext.context_round`).
 - ``structuring/parsing/`` (stage 2, filling that schema per document) — ``result.json``
-  (``{parsed, source_docs, source_ids, provenance, totals}`` — for each list field of
-  ``parsed``, the 0-based index and the id of the document each record came from, a
-  part's records carrying their document's; and per document, in document order, the
-  ids of the relevance snippets its parse used) + ``calls.json`` (one entry per
+  (``{parsed, source_docs, source_ids, provenance, skipped, totals}`` — for each list
+  field of ``parsed``, the 0-based index and the id of the document each record came
+  from, a part's records carrying their document's; and per document, in document
+  order, the ids of the relevance snippets its parse used, and its parts whose parse
+  was skipped, each ``{part, reason}``, ``part`` ``null`` for a document read whole,
+  none for most) + ``calls.json`` (one entry per
   ``parse-d{doc}`` call, or ``parse-d{doc}c{part}`` for a part, ``-retry-{n}`` added to
   a resend).
 - ``reasoning/`` (stage 3) — ``result.json`` (``{answer, provenance, path, fallback,
@@ -69,6 +75,12 @@ Layout per ``logs/<run-folder>/``:
   :attr:`r3con.pipeline.Answer.provenance` gives them, none when their call is not
   sent, fails or is cancelled: :func:`r3con.stages.claims.find_claims`) +
   ``calls.json`` + ``transcript.yaml``.
+- ``skipped.json`` — written when the run finishes, for reading only: every relevance
+  note and parse it skipped, as its reply stayed unusable once its resends and
+  re-rolls were spent, ``[]`` for none, each a :class:`r3con.pipeline.Skip` as JSON,
+  in the order :attr:`r3con.pipeline.Answer.skipped` gives them, which a resumed
+  run's include from before the resume too. r3con reads none back: an ask builds its
+  run's skips from the stages' ``result.json``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.
@@ -196,6 +208,8 @@ _log = get_logger("runs")
 _DOC_CHUNK_RE = re.compile(r"-d(\d+)(?:c(\d+))?\b")
 _EVENTS = "events.jsonl"
 _LOCK = "run.lock"
+SKIPPED = "skipped"
+"""The run folder's ``skipped.json``, by the name :meth:`TaskLogger.write_json` takes."""
 
 Emit = Callable[..., None]
 """Reports one progress event, ``emit(event_type, **fields)``, as

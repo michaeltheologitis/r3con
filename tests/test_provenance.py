@@ -344,3 +344,21 @@ def test_quotes_come_in_document_order_then_by_where_they_start():
     ]
     quotes = provenance_of([final], summary_ids=["c", "b", "a"])["quotes"]
     assert places(quotes) == [("a", 0, 10), ("a", 50, 60), ("b", 5, 8), ("c", 1, 2)]
+
+
+def test_a_citation_of_a_note_skipped_in_the_last_round_leads_to_the_one_kept():
+    skipped = SnippetRecord(
+        id="b", summary="", quotes=[], provenance=[], skipped="schema error"
+    )
+    rounds = [
+        [snippet("a"), snippet("b", quote("B said y.", 10, 19, "exact")), snippet("c")],
+        [snippet("a", cites=("b",)), skipped, snippet("c")],
+    ]
+    provenance = provenance_of(
+        rounds, summary_ids=["a", "b"], parse_ids=["c"], parses=[[], [], ["b"]]
+    )
+    edges = provenance["trail"]["edges"]
+    assert ["answer", "summary:1:b", "cites"] in edges
+    assert ["parse:c", "summary:1:b", "cites"] in edges
+    assert "summary:2:b" not in provenance["trail"]["nodes"]
+    assert places(provenance["quotes"]) == [("b", 10, 19)]

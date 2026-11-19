@@ -76,6 +76,7 @@ from r3con.provenance import (
 )
 from r3con.quotes import Match, Quote
 from r3con.runs import (
+    SKIPPED,
     Emit,
     EventRecorder,
     StageRun,
@@ -92,7 +93,7 @@ from r3con.runs import (
 from r3con.runtime.codeact import DEFAULT_EXEC_TIMEOUT_S
 from r3con.runtime.llm import raise_if_cancelled, register_credentials
 from r3con.settings import settings_snapshot
-from r3con.splitting import Splits
+from r3con.splitting import Splits, call_kind
 from r3con.stages import reasoning
 from r3con.stages.claims import find_claims
 from r3con.stages.relevance import (
@@ -102,10 +103,18 @@ from r3con.stages.relevance import (
     draw_document_ids,
     join_parts,
     part_ids,
+    part_number,
     relevance_call,
     surface_relevance,
 )
-from r3con.stages.structuring.parsing import ParseResult, check_schema, parse_documents
+from r3con.stages.structuring.parsing import (
+    PARSE_CALL,
+    Parsed,
+    ParseResult,
+    SkippedPart,
+    check_schema,
+    parse_documents,
+)
 from r3con.stages.structuring.schema import (
     ProposalResult,
     no_fields_schema,
@@ -211,6 +220,47 @@ def _cites_nothing() -> AnswerProvenance:
     return AnswerProvenance(**provenance, claims=[])
 
 
+RELEVANCE_STAGE = "relevance"
+PARSING_STAGE = "parsing"
+NO_NOTE = "no note"
+NO_RECORDS = "no records"
+
+
+def kept_note(round_: int) -> str:
+    """The ``used_instead`` of a skipped note of the relevant context whose part keeps
+    its round-``round_`` note."""
+    return f"kept its round-{round_} note"
+
+
+@dataclass(frozen=True)
+class Skip:
+    """A note or parse the run skipped, its reply still unusable once its resends and
+    re-rolls were spent, as ``skipped.json`` and :attr:`Answer.skipped` list it.
+
+    - ``stage`` — :data:`RELEVANCE_STAGE` or :data:`PARSING_STAGE`.
+    - ``round`` — the relevance round, from 1; ``None`` for parsing.
+    - ``doc_id``, ``doc_name`` — the document's id and name.
+    - ``part`` — the ``k`` of the part's snippet id ``<id>.<k>``, or ``None`` for a
+      document read whole (:func:`~r3con.stages.relevance.part_number`).
+    - ``reason`` — why, as :class:`~r3con.runtime.llm.UnusableReply` gives it.
+    - ``call`` — the call's kind, as its stage's ``calls.json`` records it
+      (``relevance-r2-d14``, ``parse-d3c1``), its resends with ``-retry-<n>`` added.
+    - ``used_instead`` — :func:`kept_note` for a note of the relevant context that
+      gave way to an earlier round's
+      (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`), :data:`NO_NOTE`
+      for any other note, and :data:`NO_RECORDS` for a parse.
+    """
+
+    stage: str
+    round: int | None
+    doc_id: str
+    doc_name: str
+    part: int | None
+    reason: str
+    call: str
+    used_instead: str
+
+
 @dataclass(frozen=True)
 class Answer:
     """What a run produced: the answer, and the two views it was derived from.
@@ -249,8 +299,10 @@ class Answer:
       the ``documents`` you passed in
       (``relevant_context[i]`` describes ``documents[i]``, which for documents given by
       name is ``list(documents.values())[i]``); a document read in parts has
-      its parts' notes joined. A document that contributes nothing is an empty string,
-      which is a real result rather than a failure.
+      its parts' notes joined. A note skipped in that round gives way to an earlier
+      round's (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`). A
+      document that contributes nothing is an empty string, which is a real result
+      rather than a failure.
     - ``structured_context`` — the merged parse: the per-task schema filled from every
       document parsed, as plain JSON-able data. Each record carries a ``document`` key
       naming the id of the document it came from, as reasoning saw it.
@@ -272,8 +324,9 @@ class Answer:
       names were recorded; recorded in the run folder's ``names.json``.
     - ``relevance_provenance`` — for each document, aligned 1:1 with
       ``relevant_context``, the ids of the previous round's relevance snippets its
-      snippet there used: each a document's id, or ``<id>.<k>`` for part ``k`` of
-      a document read in parts in that previous round. A document read in parts has its
+      snippet there used (for a note kept from an earlier round in place of a skipped
+      one, the round before that one's): each a document's id, or ``<id>.<k>`` for
+      part ``k`` of a document read in parts in that previous round. A document read in parts has its
       parts' ids combined, in order, without repeats.
     - ``parsing_provenance`` — for each document, aligned 1:1 with ``documents``, the
       ids of the snippets of ``relevant_context`` its parse used, its own document's
@@ -288,6 +341,11 @@ class Answer:
       ids in ``provenance``, in ``relevance_provenance``, in ``parsing_provenance`` and
       in the run folder's ``relevance/result.json``, where a part's id is ``<id>.<k>``
       and matching uses the part before the dot.
+    - ``skipped`` — every note and parse the run skipped (:class:`Skip`), as its
+      ``skipped.json`` lists them: relevance's, round by round, in document order,
+      then parsing's. Empty when nothing was skipped. An ask builds its run's from
+      the stages' ``result.json``, so a run that stopped after parsing has them, and
+      one written before r3con skipped has none.
     """
 
     answer: str
@@ -301,6 +359,7 @@ class Answer:
     provenance: AnswerProvenance = field(default_factory=_cites_nothing)
     relevance_provenance: list[list[str]] = field(default_factory=list)
     parsing_provenance: list[list[str]] = field(default_factory=list)
+    skipped: list[Skip] = field(default_factory=list)
 
     @property
     def source_ids(self) -> dict[str, list[str]]:
@@ -323,6 +382,7 @@ class Representation:
     parsed: dict[str, Any]
     source_docs: dict[str, list[int]]
     parsing_provenance: list[list[str]]
+    skipped: list[Skip]
 
 
 @dataclass
@@ -503,6 +563,11 @@ def run_pipeline(
     carries a note naming the run folder. The run holds its folder while it writes there
     (:func:`r3con.runs.run_lock`), so it is not resumed meanwhile.
 
+    A relevance note or a parse whose reply stays unusable is skipped, and the run goes
+    on (:mod:`r3con.stages.relevance`, :mod:`r3con.stages.structuring.parsing`); a run
+    never fails for what it skipped. Once the run finishes, ``skipped.json`` in its
+    folder lists every skip, ``[]`` for none, as :attr:`Answer.skipped` does.
+
     ``cancel`` stops the run as :func:`r3con.run` says: once it is set, no new model
     call is sent and no stage starts, and the stage then under way, or the next one,
     raises :class:`~r3con.runtime.llm.Cancelled` as any failing stage raises; but once
@@ -518,9 +583,10 @@ def run_pipeline(
       ``doc_id``. ``relevance_finished``, once it is read, for each part it ended up
       read in: ``round``, ``doc_id``, ``part`` (``k`` of the part's snippet id
       ``<id>.<k>``, ``None`` for a document read whole), the snippet's ``summary``, its
-      ``quotes`` as the snippet record holds them, and the ids of the previous round's
-      snippets it used, ``provenance``. A part refused as too long and cut further is
-      no event.
+      ``quotes`` as the snippet record holds them, the ids of the previous round's
+      snippets it used, ``provenance``, and ``skipped``: ``None``, or, for a note
+      skipped, why (as :attr:`Skip.reason`), its fields then empty. A part refused as
+      too long and cut further is no event.
     - ``documents_pruned``, once a round from 2 on that prunes is in: ``round``, and
       ``doc_ids``, the documents relevance pruned after it
       (:attr:`~r3con.stages.relevance.RelevantContext.pruned`), in document order,
@@ -534,8 +600,10 @@ def run_pipeline(
     - ``parsing_started`` / ``parsing_finished``, around each document's parse:
       ``doc_id``; finished adds ``n_records``, the document's ``parse`` as JSON
       (each field of ``Parse`` and its records, a document read in parts with its
-      parts' records in order), and the ids of the relevance snippets the parse used,
-      ``provenance``.
+      parts' records in order), the ids of the relevance snippets the parse used,
+      ``provenance``, and ``skipped``, each of its parts whose parse was skipped, as
+      ``{part, reason}`` (``part`` as in ``relevance_finished``, ``reason`` as
+      :attr:`Skip.reason`), none when none was.
     - ``reasoning_started``: ``question``, ``model``. ``reasoning_finished``:
       ``answer``, ``provenance`` (``{summary_ids, parse_ids, documents, quotes,
       trail}``, as :attr:`Answer.provenance` but for its claims), ``path``,
@@ -625,7 +693,7 @@ class _Saved:
     recorded_through: int = 1
     proposal: ProposalResult | None = None
     extraction: ParseResult | None = None
-    parses: dict[int, tuple[BaseModel, list[str]]] = field(default_factory=dict)
+    parses: dict[int, Parsed] = field(default_factory=dict)
     totals: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -817,6 +885,7 @@ def _build_and_answer(
                 "source_docs": extraction.source_docs,
                 "source_ids": _sources_as_ids(extraction.source_docs, document_ids),
                 "provenance": extraction.provenance,
+                "skipped": extraction.skipped,
             }
         stage_runs.append(record.run)
     parsed = extraction.parse
@@ -881,6 +950,9 @@ def _build_and_answer(
         resumed=resumed,
     )
     stage_runs.append(claims_run)
+    skipped = _skips(relevance, extraction.skipped, names)
+    if task_logger is not None:
+        task_logger.write_json(SKIPPED, [asdict(skip) for skip in skipped])
     emit("run_finished", run_dir=run_dir, **_spent(stage_runs, saved.totals))
     return _answer(
         result,
@@ -893,6 +965,7 @@ def _build_and_answer(
         parsing_provenance=extraction.provenance,
         names=names,
         run_dir=run_dir,
+        skipped=skipped,
     )
 
 
@@ -1098,7 +1171,7 @@ def _refuse_other_documents(
     }
     if any(differences.values()):
         listed = "; ".join(
-            f"{what} {_some(names)}" for what, names in differences.items() if names
+            f"{what} {first_few(names)}" for what, names in differences.items() if names
         )
         raise OtherDocuments(f"{run_dir}: these are not the run's documents: {listed}.")
     if list(given) != list(run):
@@ -1108,7 +1181,7 @@ def _refuse_other_documents(
         )
 
 
-def _some(names: Sequence[str], shown: int = 3) -> str:
+def first_few(names: Sequence[str], shown: int = 3) -> str:
     """The first ``shown`` of ``names``, and how many more there are."""
     listed = ", ".join(names[:shown])
     more = len(names) - shown
@@ -1164,7 +1237,9 @@ def _read_saved(
     finished one's pruning is replayed from its ``result.json`` (:func:`_pruning_of`).
     The lines and results it skips, which the resume computes again, are counted in one
     warning. Each quote of a snippet it reuses has its ``document_text`` from ``texts``
-    (:func:`_with_document_text`).
+    (:func:`_with_document_text`). A note or parse the run skipped as its reply stayed
+    unusable is a result like any other, reused as it was saved, so it is not read
+    again and stays skipped.
     """
     events, unreadable = read_events(run_dir)
     found = _saved_snippets(events, document_ids, texts, rounds, splits)
@@ -1306,11 +1381,19 @@ class _SnippetEvent(_DocumentEvent):
     summary: str
     quotes: list[_Quote]
     provenance: list[str]
+    # Events written before r3con skipped notes lack it.
+    skipped: str | None = None
+
+
+class _SkippedPart(BaseModel):
+    part: StrictInt | None
+    reason: str
 
 
 class _ParseEvent(_DocumentEvent):
     parse: dict[str, Any]
     provenance: list[str]
+    skipped: list[_SkippedPart] = []
 
 
 _Event = TypeVar("_Event", bound=_DocumentEvent)
@@ -1442,7 +1525,11 @@ def _snippet(id_: str, event: _SnippetEvent) -> SnippetRecord:
     """The snippet ``event`` reports, as its document's part ``id_``."""
     quotes = [Quote(**q.model_dump()) for q in event.quotes]
     return SnippetRecord(
-        id=id_, summary=event.summary, quotes=quotes, provenance=event.provenance
+        id=id_,
+        summary=event.summary,
+        quotes=quotes,
+        provenance=event.provenance,
+        skipped=event.skipped,
     )
 
 
@@ -1479,30 +1566,40 @@ def _last_reporting(
 
 def _fitting_parses(
     reported: Mapping[int, tuple[int, _ParseEvent]], parse_cls: type[BaseModel]
-) -> tuple[dict[int, tuple[BaseModel, list[str]]], list[int]]:
+) -> tuple[dict[int, Parsed], list[int]]:
     """Each of the ``reported`` parses, by document index, that fits ``parse_cls``, read
-    as JSON, as it was written, with the ids it used; and the positions of their
-    events."""
-    parses: dict[int, tuple[BaseModel, list[str]]] = {}
+    as JSON, as it was written, with the ids it used and its parts skipped; and the
+    positions of their events."""
+    parses: dict[int, Parsed] = {}
     positions: list[int] = []
     for doc, (at, event) in reported.items():
         try:
             parse = parse_cls.model_validate_json(json.dumps(event.parse))
         except ValidationError:
             continue
-        parses[doc] = (parse, event.provenance)
+        skipped = [SkippedPart(part=s.part, reason=s.reason) for s in event.skipped]
+        parses[doc] = Parsed(parse, event.provenance, skipped)
         positions.append(at)
     return parses, positions
 
 
 def _extraction(result: Mapping[str, Any], parse_cls: type[BaseModel]) -> ParseResult:
     """What the parsing stage's ``result.json``, ``result``, holds, its parse read as
-    JSON into ``parse_cls``."""
+    JSON into ``parse_cls``, and no part skipped when it lists none, as one written
+    before r3con skipped."""
     return ParseResult(
         parse=parse_cls.model_validate_json(json.dumps(result["parsed"])),
         source_docs=result["source_docs"],
         provenance=result["provenance"],
+        skipped=_parts_skipped(result),
     )
+
+
+def _parts_skipped(result: Mapping[str, Any]) -> list[list[SkippedPart]]:
+    """Each document's parts whose parse was skipped, as the parsing stage's
+    ``result.json``, ``result``, lists them: none for one written before r3con
+    skipped."""
+    return result.get("skipped", [[] for _ in result["provenance"]])
 
 
 def _parse_of(result: Mapping[str, Any], doc: int) -> tuple[dict[str, Any], list[str]]:
@@ -1660,6 +1757,7 @@ def _read_built(run_dir: Path) -> Representation:
         parsed=parsing["parsed"],
         source_docs=parsing["source_docs"],
         parsing_provenance=parsing["provenance"],
+        skipped=_skips(relevance, _parts_skipped(parsing), names),
     )
 
 
@@ -1839,6 +1937,7 @@ def ask_pipeline(
         parsing_provenance=built.parsing_provenance,
         names=built.names,
         run_dir=task_logger.dir,
+        skipped=built.skipped,
     )
 
 
@@ -1969,10 +2068,11 @@ def _answer(
     parsing_provenance: list[list[str]],
     names: dict[str, str],
     run_dir: Path | None,
+    skipped: list[Skip],
 ) -> Answer:
     """The :class:`Answer` that reasoning's ``result`` makes, with its
     ``provenance`` and ``claims``, over what it reasoned over, ``names`` giving each
-    document's name by its id, in document order."""
+    document's name by its id, in document order, and what the run ``skipped``."""
     return Answer(
         answer=result.answer,
         relevant_context=[join_parts(s) for s in relevance.snippets],
@@ -1990,7 +2090,78 @@ def _answer(
         provenance=AnswerProvenance(**provenance, claims=claims),
         relevance_provenance=relevance.provenance,
         parsing_provenance=parsing_provenance,
+        skipped=skipped,
     )
+
+
+def _skips(
+    relevance: RelevantContext,
+    parts_skipped: Sequence[Sequence[SkippedPart]],
+    names: Mapping[str, str],
+) -> list[Skip]:
+    """Every note ``relevance`` skipped, round by round, in document order, then each
+    parse of ``parts_skipped``, each document's parts whose parse was skipped, in
+    document order; ``names`` gives each document's name by its id, in document
+    order."""
+    ids = list(names)
+    context, rounds = relevance.context_round, relevance.note_rounds
+
+    def skip(
+        *,
+        stage: str,
+        k: int | None,
+        call: str,
+        d: int,
+        part: int | None,
+        reason: str,
+        used_instead: str,
+    ) -> Skip:
+        return Skip(
+            stage=stage,
+            round=k,
+            doc_id=ids[d],
+            doc_name=names[ids[d]],
+            part=part,
+            reason=reason,
+            call=call_kind(call, d, part),
+            used_instead=used_instead,
+        )
+
+    notes = [
+        skip(
+            stage=RELEVANCE_STAGE,
+            k=k,
+            call=relevance_call(k),
+            d=d,
+            part=part_number(p, len(parts)),
+            reason=record.skipped,
+            used_instead=_instead_of_note(k, rounds[record.id] if k == context else k),
+        )
+        for k, round_ in enumerate(relevance.records, start=1)
+        for d, parts in enumerate(round_)
+        for p, record in enumerate(parts)
+        if record.skipped is not None
+    ]
+    parses = [
+        skip(
+            stage=PARSING_STAGE,
+            k=None,
+            call=PARSE_CALL,
+            d=d,
+            part=part["part"],
+            reason=part["reason"],
+            used_instead=NO_RECORDS,
+        )
+        for d, (_, parts) in enumerate(zip(ids, parts_skipped, strict=True))
+        for part in parts
+    ]
+    return notes + parses
+
+
+def _instead_of_note(k: int, kept: int) -> str:
+    """What stands for a note skipped in round ``k``, its part's note in the relevant
+    context being round ``kept``'s."""
+    return kept_note(kept) if kept < k else NO_NOTE
 
 
 def _read_json(path: Path) -> Any:

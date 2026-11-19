@@ -505,7 +505,14 @@ def _utf8_size(text: str) -> int:
 
 def _kind(call: str, doc: int, k: int, n_parts: int) -> str:
     """The kind a call records for part ``k`` of ``n_parts`` of document ``doc``."""
-    return f"{call}-d{doc}" if n_parts == 1 else f"{call}-d{doc}c{k}"
+    return call_kind(call, doc, None if n_parts == 1 else k + 1)
+
+
+def call_kind(call: str, doc: int, part: int | None) -> str:
+    """The kind ``call`` records for document ``doc`` read whole (``part`` ``None``),
+    ``{call}-d{doc}``, or for its part ``part``, from 1, as in the part's snippet id
+    ``<id>.<part>``: ``{call}-d{doc}c{part - 1}``."""
+    return f"{call}-d{doc}" if part is None else f"{call}-d{doc}c{part - 1}"
 
 
 def _no_room(rest_tokens: int) -> str:

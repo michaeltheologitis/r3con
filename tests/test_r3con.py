@@ -6,7 +6,7 @@ import os
 import shutil
 import threading
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -30,8 +30,10 @@ from tests.fakes import (
     ANSWERING,
     ANSWERING_SCHEMA,
     FINGERPRINT,
+    MERROW_CUT_OFF,
     TWO_LINE_MEMOS,
     USAGE,
+    Raw,
     a_parse_citation_short,
     asks_for_quotes,
     bad_key,
@@ -48,6 +50,7 @@ from tests.fakes import (
     reading,
     reading_in_round,
     reading_moved_prompts,
+    replying_when,
     silent_when,
     snippets_without_quotes,
     stage_of,
@@ -979,6 +982,20 @@ def test_trace_of_an_asks_folder_follows_the_asks_citations_through_the_runs_rec
     asked = ask(cited_run, "Who else?", completion=answering_llm)
     assert trace(asked.run_dir) == trace(asked) == asked.provenance
     assert asked.provenance["trail"] != cited_run.provenance["trail"]
+
+
+def test_trace_reads_an_older_folder_whose_answer_cites_a_note_outside_its_context(
+    cited_run,
+):
+    stray = f"{cited_run.document_ids[0]}.1"
+
+    def citing_a_stray_note(result: dict) -> None:
+        result["provenance"]["summary_ids"].append(stray)
+
+    in_json("reasoning/result.json", citing_a_stray_note)(cited_run.run_dir)
+    traced = trace(cited_run.run_dir)
+    assert traced["summary_ids"][-1] == stray
+    assert ["answer", f"summary:2:{stray}", "cites"] in traced["trail"]["edges"]
 
 
 def test_trace_of_a_folder_whose_snippets_have_no_quotes_quotes_nothing(cited_run):
@@ -2495,6 +2512,102 @@ def test_a_folder_resume_cannot_carry_on_is_refused_before_any_request_or_write(
     assert str(refused.value).startswith(said.format(run_dir=run_dir))
     assert answering_llm.requests[sent:] == []
     assert the_runs_own_files(run_dir) == before
+
+
+def skipped_json(run_dir: Path) -> list[dict[str, Any]]:
+    return json.loads((run_dir / "skipped.json").read_text())
+
+
+def test_a_resume_keeps_a_note_skipped_before_it_and_never_reads_it_again(
+    answering_llm, one_worker, tmp_path
+):
+    calder_late = reading("Calder memo", later_round=True)
+    llm = answering_llm.answers(relevance=failing_once(calder_late, MERROW_CUT_OFF))
+    run_dir = failed_run(llm, tmp_path)
+    assert not (run_dir / "skipped.json").exists()
+    answer, requests = resumed(llm, run_dir)
+    assert requests == [
+        *[("relevance", line) for line in LAST_THREE],
+        ("schema", None),
+        *[("parsing", line) for line in MEMOS_BY_NAME.values()],
+        ("reasoning", None),
+    ]
+    assert answer.relevant_context[1] == "Notes on Merrow memo."
+    assert [(s.stage, s.round, s.doc_name, s.used_instead) for s in answer.skipped] == [
+        ("relevance", 2, "memos/merrow.txt", "kept its round-1 note")
+    ]
+    assert skipped_json(run_dir) == [asdict(skip) for skip in answer.skipped]
+
+
+def test_skipped_json_lists_the_skips_from_before_a_resume_and_after_it(
+    answering_llm, one_worker, tmp_path
+):
+    def calder_or_easton(request) -> bool:
+        return first_line(request) in ("Calder memo", "Easton memo")
+
+    parsing = replying_when(calder_or_easton, Raw(""), ANSWERING["parsing"])
+    llm = answering_llm.answers(parsing=failing_once(reading("Dunmore memo"), parsing))
+    run_dir = failed_run(llm, tmp_path)
+    answer, requests = resumed(llm, run_dir)
+    # Easton's one send is re-rolled three times, and not sent again.
+    assert requests == [
+        ("parsing", "Dunmore memo"),
+        *[("parsing", "Easton memo")] * 4,
+        ("reasoning", None),
+    ]
+    assert [(s.stage, s.doc_name, s.reason, s.call) for s in answer.skipped] == [
+        ("parsing", "memos/calder.txt", "empty reply", "parse-d2"),
+        ("parsing", "memos/easton.txt", "empty reply", "parse-d4"),
+    ]
+    assert skipped_json(run_dir) == [asdict(skip) for skip in answer.skipped]
+
+
+CALDER_UNPARSED = replying_when(reading("Calder memo"), Raw(""), ANSWERING["parsing"])
+
+
+def test_an_ask_carries_the_skips_its_runs_results_hold(answering_llm, tmp_path):
+    llm = answering_llm.answers(relevance=MERROW_CUT_OFF, parsing=CALDER_UNPARSED)
+    answer = finished_run(llm, tmp_path, MEMOS_BY_NAME)
+    assert [(s.stage, s.doc_name) for s in answer.skipped] == [
+        ("relevance", "memos/merrow.txt"),
+        ("parsing", "memos/calder.txt"),
+    ]
+    assert ask(answer, "Who else?", completion=llm).skipped == answer.skipped
+
+
+def test_an_ask_over_a_run_stopped_in_reasoning_carries_its_skips(
+    answering_llm, tmp_path
+):
+    llm = answering_llm.answers(
+        relevance=MERROW_CUT_OFF, parsing=CALDER_UNPARSED, reasoning=bad_key()
+    )
+    run_dir = failed_run(llm, tmp_path)
+    assert not (run_dir / "skipped.json").exists()
+    llm.answers(reasoning=ANSWERING["reasoning"])
+    asked = ask(run_dir, "Who else?", completion=llm)
+    assert [(s.stage, s.round, s.doc_name, s.used_instead) for s in asked.skipped] == [
+        ("relevance", 2, "memos/merrow.txt", "kept its round-1 note"),
+        ("parsing", None, "memos/calder.txt", "no records"),
+    ]
+
+
+def without_skipped(result: dict) -> None:
+    """A stage's ``result.json`` as r3con wrote it before it skipped."""
+    result.pop("skipped", None)
+    for round_ in result.get("rounds", []):
+        for snippet in round_["snippets"]:
+            del snippet["skipped"]
+
+
+@pytest.mark.parametrize(
+    "stage", ["relevance/result.json", "structuring/parsing/result.json"]
+)
+def test_an_ask_over_a_run_from_before_skipping_carries_no_skips(
+    answering_llm, tmp_path, stage
+):
+    answer = finished_run(answering_llm, tmp_path, MEMOS_BY_NAME)
+    in_json(stage, without_skipped)(answer.run_dir)
+    assert ask(answer, "Who else?", completion=answering_llm).skipped == []
 
 
 def test_a_finished_run_is_not_resumed_but_asked(answering_llm, tmp_path):

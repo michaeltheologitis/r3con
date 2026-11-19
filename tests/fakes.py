@@ -24,7 +24,18 @@ _completion = litellm.completion
 
 Stage = Literal["relevance", "schema", "parsing", "reasoning", "claims"]
 Request = dict[str, Any]
-Content = str | dict[str, Any]
+
+
+class Raw(NamedTuple):
+    """A reply's content sent as it is, never read as a relevance summary, and why the
+    model stopped: ``Raw("")`` is an empty reply, ``Raw(text, "length")`` one the
+    model's output limit cut off."""
+
+    content: str
+    finish_reason: str = "stop"
+
+
+Content = str | dict[str, Any] | Raw
 Reply = Content | BaseException | Callable[[Request], Content]
 USAGE = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
 FINGERPRINT = "fp_fake"
@@ -119,7 +130,8 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request gets a text reply as its summary, quoting and
-    citing nothing; a parsing request for ``{parse, provenance_ids}`` gets a dict
+    citing nothing; a :class:`Raw` reply is sent as it is, to any request; a parsing
+    request for ``{parse, provenance_ids}`` gets a dict
     reply without ``parse`` as its parse, citing nothing; a direct reasoning request
     gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
@@ -192,7 +204,10 @@ class FakeLLM:
             if isinstance(reply, BaseException):
                 raise reply
             content = reply(copy.deepcopy(snapshot)) if callable(reply) else reply
-            if (
+            finish_reason = "stop"
+            if isinstance(content, Raw):
+                content, finish_reason = content
+            elif (
                 isinstance(content, str)
                 and _schema_name(snapshot) == "RelevanceSummary"
             ):
@@ -205,7 +220,7 @@ class FakeLLM:
                 content = {"parse": content, "provenance_ids": []}
             if isinstance(content, dict):
                 content = json.dumps(content)
-            return mock_completion(request, content)
+            return mock_completion(request, content, finish_reason)
         finally:
             with self._lock:
                 self._in_flight -= 1
@@ -314,19 +329,29 @@ def failing_once(
     return reply
 
 
+def replying_when(
+    when: Callable[[Request], bool],
+    reply: Content,
+    otherwise: Content | Callable[[Request], Content],
+) -> Callable[[Request], Content]:
+    """A reply of ``reply`` to each request ``when`` holds for, resends and re-rolls
+    included, and of ``otherwise`` to every other."""
+
+    def answer(request: Request) -> Content:
+        if when(request):
+            return reply
+        return otherwise(request) if callable(otherwise) else otherwise
+
+    return answer
+
+
 def silent_when(
     when: Callable[[Request], bool],
     otherwise: Content | Callable[[Request], Content] = ANSWERING["relevance"],
 ) -> Callable[[Request], Content]:
     """A relevance reply that says nothing, an empty summary, to each request ``when``
     holds for, and answers every other with ``otherwise``."""
-
-    def reply(request: Request) -> Content:
-        if when(request):
-            return ""
-        return otherwise(request) if callable(otherwise) else otherwise
-
-    return reply
+    return replying_when(when, "", otherwise)
 
 
 def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool]:
@@ -352,6 +377,17 @@ def reading_in_round(
         return read >= round_ if or_later else read == round_
 
     return when
+
+
+MERROW_LATE = reading("Merrow memo", later_round=True)
+"""Whether a relevance request reads the Merrow memo in a later round."""
+MERROW_CUT_OFF = replying_when(
+    MERROW_LATE,
+    Raw('{"summary": "Notes on Merrow memo and on and on and', "length"),
+    ANSWERING["relevance"],
+)
+"""A relevance reply cut off at the model's output limit to each later round's read of
+the Merrow memo, and ANSWERING's to every other request."""
 
 
 def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
@@ -386,12 +422,17 @@ def unscripted(request: Request) -> UnscriptedRequest:
     )
 
 
-def mock_completion(request: Request, content: str) -> Any:
-    """litellm's response to ``request`` when its own mock replies ``content``, the
-    reply's body handed to the request's ``logger_fn``, as litellm hands a server's:
-    its model the model asked for, without the provider."""
+def mock_completion(request: Request, content: str, finish_reason: str = "stop") -> Any:
+    """litellm's response to ``request`` when its own mock replies ``content``, having
+    stopped for ``finish_reason``, the reply's body handed to the request's
+    ``logger_fn``, as litellm hands a server's: its model the model asked for, without
+    the provider."""
     # The dict form, because litellm treats mock_response="" as absent.
-    choice = {"index": 0, "finish_reason": "stop", "message": {"content": content}}
+    choice = {
+        "index": 0,
+        "finish_reason": finish_reason,
+        "message": {"content": content},
+    }
     body = {
         "model": request["model"].partition("/")[2] or request["model"],
         "system_fingerprint": FINGERPRINT,

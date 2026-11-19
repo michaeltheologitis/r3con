@@ -2,14 +2,16 @@ import copy
 import logging
 import pickle
 import re
+import threading
 from collections import Counter
 from dataclasses import asdict
 
+import litellm
 import pytest
-from pydantic import ValidationError
 
 from r3con import settings
 from r3con.runs import StageRun, TaskLogger
+from r3con.runtime.llm import Cancelled
 from r3con.stages.relevance import (
     RelevantContext,
     SnippetRecord,
@@ -20,9 +22,13 @@ from r3con.stages.relevance import (
     surface_relevance,
 )
 from tests.fakes import (
+    Raw,
+    bad_key,
     is_later_round,
     quote,
     quoting_its_first_line_and_citing_all_shown,
+    replying_when,
+    too_long,
 )
 
 MODEL = "openai/gpt-6-luna"
@@ -530,18 +536,165 @@ def test_a_reply_that_does_not_fit_its_schema_is_sent_again(
         )
 
 
-@pytest.mark.parametrize("attempts", [1, 2])
-def test_the_last_malformed_reply_is_raised_once_the_attempts_run_out(
-    llm, monkeypatch, attempts
+def round_of(request) -> int:
+    """The round a relevance request reads in, from the notes it shows, each naming
+    its round (:func:`note_of_its_round`): one more than theirs, 1 with none."""
+    shown = re.findall(r"N\(\w+,r(\d)\)", request["messages"][0]["content"])
+    return int(max(shown, default="0")) + 1
+
+
+def note_of_its_round(request) -> str:
+    """A note naming the document, by its text up to the first full stop, and the
+    round it was read in, read from the notes shown (:func:`round_of`)."""
+    document = request["messages"][1]["content"]
+    return f"N({document.split('.')[0]},r{round_of(request)})"
+
+
+def unusable_in(round_: int, unusable, reading="DOC0"):
+    """A relevance reply of ``unusable`` to every send of the text starting with
+    ``reading`` in round ``round_``, its resends and re-rolls included, and of
+    :func:`note_of_its_round` to every other."""
+
+    def when(request) -> bool:
+        text = request["messages"][1]["content"]
+        return text.startswith(reading) and round_of(request) == round_
+
+    return replying_when(when, unusable, note_of_its_round)
+
+
+def skip_warnings(caplog) -> list[str]:
+    return [message for message in caplog.messages if ": skipped: " in message]
+
+
+THREE = ["DOC0", "DOC1", "DOC2"]
+
+
+@pytest.mark.parametrize(
+    ("unusable", "reason", "error", "sends"),
+    [
+        (
+            Raw('{"summary": "N(DOC0,r2) and on and', "length"),
+            "output context length",
+            "ValidationError: Invalid JSON: EOF while parsing a string",
+            3,
+        ),
+        (MALFORMED, "schema error", "ValidationError: summary: Field required", 3),
+        # One send, re-rolled 3 times, and not sent again with an error.
+        (Raw(""), "empty reply", "EmptyReply: The model returned empty text", 4),
+    ],
+    ids=["cut-off", "schema-error", "empty"],
+)
+def test_a_last_round_note_whose_reply_stays_unusable_gives_way_to_its_earlier_one(
+    llm, caplog, unusable, reason, error, sends
 ):
-    monkeypatch.setattr(settings, "RELEVANCE_MAX_ATTEMPTS", attempts)
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    result = surface(llm, THREE, rounds=2, reply=unusable_in(2, unusable))
+    assert by_round(result, "skipped") == [[[None]] * 3, [[reason], [None], [None]]]
+    assert by_round(result, "summary")[1] == [[""], ["N(DOC1,r2)"], ["N(DOC2,r2)"]]
+    assert (
+        by_round(result, "quotes")[1][0] == by_round(result, "provenance")[1][0] == [[]]
+    )
+    assert result.snippets == ["N(DOC0,r1)", "N(DOC1,r2)", "N(DOC2,r2)"]
+    assert result.note_rounds == {IDS[0]: 1, IDS[1]: 2, IDS[2]: 2}
+    assert result.pruned == frozenset()
+    assert len([r for r in sends_of(llm, "DOC0") if round_of(r) == 2]) == sends
+    [warning] = skip_warnings(caplog)
+    assert warning.startswith(f"relevance-r2-d0: skipped: {reason}: {error}")
+
+
+def test_a_skipped_part_is_logged_once_though_a_refusal_discards_it_and_reads_again(
+    llm, caplog, window
+):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    second_half = LONG[LONG.index("P10. ") :]
 
     def reply(request):
-        return MALFORMED if is_later_round(request) else "A snippet."
+        text = request["messages"][1]["content"]
+        if text in (LONG, second_half):
+            raise too_long(READ_IN_HALVES, len(text), QWEN)
+        return MALFORMED if text.startswith("P0.") else note_of_its_round(request)
 
-    with pytest.raises(ValidationError, match="summary"):
-        surface(llm, ["DOC0", "DOC1"], rounds=2, reply=reply, workers=1)
-    assert len(sends_of(llm, "DOC0")) == 1 + attempts
+    # A window this wide splits only on a refusal, and never stops for the prompt.
+    model = window(1_000_000)
+    result = surface(llm, ["DOC0", LONG], rounds=1, model=model, reply=reply)
+    assert by_round(result, "skipped")[0][1] == ["schema error", None, None, None]
+    warning = "relevance-r1-d1c0: skipped: schema error: ValidationError: summary"
+    assert skip_warnings(caplog) == [f"{warning}: Field required"]
+
+
+@pytest.mark.parametrize(("rounds", "skipped_in"), [(2, 1), (3, 2)])
+def test_a_note_skipped_before_the_last_round_prunes_nothing_and_is_read_again(
+    llm, rounds, skipped_in
+):
+    reply = unusable_in(skipped_in, MALFORMED)
+    result = surface(llm, THREE, rounds=rounds, reply=reply)
+    skipped = by_round(result, "skipped")[skipped_in - 1]
+    assert skipped == [["schema error"], [None], [None]]
+    assert result.pruned == frozenset()
+    assert result.snippets == [f"N({d},r{rounds})" for d in THREE]
+    next_round = [r for r in llm.requests if round_of(r) == skipped_in + 1]
+    assert [r["messages"][1]["content"] for r in next_round].count("DOC0") == 1
+    assert not any(f"ID: {IDS[0]}\n" in r["messages"][0]["content"] for r in next_round)
+
+
+def test_with_one_round_a_skipped_note_leaves_its_document_no_note(llm):
+    result = surface(llm, THREE, rounds=1, reply=unusable_in(1, MALFORMED))
+    assert result.snippets == ["", "N(DOC1,r1)", "N(DOC2,r1)"]
+    assert result.note_rounds == dict.fromkeys(IDS, 1)
+    assert by_round(result, "skipped") == [[["schema error"], [None], [None]]]
+
+
+def test_a_part_whose_reply_stays_unusable_is_skipped_and_the_others_kept(llm):
+    reply = unusable_in(2, MALFORMED, reading="P10")
+    documents = ["DOC0", LONG, "DOC2"]
+    llm.refuses_over(READ_IN_HALVES)
+    result = surface(llm, documents, rounds=2, model=QWEN, reply=reply)
+    assert by_round(result, "skipped")[1] == [[None], [None, "schema error"], [None]]
+    assert result.snippets == ["N(DOC0,r2)", ["N(P0,r2)", "N(P10,r1)"], "N(DOC2,r2)"]
+    assert result.note_rounds == {
+        IDS[0]: 2,
+        f"{IDS[1]}.1": 2,
+        f"{IDS[1]}.2": 1,
+        IDS[2]: 2,
+    }
+
+
+def test_a_skipped_part_read_whole_the_round_before_has_no_note_to_keep(llm):
+    reply = unusable_in(2, MALFORMED, reading="P20")
+    documents = ["DOC0", LONGER, "DOC2"]
+    llm.refuses_over(READ_WHOLE_ONLY_IN_ROUND_1)
+    result = surface(llm, documents, rounds=2, model=QWEN, reply=reply)
+    assert by_round(result, "summary")[0][1] == ["N(P0,r1)"]
+    assert by_round(result, "skipped")[1][1] == [None, "schema error"]
+    assert result.snippets[1] == ["N(P0,r2)", ""]
+    assert result.note_rounds[f"{IDS[1]}.2"] == 2
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        bad_key(),
+        litellm.InternalServerError("down", llm_provider="openai", model=MODEL),
+        RuntimeError("a bug"),
+    ],
+    ids=["refused-key", "server-error", "bug"],
+)
+def test_an_error_that_is_no_unusable_reply_still_fails_relevance(llm, error):
+    llm.replies(error)
+    with pytest.raises(type(error)):
+        surface(llm, THREE, rounds=2, workers=1)
+
+
+def test_a_cancel_set_while_relevance_reads_still_stops_it(llm):
+    cancel = threading.Event()
+
+    def reply(request):
+        cancel.set()
+        return note_of_its_round(request)
+
+    with pytest.raises(Cancelled):
+        surface(llm, THREE, rounds=2, reply=reply, workers=1, cancel=cancel)
+    assert len(llm.requests) == 1
 
 
 def test_fewer_than_one_attempt_is_refused_before_any_request(llm, monkeypatch):

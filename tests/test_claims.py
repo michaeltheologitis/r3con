@@ -372,10 +372,15 @@ def test_a_claims_request_over_the_models_line_is_not_sent(
 
 
 @pytest.mark.parametrize(
-    ("reply", "sends"), [(bad_key(), 1), ("not JSON", 3)], ids=["refused", "invalid"]
+    ("reply", "sends", "error"),
+    [
+        (bad_key(), 1, "AuthenticationError: "),
+        ("not JSON", 3, "ValidationError: Invalid JSON: expected ident"),
+    ],
+    ids=["refused", "invalid"],
 )
 def test_a_claims_call_that_fails_leaves_no_claims_and_the_run_finishes(
-    quoting_llm, tmp_path, caplog, events_in, reply, sends
+    quoting_llm, tmp_path, caplog, events_in, reply, sends, error
 ):
     caplog.set_level(logging.WARNING, logger="r3con")
     quoting_llm.answers(claims=reply)
@@ -383,7 +388,7 @@ def test_a_claims_call_that_fails_leaves_no_claims_and_the_run_finishes(
     assert result.answer == ANSWER
     assert result.provenance["claims"] == []
     assert len(quoting_llm.requests_for("claims")) == sends
-    assert "claims: none, as their call failed: " in caplog.text
+    assert f"claims: none, as their call failed: {error}" in caplog.text
     events = events_in(result.run_dir)
     assert [event["type"] for event in events[-3:]] == [
         "claims_started",
