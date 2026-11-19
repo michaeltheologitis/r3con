@@ -12,12 +12,20 @@ from tests.app.build_sample import (
     built_blocks,
 )
 from tests.fakes import (
+    ANSWERING,
     FakeLLM,
+    Raw,
     Request,
     citing,
     in_json,
     quoting_its_first_line_and_citing_all_shown,
+    reading,
+    replying_when,
 )
+
+EASTFIELD = "MEMO — Eastfield site, Q3 operations review"
+REGISTRY = "APPROVED CONTRACTOR REGISTRY (extract, revised July)"
+CUT_OFF = Raw('{"summary": "Notes on and on and', "length")
 
 
 @pytest.fixture
@@ -59,3 +67,31 @@ def test_a_saved_trail_trace_does_not_give_fails_the_build(todays_run: Answer) -
     )(todays_run.run_dir)
     with pytest.raises(AssertionError, match="trace gives the saved provenance"):
         build_sample(todays_run.run_dir, MEMOS)
+
+
+def test_a_run_that_skipped_builds_with_its_skips_and_one_call_per_node(
+    answering_llm: FakeLLM, shown_ids: Callable[[Request], list[str]], tmp_path
+) -> None:
+    relevance = quoting_its_first_line_and_citing_all_shown(shown_ids)
+    answering_llm.answers(
+        relevance=replying_when(
+            reading(EASTFIELD, later_round=True), CUT_OFF, relevance
+        ),
+        parsing=replying_when(reading(REGISTRY), Raw("{}"), ANSWERING["parsing"]),
+        reasoning=citing("Halloran memo", slice(1), slice(-1, None)),
+    )
+    answer = run(
+        "Who?", read_documents(MEMOS), completion=answering_llm, logs_dir=tmp_path
+    )
+    assert answer.run_dir is not None
+    built = build_sample(answer.run_dir, MEMOS)
+    note = [{"part": None, "reason": "output context length"}]
+    parse = [{"part": None, "reason": "schema error"}]
+    rounds = [[s.get("skipped") for s in round_] for round_ in built["rounds"]]
+    assert rounds == [[None] * 5, [None, note, None, None, None]]
+    assert [p.get("skipped") for p in built["parsed"]] == [None] * 3 + [parse, None]
+    # Each skipped call was sent three times.
+    assert built["calls"]["r2-1"]["tokens"] == 3 * built["calls"]["r2-0"]["tokens"]
+    assert (
+        built["calls"]["parsed-3"]["tokens"] == 3 * built["calls"]["parsed-0"]["tokens"]
+    )

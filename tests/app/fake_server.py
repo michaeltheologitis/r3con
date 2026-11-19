@@ -19,6 +19,10 @@ every call wait until the server is killed. One holding ``STALLS`` makes every c
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, one holding a marker of
 ``BROKEN_STAGES`` makes every call of its stage raise until then, and one holding
 ``OFF_SCHEMA`` makes every reply with a schema miss it, so r3con sends again.
+A document holding ``RUNS_OUT`` has every relevance reply after round 1's cut off at
+the output limit, and one holding ``MISFITS`` every parse reply miss its schema, so
+that r3con skips that note or parse; neither marker may be a document's first line,
+which other calls are shown as its note.
 The server keeps the keys it is given in a credential store of its own, in memory,
 never the system's. With ``--save-dialog`` after LOGS_DIR, it saves a tab as the Mac
 app does, through a Save dialog, faked: it saves in LOGS_DIR's ``saved``, under the
@@ -51,6 +55,7 @@ from tests.fakes import (
     SCHEMA_REPLY,
     FakeKeyring,
     claims_reply,
+    is_later_round,
     mock_completion,
     shown_evidence,
     stage_of,
@@ -74,6 +79,9 @@ RELEASE = "release"
 RELEASE_POLL_SECONDS = 0.05
 OFF_SCHEMA = "(the model answers off schema)"
 EMPTY_REPLY = "{}"
+RUNS_OUT = "(its note runs out after round 1)"
+CUT_OFF_REPLY = '{"summary": "This note runs on and on and'
+MISFITS = "(its parse never fits)"
 QUIET = "(nothing relevant here)"
 UNPARSED = "(nothing to parse here)"
 FADES = "(nothing relevant from round 3 on)"
@@ -183,6 +191,11 @@ def scripted_model(**request: Any) -> Any:
             llm_provider="openai",
         )
     if OFF_SCHEMA in sent and request.get("response_format"):
+        return mock_completion(request, EMPTY_REPLY)
+    stage = stage_of(request)
+    if RUNS_OUT in part and stage == "relevance" and is_later_round(request):
+        return mock_completion(request, CUT_OFF_REPLY, "length")
+    if MISFITS in part and stage == "parsing":
         return mock_completion(request, EMPTY_REPLY)
     return mock_completion(request, content(request))
 

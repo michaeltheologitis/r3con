@@ -6409,6 +6409,267 @@ async function liveFromRound1(url, server) {
   });
 }
 
+// ---------- skips: a note or parse r3con skipped, its reply unusable, and the run that went on without it ----------
+
+// fake_server.py's RUNS_OUT and MISFITS, each past its memo's first line, which other calls are shown as its note: every
+// relevance reply to a memo holding the first is cut off at the output limit after round 1, and every parse reply to
+// one holding the second misses its schema, so r3con skips Eastfield's round-2 note, keeping its round-1 note in the
+// relevant context, and the registry's parse.
+const RUNS_OUT = '(its note runs out after round 1)';
+const MISFITS = '(its parse never fits)';
+const [EASTFIELD, REGISTRY] = [1, 3];
+const skippingMemos = () => recordedSample().docs.map((d, i) => memo(d.name, `${d.text}${{ [EASTFIELD]: `\n${RUNS_OUT}\n`, [REGISTRY]: `\n${MISFITS}\n` }[i] ?? ''}`));
+const SKIPPED_IDS = [`r2-${EASTFIELD}`, `parsed-${REGISTRY}`];
+const NOTE_SKIPPED = 'Skipped: output context length. The reply was cut off at the context limit.';
+const PARSE_SKIPPED = "Skipped: schema error. The reply didn't fit its schema.";
+const SKIPPED_NODES = [
+  [`parsed-${REGISTRY}`, `${stem(REGISTRY)}, parsed structure, skipped: schema error`, 'Skipped: schema error'],
+  [`r2-${EASTFIELD}`, `${stem(EASTFIELD)}, round 2 relevance snippet, skipped: output context length`, 'Skipped: output context length'],
+];
+// Each skipped node's popup: only what happened, none of a node's output.
+const SKIPPED_POPUPS = [{ note: NOTE_SKIPPED, outputs: [] }, { note: PARSE_SKIPPED, outputs: [] }];
+const SKIPPED_LINE = `2 skipped: round-2 note of ${stem(EASTFIELD)} (output context length), parsing of ${stem(REGISTRY)} (schema error).`;
+// The kept round-1 note reaches the answer and Eastfield's parse from its own node.
+const KEPT_LINES = [`r1-${EASTFIELD}>answer-0`, `r1-${EASTFIELD}>parsed-${EASTFIELD}`];
+const SKIPPED_EVENTS = (ids) => ({ notes: [[2, ids[EASTFIELD], 'output context length']], parses: [[ids[REGISTRY], [{ part: null, reason: 'schema error' }]]] });
+
+// In-page: each node with a skip mark, by id, with its name and its mark's.
+function skippedNodes() {
+  return [...document.querySelectorAll('#world .node.skipped')].map((el) => [el.dataset.id, el.getAttribute('aria-label'), el.querySelector('.skip-badge')?.getAttribute('aria-label')]).sort();
+}
+
+// In-page: the open popup's skip note, a line a part, and which of a node's outputs it shows: its text, parse, trail line
+// and folds.
+function skipPopup() {
+  const inspector = document.getElementById('inspector');
+  return {
+    note: [...inspector.querySelectorAll('.skip-note p')].map((p) => p.textContent).join('\n'),
+    outputs: ['.insp-text', 'pre.code', '.trail-line', 'details'].filter((selector) => inspector.querySelector(selector)),
+  };
+}
+
+// In-page: the line under each answer that says what its run skipped, by the answer's node.
+function skipLines() {
+  return [...document.querySelectorAll('.transcript:not([hidden]) .skips')].map((el) => [el.parentElement.querySelector('.line.answer').dataset.node, el.textContent]);
+}
+
+// What a run over skippingMemos shows of its skips: its marked nodes, their popups, the lines out of them, the line under
+// each answer, and its lit trail, each document's node named `doc`.
+async function skipsShown(page) {
+  const popups = [];
+  for (const id of SKIPPED_IDS) {
+    await inspect(page, id);
+    popups.push(await page.evaluate(skipPopup));
+  }
+  await page.keyboard.press('Escape');
+  return {
+    nodes: await page.evaluate(skippedNodes),
+    popups,
+    out: await page.$$eval('#world .edge', (els, ids) => els.map((el) => el.dataset.key).filter((key) => ids.includes(key.split('>')[0])), SKIPPED_IDS),
+    lines: await page.evaluate(skipLines),
+    lit: await litTrail(page),
+  };
+}
+
+const keptLit = (lit) => KEPT_LINES.every((key) => lit.edges.includes(key)) && lit.nodes.includes(`r1-${EASTFIELD}`) && !lit.nodes.includes(`r2-${EASTFIELD}`);
+
+// A saved block without what r3con writes of its skips, as a tab saved before r3con skipped holds it.
+function withoutSkips(b) {
+  const relevance = b.representation['relevance/result.json'];
+  const { skipped, ...parsing } = b.representation['structuring/parsing/result.json'];
+  const rounds = relevance.rounds.map((round) => ({ ...round, snippets: round.snippets.map(({ skipped: reason, ...snippet }) => snippet) }));
+  return { ...b, representation: { ...b.representation, 'relevance/result.json': { ...relevance, rounds }, 'structuring/parsing/result.json': parsing } };
+}
+
+// Over skippingMemos, r3con skips Eastfield's round-2 note and the registry's parse: each skipped node is marked red as
+// its event comes, its popup says only what happened, no line leaves it, the kept round-1 note lights on the answer's
+// trail, and a line under each answer lists the skips, each a link to its node; in the live run and an ask over it, the
+// tab saved and opened again and an ask over that, and a run continued after it failed in parsing. A tab saved before
+// r3con skipped opens with no skips, and one whose skips are damaged is refused.
+async function liveSkips(url, server) {
+  let html;
+  let live;
+  const before = async (page) => {
+    await page.addInitScript(recordEvents);
+    await page.addInitScript(holdFrom, 'schema_started');
+  };
+  await withPage('live', { url, sample: false, question: true, before }, async (page) => {
+    await page.setInputFiles('#file-input', skippingMemos());
+    await filesCounted(page, SAMPLE_DOCS);
+    await page.click('#run-btn');
+    const roundTwo = await becomes(page, (n) => document.querySelectorAll('#world .node.r2:not(.working)').length === n, SAMPLE_DOCS, LIVE_RUN_MS);
+    const early = await page.evaluate(skippedNodes);
+    await page.evaluate(() => (window.release = true));
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const marked = roundTwo && isDeepStrictEqual(early, SKIPPED_NODES.slice(1));
+    check('live', "a skipped note is marked as its event comes, before the run goes on, named with why", marked, JSON.stringify(early));
+
+    const events = await page.evaluate(() => window.events);
+    const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
+    const said = {
+      notes: events.filter((e) => e.type === 'relevance_finished' && e.skipped).map((e) => [e.round, e.doc_id, e.skipped]),
+      parses: events.filter((e) => e.type === 'parsing_finished' && e.skipped.length).map((e) => [e.doc_id, e.skipped]),
+    };
+    live = await skipsShown(page);
+    const [answer] = await page.evaluate(answersRead);
+    const trail = trailOnPage(answer.trail, answer.ids, await docIdsOf(page));
+    const lit = await litOnPanel(page);
+    const expected = { nodes: SKIPPED_NODES, popups: SKIPPED_POPUPS, out: [], lines: [['answer-0', SKIPPED_LINE]] };
+    const { nodes, popups, out, lines } = live;
+    const shown = { nodes, popups, out, lines };
+    const liveName = "r3con's skips, as its events name them, mark their nodes and nothing else; each popup says only what happened, no line leaves them, and a line under the answer lists them";
+    check('live', liveName, done && isDeepStrictEqual(said, SKIPPED_EVENTS(ids)) && isDeepStrictEqual(shown, expected), `${JSON.stringify(said)}; ${JSON.stringify(shown)}`);
+    const keptName = "the kept round-1 note reaches the answer and its parse from its own node, and the lit trail is exactly r3con's";
+    check('live', keptName, keptLit(lit) && isDeepStrictEqual(lit, trail), JSON.stringify(lit.edges));
+
+    await send(page, SAVED_ASK);
+    const landed = await becomes(page, landedNode, 'answer-1', LIVE_RUN_MS);
+    const asked = await page.evaluate(skipLines);
+    await page.locator(`${CHAT} .skips .ref`).first().click();
+    const opened = (await popup(page))?.title;
+    const askName = "an ask over that run has the same line under its answer, whose first link opens the skipped note's popup";
+    check('live', askName, landed && isDeepStrictEqual(asked, [['answer-0', SKIPPED_LINE], ['answer-1', SKIPPED_LINE]]) && opened === `● ${stem(EASTFIELD)} · round 2`, `${JSON.stringify(asked)}; ${opened}`);
+    await page.keyboard.press('Escape');
+    live = await skipsShown(page);
+    html = await savedHtml(page);
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, html]] });
+    const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = await skipsShown(page);
+    check('live', 'saved and opened again, the tab shows the same skips, popups, lines and lit trail', opened && isDeepStrictEqual(shown, live), JSON.stringify(shown));
+    await send(page, NEW_QUESTION);
+    const again = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
+    const lines = await page.evaluate(skipLines);
+    check('live', 'an ask over the tab opened again lists the run\'s skips under its answer too', again && lines.length === 3 && lines.every(([, text]) => text === SKIPPED_LINE), JSON.stringify(lines));
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, withBlock(html, withoutSkips)]] });
+    const opened = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = { nodes: await page.evaluate(skippedNodes), lines: await page.evaluate(skipLines) };
+    check('live', 'a tab saved before r3con skipped opens, with no skips', opened && isDeepStrictEqual(shown, { nodes: [], lines: [] }), JSON.stringify(shown));
+  });
+  const damaged = withBlock(html, (b) => {
+    b.representation['structuring/parsing/result.json'].skipped[REGISTRY] = [{ part: 'two', reason: 'schema error' }];
+    return b;
+  });
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: [[SAVED_NAME, damaged]] });
+    const said = await becomes(page, (text) => document.getElementById('files-error').textContent === text, `Not added: ${SAVED_NAME}. ${DAMAGED_SAVE}`, LIVE_RUN_MS);
+    check('live', 'a saved tab whose skips are not as r3con writes them is refused as damaged and opens no run', said && (await count(page, '#world .node.answer')) === 0, await filesError(page));
+  });
+
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.setInputFiles('#file-input', skippingMemos());
+    await filesCounted(page, SAMPLE_DOCS);
+    await send(page, `Which site logged the most incidents? ${BREAKS}`);
+    const failed = await becomes(page, statusIs, `● failed in parsing · ${PARSER_ERROR}`, LIVE_RUN_MS);
+    const stopped = await page.evaluate(skippedNodes);
+    server.release();
+    await page.click(CONTINUE_BUTTON);
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const shown = { nodes: await page.evaluate(skippedNodes), lines: await page.evaluate(skipLines) };
+    const continuedName = 'a run that failed in parsing after a skip continues with the skip it reused still marked, and the parse it skipped then';
+    const expected = { nodes: SKIPPED_NODES, lines: [['answer-0', SKIPPED_LINE]] };
+    check('live', continuedName, failed && done && isDeepStrictEqual(stopped, SKIPPED_NODES.slice(1)) && isDeepStrictEqual(shown, expected), `${JSON.stringify(stopped)}; ${JSON.stringify(shown)}`);
+  });
+}
+
+// fake_server.py's split memo, with both skip markers at its end: a reply cut off at the output limit has r3con cut that
+// part further, so round 2 reads the memo in more parts than round 1, and the last part's round-2 note and parse are
+// skipped, while its other parts' notes and parses stand.
+const SPLIT_SKIPPED = SAMPLE_DOCS;
+function skippingSplitMemo() {
+  const { name, buffer } = splitMemo();
+  return memo(name, `${buffer.toString()}\n\n${RUNS_OUT}\n\n${MISFITS}\n`);
+}
+
+// A memo read in parts, its last part's round-2 note and parse skipped: each popup says which part was skipped and why,
+// above its other parts' output; with no earlier note of that part read in as many parts, only its round-2 node stands
+// for it in the relevant context; and the line under the answer names the part.
+async function liveSkippedParts(url) {
+  await withPage('live', { url, sample: false, question: true, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
+    await page.setInputFiles('#file-input', [...sampleMemos(), skippingSplitMemo()]);
+    await filesCounted(page, SAMPLE_DOCS + 1);
+    await page.click('#run-btn');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const events = await page.evaluate(() => window.events);
+    const parts = {
+      notes: events.filter((e) => e.type === 'relevance_finished' && e.skipped).map((e) => [e.round, e.part, e.skipped]),
+      parses: events.filter((e) => e.type === 'parsing_finished' && e.skipped.length).map((e) => e.skipped),
+    };
+    const popups = [];
+    for (const id of [`r2-${SPLIT_SKIPPED}`, `parsed-${SPLIT_SKIPPED}`]) {
+      await inspect(page, id);
+      popups.push(await page.evaluate(skipPopup));
+    }
+    await page.keyboard.press('Escape');
+    const context = await page.$$eval('#world .edge.context', (els) => els.map((el) => el.dataset.key).filter((key) => key.endsWith('>schema')));
+    const shown = { parts, popups, notes: [1, 2].map((k) => context.includes(`r${k}-${SPLIT_SKIPPED}>schema`)), lines: await page.evaluate(skipLines) };
+    const part = parts.notes[0]?.[1];
+    const expected = {
+      parts: { notes: [[2, part, 'output context length']], parses: [[{ part, reason: 'schema error' }]] },
+      popups: [
+        { note: `Part ${part} skipped: output context length. The reply was cut off at the context limit.`, outputs: ['.insp-text', '.trail-line', 'details'] },
+        { note: `Part ${part} skipped: schema error. The reply didn't fit its schema.`, outputs: ['pre.code', 'details'] },
+      ],
+      notes: [false, true],
+      lines: [['answer-0', `2 skipped: round-2 note of part ${part} of ${SPLIT_MEMO} (output context length), parsing of part ${part} of ${SPLIT_MEMO} (schema error).`]],
+    };
+    const partsName = "a memo read in parts with a part skipped says which part and why above its other parts' output, and with no earlier note read in as many parts only its round-2 node stands in the relevant context";
+    check('live', partsName, done && part > 1 && isDeepStrictEqual(shown, expected), JSON.stringify(shown));
+  });
+}
+
+// ---------- skips in the sample: a run's skips as build_sample.py builds them into SAMPLE ----------
+
+// The sample with Eastfield's round-2 note skipped, its round-1 note kept, and every parse skipped, as build_sample.py
+// builds a run r3con skipped them in.
+const withSkips = withSample((sample) => {
+  sample.rounds[1][EASTFIELD] = { summary: '', provenance: [], quotes: [], skipped: [{ part: null, reason: 'output context length' }] };
+  sample.parsed = sample.parsed.map(({ parse }) => ({ parse: Object.fromEntries(Object.keys(parse).map((field) => [field, []])), provenance: [], skipped: [{ part: null, reason: 'schema error' }] }));
+  return sample;
+});
+const SAMPLE_SKIPPED = [...Array.from({ length: SAMPLE_DOCS }, (_, d) => `parsed-${d}`), `r2-${EASTFIELD}`];
+const CAPPED_LINE = `6 skipped: round-2 note of ${stem(EASTFIELD)} (output context length), parsing of ${stem(0)} (schema error), parsing of ${stem(1)} (schema error) and 3 more.`;
+// A skip mark's width on screen at zoom 1, in px; it scales with the panel's zoom, as a document's count does.
+const SKIP_BADGE_PX = 14;
+const ZOOM_IN_STEPS = 3;
+
+// In-page: the first skip mark's width on screen and its colour, and the colours of the --alert and --err tokens.
+function skipBadgeLook() {
+  const badge = document.querySelector('#world .node .skip-badge');
+  const colour = (token) => {
+    const probe = document.body.appendChild(document.createElement('i'));
+    probe.style.color = `var(${token})`;
+    const value = getComputedStyle(probe).color;
+    probe.remove();
+    return value;
+  };
+  return { width: badge.getBoundingClientRect().width, colour: getComputedStyle(badge).color, alert: colour('--alert'), err: colour('--err') };
+}
+
+async function skipsArea() {
+  for (const layout of [LAYOUTS.desktop, LAYOUTS.phone]) {
+    await withPage('skips', { layout, before: serving(withSkips) }, async (page) => {
+      const nodes = (await page.evaluate(skippedNodes)).map(([id]) => id);
+      const lines = await page.evaluate(skipLines);
+      const listedName = `${layout.name}: the sample's six skips mark their six nodes, and the line under its answer names three and counts the rest`;
+      check('skips', listedName, isDeepStrictEqual(nodes, SAMPLE_SKIPPED) && isDeepStrictEqual(lines, [['answer-0', CAPPED_LINE]]), `${nodes.join(', ')}; ${JSON.stringify(lines)}`);
+      const look = await page.evaluate(skipBadgeLook);
+      const k = await zoom(page);
+      const centre = await boxCentre(page, '#panel');
+      for (let step = 0; step < ZOOM_IN_STEPS; step++) await zoomAt(page, centre, ZOOM_IN_DELTA);
+      const zoomed = { width: (await page.evaluate(skipBadgeLook)).width, k: await zoom(page) };
+      const scales = [[look.width, k], [zoomed.width, zoomed.k]].every(([width, at]) => Math.abs(width - SKIP_BADGE_PX * at) < 0.5) && zoomed.k > k;
+      const lookName = `${layout.name}: a skip mark is the --alert red, not the --err the count badges sit near, and scales with the panel's zoom`;
+      check('skips', lookName, look.colour === look.alert && look.alert !== look.err && scales, `${JSON.stringify(look)}; zoomed ${JSON.stringify(zoomed)} from ${k}`);
+    });
+  }
+}
+
 // fake_server.py's UNPARSED: a document holding it parses to nothing.
 const UNPARSED = '(nothing to parse here)';
 // Enough quiet paragraphs that fake_server.py refuses the memo whole, past PART_CHARS, so r3con reads it in parts.
@@ -8942,6 +9203,7 @@ async function live() {
     await liveTabs(url);
     await liveWhileGoing(url);
     await liveParts(url);
+    await liveSkippedParts(url);
     await liveFoldsParsed(url);
     await liveQuotes(url);
     await livePartQuotes(url);
@@ -8975,7 +9237,7 @@ async function live() {
     await liveRefusalsThenFailure(url);
     await liveTitleBar(url);
   });
-  const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined];
+  const stateful = [livePruned, liveFromRound1, liveSaved, liveImport, liveSession, liveKeySaves, liveLoadProblem, liveAskGoing, liveGoingThenLost, liveStop, liveStopEarly, liveStopAsk, liveContinueFailed, liveContinueStopped, liveContinueRefused, liveContinueFixable, liveContinueRedrawn, liveContinueStopEarly, liveContinueLost, liveFolds, liveFoldsStopped, liveFoldsJoined, liveSkips];
   for (const body of stateful) await withFakeServer(body);
   await withFakeServer(liveKeyStates, { GEMINI_API_KEY: ENVIRONMENT_KEY });
   await withFakeServer(liveServers);
@@ -8987,7 +9249,7 @@ async function live() {
 try {
   documents = writeDocuments(DOCUMENT_SPECS);
   browser = await require('playwright').chromium.launch();
-  const areas = [load, beforeRun, folds, folders, folderQuotes, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, claimsArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
+  const areas = [load, beforeRun, folds, folders, folderQuotes, sampleReplay, chatLog, arrange, runView, filesNotText, filesAddFails, removeArea, trashArea, removeAllArea, answers, tabs, tabFiles, dropArea, stopArea, settings, popupArea, popupWords, popupHuge, quotesArea, claimsArea, skipsArea, gestures, scale, chatWidthArea, prototypeSaves, prototypeImports, live];
   for (const area of areas) await area();
 } catch (error) {
   check('setup', firstLine(error), false);

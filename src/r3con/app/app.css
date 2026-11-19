@@ -23,6 +23,9 @@
   --mark-strong: light-dark(rgba(193, 95, 60, 0.38), rgba(215, 119, 87, 0.45));
   --ok: light-dark(#3f7d4e, #7fb38a);
   --err: light-dark(#b1452f, #e2806d);
+  /* A call r3con skipped: a red apart from the accent's orange, and its text at 4.5:1 or more on its tint. */
+  --alert: light-dark(#dc2626, #ef4444);
+  --alert-ink: light-dark(#b91c1c, #f87171);
   --warn: light-dark(#8f6113, #d6a54c);
   --fill-orange: light-dark(#f27b45, #d96d3e);
   --fill-yellow: light-dark(#f5cd55, #d8b24c);
@@ -243,6 +246,23 @@ p { margin: 0; }
   border-radius: 1em;
 }
 .node.void { opacity: 0.45; }
+/* A call r3con skipped: a red mark at its icon's top-right, ringed in the panel's colour so it reads over the icon and
+   the lines. The mark keeps full strength while the rest of its node dims: empty, or off the lit trail or path. */
+.skip-badge { display: block; width: 14px; height: 14px; color: var(--alert); }
+.skip-badge svg { display: block; width: 100%; height: 100%; }
+.node .skip-badge {
+  position: absolute;
+  top: -4px;
+  left: calc(50% + var(--node-icon) / 2 - 10.5px);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--panel);
+}
+.node.skipped.void,
+.drawing.is-lit .node.skipped:not(.on-path),
+.drawing.is-lit.has-claim .node.skipped.on-path:not(.on-claim) { opacity: 1; }
+.node.skipped.void > :not(.skip-badge) { opacity: 0.45; }
+.drawing.is-lit .node.skipped:not(.on-path) > :not(.skip-badge),
+.drawing.is-lit.has-claim .node.skipped.on-path:not(.on-claim) > :not(.skip-badge) { opacity: 0.3; }
 /* A fold's first node, which opens and closes it, is bolder; open, its ⋮ turns ⋯. */
 .node.fold.doc .icon { color: var(--dim); }
 .node.fold.doc .name { font-weight: 700; }
@@ -412,6 +432,17 @@ p { margin: 0; }
 .insp-title .g.accent { color: var(--accent); }
 .insp-text { overflow-wrap: anywhere; }
 .insp-text.strong { font-weight: 600; }
+.skip-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 1ch;
+  padding: 0.5em 1.5ch;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--alert) 7%, var(--bg));
+  border-radius: 4px;
+}
+.skip-note > .skip-badge { flex: none; margin-top: 0.2em; }
+.skip-note strong { font-weight: 600; color: var(--alert-ink); }
 .row { overflow-wrap: anywhere; }
 .ref {
   font: inherit;
@@ -535,6 +566,9 @@ mark[title] { cursor: help; }
 .line.answer .g { color: var(--accent); }
 .line.answer .t { font-weight: 600; }
 .sentences { margin: 0.3em 0 0 2ch; }
+.skips { margin: 0.3em 0 0 2ch; color: var(--dim); overflow-wrap: anywhere; }
+.skips .ref { color: inherit; }
+.skips .ref:hover { color: var(--fg); }
 .quoted { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3em; margin-top: 0.6em; }
 .quoted-name { font-weight: 600; }
 .sentence, .doc-summary { padding-left: 1.5ch; border-left: 1px solid var(--line); overflow-wrap: anywhere; }
