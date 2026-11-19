@@ -13,7 +13,7 @@ the claims call is shown, and its second on none. A document holding ``FADES`` g
 summary from its ``FADES_FROM_READ``-th read on, its reads counted from the server's
 start, so that a check reading it whole once a round, with text of its own, has its
 note go empty in that round. It refuses a document over ``PART_CHARS`` as too long, so
-that r3con reads it in parts.
+that r3con reads it in parts, judging a resend by the part it sends again.
 A question holding ``FAILS`` makes every call raise, and one holding ``HANGS`` makes
 every call wait until the server is killed. One holding ``STALLS`` makes every call
 wait until ``check.mjs`` writes ``RELEASE`` into LOGS_DIR, one holding a marker of
@@ -82,6 +82,8 @@ EMPTY_REPLY = "{}"
 RUNS_OUT = "(its note runs out after round 1)"
 CUT_OFF_REPLY = '{"summary": "This note runs on and on and'
 MISFITS = "(its parse never fits)"
+# Where r3con's resend of a part adds the error its reply had, below the part.
+RESENT = "\n\n---\n\nYour previous response failed schema validation:"
 QUIET = "(nothing relevant here)"
 UNPARSED = "(nothing to parse here)"
 FADES = "(nothing relevant from round 3 on)"
@@ -134,10 +136,9 @@ def faded(text: str) -> bool:
         return reads[text] >= FADES_FROM_READ
 
 
-def content(request: dict[str, Any]) -> str:
-    """The reply to ``request``, by the stage that sent it."""
+def content(request: dict[str, Any], stage: str) -> str:
+    """The reply to ``request``, by ``stage``, the stage that sent it."""
     user = request["messages"][-1]["content"]
-    stage = stage_of(request)
     if stage == "schema":
         return SCHEMA_REPLY
     # Coding reasoning, which the checks never run.
@@ -173,6 +174,7 @@ def content(request: dict[str, Any]) -> str:
 
 def scripted_model(**request: Any) -> Any:
     sent = "\n".join(message["content"] for message in request["messages"])
+    stage = stage_of(request)
     if FAILS in sent:
         raise RuntimeError("the check's model is down")
     if HANGS in sent:
@@ -181,10 +183,10 @@ def scripted_model(**request: Any) -> Any:
     while STALLS in sent and not released.exists():
         time.sleep(RELEASE_POLL_SECONDS)
     broken = {stage for marker, stage in BROKEN_STAGES.items() if marker in sent}
-    if stage_of(request) in broken and not released.exists():
-        raise RuntimeError(f"the check's {stage_of(request)} is down")
-    part = request["messages"][-1]["content"]
-    if stage_of(request) in READS_A_DOCUMENT and len(part) > PART_CHARS:
+    if stage in broken and not released.exists():
+        raise RuntimeError(f"the check's {stage} is down")
+    part = request["messages"][-1]["content"].partition(RESENT)[0]
+    if stage in READS_A_DOCUMENT and len(part) > PART_CHARS:
         raise ContextWindowExceededError(
             message=f"{len(part)} characters, over the scripted model's {PART_CHARS}",
             model=request["model"],
@@ -192,12 +194,11 @@ def scripted_model(**request: Any) -> Any:
         )
     if OFF_SCHEMA in sent and request.get("response_format"):
         return mock_completion(request, EMPTY_REPLY)
-    stage = stage_of(request)
     if RUNS_OUT in part and stage == "relevance" and is_later_round(request):
         return mock_completion(request, CUT_OFF_REPLY, "length")
     if MISFITS in part and stage == "parsing":
         return mock_completion(request, EMPTY_REPLY)
-    return mock_completion(request, content(request))
+    return mock_completion(request, content(request, stage))
 
 
 def choose_save_path(name: str) -> Path | None:

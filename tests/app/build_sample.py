@@ -28,12 +28,11 @@ Building calls no model: each document's name, text and size come from
 quote's ``document_text``, which the run predates, its memo's words from ``start`` to
 ``end``, and every other value is read from the folder as it is. Each quote names the
 snippet it is from, so the app can match it to the trail. A note or parse r3con
-skipped, which this run predates, says so as the app's live run has it, and a call sent
-again counts once, at its last step, with its sends' tokens and cost. Every document in
-this run was read whole, and this handles only that. A sample with a document read in
-parts would need part handling: joining its parts' summaries as the app does, counting
-its ``<id>.<k>`` snippets as the document, and telling its parts' calls apart in the
-page's one call per node.
+skipped, which this run predates, says so as the app's live run has it, and a call's
+resends count in its node. Every document in this run was read whole, and this handles
+only that. A sample with a document read in parts would need part handling: joining its
+parts' summaries as the app does, counting its ``<id>.<k>`` snippets as the document,
+and fitting its several calls into the page's one call per node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
 keeping its name (``r3con.trace`` finds an ask's run by it), set ``RUN_FOLDER``, and run
@@ -61,6 +60,8 @@ APP_JS = REPO / "src" / "r3con" / "app" / "app.js"
 SAMPLE_ROUNDS = 2
 # What the page reads of each quote: its text, and where it is in its document, in code points.
 QUOTE_FIELDS = ("text", "start", "end")
+# A call kind's suffix on its resends, as calls.json records them.
+RESEND = re.compile(r"-retry-\d+$")
 
 
 def load(path: Path) -> Any:
@@ -93,12 +94,6 @@ def provenance(
     return {**traced, "quotes": quotes}
 
 
-def skips(parts: list[dict[str, Any]]) -> dict[str, Any]:
-    """A summary's or parse's ``skipped``, its parts r3con skipped: none when it
-    skipped none, as the app reads a run written before r3con skipped."""
-    return {"skipped": parts} if parts else {}
-
-
 def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
     """One document's summary in one round, each quote naming the snippet it is from."""
     reason = snippet.get("skipped")
@@ -109,7 +104,7 @@ def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
             {**{f: q[f] for f in QUOTE_FIELDS}, "snippet": snippet["id"]}
             for q in snippet["quotes"]
         ],
-        **skips([{"part": None, "reason": reason}] if reason else []),
+        **({"skipped": [{"part": None, "reason": reason}]} if reason else {}),
     }
 
 
@@ -148,7 +143,7 @@ def run_totals(run: Path) -> dict[str, Any]:
 
 def call_costs(run: Path) -> dict[str, Any]:
     """Each node's model call, keyed by the page's node for it: the step its last send
-    finished at, and its sends' tokens and cost together."""
+    finished at, and the tokens and cost of it and its resends together."""
     relevance = [
         (f"{c['kind'].split('-')[1]}-{c['doc']}", c)
         for c in load(run / "relevance/calls.json")
@@ -158,14 +153,19 @@ def call_costs(run: Path) -> dict[str, Any]:
     ]
     schema = [("schema", c) for c in load(run / "structuring/schema/calls.json")]
     answer = [("answer", c) for c in load(run / "reasoning/calls.json")]
-    calls: dict[str, Any] = {}
-    for key, c in relevance + parsing + schema + answer:
-        sent = calls.get(key, {"tokens": 0, "usd": 0})
-        calls[key] = {
-            "step": c["step"],
-            "tokens": sent["tokens"] + c["tokens"]["total"],
-            "usd": sent["usd"] + c["usd"],
-        }
+    every = relevance + parsing + schema + answer
+    first_sends = [(key, c) for key, c in every if not RESEND.search(c["kind"])]
+    calls = {
+        key: {"step": c["step"], "tokens": c["tokens"]["total"], "usd": c["usd"]}
+        for key, c in first_sends
+    }
+    assert len(calls) == len(first_sends), "one call per node"
+    for key, c in every:
+        if RESEND.search(c["kind"]):
+            total = calls[key]
+            total["step"] = max(total["step"], c["step"])
+            total["tokens"] += c["tokens"]["total"]
+            total["usd"] += c["usd"]
     return calls
 
 
@@ -202,7 +202,11 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         "rounds": rounds,
         "schema": {"code": schema["schema_code"], "thought": schema["thought"]},
         "parsed": [
-            {"parse": parse, "provenance": [ids[c] for c in cited], **skips(parts)}
+            {
+                "parse": parse,
+                "provenance": cited,
+                **({"skipped": parts} if parts else {}),
+            }
             for parse, cited, parts in zip(
                 parses, parsing["provenance"], skipped, strict=True
             )

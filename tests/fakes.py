@@ -389,6 +389,27 @@ MERROW_CUT_OFF = replying_when(
 """A relevance reply cut off at the model's output limit to each later round's read of
 the Merrow memo, and ANSWERING's to every other request."""
 
+# The first lines of examples/memos' memos, which a request reading one starts with.
+RIVERSIDE = "MEMO — Riverside site, Q3 operations review"
+EASTFIELD = "MEMO — Eastfield site, Q3 operations review"
+NORTHGATE = "MEMO — Northgate site, Q3 operations review"
+CAFETERIA = "MEMO — Cafeteria refurbishment, phase 2"
+
+
+def skipping(llm: FakeLLM, *unparsed: str) -> None:
+    """``llm`` answering as ``answering_llm`` does, but cutting off the Riverside memo's
+    note in round 2, and failing the schema in each parse of the ``unparsed`` memos."""
+    cut_off = Raw('{"summary": "Riverside logged and logged and', "length")
+    riverside_late = reading(RIVERSIDE, later_round=True)
+    llm.answers(
+        relevance=replying_when(riverside_late, cut_off, ANSWERING["relevance"]),
+        parsing=replying_when(
+            lambda request: first_line(request) in unparsed,
+            {"rows": 7},
+            ANSWERING["parsing"],
+        ),
+    )
+
 
 def the_runs_own_files(run_dir: Path) -> dict[str, bytes]:
     """Every file in ``run_dir`` but those under ``asks/``, by path."""

@@ -687,7 +687,7 @@ function sourcesOf(sample, docIds, id) {
   const { summary_ids, parse_ids } = sample.answer.provenance;
   const cited = (ids, prefix) => ids.map((id) => `${prefix}-${docIndexIn(sample, id)}`);
   if (kind === 'answer') return [...cited(summary_ids, 'r2'), ...cited(parse_ids, 'parsed')];
-  if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((d) => `r2-${d}`)];
+  if (kind === 'parsed') return [...own, ...sample.parsed[i].provenance.map((id) => `r2-${docIndexIn(sample, id)}`)];
   if (kind === 'r2') return [...own, ...sample.rounds[1][i].provenance.map((d) => `r1-${d}`)];
   return own;
 }
@@ -6411,10 +6411,7 @@ async function liveFromRound1(url, server) {
 
 // ---------- skips: a note or parse r3con skipped, its reply unusable, and the run that went on without it ----------
 
-// fake_server.py's RUNS_OUT and MISFITS, each past its memo's first line, which other calls are shown as its note: every
-// relevance reply to a memo holding the first is cut off at the output limit after round 1, and every parse reply to
-// one holding the second misses its schema, so r3con skips Eastfield's round-2 note, keeping its round-1 note in the
-// relevant context, and the registry's parse.
+// fake_server.py's markers, past a memo's first line: notes after round 1 cut off, or every parse off its schema.
 const RUNS_OUT = '(its note runs out after round 1)';
 const MISFITS = '(its parse never fits)';
 const [EASTFIELD, REGISTRY] = [1, 3];
@@ -6426,20 +6423,25 @@ const SKIPPED_NODES = [
   [`parsed-${REGISTRY}`, `${stem(REGISTRY)}, parsed structure, skipped: schema error`, 'Skipped: schema error'],
   [`r2-${EASTFIELD}`, `${stem(EASTFIELD)}, round 2 relevance snippet, skipped: output context length`, 'Skipped: output context length'],
 ];
-// Each skipped node's popup: only what happened, none of a node's output.
 const SKIPPED_POPUPS = [{ note: NOTE_SKIPPED, outputs: [] }, { note: PARSE_SKIPPED, outputs: [] }];
 const SKIPPED_LINE = `2 skipped: round-2 note of ${stem(EASTFIELD)} (output context length), parsing of ${stem(REGISTRY)} (schema error).`;
-// The kept round-1 note reaches the answer and Eastfield's parse from its own node.
 const KEPT_LINES = [`r1-${EASTFIELD}>answer-0`, `r1-${EASTFIELD}>parsed-${EASTFIELD}`];
-const SKIPPED_EVENTS = (ids) => ({ notes: [[2, ids[EASTFIELD], 'output context length']], parses: [[ids[REGISTRY], [{ part: null, reason: 'schema error' }]]] });
+const skippedEvents = (ids) => ({ notes: [[2, ids[EASTFIELD], null, 'output context length']], parses: [[ids[REGISTRY], [{ part: null, reason: 'schema error' }]]] });
+
+// The skips r3con's events carry: each note's round, document, part and why, and each parse's document and parts.
+function skipEvents(events) {
+  return {
+    notes: events.filter((e) => e.type === 'relevance_finished' && e.skipped).map((e) => [e.round, e.doc_id, e.part, e.skipped]),
+    parses: events.filter((e) => e.type === 'parsing_finished' && e.skipped.length).map((e) => [e.doc_id, e.skipped]),
+  };
+}
 
 // In-page: each node with a skip mark, by id, with its name and its mark's.
 function skippedNodes() {
   return [...document.querySelectorAll('#world .node.skipped')].map((el) => [el.dataset.id, el.getAttribute('aria-label'), el.querySelector('.skip-badge')?.getAttribute('aria-label')]).sort();
 }
 
-// In-page: the open popup's skip note, a line a part, and which of a node's outputs it shows: its text, parse, trail line
-// and folds.
+// In-page: the open popup's skip note, a line a part, and which of a node's outputs it shows.
 function skipPopup() {
   const inspector = document.getElementById('inspector');
   return {
@@ -6448,23 +6450,26 @@ function skipPopup() {
   };
 }
 
+async function skipPopups(page, ids) {
+  const popups = [];
+  for (const id of ids) {
+    await inspect(page, id);
+    popups.push(await page.evaluate(skipPopup));
+  }
+  await page.keyboard.press('Escape');
+  return popups;
+}
+
 // In-page: the line under each answer that says what its run skipped, by the answer's node.
 function skipLines() {
   return [...document.querySelectorAll('.transcript:not([hidden]) .skips')].map((el) => [el.parentElement.querySelector('.line.answer').dataset.node, el.textContent]);
 }
 
-// What a run over skippingMemos shows of its skips: its marked nodes, their popups, the lines out of them, the line under
-// each answer, and its lit trail, each document's node named `doc`.
+// What a run over skippingMemos shows of its skips, its lit trail's document nodes named `doc`.
 async function skipsShown(page) {
-  const popups = [];
-  for (const id of SKIPPED_IDS) {
-    await inspect(page, id);
-    popups.push(await page.evaluate(skipPopup));
-  }
-  await page.keyboard.press('Escape');
   return {
     nodes: await page.evaluate(skippedNodes),
-    popups,
+    popups: await skipPopups(page, SKIPPED_IDS),
     out: await page.$$eval('#world .edge', (els, ids) => els.map((el) => el.dataset.key).filter((key) => ids.includes(key.split('>')[0])), SKIPPED_IDS),
     lines: await page.evaluate(skipLines),
     lit: await litTrail(page),
@@ -6481,11 +6486,7 @@ function withoutSkips(b) {
   return { ...b, representation: { ...b.representation, 'relevance/result.json': { ...relevance, rounds }, 'structuring/parsing/result.json': parsing } };
 }
 
-// Over skippingMemos, r3con skips Eastfield's round-2 note and the registry's parse: each skipped node is marked red as
-// its event comes, its popup says only what happened, no line leaves it, the kept round-1 note lights on the answer's
-// trail, and a line under each answer lists the skips, each a link to its node; in the live run and an ask over it, the
-// tab saved and opened again and an ask over that, and a run continued after it failed in parsing. A tab saved before
-// r3con skipped opens with no skips, and one whose skips are damaged is refused.
+// Over skippingMemos: the skips live, after an ask, saved and opened again, from an older or damaged file, and continued.
 async function liveSkips(url, server) {
   let html;
   let live;
@@ -6506,10 +6507,7 @@ async function liveSkips(url, server) {
 
     const events = await page.evaluate(() => window.events);
     const ids = events.find((e) => e.type === 'run_started')?.document_ids ?? [];
-    const said = {
-      notes: events.filter((e) => e.type === 'relevance_finished' && e.skipped).map((e) => [e.round, e.doc_id, e.skipped]),
-      parses: events.filter((e) => e.type === 'parsing_finished' && e.skipped.length).map((e) => [e.doc_id, e.skipped]),
-    };
+    const said = skipEvents(events);
     live = await skipsShown(page);
     const [answer] = await page.evaluate(answersRead);
     const trail = trailOnPage(answer.trail, answer.ids, await docIdsOf(page));
@@ -6518,7 +6516,7 @@ async function liveSkips(url, server) {
     const { nodes, popups, out, lines } = live;
     const shown = { nodes, popups, out, lines };
     const liveName = "r3con's skips, as its events name them, mark their nodes and nothing else; each popup says only what happened, no line leaves them, and a line under the answer lists them";
-    check('live', liveName, done && isDeepStrictEqual(said, SKIPPED_EVENTS(ids)) && isDeepStrictEqual(shown, expected), `${JSON.stringify(said)}; ${JSON.stringify(shown)}`);
+    check('live', liveName, done && isDeepStrictEqual(said, skippedEvents(ids)) && isDeepStrictEqual(shown, expected), `${JSON.stringify(said)}; ${JSON.stringify(shown)}`);
     const keptName = "the kept round-1 note reaches the answer and its parse from its own node, and the lit trail is exactly r3con's";
     check('live', keptName, keptLit(lit) && isDeepStrictEqual(lit, trail), JSON.stringify(lit.edges));
 
@@ -6542,7 +6540,8 @@ async function liveSkips(url, server) {
     await send(page, NEW_QUESTION);
     const again = await becomes(page, landedNode, 'answer-2', LIVE_RUN_MS);
     const lines = await page.evaluate(skipLines);
-    check('live', 'an ask over the tab opened again lists the run\'s skips under its answer too', again && lines.length === 3 && lines.every(([, text]) => text === SKIPPED_LINE), JSON.stringify(lines));
+    const everyAnswer = ['answer-0', 'answer-1', 'answer-2'].map((id) => [id, SKIPPED_LINE]);
+    check('live', "an ask over the tab opened again lists the run's skips under its answer too", again && isDeepStrictEqual(lines, everyAnswer), JSON.stringify(lines));
   });
 
   await withPage('live', { url, sample: false }, async (page) => {
@@ -6577,78 +6576,102 @@ async function liveSkips(url, server) {
   });
 }
 
-// fake_server.py's split memo, with both skip markers at its end: a reply cut off at the output limit has r3con cut that
-// part further, so round 2 reads the memo in more parts than round 1, and the last part's round-2 note and parse are
-// skipped, while its other parts' notes and parses stand.
-const SPLIT_SKIPPED = SAMPLE_DOCS;
+// A memo read in two parts in each round, its first part quiet, its second holding both markers.
+const SPLIT_MEMO_INDEX = 0;
+const SPLIT_SKIPPED = '00_split_skipped';
+const SPLIT_QUIET_PARAGRAPHS = 24;
+const SPLIT_RELEVANT_PARAGRAPHS = 8;
 function skippingSplitMemo() {
-  const { name, buffer } = splitMemo();
-  return memo(name, `${buffer.toString()}\n\n${RUNS_OUT}\n\n${MISFITS}\n`);
+  const quiet = Array.from({ length: SPLIT_QUIET_PARAGRAPHS }, (_, i) => `${QUIET} Filler paragraph ${i + 1}, which the scripted model skips.`);
+  const relevant = Array.from({ length: SPLIT_RELEVANT_PARAGRAPHS }, (_, i) => `Westbrook site, note ${i + 1}: an equipment incident was logged in Q3.`);
+  return memo(`${SPLIT_SKIPPED}.txt`, [...quiet, ...relevant, RUNS_OUT, MISFITS].join('\n\n'));
 }
 
-// A memo read in parts, its last part's round-2 note and parse skipped: each popup says which part was skipped and why,
-// above its other parts' output; with no earlier note of that part read in as many parts, only its round-2 node stands
-// for it in the relevant context; and the line under the answer names the part.
+// Its second part's round-2 note and parse skipped: what each says, and cite lines from each note's own round's node.
 async function liveSkippedParts(url) {
   await withPage('live', { url, sample: false, question: true, before: (page) => page.addInitScript(recordEvents) }, async (page) => {
-    await page.setInputFiles('#file-input', [...sampleMemos(), skippingSplitMemo()]);
+    await page.setInputFiles('#file-input', [skippingSplitMemo(), ...sampleMemos()]);
     await filesCounted(page, SAMPLE_DOCS + 1);
     await page.click('#run-btn');
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const events = await page.evaluate(() => window.events);
-    const parts = {
-      notes: events.filter((e) => e.type === 'relevance_finished' && e.skipped).map((e) => [e.round, e.part, e.skipped]),
-      parses: events.filter((e) => e.type === 'parsing_finished' && e.skipped.length).map((e) => e.skipped),
-    };
-    const popups = [];
-    for (const id of [`r2-${SPLIT_SKIPPED}`, `parsed-${SPLIT_SKIPPED}`]) {
-      await inspect(page, id);
-      popups.push(await page.evaluate(skipPopup));
-    }
-    await page.keyboard.press('Escape');
+    const id = events.find((e) => e.type === 'run_started')?.document_ids[SPLIT_MEMO_INDEX];
     const context = await page.$$eval('#world .edge.context', (els) => els.map((el) => el.dataset.key).filter((key) => key.endsWith('>schema')));
-    const shown = { parts, popups, notes: [1, 2].map((k) => context.includes(`r${k}-${SPLIT_SKIPPED}>schema`)), lines: await page.evaluate(skipLines) };
-    const part = parts.notes[0]?.[1];
-    const expected = {
-      parts: { notes: [[2, part, 'output context length']], parses: [[{ part, reason: 'schema error' }]] },
-      popups: [
-        { note: `Part ${part} skipped: output context length. The reply was cut off at the context limit.`, outputs: ['.insp-text', '.trail-line', 'details'] },
-        { note: `Part ${part} skipped: schema error. The reply didn't fit its schema.`, outputs: ['pre.code', 'details'] },
-      ],
-      notes: [false, true],
-      lines: [['answer-0', `2 skipped: round-2 note of part ${part} of ${SPLIT_MEMO} (output context length), parsing of part ${part} of ${SPLIT_MEMO} (schema error).`]],
+    const shown = {
+      skips: skipEvents(events),
+      popups: await skipPopups(page, [`r2-${SPLIT_MEMO_INDEX}`, `parsed-${SPLIT_MEMO_INDEX}`]),
+      logged: (await page.evaluate(lastTurnLines)).filter((text) => text.startsWith(`${SPLIT_SKIPPED} — `)),
+      notes: [1, 2].map((k) => context.includes(`r${k}-${SPLIT_MEMO_INDEX}>schema`)),
+      lines: await page.evaluate(skipLines),
     };
-    const partsName = "a memo read in parts with a part skipped says which part and why above its other parts' output, and with no earlier note read in as many parts only its round-2 node stands in the relevant context";
-    check('live', partsName, done && part > 1 && isDeepStrictEqual(shown, expected), JSON.stringify(shown));
+    const expected = {
+      skips: { notes: [[2, id, 2, 'output context length']], parses: [[id, [{ part: 2, reason: 'schema error' }]]] },
+      popups: [
+        { note: 'Part 2 skipped: output context length. The reply was cut off at the context limit.', outputs: [] },
+        { note: "Part 2 skipped: schema error. The reply didn't fit its schema.", outputs: ['pre.code', 'details'] },
+      ],
+      logged: [
+        `${SPLIT_SKIPPED} — ${SNIPPET_READY}`,
+        `${SPLIT_SKIPPED} — nothing relevant · part 2 skipped: output context length`,
+        `${SPLIT_SKIPPED} — ${STRUCTURE_READY} · part 2 skipped: schema error`,
+      ],
+      notes: [true, true],
+      lines: [['answer-0', `2 skipped: round-2 note of part 2 of ${SPLIT_SKIPPED} (output context length), parsing of part 2 of ${SPLIT_SKIPPED} (schema error).`]],
+    };
+    const partsName = "a memo read in parts with a part skipped says which part and why, in its popups, its log and the line under the answer, and its notes of the relevant context come from both rounds";
+    check('live', partsName, done && isDeepStrictEqual(shown, expected), JSON.stringify(shown));
+
+    const [answer] = await page.evaluate(answersRead);
+    const docIds = await docIdsOf(page);
+    const citers = trailOnPage(answer.trail, answer.ids, docIds).nodes.filter((node) => node === 'answer-0' || node.startsWith('parsed-'));
+    const citing = { ...answer.trail, edges: answer.trail.edges.filter(([from, , kind]) => kind === 'cites' && !from.startsWith('summary:')) };
+    const trail = trailOnPage(citing, answer.ids, docIds).edges;
+    const drawn = (await page.$$eval('#world .edge.cite', (els) => els.map((el) => el.dataset.key))).filter((key) => citers.includes(key.split('>')[1])).sort();
+    const citesName = "the answer's and its parses' cite lines are exactly r3con's trail: the kept part's note from round 1's node, and none from the other part's round";
+    check('live', citesName, trail.includes(`r1-${SPLIT_MEMO_INDEX}>answer-0`) && isDeepStrictEqual(drawn, trail), `${drawn.join(', ')} | trail ${trail.join(', ')}`);
   });
 }
 
-// ---------- skips in the sample: a run's skips as build_sample.py builds them into SAMPLE ----------
+// More than FOLD_FROM_DOCS memos in two folders, so both start closed; the second's first memo holds RUNS_OUT.
+const QUIET_FOLDER = 'quiet';
+const SKIP_FOLDERS = [
+  ['cited', recordedSample().docs.map((d) => [d.name, d.text])],
+  [QUIET_FOLDER, Array.from({ length: FOLD_FROM_DOCS + 1 - SAMPLE_DOCS }, (_, i) => [`memo_${i}.txt`, `Memo ${i} from the quiet folder.\n${i ? '' : `${RUNS_OUT}\n`}`])],
+];
 
-// The sample with Eastfield's round-2 note skipped, its round-1 note kept, and every parse skipped, as build_sample.py
-// builds a run r3con skipped them in.
+async function liveSkipInFolder(url) {
+  await withPage('live', { url, sample: false }, async (page) => {
+    await page.evaluate(dropItems, { on: 'panel', items: SKIP_FOLDERS });
+    await filesCounted(page, FOLD_FROM_DOCS + 1);
+    const expanded = () => page.$eval(folderSel(QUIET_FOLDER), (el) => el.getAttribute('aria-expanded'));
+    const closed = await expanded();
+    await page.click('#tab-chat');
+    await send(page, 'Which site logged the most incidents?');
+    const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
+    const named = (await page.evaluate(skippedNodes)).map(([, name]) => name);
+    const shown = { closed, opened: await expanded(), named };
+    const expected = { closed: 'false', opened: 'true', named: ['memo_0, round 2 relevance snippet, skipped: output context length'] };
+    check('live', 'a note skipped in a closed folder opens the folder, so that its mark shows', done && isDeepStrictEqual(shown, expected), JSON.stringify(shown));
+  });
+}
+
+// The sample with Eastfield's round-2 note and every parse marked skipped, and its recorded answer citing no parse.
 const withSkips = withSample((sample) => {
   sample.rounds[1][EASTFIELD] = { summary: '', provenance: [], quotes: [], skipped: [{ part: null, reason: 'output context length' }] };
   sample.parsed = sample.parsed.map(({ parse }) => ({ parse: Object.fromEntries(Object.keys(parse).map((field) => [field, []])), provenance: [], skipped: [{ part: null, reason: 'schema error' }] }));
+  sample.answer.provenance.parse_ids = [];
   return sample;
 });
 const SAMPLE_SKIPPED = [...Array.from({ length: SAMPLE_DOCS }, (_, d) => `parsed-${d}`), `r2-${EASTFIELD}`];
 const CAPPED_LINE = `6 skipped: round-2 note of ${stem(EASTFIELD)} (output context length), parsing of ${stem(0)} (schema error), parsing of ${stem(1)} (schema error) and 3 more.`;
-// A skip mark's width on screen at zoom 1, in px; it scales with the panel's zoom, as a document's count does.
+// A skip mark's width on screen at zoom 1, in px.
 const SKIP_BADGE_PX = 14;
 const ZOOM_IN_STEPS = 3;
 
-// In-page: the first skip mark's width on screen and its colour, and the colours of the --alert and --err tokens.
+// In-page: the first skip mark's width on screen, and its colour.
 function skipBadgeLook() {
   const badge = document.querySelector('#world .node .skip-badge');
-  const colour = (token) => {
-    const probe = document.body.appendChild(document.createElement('i'));
-    probe.style.color = `var(${token})`;
-    const value = getComputedStyle(probe).color;
-    probe.remove();
-    return value;
-  };
-  return { width: badge.getBoundingClientRect().width, colour: getComputedStyle(badge).color, alert: colour('--alert'), err: colour('--err') };
+  return { width: badge.getBoundingClientRect().width, colour: getComputedStyle(badge).color };
 }
 
 async function skipsArea() {
@@ -6658,12 +6681,12 @@ async function skipsArea() {
       const lines = await page.evaluate(skipLines);
       const listedName = `${layout.name}: the sample's six skips mark their six nodes, and the line under its answer names three and counts the rest`;
       check('skips', listedName, isDeepStrictEqual(nodes, SAMPLE_SKIPPED) && isDeepStrictEqual(lines, [['answer-0', CAPPED_LINE]]), `${nodes.join(', ')}; ${JSON.stringify(lines)}`);
-      const look = await page.evaluate(skipBadgeLook);
+      const look = { ...(await page.evaluate(skipBadgeLook)), alert: await page.evaluate(tokenColour, '--alert'), err: await page.evaluate(tokenColour, '--err') };
       const k = await zoom(page);
       const centre = await boxCentre(page, '#panel');
       for (let step = 0; step < ZOOM_IN_STEPS; step++) await zoomAt(page, centre, ZOOM_IN_DELTA);
       const zoomed = { width: (await page.evaluate(skipBadgeLook)).width, k: await zoom(page) };
-      const scales = [[look.width, k], [zoomed.width, zoomed.k]].every(([width, at]) => Math.abs(width - SKIP_BADGE_PX * at) < 0.5) && zoomed.k > k;
+      const scales = [[look.width, k], [zoomed.width, zoomed.k]].every(([width, at]) => Math.abs(width - SKIP_BADGE_PX * at) < ALIGNED_PX) && zoomed.k > k;
       const lookName = `${layout.name}: a skip mark is the --alert red, not the --err the count badges sit near, and scales with the panel's zoom`;
       check('skips', lookName, look.colour === look.alert && look.alert !== look.err && scales, `${JSON.stringify(look)}; zoomed ${JSON.stringify(zoomed)} from ${k}`);
     });
@@ -9204,6 +9227,7 @@ async function live() {
     await liveWhileGoing(url);
     await liveParts(url);
     await liveSkippedParts(url);
+    await liveSkipInFolder(url);
     await liveFoldsParsed(url);
     await liveQuotes(url);
     await livePartQuotes(url);
