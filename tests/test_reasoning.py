@@ -9,7 +9,7 @@ from r3con import settings
 from r3con.config import REASONING_PATHS
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.reasoning import _sample_record_per_field, reason
-from tests.fakes import citable_lists
+from tests.fakes import CutOff, citable_lists
 
 MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v4", "reasoning/coding": "v4"}
@@ -374,6 +374,20 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
         "reasoning's direct reply did not fit its schema in 3 send(s); reasoning with "
         "code instead"
     )
+
+
+def test_direct_replies_cut_off_at_the_output_limit_go_to_the_coding_path(llm):
+    cut_off = CutOff('{"answer": "Halloran and Merrow and Merrow and')
+    result = ask(llm, cut_off, cut_off, cut_off, citing("coding"))
+    assert (result.answer, result.path) == ("ok", "coding")
+    assert result.fallback is not None and result.fallback["cause"] == "invalid"
+    assert result.fallback["error"].startswith("ValidationError: Invalid JSON: EOF")
+
+
+def test_a_direct_reply_still_empty_after_its_rerolls_still_fails_reasoning(llm):
+    with pytest.raises(ValueError, match=r"empty text after 4 attempt\(s\)"):
+        ask(llm, "", "", "", "", citing("coding"))
+    assert len(llm.requests) == 4
 
 
 def test_a_reasoning_attempt_cap_set_in_settings_bounds_the_direct_sends(

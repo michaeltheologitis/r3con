@@ -24,6 +24,11 @@ included (:func:`r3con.stages.relevance.citable_ids`). With no such note,
 (:func:`r3con.stages.citing.cited`). Every call of a run sends the same system
 prompt and reply schema, built once.
 
+A document (or part) whose reply stays unusable, still empty after its re-rolls or
+still unfit after its last send (:class:`~r3con.runtime.llm.UnusableReply`), is
+**skipped**, with a warning, and the run goes on: it yields no records and cites
+nothing, and :attr:`ParseResult.skipped` keeps why. Any other error fails the run.
+
 Each document (or part) yields one populated ``Parse``; the parses merge into one
 (list fields concatenated in document order, a document's parts in order), and its
 parts' provenance into one list (:attr:`ParseResult.provenance`). Every
@@ -49,7 +54,7 @@ import typing
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, get_args, get_origin
+from typing import Any, TypedDict, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -58,6 +63,7 @@ from r3con.logging_setup import get_logger
 from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.runs import Emit, StageRun, no_events
+from r3con.runtime.llm import UnusableReply
 from r3con.runtime.python_executor import (
     ExecutionTimeoutError,
     InterpreterError,
@@ -76,6 +82,8 @@ from r3con.stages.relevance import (
 _log = get_logger("structuring.parsing")
 
 _REWRITE = "Re-extract the same document"
+# The name of parsing's calls, as calls.json and splits.json give it.
+PARSE_CALL = "parse"
 # Reasoning stamps each record with its document's id under this key.
 DOCUMENT_KEY = "document"
 
@@ -307,6 +315,38 @@ def _read(
     return reply.parse, provenance
 
 
+class SkippedPart(TypedDict):
+    """A document's parse, or one part's, that was skipped: ``part``, the ``k`` of the
+    part's snippet id ``<id>.<k>``, or ``None`` for a document read whole, and
+    ``reason``, why (:class:`~r3con.runtime.llm.UnusableReply`)."""
+
+    part: int | None
+    reason: str
+
+
+Parsed = tuple[BaseModel, list[str], list[SkippedPart]]
+"""A document's parse, the ids of the notes it used, and the parts skipped."""
+
+
+def _read_or_skip(
+    request: CitingRequest,
+    document_id: str,
+    part: str,
+    *,
+    kind: str,
+    nothing: BaseModel,
+    **read: Any,
+) -> tuple[BaseModel, list[str], str | None]:
+    """``part`` parsed as :func:`_read` parses it, and ``None``; or, when its reply
+    stays unusable, ``nothing``, citing nothing, and why, with a warning that the parse
+    is skipped."""
+    try:
+        return *_read(request, document_id, part, kind=kind, **read), None
+    except UnusableReply as unusable:
+        _log.warning("%s: skipped: %s", kind, unusable.reason)
+        return nothing, [], unusable.reason
+
+
 def _attempts(max_attempts: int | None) -> int:
     """``max_attempts``, or ``settings.PARSING_MAX_ATTEMPTS`` for ``None``.
 
@@ -350,12 +390,14 @@ def parse_one_document(
 
     A reply that does not fit the schema is sent again with the validator's error, by
     :func:`r3con.runtime.llm.send_until_valid`, up to ``max_attempts`` sends (``None``
-    reads ``settings.PARSING_MAX_ATTEMPTS`` when the call runs); the last send's
-    ``ValidationError`` is raised. Any other exception passes through at once.
+    reads ``settings.PARSING_MAX_ATTEMPTS`` when the call runs). Any other exception
+    passes through at once.
 
     Raises:
         ValueError: if ``max_attempts`` is not positive, or ``document_ids`` is not one
             id per snippet.
+        UnusableReply: when the reply stays unusable, still empty after its re-rolls
+            or unfit after the last send, which :func:`parse_documents` skips instead.
     """
     attempts = _attempts(max_attempts)
     request = _request(
@@ -394,11 +436,14 @@ class ParseResult:
     - ``provenance`` — for each document, aligned 1:1 with the documents, the ids of
       the notes its parse used, a document read in parts having its parts' ids
       combined (:func:`r3con.stages.relevance.combine_parts`); none for a pruned one.
+    - ``skipped`` — for each document, aligned 1:1 with the documents, its parts
+      whose parse was skipped, in order (:class:`SkippedPart`); none for most.
     """
 
     parse: BaseModel
     source_docs: dict[str, list[int]] = field(default_factory=dict)
     provenance: list[list[str]] = field(default_factory=list)
+    skipped: list[list[SkippedPart]] = field(default_factory=list)
 
 
 def parse_documents(
@@ -416,7 +461,7 @@ def parse_documents(
     workers: int | None = None,
     splits: Splits | None = None,
     emit: Emit = no_events,
-    saved: Mapping[int, tuple[BaseModel, list[str]]] = MappingProxyType({}),
+    saved: Mapping[int, Parsed] = MappingProxyType({}),
     pruned: frozenset[int] = frozenset(),
     **llm_kwargs: Any,
 ) -> ParseResult:
@@ -438,15 +483,18 @@ def parse_documents(
     source-document index in :attr:`ParseResult.source_docs`, a part's records with its
     document's. Each document's cited ids are in :attr:`ParseResult.provenance`.
     ``max_attempts`` bounds each call's retries (see :func:`parse_one_document`).
-    Returns a :class:`ParseResult`.
+    A part whose reply stays unusable is skipped, as the module says: logged as
+    ``<kind>: skipped: <reason>``, it adds no records and cites nothing, and is listed
+    in :attr:`ParseResult.skipped`. Returns a :class:`ParseResult`.
 
     ``emit`` reports ``parsing_started`` and ``parsing_finished`` around each
     document's parse, all its parts' (:func:`r3con.pipeline.run_pipeline` lists their
     fields). It is called from worker threads.
 
     ``saved`` holds parses an earlier attempt at the run made, each with the ids it
-    used, by document index (:func:`r3con.pipeline.resume_pipeline`): such a document is
-    not parsed again, and reports nothing.
+    used and its parts skipped, by document index
+    (:func:`r3con.pipeline.resume_pipeline`): such a document is not parsed again, and
+    reports nothing.
 
     Raises:
         ValueError: if ``document_ids`` is not one id per document, or ``max_attempts``
@@ -482,23 +530,24 @@ def parse_documents(
 
     nothing = _empty_parse(parse_cls)
 
-    def one(i: int, _document: str) -> tuple[BaseModel, list[str]]:
+    def one(i: int, _document: str) -> Parsed:
         if i in pruned:
-            return nothing, []
+            return nothing, [], []
         if (parsed := saved.get(i)) is not None:
             return parsed
         _log.info("parse doc %d/%d", i + 1, len(documents))
         emit("parsing_started", doc_id=document_ids[i])
         parts = reader.read_in_parts(
             i,
-            call="parse",
+            call=PARSE_CALL,
             rest=request.system_prompt + _headed(document_ids[i], ""),
             schema=request.schema,
-            send=lambda part, kind: _read(
+            send=lambda part, kind: _read_or_skip(
                 request,
                 document_ids[i],
                 part,
                 kind=kind,
+                nothing=nothing,
                 max_attempts=attempts,
                 model=model,
                 run=run,
@@ -506,21 +555,27 @@ def parse_documents(
             ),
         )
         merged, _ = _merge_with_source_docs(
-            [(i, parse) for parse, _ in parts], parse_cls
+            [(i, parse) for parse, _, _ in parts], parse_cls
         )
-        provenance = combine_parts(ids for _, ids in parts)
+        provenance = combine_parts(ids for _, ids, _ in parts)
+        skipped = [
+            SkippedPart(part=k if len(parts) > 1 else None, reason=reason)
+            for k, (_, _, reason) in enumerate(parts, start=1)
+            if reason is not None
+        ]
         emit(
             "parsing_finished",
             doc_id=document_ids[i],
             n_records=sum(len(getattr(merged, f)) for f in parse_cls.model_fields),
             parse=merged.model_dump(mode="json"),
             provenance=provenance,
+            skipped=skipped,
         )
-        return merged, provenance
+        return merged, provenance, skipped
 
     per_doc = parallel_map(one, documents, max_workers=max_workers)
     parse, source_docs = _merge_with_source_docs(
-        [(i, parse) for i, (parse, _) in enumerate(per_doc)], parse_cls
+        [(i, parse) for i, (parse, _, _) in enumerate(per_doc)], parse_cls
     )
     counts = {f: len(v) for f, v in source_docs.items()}
     _log.info(
@@ -529,7 +584,8 @@ def parse_documents(
     return ParseResult(
         parse=parse,
         source_docs=source_docs,
-        provenance=[provenance for _, provenance in per_doc],
+        provenance=[provenance for _, provenance, _ in per_doc],
+        skipped=[skipped for _, _, skipped in per_doc],
     )
 
 

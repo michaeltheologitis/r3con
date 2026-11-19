@@ -15,7 +15,10 @@ Each edge is ``[from, to, kind]``, of three kinds:
 - ``cites``: from the answer to each summary of the relevant context
   (:attr:`~r3con.stages.relevance.RelevantContext.context_round`) and each parse it
   cites, from a parse to each summary of the relevant context it cites, and from a
-  summary of round k to each summary of round k-1 it cites;
+  summary of round k to each summary of round k-1 it cites. A summary of the relevant
+  context is its round's, or, for one skipped there, the earlier round's kept in its
+  place (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`), so a citation
+  of it leads there, never to the skipped one;
 - ``summarizes``: from every summary to its document, carrying the summary's quotes
   found there;
 - ``parses``: from every parse to its document.
@@ -217,13 +220,15 @@ def build_graph(
     document's parse citing the summaries of the relevant context its
     ``parsing_provenance`` lists, ``names`` giving each document's name by its id, in
     document order."""
-    context = relevance.context_round
-    edges = [
-        [ANSWER, _summary(context, id_), CITES] for id_ in citations["summary_ids"]
-    ]
+    rounds = relevance.note_rounds
+
+    def note(id_: str) -> str:
+        return _summary(rounds.get(id_, relevance.context_round), id_)
+
+    edges = [[ANSWER, note(id_), CITES] for id_ in citations["summary_ids"]]
     edges += [[ANSWER, _parse(id_), CITES] for id_ in citations["parse_ids"]]
     for document, cited in zip(names, parsing_provenance, strict=True):
-        edges += [[_parse(document), _summary(context, id_), CITES] for id_ in cited]
+        edges += [[_parse(document), note(id_), CITES] for id_ in cited]
         edges.append([_parse(document), _document(document), PARSES])
     quotes: dict[str, list[NamedQuote]] = {}
     for round_ in range(len(relevance.records), 0, -1):

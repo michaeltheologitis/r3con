@@ -11,7 +11,9 @@ answer alone rarely tells you whether to trust it.
 
 ``r3con resume`` carries on a run that failed or was stopped, in its folder, over the
 same sources (:func:`r3con.resume`); a run that fails or is interrupted says so, with
-the command to paste. ``r3con ask`` reruns only reasoning over a finished run's folder
+the command to paste. A run or resume that skipped a relevance note or a parse, its
+reply unusable, says so in one line on stderr after the answer, naming the folder's
+``skipped.json``. ``r3con ask`` reruns only reasoning over a finished run's folder
 (:func:`r3con.ask`).
 ``r3con app`` serves the app's page on 127.0.0.1 (:mod:`r3con.app`), when the ``app``
 extra is installed.
@@ -39,6 +41,8 @@ from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import masked, masked_values
 from r3con.pipeline import (
     ASKS_FOLDER,
+    Answer,
+    Skip,
     ask_config,
     ask_pipeline,
     read_representation,
@@ -294,6 +298,7 @@ def _run(args: argparse.Namespace) -> int:
         code = _failed(e)
     else:
         print(result.answer)
+        _report_skipped(result)
         return 0
     if task_logger is not None:
         _carry_on(task_logger.dir, args)
@@ -332,9 +337,27 @@ def _resume(args: argparse.Namespace) -> int:
         code = _failed(e)
     else:
         print(result.answer)
+        _report_skipped(result)
         return 0
     _carry_on(resumable.run_dir, args)
     return code
+
+
+def _report_skipped(result: Answer) -> None:
+    """Say on stderr, in one line, what the run skipped, if anything, and where its
+    folder lists it."""
+    if not result.skipped:
+        return
+    listed = ", ".join(map(_skipped, result.skipped))
+    where = "" if result.run_dir is None else f". See {result.run_dir / 'skipped.json'}"
+    print(f"{len(result.skipped)} skipped: {listed}{where}", file=sys.stderr)
+
+
+def _skipped(skip: Skip) -> str:
+    """``skip`` in a few words: which call it was, of which document, and why."""
+    call = "parsing" if skip.round is None else f"relevance round {skip.round}"
+    part = "" if skip.part is None else f"part {skip.part} of "
+    return f"{call} of {part}{skip.doc_name} ({skip.reason})"
 
 
 def _use_settings(args: argparse.Namespace) -> None:

@@ -83,7 +83,11 @@ def read_citing(
     """``text`` read under ``request`` by :func:`~r3con.runtime.llm.send_until_valid`,
     which sends it again with ``rewrite`` when a reply does not fit: the reply, and
     the citable ids it cites (:func:`cited`), none when its schema has no
-    ``provenance_ids``."""
+    ``provenance_ids``.
+
+    Raises:
+        UnusableReply: as :func:`~r3con.runtime.llm.send_until_valid` does.
+    """
     reply = send_until_valid(
         request.system_prompt,
         text,

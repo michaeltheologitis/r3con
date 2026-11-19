@@ -20,7 +20,15 @@ import pytest
 import yarl
 from litellm.litellm_core_utils.get_model_cost_map import get_model_cost_map_source_info
 from litellm.types.router import RetryPolicy
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, MongoDsn, create_model
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    MongoDsn,
+    ValidationError,
+    create_model,
+)
 from pydantic_core import Url
 
 from r3con import settings
@@ -29,15 +37,20 @@ from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.llm import (
     _RETRY_AFTER_JITTER_SECONDS,
     _SECONDS_DIGITS,
+    CUT_OFF,
+    EMPTY_REPLY,
+    SCHEMA_ERROR,
     Cancelled,
+    UnusableReply,
     _sleep,
     litellm_chat_completion,
     litellm_chat_completion_full,
     quiet_litellm,
     register_credentials,
     schema_as_sent,
+    send_until_valid,
 )
-from tests.fakes import DIGITS_KEY, GatewayKey, on_your_data
+from tests.fakes import DIGITS_KEY, CutOff, GatewayKey, on_your_data
 
 MODEL = "openai/gpt-6-luna"
 VLLM = "hosted_vllm/fake"
@@ -397,6 +410,65 @@ def test_empty_replies_raise_once_the_rerolls_run_out(llm):
     with pytest.raises(ValueError, match=r"empty text after 4 attempt\(s\)\. For a"):
         ask(llm, max_empty_retries=3, schema=Number)
     assert len(llm.requests) == 4
+
+
+def send(llm, *replies, max_attempts=2, **kwargs):
+    """``send_until_valid`` for a ``Number``, ``llm`` answering with ``replies``."""
+    return send_until_valid(
+        "s",
+        "u",
+        schema=Number,
+        rewrite="Again",
+        kind="k",
+        max_attempts=max_attempts,
+        model=MODEL,
+        completion=llm.replies(*replies),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    ("last", "reason"),
+    [
+        (CutOff('{"x": 7'), CUT_OFF),
+        ('{"x": "seven"}', SCHEMA_ERROR),
+        ('{"x": 7', SCHEMA_ERROR),
+    ],
+    ids=["cut-off", "unfit", "unfinished-but-stopped"],
+)
+def test_a_last_reply_that_does_not_fit_is_unusable_for_why_the_model_stopped(
+    llm, last, reason
+):
+    with pytest.raises(UnusableReply) as unusable:
+        send(llm, '{"x": "seven"}', last)
+    assert unusable.value.reason == reason
+    assert isinstance(unusable.value.__cause__, ValidationError)
+    assert str(unusable.value) == str(unusable.value.__cause__)
+    assert len(llm.requests) == 2
+
+
+def test_a_reply_cut_off_before_the_last_send_is_sent_again_as_any_unfit_one(llm):
+    assert send(llm, CutOff('{"x": 7'), '{"x": 7}') == Number(x=7)
+    resent = llm.requests[1]["messages"][1]["content"]
+    assert resent.startswith(
+        "u\n\n---\n\nYour previous response failed schema validation:\n\n"
+        "ValidationError: 1 validation error for Number\n"
+        "  Invalid JSON: EOF while parsing"
+    )
+    assert resent.endswith(
+        "Again, fixing only the offending field(s) so the output validates against "
+        "the schema. Output the corrected JSON."
+    )
+
+
+def test_a_reply_still_empty_after_its_rerolls_is_unusable_and_not_sent_again(llm):
+    with pytest.raises(UnusableReply, match=r"empty text after 2 attempt") as unusable:
+        send(llm, "", "", max_attempts=3, max_empty_retries=1)
+    assert unusable.value.reason == EMPTY_REPLY
+    assert [request["messages"][1]["content"] for request in llm.requests] == [
+        "u",
+        "u",
+    ]
 
 
 def test_an_empty_plain_reply_is_returned_as_it_is(llm):

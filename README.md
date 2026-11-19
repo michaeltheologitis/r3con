@@ -280,7 +280,15 @@ result.relevant_context  # Relevant text found in the documents
 result.structured_context  # Information extracted and organized from the documents
 result.provenance  # What the answer is based on (see Provenance above)
 result.run_dir  # Folder where this run's files are saved
+result.skipped  # What the run skipped, and why
 ```
+
+When the AI model's reply for one document stays unusable after its retries
+(cut off at its output limit, not fitting the requested format, or empty),
+the run skips that document's relevance note or parsed records and carries on
+rather than failing. `result.skipped` lists each skip, `r3con run` prints a
+line about them after the answer, and the run folder's `skipped.json` has
+the details.
 
 ## Run artifacts
 
@@ -292,6 +300,7 @@ logs/<timestamp>_<hex>/          <- result.run_dir
 ├── names.json                   <- each document's filename
 ├── documents.json               <- each document's SHA-256 (UTF-8, lone surrogates passed through)
 ├── events.jsonl                 <- when each processing step started and finished
+├── skipped.json                 <- notes and parses skipped, and why
 ├── splits.json                  <- how documents were split, if necessary
 ├── relevance/
 │   ├── result.json              <- relevant text and supporting quotes

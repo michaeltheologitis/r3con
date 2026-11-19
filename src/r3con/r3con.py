@@ -185,8 +185,12 @@ def run(
         see :attr:`~r3con.pipeline.Answer.provenance`), each document's name
         (``.document_names``), the relevant context
         (``.relevant_context``), the structured parse (``.structured_context``), the
-        schema proposed for this question (``.schema_code``), and where the artifacts
-        were written (``.run_dir``).
+        schema proposed for this question (``.schema_code``), where the artifacts
+        were written (``.run_dir``), and what the run skipped (``.skipped``, each a
+        :class:`~r3con.pipeline.Skip`): a relevance note or a parse whose reply stayed
+        unusable once its resends were spent, cut off at the model's output limit,
+        unfit for its schema or empty, which the run goes on without, never failing
+        for it; the run folder's ``skipped.json`` lists the same.
 
     Raises:
         TypeError: if ``documents`` is not a mapping of names to strings or a sequence
@@ -371,7 +375,9 @@ def resume(
     when it was killed outright, rather than failing or being cancelled, is not in its
     stage's ``calls.json``, nor in the totals; its result, when its events hold it, is
     reused all the same. Lines of ``events.jsonl`` or saved results it can't use are
-    computed again, and a warning counts them.
+    computed again, and a warning counts them. A note or parse the run skipped stays
+    skipped and is not read again, and the ``skipped.json`` written when it finishes
+    lists every skip, from before the resume and after.
 
     A run or resume holds its folder while it writes there (``run.lock``,
     :func:`r3con.runs.run_lock`), so a run still going, or another resume, is not

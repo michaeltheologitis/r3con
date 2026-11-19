@@ -21,14 +21,25 @@ and its snippet is then one note per part. Cross-corpus awareness is built over
   the whole history. The reply adds ``provenance_ids``, the ids of the shown snippets
   it used. With nothing to show, the first-round prompt is used instead.
 
-After each round from 2 on, a document whose snippet in it is empty, every part's, is
-**pruned** (:attr:`RelevantContext.pruned`): no later round reads it, its snippet there
-empty, and parsing does not parse it (:mod:`r3con.stages.structuring.parsing`), the
-final round's included. An empty round-1 snippet alone prunes nothing, since round 2
-may bring the document back once the others are known; with fewer than two rounds
-nothing is pruned. The other documents' snippets in the round it went empty in may
-still cite its snippet of the round before, so the answer's trail can reach it through
-them.
+After each round from 2 on, a document whose snippet in it is empty, every part's, and
+none of them skipped (below), is **pruned** (:attr:`RelevantContext.pruned`): no later
+round reads it, its snippet there empty, and parsing does not parse it
+(:mod:`r3con.stages.structuring.parsing`), the final round's included. An empty round-1
+snippet alone prunes nothing, since round 2 may bring the document back once the others
+are known; with fewer than two rounds nothing is pruned. The other documents' snippets
+in the round it went empty in may still cite its snippet of the round before, so the
+answer's trail can reach it through them.
+
+A note whose reply stays unusable, still empty after its re-rolls or still unfit after
+its last send (:class:`~r3con.runtime.llm.UnusableReply`), is **skipped**, with a
+warning, and the run goes on: its record is empty and keeps the reason
+(:attr:`SnippetRecord.skipped`), so the next round does not show it. A skip is not
+"nothing relevant": it prunes nothing, and the document is read again in the next
+round. In the relevant context, a note skipped in
+:attr:`RelevantContext.context_round` gives way to the part's latest note not skipped
+in an earlier round that read the document in as many parts, when that note says
+something (:attr:`RelevantContext.note_rounds`); otherwise the part has no note there.
+Any other error fails the run.
 
 Relevance reads at one of two evidence levels (``evidence_level``). At
 ``"sentence"``, the default, each reply quotes the sentences of the document its summary
@@ -73,6 +84,7 @@ from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
+from r3con.runtime.llm import UnusableReply
 from r3con.settings import active_doc_workers
 from r3con.splitting import Splits
 from r3con.stages.citing import (
@@ -98,13 +110,16 @@ class SnippetRecord:
     ``summary`` is the snippet's text, ``quotes`` the sentences of the document it is
     based on, each where it was found in the whole document (none at the document
     evidence level), and ``provenance`` the ids of the previous round's snippets it
-    used: empty in round 1, and whenever it used none.
+    used: empty in round 1, and whenever it used none. ``skipped`` is ``None``, or,
+    for a note skipped as its reply stayed unusable, why
+    (:class:`~r3con.runtime.llm.UnusableReply`), the record then empty.
     """
 
     id: str
     summary: str
     quotes: list[Quote]
     provenance: list[str]
+    skipped: str | None = None
 
 
 @dataclass
@@ -148,33 +163,68 @@ class RelevantContext:
 
     @property
     def snippets(self) -> list[Snippet]:
-        """The relevant context: each document's snippet in :attr:`context_round`,
+        """The relevant context: each document's snippet in :attr:`context_round`, a
+        note skipped there replaced by the one :attr:`note_rounds` keeps in its place,
         aligned 1:1 with the input ``documents``: its text, or, for a document read in
         parts, one per part. Empty when no round ran."""
         return [
             parts[0].summary if len(parts) == 1 else [part.summary for part in parts]
-            for parts in self._context()
+            for parts in self._notes()
         ]
 
     @property
     def provenance(self) -> list[list[str]]:
-        """The ids each document's snippet in :attr:`context_round` used, aligned with
+        """The ids each document's snippet in the relevant context used (a note kept
+        from an earlier round, those of the round before its own), aligned with
         :attr:`snippets`, a document read in parts having its parts' ids combined
         (:func:`combine_parts`)."""
         return [
-            combine_parts(part.provenance for part in parts)
-            for parts in self._context()
+            combine_parts(part.provenance for part in parts) for parts in self._notes()
         ]
 
-    def _context(self) -> list[list[SnippetRecord]]:
-        return self.records[self.context_round - 1] if self.records else []
+    @property
+    def note_rounds(self) -> dict[str, int]:
+        """The round, from 1, that each note of the relevant context comes from, by its
+        id: :attr:`context_round`; or, for a note skipped there, the round of the part's
+        latest note not skipped before it, which is kept in its place, when that round
+        read the document in as many parts and that note says something."""
+        return {note.id: k for parts in self._context() for k, note in parts}
+
+    def _notes(self) -> list[list[SnippetRecord]]:
+        return [[note for _, note in parts] for parts in self._context()]
+
+    def _context(self) -> list[list[tuple[int, SnippetRecord]]]:
+        """Each document's notes in the relevant context, each with its round."""
+        if not self.records:
+            return []
+        return [
+            [self._kept(d, p) for p in range(len(parts))]
+            for d, parts in enumerate(self.records[self.context_round - 1])
+        ]
+
+    def _kept(self, d: int, p: int) -> tuple[int, SnippetRecord]:
+        """Part ``p`` of document ``d``'s note in the relevant context, and its round,
+        as :attr:`note_rounds` says."""
+        k = self.context_round
+        parts = self.records[k - 1][d]
+        earlier = (
+            (j, self.records[j - 1][d][p])
+            for j in range(k - 1, 0, -1)
+            if len(self.records[j - 1][d]) == len(parts)
+        )
+        kept = next(((j, note) for j, note in earlier if note.skipped is None), None)
+        if parts[p].skipped is None or kept is None or not kept[1].summary:
+            return k, parts[p]
+        return kept
 
 
 def _pruned(round_: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
     """The documents ``round_``'s snippets prune, by index: those whose snippet there is
-    empty, every part's."""
+    empty, every part's, none of them skipped."""
     return frozenset(
-        d for d, parts in enumerate(round_) if not any(r.summary for r in parts)
+        d
+        for d, parts in enumerate(round_)
+        if not any(r.summary or r.skipped for r in parts)
     )
 
 
@@ -343,6 +393,18 @@ def _read(
     return summary, getattr(reply, "quotes", []) if summary else [], provenance
 
 
+def _read_or_skip(
+    request: CitingRequest, part: str, *, kind: str, **read: Any
+) -> tuple[str, list[str], list[str], str | None]:
+    """``part`` read as :func:`_read` reads it, and ``None``; or, when its reply stays
+    unusable, nothing, and why, with a warning that the note is skipped."""
+    try:
+        return *_read(request, part, kind=kind, **read), None
+    except UnusableReply as unusable:
+        _log.warning("%s: skipped: %s", kind, unusable.reason)
+        return "", [], [], unusable.reason
+
+
 def _report_snippets(
     emit: Emit, round_: int, document_id: str, records: list[SnippetRecord]
 ) -> None:
@@ -359,6 +421,7 @@ def _report_snippets(
             summary=record.summary,
             quotes=record.quotes,
             provenance=record.provenance,
+            skipped=record.skipped,
         )
 
 
@@ -412,6 +475,9 @@ def relevance_snippet(
 
     Raises:
         ValueError: if ``max_attempts`` is not positive.
+        UnusableReply: when the reply stays unusable
+            (:func:`~r3con.runtime.llm.send_until_valid`), which
+            :func:`surface_relevance` skips instead.
     """
     attempts = _attempts(max_attempts)
     shown = {id_: s.strip() for id_, s in other_snippets.items() if s.strip()}
@@ -469,17 +535,22 @@ def surface_relevance(
     snippet there is empty, under the ids it had in the round before, and reports
     nothing.
 
+    A part whose reply stays unusable (:class:`~r3con.runtime.llm.UnusableReply`) is
+    skipped, as the module says: logged as ``<kind>: skipped: <reason>``, its record
+    empty with the reason in :attr:`SnippetRecord.skipped`. Any other exception
+    raised by a call passes through.
+
     ``emit`` reports ``relevance_started`` before each document is read in a round, and
     ``relevance_finished`` for each of its final parts once it is read; once a round
     that prunes is in, ``documents_pruned`` (:func:`r3con.pipeline.run_pipeline` lists
     their fields). It is called from worker threads.
 
-    ``saved`` holds snippets an earlier attempt at the run read, by round and document
-    index (:func:`r3con.pipeline.resume_pipeline`): such a document is not read again in
-    that round, and reports nothing. ``recorded`` maps each document that attempt
-    pruned after a round up to ``recorded_through`` to that round, as it recorded it:
-    up to that round, those are the documents pruned, whatever their snippets say, and
-    no ``documents_pruned`` is reported again.
+    ``saved`` holds snippets an earlier attempt at the run read, skipped ones included,
+    by round and document index (:func:`r3con.pipeline.resume_pipeline`): such a
+    document is not read again in that round, and reports nothing. ``recorded`` maps
+    each document that attempt pruned after a round up to ``recorded_through`` to that
+    round, as it recorded it: up to that round, those are the documents pruned,
+    whatever their snippets say, and no ``documents_pruned`` is reported again.
 
     Raises:
         ValueError: if ``document_ids`` is not one distinct id per document, or
@@ -502,21 +573,22 @@ def surface_relevance(
     reader = splits if splits is not None else Splits(documents, model=model)
 
     def run_round(
-        prev: list[list[SnippetRecord]], round_idx: int, skipped: Collection[int]
+        prev: list[list[SnippetRecord]], round_idx: int, unread: Collection[int]
     ) -> list[list[SnippetRecord]]:
-        """Rewrite every document's relevance snippet in parallel, but the ``skipped``
-        ones'. ``prev`` is the frozen previous-round set (no snippets in round 1)."""
+        """Rewrite every document's relevance snippet in parallel, but the pruned
+        ones', ``unread``. ``prev`` is the frozen previous-round set (no snippets in
+        round 1)."""
         _log.info(
             "round %d/%d · %d doc(s) (≤%d parallel)",
             round_idx,
             rounds,
-            len(documents) - len(skipped),
+            len(documents) - len(unread),
             max_workers,
         )
         shown = {r.id: r.summary for parts in prev for r in parts if r.summary}
 
         def one(i: int, _document: str) -> list[SnippetRecord]:
-            if i in skipped:
+            if i in unread:
                 return [SnippetRecord(r.id, "", [], []) for r in prev[i]]
             if (records := saved.get((round_idx, i))) is not None:
                 return records
@@ -531,7 +603,7 @@ def surface_relevance(
                 call=relevance_call(round_idx),
                 rest=request.system_prompt,
                 schema=request.schema,
-                send=lambda part, kind: _read(
+                send=lambda part, kind: _read_or_skip(
                     request,
                     part,
                     kind=kind,
@@ -548,8 +620,9 @@ def surface_relevance(
                     summary=summary,
                     quotes=locate_quotes(quotes, part, start),
                     provenance=provenance,
+                    skipped=skipped,
                 )
-                for id_, part, start, (summary, quotes, provenance) in zip(
+                for id_, part, start, (summary, quotes, provenance, skipped) in zip(
                     ids, reader.parts(i), reader.starts(i), replies, strict=True
                 )
             ]

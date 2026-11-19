@@ -90,6 +90,16 @@ class UnscriptedRequest(AssertionError):
     """A request reached a fake that had no reply for it."""
 
 
+class Raw(str):
+    """A reply's content sent as it is, never read as a relevance summary: ``Raw("")``
+    is an empty reply."""
+
+
+class CutOff(Raw):
+    """A reply's content as the model left it when it stopped at its output limit:
+    sent as it is, its ``finish_reason`` ``length``."""
+
+
 def _schema_name(request: Request) -> str | None:
     """The name of the schema ``request`` asks its reply to fit, if any."""
     return request.get("response_format", {}).get("json_schema", {}).get("name")
@@ -119,7 +129,8 @@ class FakeLLM:
     of that stage, or a list consumed in order). A reply is the response's content (a
     dict is sent as its JSON), an exception to raise, or a callable from the request to
     the content. A relevance request gets a text reply as its summary, quoting and
-    citing nothing; a parsing request for ``{parse, provenance_ids}`` gets a dict
+    citing nothing, but a :class:`Raw` one as it is, and a :class:`CutOff` one as it
+    is, stopped at the model's output limit; a parsing request for ``{parse, provenance_ids}`` gets a dict
     reply without ``parse`` as its parse, citing nothing; a direct reasoning request
     gets a text reply as it is.
     ``refuses_over(chars)`` makes it a model with a window: a longer request is
@@ -194,6 +205,7 @@ class FakeLLM:
             content = reply(copy.deepcopy(snapshot)) if callable(reply) else reply
             if (
                 isinstance(content, str)
+                and not isinstance(content, Raw)
                 and _schema_name(snapshot) == "RelevanceSummary"
             ):
                 content = _summary_reply(content, snapshot)
@@ -203,9 +215,10 @@ class FakeLLM:
                 and _schema_name(snapshot) == "ParseReply"
             ):
                 content = {"parse": content, "provenance_ids": []}
+            finish_reason = "length" if isinstance(content, CutOff) else "stop"
             if isinstance(content, dict):
                 content = json.dumps(content)
-            return mock_completion(request, content)
+            return mock_completion(request, content, finish_reason)
         finally:
             with self._lock:
                 self._in_flight -= 1
@@ -329,6 +342,22 @@ def silent_when(
     return reply
 
 
+def unusable_when(
+    when: Callable[[Request], bool],
+    unusable: Content,
+    otherwise: Content | Callable[[Request], Content],
+) -> Callable[[Request], Content]:
+    """A reply of ``unusable`` to each request ``when`` holds for, resends and re-rolls
+    included, and of ``otherwise`` to every other."""
+
+    def reply(request: Request) -> Content:
+        if when(request):
+            return unusable
+        return otherwise(request) if callable(otherwise) else otherwise
+
+    return reply
+
+
 def reading(line: str, *, later_round: bool = False) -> Callable[[Request], bool]:
     """Whether a request reads the document whose first line is ``line``, in a later
     relevance round only with ``later_round``."""
@@ -386,12 +415,17 @@ def unscripted(request: Request) -> UnscriptedRequest:
     )
 
 
-def mock_completion(request: Request, content: str) -> Any:
-    """litellm's response to ``request`` when its own mock replies ``content``, the
-    reply's body handed to the request's ``logger_fn``, as litellm hands a server's:
-    its model the model asked for, without the provider."""
+def mock_completion(request: Request, content: str, finish_reason: str = "stop") -> Any:
+    """litellm's response to ``request`` when its own mock replies ``content``, having
+    stopped for ``finish_reason``, the reply's body handed to the request's
+    ``logger_fn``, as litellm hands a server's: its model the model asked for, without
+    the provider."""
     # The dict form, because litellm treats mock_response="" as absent.
-    choice = {"index": 0, "finish_reason": "stop", "message": {"content": content}}
+    choice = {
+        "index": 0,
+        "finish_reason": finish_reason,
+        "message": {"content": content},
+    }
     body = {
         "model": request["model"].partition("/")[2] or request["model"],
         "system_fingerprint": FINGERPRINT,

@@ -17,7 +17,9 @@ Two entry points. :func:`litellm_chat_completion_full` returns the raw response 
 a ``schema`` is given, re-rolling the same request if the model answers with empty
 content (a 200 with no JSON, which transport retries never see).
 :func:`send_until_valid` sends a structured request again, with the validator's error,
-when its reply does not fit the schema.
+when its reply does not fit the schema. A structured reply still empty after its
+re-rolls, or still unfit after the last send, raises :class:`UnusableReply`, which says
+why; the relevance and parsing stages skip the note or parse it was for.
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
@@ -184,10 +186,31 @@ _USAGE_FIELDS = ("usage", "usageMetadata")
 _MODEL_FIELDS = ("model", "modelVersion")
 _PRE_SEND = "pre_api_call"
 _POST_SEND = "post_api_call"
+# What a reply's finish_reason is when the model stopped at its output limit.
+_LENGTH_LIMIT = "length"
+CUT_OFF = "output context length"
+SCHEMA_ERROR = "schema error"
+EMPTY_REPLY = "empty reply"
 
 
 class Cancelled(Exception):
     """Raised in place of a model call once the ``cancel`` event it was given is set."""
+
+
+class UnusableReply(ValueError):
+    """A structured reply r3con cannot use once its re-rolls and resends are spent.
+
+    ``reason`` says why: :data:`EMPTY_REPLY` (``"empty reply"``) when it is still empty
+    after its re-rolls (:func:`litellm_chat_completion`); and, when the last send's reply
+    does not fit its schema (:func:`send_until_valid`), :data:`CUT_OFF` (``"output
+    context length"``) if the model stopped at its output limit, else
+    :data:`SCHEMA_ERROR` (``"schema error"``). An unfit one is raised from the
+    validator's ``ValidationError``, whose message it carries. It is a ``ValueError``,
+    as the error of an empty reply was before it had a reason."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 def raise_if_cancelled(cancel: threading.Event | None) -> None:
@@ -423,46 +446,70 @@ def litellm_chat_completion(
     Each re-roll re-sends the same request, so it is an independent sample (a ``seed``
     the caller passes in ``kwargs`` is re-sent unchanged). This recovers the common
     transient case where a reasoning model spent its budget on the thinking block; a
-    *deterministic* empty still raises after the re-rolls. (A non-empty-but-malformed
+    *deterministic* empty still raises :class:`UnusableReply`, a ``ValueError``, with
+    the reason :data:`EMPTY_REPLY`, after the re-rolls. (A non-empty-but-malformed
     JSON raises a Pydantic ``ValidationError`` instead — that's the *caller's* retry to
     handle, e.g. :func:`send_until_valid`.)
     """
+    response = _answered(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        messages=messages,
+        model=model,
+        api_base=api_base,
+        api_key=api_key,
+        schema=schema,
+        completion=completion,
+        run=run,
+        kind=kind,
+        max_empty_retries=max_empty_retries,
+        cancel=cancel,
+        **kwargs,
+    )
+    return _read(response, schema)
+
+
+def _answered(
+    *, schema: type[BaseModel] | None, max_empty_retries: int | None = None, **call: Any
+) -> Any:
+    """The response to the request ``call`` and ``schema`` make
+    (:func:`litellm_chat_completion_full`), a structured one re-rolled while empty, as
+    :func:`litellm_chat_completion` says.
+
+    Raises:
+        UnusableReply: with the reason :data:`EMPTY_REPLY`, once the re-rolls run out.
+    """
     if max_empty_retries is None:
         max_empty_retries = settings.LLM_EMPTY_CONTENT_RETRIES
-
     attempt = 0
     while True:
-        response = litellm_chat_completion_full(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            messages=messages,
-            model=model,
-            api_base=api_base,
-            api_key=api_key,
-            schema=schema,
-            completion=completion,
-            run=run,
-            kind=kind,
-            cancel=cancel,
-            **kwargs,
-        )
-
-        text = response.choices[0].message.content or ""
-
-        if schema is None:
-            return text
-        if text.strip():
-            return schema.model_validate_json(text)
-
+        response = litellm_chat_completion_full(schema=schema, **call)
+        if schema is None or _content(response).strip():
+            return response
         attempt += 1
         if attempt > max_empty_retries:
-            raise ValueError(
+            raise UnusableReply(
+                EMPTY_REPLY,
                 f"The model returned empty text after {attempt} attempt(s). For a "
                 "reasoning model this usually means thinking consumed the response — "
                 "try a no-thinking config, a higher max_tokens, or raising "
-                "settings.LLM_EMPTY_CONTENT_RETRIES."
+                "settings.LLM_EMPTY_CONTENT_RETRIES.",
             )
         _log.warning("empty reply, re-rolling (%d/%d)", attempt, max_empty_retries)
+
+
+def _content(response: Any) -> str:
+    return response.choices[0].message.content or ""
+
+
+def _read(response: Any, schema: type[BaseModel] | None) -> str | BaseModel:
+    """``response``'s text, or with ``schema``, that text validated as JSON into it.
+
+    Raises:
+        ValidationError: if the text does not fit ``schema``.
+    """
+    text = _content(response)
+    return text if schema is None else schema.model_validate_json(text)
 
 
 def _retry_prompt(user_prompt: str, error: str, rewrite: str) -> str:
@@ -491,11 +538,19 @@ def send_until_valid(
 ) -> str | BaseModel:
     """The reply to ``user_prompt`` beside ``system_prompt``, sending it again with the
     validator's error and ``rewrite`` when a reply does not fit ``schema`` (invalid
-    JSON, a missing field), up to ``max_attempts`` sends; the last send's error is
-    raised. Each resend is logged and recorded as ``<kind>-retry-<n>``."""
+    JSON, a missing field), up to ``max_attempts`` sends. Each resend is logged and
+    recorded as ``<kind>-retry-<n>``. Each send re-rolls an empty reply as
+    :func:`litellm_chat_completion` does, and one still empty is not sent again.
 
-    def send(text: str, attempt: int) -> str | BaseModel:
-        return litellm_chat_completion(
+    Raises:
+        UnusableReply: when a reply is still empty after its re-rolls
+            (:data:`EMPTY_REPLY`), or the last send's does not fit ``schema``:
+            :data:`CUT_OFF` if its ``finish_reason`` is ``length``, else
+            :data:`SCHEMA_ERROR`, raised from the validator's ``ValidationError``.
+    """
+
+    def send(text: str, attempt: int) -> Any:
+        return _answered(
             system_prompt=system_prompt,
             user_prompt=text,
             schema=schema,
@@ -506,7 +561,7 @@ def send_until_valid(
     text = user_prompt
     for attempt in range(1, max_attempts):
         try:
-            return send(text, attempt)
+            return _read(send(text, attempt), schema)
         except ValidationError as e:
             error = f"{type(e).__name__}: {e}"
             _log.warning(
@@ -517,7 +572,12 @@ def send_until_valid(
                 error,
             )
             text = _retry_prompt(user_prompt, error, rewrite)
-    return send(text, max_attempts)
+    response = send(text, max_attempts)
+    try:
+        return _read(response, schema)
+    except ValidationError as e:
+        cut_off = response.choices[0].finish_reason == _LENGTH_LIMIT
+        raise UnusableReply(CUT_OFF if cut_off else SCHEMA_ERROR, str(e)) from e
 
 
 @contextlib.contextmanager

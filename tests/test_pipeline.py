@@ -7,12 +7,13 @@ import re
 import threading
 import time
 from collections import Counter
+from contextlib import nullcontext
+from dataclasses import asdict
 from pathlib import Path
 
 import litellm
 import pytest
 import yaml
-from pydantic import ValidationError
 
 from r3con import read_documents, settings
 from r3con.config import (
@@ -21,13 +22,16 @@ from r3con.config import (
     RunConfig,
     load_config,
 )
-from r3con.pipeline import read_answer, run_pipeline
-from r3con.provenance import DEFAULT_RULE
+from r3con.pipeline import Skip, read_answer, run_pipeline
+from r3con.provenance import ANSWER, CITES, DEFAULT_RULE
 from r3con.runs import TaskLogger
 from r3con.stages.structuring.parsing import SchemaError
 from r3con.stages.structuring.schema import no_fields_schema
 from tests.fakes import (
+    ANSWERING,
     TWO_LINE_MEMOS,
+    CutOff,
+    Raw,
     citable_lists,
     citing,
     first_line,
@@ -39,6 +43,7 @@ from tests.fakes import (
     reading,
     reading_in_round,
     silent_when,
+    unusable_when,
     without_trail,
 )
 
@@ -82,6 +87,8 @@ SAMPLE = "only a SAMPLE"
 LINE_8192 = 6_963
 SUMMARY_ID_LINE = re.compile(r"^### Summary ID: \S+$", re.MULTILINE)
 DOCUMENT_ID_LINE = re.compile(r"^(### )?Document ID: \S+$", re.MULTILINE)
+# The first line of a filler paragraph of the grown registry, not its first part's.
+FILLER = re.compile(r"\w+ note, \w+\. ")
 
 
 def answer(
@@ -349,7 +356,9 @@ def test_a_run_answers_and_leaves_every_stages_artifacts(
         "claims/calls.json",
         "claims/result.json",
         "claims/transcript.yaml",
+        "skipped.json",
     }
+    assert read_json(logger, "skipped") == result.skipped == []
     relevance = json.loads((logger.dir / "relevance/result.json").read_text())
     assert (relevance["n_rounds"], relevance["n_docs"]) == (2, 2)
     assert [r["round"] for r in relevance["rounds"]] == [1, 2]
@@ -376,7 +385,13 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
         {
             "round": 1,
             "snippets": [
-                {"id": id_, "summary": note, "quotes": quoted, "provenance": []}
+                {
+                    "id": id_,
+                    "summary": note,
+                    "quotes": quoted,
+                    "provenance": [],
+                    "skipped": None,
+                }
                 for id_, note, quoted in zip(ids, notes, quotes, strict=True)
             ],
         },
@@ -388,18 +403,21 @@ def test_the_run_folder_and_the_answer_record_which_summaries_each_one_used(
                     "summary": notes[0],
                     "quotes": quotes[0],
                     "provenance": [ids[2], ids[1]],
+                    "skipped": None,
                 },
                 {
                     "id": ids[1],
                     "summary": notes[1],
                     "quotes": quotes[1],
                     "provenance": [ids[2], ids[0]],
+                    "skipped": None,
                 },
                 {
                     "id": ids[2],
                     "summary": notes[2],
                     "quotes": quotes[2],
                     "provenance": [ids[1], ids[0]],
+                    "skipped": None,
                 },
             ],
         },
@@ -1220,12 +1238,7 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
             "class Foo(BaseModel):\n    x: int",
             pytest.raises(SchemaError, match="exhausted 2 attempts"),
         ),
-        (
-            "PARSING_MAX_ATTEMPTS",
-            "parsing",
-            {"rows": [{"who": 7}]},
-            pytest.raises(ValidationError, match="who"),
-        ),
+        ("PARSING_MAX_ATTEMPTS", "parsing", {"rows": [{"who": 7}]}, nullcontext()),
     ],
 )
 def test_an_attempt_cap_set_in_settings_bounds_its_stage(
@@ -1312,10 +1325,130 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
         return {"provenance_ids": []} if is_later_round(request) else "A snippet."
 
     logger = TaskLogger("run", root=tmp_path)
-    with pytest.raises(ValidationError, match="summary"):
-        answer(answering_llm.answers(relevance=reply), logger)
-    assert len(answering_llm.requests_for("relevance")) == len(DOCS) + 2
+    result = answer(answering_llm.answers(relevance=reply), logger)
+    assert len(answering_llm.requests_for("relevance")) == len(DOCS) * (1 + 2)
+    assert [skip.reason for skip in result.skipped] == ["schema error"] * len(DOCS)
     assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2
+
+
+MERROW_LATE = reading("Merrow memo", later_round=True)
+CUT_OFF_NOTE = CutOff('{"summary": "Notes on Merrow memo and on and on and')
+
+
+def test_a_last_round_note_skipped_keeps_its_earlier_one_and_the_trail_leads_there(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(
+        relevance=unusable_when(MERROW_LATE, CUT_OFF_NOTE, ANSWERING["relevance"]),
+        reasoning=citing("Merrow memo", summaries=slice(None)),
+    )
+    result = answer(llm, logger, documents=THREE)
+    ids = result.document_ids
+    assert result.relevant_context == [f"Notes on {memo}." for memo in THREE]
+    skip = Skip(
+        stage="relevance",
+        round=2,
+        doc_id=ids[1],
+        doc_name="1",
+        part=None,
+        reason="output context length",
+        call="relevance-r2-d1",
+        used_instead="kept its round-1 note",
+    )
+    assert result.skipped == [skip]
+    assert read_json(logger, "skipped") == [asdict(skip)]
+    kinds = [call["kind"] for call in read_json(logger, "relevance/calls")]
+    assert kinds.count("relevance-r2-d1") == 1
+    assert "relevance-r2-d1-retry-2" in kinds
+    snippets = read_json(logger, "relevance/result")["rounds"][1]["snippets"]
+    assert snippets[1] == {
+        "id": ids[1],
+        "summary": "",
+        "quotes": [],
+        "provenance": [],
+        "skipped": "output context length",
+    }
+    trail = result.provenance["trail"]
+    assert [ANSWER, f"summary:1:{ids[1]}", CITES] in trail["edges"]
+    assert f"summary:2:{ids[1]}" not in trail["nodes"]
+    assert result.provenance["documents"] == named_documents(result, 0, 1, 2)
+    assert read_answer(logger.dir, DEFAULT_RULE)["trail"] == trail
+
+
+def test_with_one_round_a_skipped_note_leaves_no_note_and_the_memo_is_parsed(
+    answering_llm,
+):
+    no_summary = {"quotes": []}
+    llm = answering_llm.answers(
+        relevance=unusable_when(
+            reading("Merrow memo"), no_summary, ANSWERING["relevance"]
+        )
+    )
+    result = answer(llm, documents=THREE, relevance_rounds=1)
+    assert result.relevant_context == [
+        "Notes on Halloran memo.",
+        "",
+        "Notes on Calder memo.",
+    ]
+    assert result.answer == "; ".join(THREE)
+    assert [(s.round, s.reason, s.used_instead) for s in result.skipped] == [
+        (1, "schema error", "no note")
+    ]
+
+
+def test_a_skipped_parse_leaves_no_records_and_its_note_still_reaches_reasoning(
+    answering_llm, tmp_path
+):
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(
+        parsing=unusable_when(reading("Merrow memo"), Raw(""), ANSWERING["parsing"])
+    )
+    result = answer(llm, logger, documents=THREE)
+    ids = result.document_ids
+    assert result.answer == "Halloran memo; Calder memo"
+    assert result.source_docs == {"rows": [0, 2]}
+    skip = Skip(
+        stage="parsing",
+        round=None,
+        doc_id=ids[1],
+        doc_name="1",
+        part=None,
+        reason="empty reply",
+        call="parse-d1",
+        used_instead="no records",
+    )
+    assert result.skipped == [skip]
+    assert read_json(logger, "skipped") == [asdict(skip)]
+    parsing = read_json(logger, "structuring/parsing/result")
+    assert parsing["skipped"] == [[], [{"part": None, "reason": "empty reply"}], []]
+    [prompt, *_] = system_prompts(llm, "reasoning")
+    assert f"### Document ID: {ids[1]}\nNotes on Merrow memo." in prompt
+
+
+def test_each_skipped_part_names_the_call_its_stages_calls_record(
+    answering_llm, grown_registry, tmp_path
+):
+    def a_later_part(request) -> bool:
+        return FILLER.match(first_line(request)) is not None
+
+    logger = TaskLogger("run", root=tmp_path)
+    llm = answering_llm.answers(
+        relevance=unusable_when(a_later_part, {"quotes": []}, ANSWERING["relevance"]),
+        parsing=unusable_when(a_later_part, {"rows": 7}, ANSWERING["parsing"]),
+    )
+    documents = memos_with(grown_registry(40_000))
+    result = answer(llm.refuses_over(16_000), logger, documents=documents, model=QWEN)
+    assert {(s.stage, s.doc_id) for s in result.skipped} == {
+        ("relevance", result.document_ids[3]),
+        ("parsing", result.document_ids[3]),
+    }
+    for skip in result.skipped:
+        folder = "relevance" if skip.stage == "relevance" else "structuring/parsing"
+        kinds = {call["kind"] for call in read_json(logger, f"{folder}/calls")}
+        assert skip.part is not None and skip.part > 1
+        assert skip.call in kinds
+        assert skip.call.endswith(f"-d3c{skip.part - 1}")
 
 
 def test_a_split_documents_provenance_joins_its_parts_without_repeats(
@@ -1564,6 +1697,7 @@ def test_each_finished_event_carries_what_the_run_folder_records(
             "summary": s["summary"],
             "quotes": s["quotes"],
             "provenance": s["provenance"],
+            "skipped": s["skipped"],
         }
         for r in rounds
         for s in r["snippets"]
@@ -1581,6 +1715,7 @@ def test_each_finished_event_carries_what_the_run_folder_records(
             "n_records": 1,
             "parse": parse_of(parsing, id_),
             "provenance": parsing["provenance"][i],
+            "skipped": parsing["skipped"][i],
         }
         for i, id_ in enumerate(result.document_ids)
     ]
