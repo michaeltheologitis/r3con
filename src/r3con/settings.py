@@ -50,7 +50,7 @@ RELEVANCE_MAX_ATTEMPTS = 3
 SCHEMA_MAX_ATTEMPTS = 5
 
 # Cap on the sends of one parsing request whose reply does not fit its schema.
-PARSING_MAX_ATTEMPTS = 5
+PARSING_MAX_ATTEMPTS = 3
 
 # Cap on the sends of the direct reasoning request whose reply does not fit its schema.
 REASONING_MAX_ATTEMPTS = 3
