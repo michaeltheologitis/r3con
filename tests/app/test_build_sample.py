@@ -2,7 +2,7 @@ from collections.abc import Callable
 
 import pytest
 
-from r3con import Answer, ask, read_documents, run
+from r3con import Answer, ask, read_documents, run, settings
 from tests.app.build_sample import (
     APP_JS,
     MEMOS,
@@ -10,14 +10,20 @@ from tests.app.build_sample import (
     ask_entry,
     build_sample,
     built_blocks,
+    load,
 )
 from tests.fakes import (
+    ANSWERING_SCHEMA,
+    EASTFIELD,
     FakeLLM,
     Request,
     citing,
     in_json,
     quoting_its_first_line_and_citing_all_shown,
+    skipping,
 )
+
+UNFIT_SCHEMA = "Thought: none.\n<schema>\nnot a schema\n</schema>"
 
 
 @pytest.fixture
@@ -58,4 +64,54 @@ def test_a_saved_trail_trace_does_not_give_fails_the_build(todays_run: Answer) -
         lambda result: result["provenance"]["trail"].update(rule="another rule"),
     )(todays_run.run_dir)
     with pytest.raises(AssertionError, match="trace gives the saved provenance"):
+        build_sample(todays_run.run_dir, MEMOS)
+
+
+def test_a_skip_builds_into_its_node_and_a_resent_calls_tokens_add_up_there(
+    answering_llm: FakeLLM, tmp_path
+) -> None:
+    skipping(answering_llm, EASTFIELD)
+    answer = run(
+        "Who?", read_documents(MEMOS), completion=answering_llm, logs_dir=tmp_path
+    )
+    assert answer.run_dir is not None
+    built = build_sample(answer.run_dir, MEMOS)
+    note = [{"part": None, "reason": "output context length"}]
+    parse = [{"part": None, "reason": "schema error"}]
+    rounds = [[s.get("skipped") for s in round_] for round_ in built["rounds"]]
+    assert rounds == [[None] * 5, [None, None, note, None, None]]
+    assert [p.get("skipped") for p in built["parsed"]] == [
+        None,
+        parse,
+        None,
+        None,
+        None,
+    ]
+    calls = built["calls"]
+    relevance = settings.RELEVANCE_MAX_ATTEMPTS * calls["r2-0"]["tokens"]
+    assert calls["r2-2"]["tokens"] == relevance
+    parsing = settings.PARSING_MAX_ATTEMPTS * calls["parsed-0"]["tokens"]
+    assert calls["parsed-1"]["tokens"] == parsing
+
+
+def test_a_retried_schema_builds_as_one_node_its_calls_added_up(
+    answering_llm: FakeLLM, tmp_path
+) -> None:
+    answering_llm.answers(schema=[UNFIT_SCHEMA, ANSWERING_SCHEMA])
+    answer = run(
+        "Who?", read_documents(MEMOS), completion=answering_llm, logs_dir=tmp_path
+    )
+    assert answer.run_dir is not None
+    sent = load(answer.run_dir / "structuring/schema/calls.json")
+    assert [c["kind"] for c in sent] == ["llm_call", "retry"]
+    built = build_sample(answer.run_dir, MEMOS)
+    assert built["calls"]["schema"]["tokens"] == sum(c["tokens"]["total"] for c in sent)
+
+
+def test_a_note_sent_twice_fails_the_build_naming_its_node(todays_run: Answer) -> None:
+    assert todays_run.run_dir is not None
+    in_json("relevance/calls.json", lambda calls: calls.append(dict(calls[0])))(
+        todays_run.run_dir
+    )
+    with pytest.raises(ValueError, match=r"2 calls for r1-\d, drawn as one"):
         build_sample(todays_run.run_dir, MEMOS)

@@ -30,26 +30,24 @@ from r3con.documents import read_documents
 from r3con.runs import run_lock
 from tests.fakes import (
     ANSWERING,
+    CAFETERIA,
+    EASTFIELD,
     KEYRING_FILE,
-    Raw,
+    NORTHGATE,
+    RIVERSIDE,
     a_parse_citation_short,
     bad_key,
     failing_once,
-    first_line,
     in_json,
     predating_resume,
     reading,
     reading_moved_prompts,
-    replying_when,
+    skipping,
 )
 
 REPO = Path(__file__).resolve().parents[1]
 MEMOS = REPO / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
-RIVERSIDE = "MEMO — Riverside site, Q3 operations review"
-EASTFIELD = "MEMO — Eastfield site, Q3 operations review"
-NORTHGATE = "MEMO — Northgate site, Q3 operations review"
-CAFETERIA = "MEMO — Cafeteria refurbishment, phase 2"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 GATEWAY = "https://gateway.example"
@@ -121,21 +119,6 @@ def test_a_run_prints_the_answer_alone_on_stdout(answering, capsys):
     assert out == f"{ANSWER}\n"
     assert "5 document(s) · default[model=gpt-6-luna,rounds=1," in err
     assert (path_after("artifacts: ", err) / "manifest.json").is_file()
-
-
-def skipping(llm, *unparsed: str) -> None:
-    """``llm`` answering as ``answering`` does, but cutting off the Riverside memo's
-    note in round 2, and failing the schema in each parse of the ``unparsed`` memos."""
-    cut_off = Raw('{"summary": "Riverside logged and logged and', "length")
-    riverside_late = reading(RIVERSIDE, later_round=True)
-    llm.answers(
-        relevance=replying_when(riverside_late, cut_off, ANSWERING["relevance"]),
-        parsing=replying_when(
-            lambda request: first_line(request) in unparsed,
-            {"rows": 7},
-            ANSWERING["parsing"],
-        ),
-    )
 
 
 def test_a_run_that_skipped_says_what_in_one_line_after_the_answer(answering, capsys):

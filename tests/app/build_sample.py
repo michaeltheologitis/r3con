@@ -27,11 +27,12 @@ Building calls no model: each document's name, text and size come from
 ``examples/memos``, each answer's provenance is ``r3con.trace``'s for its folder, each
 quote's ``document_text``, which the run predates, its memo's words from ``start`` to
 ``end``, and every other value is read from the folder as it is. Each quote names the
-snippet it is from, so the app can match it to the trail. Every document in this run
-was read whole, and this handles only that. A sample with a document read in parts
-would need part handling: joining its parts' summaries as the app does, counting its
-``<id>.<k>`` snippets as the document, and fitting its several calls into the page's
-one call per node.
+snippet it is from, so the app can match it to the trail. A note or parse r3con
+skipped, which this run predates, says so as the app's live run has it, and a call's
+resends count in its node. Every document in this run was read whole, and this handles
+only that. A sample with a document read in parts would need part handling: joining its
+parts' summaries as the app does, counting its ``<id>.<k>`` snippets as the document,
+and fitting its several calls into the page's one call per node.
 
 To record a new sample, run and ask as above, put the new run folder where this one is,
 keeping its name (``r3con.trace`` finds an ask's run by it), set ``RUN_FOLDER``, and run
@@ -45,6 +46,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +61,8 @@ APP_JS = REPO / "src" / "r3con" / "app" / "app.js"
 SAMPLE_ROUNDS = 2
 # What the page reads of each quote: its text, and where it is in its document, in code points.
 QUOTE_FIELDS = ("text", "start", "end")
+# A note's or a parse's call kind's suffix on its resends, as calls.json records them.
+RESEND = re.compile(r"-retry-\d+$")
 
 
 def load(path: Path) -> Any:
@@ -93,6 +97,7 @@ def provenance(
 
 def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
     """One document's summary in one round, each quote naming the snippet it is from."""
+    reason = snippet.get("skipped")
     return {
         "summary": snippet["summary"],
         "provenance": [ids[cited] for cited in snippet["provenance"]],
@@ -100,6 +105,7 @@ def summary(snippet: dict[str, Any], ids: dict[str, int]) -> dict[str, Any]:
             {**{f: q[f] for f in QUOTE_FIELDS}, "snippet": snippet["id"]}
             for q in snippet["quotes"]
         ],
+        **({"skipped": [{"part": None, "reason": reason}]} if reason else {}),
     }
 
 
@@ -137,7 +143,13 @@ def run_totals(run: Path) -> dict[str, Any]:
 
 
 def call_costs(run: Path) -> dict[str, Any]:
-    """Each model call's step, tokens and cost, keyed by the page's node for it."""
+    """Each node's model calls, keyed by the page's node for them: the step the last
+    finished at, and their tokens and cost together.
+
+    Raises:
+        ValueError: if a note or a parse took more than one call besides its resends,
+            as a document read in parts does, which the page draws as one.
+    """
     relevance = [
         (f"{c['kind'].split('-')[1]}-{c['doc']}", c)
         for c in load(run / "relevance/calls.json")
@@ -147,13 +159,19 @@ def call_costs(run: Path) -> dict[str, Any]:
     ]
     schema = [("schema", c) for c in load(run / "structuring/schema/calls.json")]
     answer = [("answer", c) for c in load(run / "reasoning/calls.json")]
-    keyed = [
-        (key, {"step": c["step"], "tokens": c["tokens"]["total"], "usd": c["usd"]})
-        for key, c in relevance + parsing + schema + answer
-    ]
-    calls = dict(keyed)
-    assert len(calls) == len(keyed), "one call per node"
-    return calls
+    sent = Counter(
+        key for key, c in relevance + parsing if not RESEND.search(c["kind"])
+    )
+    for key, calls in sent.items():
+        if calls > 1:
+            raise ValueError(f"{run.name}: {calls} calls for {key}, drawn as one")
+    costs: dict[str, Any] = {}
+    for key, c in relevance + parsing + schema + answer:
+        total = costs.setdefault(key, {"step": 0, "tokens": 0, "usd": 0})
+        total["step"] = max(total["step"], c["step"])
+        total["tokens"] += c["tokens"]["total"]
+        total["usd"] += c["usd"]
+    return costs
 
 
 def build_sample(run: Path, memos: Path) -> dict[str, Any]:
@@ -177,6 +195,7 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
     assert relevance["n_rounds"] == SAMPLE_ROUNDS, "check.mjs reads a two-round sample"
     rounds = [round_summaries(r["snippets"], ids) for r in relevance["rounds"]]
     parses = document_parses(run, ids)
+    skipped = parsing.get("skipped", [[] for _ in parses])
     return {
         "question": manifest["task"],
         "model": manifest["config"]["model"],
@@ -188,8 +207,14 @@ def build_sample(run: Path, memos: Path) -> dict[str, Any]:
         "rounds": rounds,
         "schema": {"code": schema["schema_code"], "thought": schema["thought"]},
         "parsed": [
-            {"parse": parse, "provenance": [ids[c] for c in cited]}
-            for parse, cited in zip(parses, parsing["provenance"], strict=True)
+            {
+                "parse": parse,
+                "provenance": cited,
+                **({"skipped": parts} if parts else {}),
+            }
+            for parse, cited, parts in zip(
+                parses, parsing["provenance"], skipped, strict=True
+            )
         ],
         "answer": {
             "text": reasoning["answer"],

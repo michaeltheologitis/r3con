@@ -37,9 +37,14 @@
   /** @typedef {Pick<Quote, 'start' | 'end'>} Place Where a quote or a claim is in its text, in r3con's code points or the page's code units. */
   /** @typedef {Quote & { snippet: string }} RecordedQuote A quote, and the id of the snippet quoting it. */
   /** @typedef {Quote & { summary: string }} RunQuote A quote, and the trail node of the summary quoting it. */
-  /** @typedef {{ summary: string, provenance: number[], quotes: RecordedQuote[] }} RecordedSummary */
-  /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[] }} Snippets What a document's snippets in a round say, together. */
-  /** @typedef {Snippets & { parts?: Map<string, Snippets> }} Summary A live run's also has each part's, by its trail node. */
+  /**
+   * A note or parse r3con skipped, its reply unusable once its resends were spent, as its events and run folder give it:
+   * its part, `k` of the part's snippet id `<id>.<k>`, null for a document read whole, and why.
+   * @typedef {{ part: number | null, reason: string }} Skip
+   */
+  /** @typedef {{ summary: string, provenance: number[], quotes: RecordedQuote[], skipped?: Skip[] }} RecordedSummary */
+  /** @typedef {{ summary: string, provenance: number[], quotes: RunQuote[], skipped: Skip[] }} Snippets What a document's snippets in a round say, together, and those r3con skipped. */
+  /** @typedef {Snippets & { parts?: Map<string, Snippets> }} Summary A live or saved run's also has each part's, by its snippet id. */
   /** @typedef {{ start: number, end: number }} TextRange A part of a document's text, in UTF-16 code units. */
   /** @typedef {TextRange & { by: string[] }} Span A part of a document's text that the summaries `by` quote. */
   /** @typedef {{ spans: Span[], sentences: TextRange[] }} Quoted What a trail quotes of one document. */
@@ -62,7 +67,7 @@
    * nodes of the summaries whose quotes it carries; and what they quote of each document, by index.
    * @typedef {{ nodes: Set<string>, edges: Set<string>, citedBy: Map<string, string>, quoting: Set<string>, quoted: Quoted[] }} Trail
    */
-  /** @typedef {{ parse: Record<string, unknown[]>, provenance: number[] }} Parse */
+  /** @typedef {{ parse: Record<string, unknown[]>, provenance: string[], skipped: Skip[] }} Parse Its provenance names the notes it cites, as r3con does. */
   /** @typedef {{ code: string, thought: string }} Schema */
   /**
    * An answer's provenance: the documents whose contextRound summaries and parses it cites, by index, and its trail.
@@ -135,7 +140,7 @@
    * @property {string[]} ids
    * @property {RecordedSummary[][]} rounds
    * @property {Schema} schema
-   * @property {Parse[]} parsed
+   * @property {(Omit<Parse, 'skipped'> & { skipped?: Skip[] })[]} parsed
    * @property {{ text: string, provenance: TracedProvenance }} answer
    * @property {Record<string, Call>} calls
    * @property {Totals} totals
@@ -159,7 +164,7 @@
    * @property {LoadedFile[]} files the tab's files, or its run's documents
    * @property {Folder} tree their folders, the top level as one with no name
    * @property {number} depth how many folders the deepest file is in
-   * @property {Set<string>} sourced the folders, by path, that hold an answer's sources
+   * @property {Set<string>} sourced the folders, by path, that hold an answer's sources or a skip
    * @property {Map<string, number>} index each document node's document
    * @property {Map<string, CallState>} calls each call by its node's id; a document node's is reading the file
    * @property {Map<NodeKind, number>} settled how many calls of each kind are back, not counting those the run stopped first
@@ -218,13 +223,14 @@
    * @property {Pick<Run, 'totals'> & { answers: SavedAnswer[] }} run
    * @property {Representation} representation
    */
-  /** @typedef {{ id: string, summary: string, quotes: Quote[], provenance: string[] }} Snippet A snippet as r3con writes it. */
+  /** @typedef {{ id: string, summary: string, quotes: Quote[], provenance: string[], skipped?: string | null }} Snippet A snippet as r3con writes it. */
   /**
    * What r3con app gives of a run's folder, each file by its path there, as far as the page reads it.
    * @typedef {{ 'ids.json': Record<string, number>, 'names.json': Record<string, string>,
    *   'relevance/result.json': { rounds: { snippets: Snippet[] }[], pruned_after?: Record<string, number> },
    *   'structuring/schema/result.json': { schema_code: string, thought: string | null },
-   *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][] }
+   *   'structuring/parsing/result.json': { parsed: Record<string, unknown[]>, source_docs: Record<string, number[]>, provenance: string[][],
+   *     skipped?: Skip[][] }
    * }} Representation
    */
   /** @typedef {Pick<Answer, 'question' | 'model' | 'text' | 'provenance' | 'totals' | 'claims'>} SavedAnswer */
@@ -246,12 +252,12 @@
    * @typedef {{ type: 'run_started', rounds: number, document_ids: string[] }
    *   | { type: 'relevance_started', round: number, doc_id: string }
    *   | { type: 'relevance_finished', round: number, doc_id: string, part: number | null, summary: string, quotes: Quote[],
-   *       provenance: string[] }
+   *       provenance: string[], skipped?: string | null }
    *   | { type: 'documents_pruned', round: number, doc_ids: string[] }
    *   | { type: 'schema_started' | 'reasoning_started' | 'ask_started' }
    *   | { type: 'schema_finished', schema_code: string, thought: string }
    *   | { type: 'parsing_started', doc_id: string }
-   *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[] }
+   *   | { type: 'parsing_finished', doc_id: string, parse: Record<string, unknown[]>, provenance: string[], skipped?: Skip[] }
    *   | { type: 'reasoning_finished', answer: string,
    *       provenance: R3conProvenance }
    *   | { type: 'claims_started' }
@@ -1946,6 +1952,15 @@
   // The first round r3con prunes after: an empty round-1 note alone prunes nothing.
   const FIRST_PRUNING_ROUND = 2;
   const FROM_ROUND_1 = "nothing relevant in the end · answered from round 1's notes";
+  // What happened, by each reason r3con gives for a skip (r3con.runtime.llm.UnusableReply).
+  /** @type {Record<string, string>} */
+  const SKIP_WHY = {
+    'output context length': 'The reply was cut off at the context limit.',
+    'schema error': "The reply didn't fit its schema.",
+    'empty reply': 'The model returned nothing.',
+  };
+  // The skips the line under an answer names; it counts the rest, as `r3con run` does.
+  const SKIPS_NAMED = 3;
   const LOOPBACK = ['127.0.0.1', 'localhost'];
   const UNAUTHORIZED = 401;
   const STALE_TOKEN = "this page's launch token is missing or stale; reopen it from the r3con app terminal";
@@ -2030,6 +2045,9 @@
   const RECORDED_SOURCE = 'recorded run';
 
   const ICONS = {
+    alert: `<svg viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="8" fill="currentColor"/><path d="M8 4.4v4.3" stroke="#fff" stroke-width="2.1" stroke-linecap="round"/><circle cx="8" cy="11.8" r="1.2" fill="#fff"/>
+    </svg>`,
     chevron: `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M6 3.5 10.5 8 6 12.5"/>
     </svg>`,
@@ -2651,6 +2669,7 @@
       summaries.map((s, i) => ({
         ...s,
         quotes: quotesInUnits(SAMPLE.docs[i].text, s.quotes).map(({ snippet, ...q }) => ({ ...q, summary: summaryNode(round, snippet) })),
+        skipped: s.skipped ?? [],
       }));
     /** @type {Omit<Run, 'answers'>} */
     const run = {
@@ -2659,7 +2678,7 @@
       ...withIds(SAMPLE.ids),
       rounds: SAMPLE.rounds.map((summaries, k) => inUnits(summaries, k + 1)),
       schema: SAMPLE.schema,
-      parsed: SAMPLE.parsed,
+      parsed: SAMPLE.parsed.map((parse) => ({ ...parse, skipped: parse.skipped ?? [] })),
       pruned: new Map(),
       calls: SAMPLE.calls,
       totals: SAMPLE.totals,
@@ -2714,7 +2733,7 @@
     /** @param {number} i @param {boolean} hasOutput */
     const madeUp = (i, hasOutput) => (hasOutput ? madeUpCitations(i, n).filter(hasSummary) : []);
     /** @param {number} k @returns {Summary[]} */
-    const round = (k) => files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, k > 0 && hasSummary(i)), quotes: [] }));
+    const round = (k) => files.map((f, i) => ({ summary: summary(f), provenance: madeUp(i, k > 0 && hasSummary(i)), quotes: [], skipped: [] }));
     /** @type {Omit<Run, 'answers'>} */
     const run = {
       simulated: true,
@@ -2722,7 +2741,8 @@
       ...withIds(range(n).map(String)),
       rounds: range(rounds).map(round),
       schema: { code: SIMULATED_SCHEMA, thought: `${SIMULATED_LABEL}. A real run proposes a schema for your question here.` },
-      parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0) })),
+      // Its document ids are their indices.
+      parsed: parses.map((parse, i) => ({ parse, provenance: madeUp(i, parse.excerpts.length > 0).map(String), skipped: [] })),
       pruned: new Map(),
       calls: null,
       totals: null,
@@ -2777,17 +2797,78 @@
   /** @param {{ question: string, model: string }} answer */
   const answerLabel = ({ question, model }) => `${excerpt(question, LABEL_MAX)} · ${bareModel(model)}`;
 
-  // An answer and a parse cite contextRound's summaries, and a summary of round k, those of round k - 1.
+  // The parts of node `id`'s note or parse that r3con skipped; none for another kind of node, a fold's, or a hole.
+  /** @param {Run} run @param {string} id @returns {Skip[]} */
+  function skipsAt(run, id) {
+    const [kind, d] = splitId(id);
+    const done = isRound(kind) ? summariesIn(run, kind)[d] : kind === 'parsed' ? run.parsed[d] : undefined;
+    return done?.skipped ?? [];
+  }
+
+  // Every skip of a run, with its node, in the order r3con lists them.
+  /** @param {Run} run */
+  function skipsOf(run) {
+    const ids = [...roundKinds(run.rounds.length), 'parsed'].flatMap((kind) => run.docs.map((_, d) => `${kind}-${d}`));
+    return ids.flatMap((id) => skipsAt(run, id).map((skip) => ({ id, skip })));
+  }
+
+  /** @param {Skip[]} skips */
+  const reasonsOf = (skips) => [...new Set(skips.map((skip) => skip.reason))].join(', ');
+  /** @param {Skip} skip */
+  const skipSaid = ({ part, reason }) => `${part === null ? 'skipped' : `part ${part} skipped`}: ${reason}`;
+
+  // Each part's note of document d in round k, by its snippet id; one read whole, as the sample's are, is one part.
+  /** @param {Run} run @param {number} k @param {number} d @returns {Map<string, Snippets>} */
+  function partsOf(run, k, d) {
+    const summary = run.rounds[k - 1][d];
+    return summary?.parts ?? new Map(summary ? [[run.ids[d], summary]] : []);
+  }
+
+  // The snippet ids of documents `docs`' notes in round k, the relevant context's by default.
+  /** @param {Run} run @param {number[]} docs */
+  const notesOf = (run, docs, k = roundOf(contextRound(run))) => docs.flatMap((d) => [...partsOf(run, k, d).keys()]);
+
+  // The node of each of `ids`, notes of the relevant context, round k, from the round r3con's note_rounds keeps it from.
+  /** @param {Run} run @param {string[]} ids @returns {string[]} */
+  function contextNodes(run, ids, k = roundOf(contextRound(run))) {
+    const nodes = ids.flatMap((id) => {
+      const d = docIndex(run, id);
+      return d === undefined ? [] : noteRound(run, k, d, id).map((j) => `${roundKind(j)}-${d}`);
+    });
+    return [...new Set(nodes)];
+  }
+
+  // As r3con's RelevantContext._kept, but a skipped note with none kept has no round, so no line leaves a skipped node.
+  /** @param {Run} run @param {number} k @param {number} d @param {string} id @returns {number[]} */
+  function noteRound(run, k, d, id) {
+    const parts = partsOf(run, k, d);
+    if (!parts.get(id)?.skipped.length) return [k];
+    for (let j = k - 1; j > 0; j -= 1) {
+      const earlier = partsOf(run, j, d);
+      const part = earlier.get(id);
+      if (earlier.size === parts.size && part && !part.skipped.length) return part.summary ? [j] : [];
+    }
+    return [];
+  }
+
+  // The notes an answer's trail has it cite, by snippet id.
+  /** @param {ProvenanceTrail} trail */
+  const citedNotes = (trail) =>
+    trail.edges.flatMap(([from, to, kind]) => {
+      const [node, , id] = to.split(':');
+      return from === TRAIL_ANSWER && kind === 'cites' && node === 'summary' ? [id] : [];
+    });
+
+  // An answer's notes are those its trail cites, as its provenance names only their documents.
   /** @param {Run} run @param {string} id */
   function cites(run, id) {
     const [kind, i] = splitId(id);
-    const context = contextRound(run);
     if (kind === 'answer') {
       // Only an answer that has landed is asked what it cites.
-      const { summary_ids, parse_ids } = /** @type {Provenance} */ (answerAt(run, id).provenance);
-      return [...summary_ids.map((d) => `${context}-${d}`), ...parse_ids.map((d) => `parsed-${d}`)];
+      const { parse_ids, trail } = /** @type {Provenance} */ (answerAt(run, id).provenance);
+      return [...contextNodes(run, citedNotes(trail)), ...parse_ids.map((d) => `parsed-${d}`)];
     }
-    if (kind === 'parsed') return run.parsed[i].provenance.map((d) => `${context}-${d}`);
+    if (kind === 'parsed') return contextNodes(run, run.parsed[i].provenance);
     if (!isRound(kind)) return [];
     const previous = previousRound(kind);
     return previous ? summariesIn(run, kind)[i].provenance.map((d) => `${previous}-${d}`) : [];
@@ -3057,7 +3138,8 @@
     if (node.kind === 'answer') return `${answerName(answerAt(runTab(tab).run, node.id))}${stopped}`;
     const what = isRound(node.kind) ? `${roundName(node.kind)} relevance snippet` : ARIA_KIND[node.kind];
     if (!node.file) return `${nodeName(tab, node.id)}, ${what}${stopped}`;
-    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}`;
+    const skipped = node.el.classList.contains('skipped') ? `, skipped: ${reasonsOf(skipsAt(runTab(tab).run, node.id))}` : '';
+    if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}${skipped}`;
     return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${plural(sentences, 'highlighted sentence')}` : ''}`;
   }
 
@@ -3251,7 +3333,9 @@
     const node = drawnNode(tab, id);
     node.el.classList.remove('void', 'failed');
     node.el.classList.add('working');
-    if (!node.fold) node.el.setAttribute('aria-label', ariaName(tab, node));
+    if (node.fold) return;
+    showSkips(node, []);
+    node.el.setAttribute('aria-label', ariaName(tab, node));
   }
 
   // A node is settled when its call finished, empty or not, or failed when the run stopped first.
@@ -3270,9 +3354,22 @@
       g.textContent = MARK;
     });
     if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = iconFor('parsed', true);
-    if (!node.fold) node.el.setAttribute('aria-label', ariaName(tab, node));
+    if (!node.fold) {
+      showSkips(node, tab.run && !failed ? skipsAt(tab.run, node.id) : []);
+      node.el.setAttribute('aria-label', ariaName(tab, node));
+    }
     rerenderIfOpen(tab, node.id);
   }
+
+  /** @param {PanelNode} node @param {Skip[]} skips */
+  function showSkips(node, skips) {
+    node.el.classList.toggle('skipped', skips.length > 0);
+    node.el.querySelector('.skip-badge')?.remove();
+    if (skips.length) node.el.append(skipBadge(`Skipped: ${reasonsOf(skips)}`));
+  }
+
+  /** @param {string} [label] */
+  const skipBadge = (label) => h('span', { class: 'skip-badge', role: label && 'img', 'aria-label': label, title: label, html: ICONS.alert });
 
   // Ids repeat across tabs; the popup and the hover are only ever on the shown tab's nodes.
   /** @param {Tab} tab */
@@ -3749,7 +3846,7 @@
     return a !== b && tab.nodes.has(a) && tab.nodes.has(b) ? [a, b] : null;
   }
 
-  // Open in a tab of at most FOLD_FROM_DOCS files, or holding an answer's sources, unless the user left it otherwise.
+  // Open in a tab of at most FOLD_FROM_DOCS files, or holding an answer's sources or a skip, unless the user left it otherwise.
   /** @param {Tab} tab @param {Folder} folder */
   function folderOpen(tab, folder) {
     const fold = foldingOf(tab);
@@ -4033,8 +4130,8 @@
     else tab.nodesEl.prepend(node.el);
   }
 
-  // Settles a call of a folded panel; true once that is drawn on its fold. A document with a snippet comes out of its
-  // fold, and one kept in view goes into one once its first round is back with nothing, when the rows are next drawn.
+  // Settles a call of a folded panel; true once that is drawn on its fold. A document with a snippet or a skip comes
+  // out of its fold, and a skip's folders open; one kept in view folds once its first round is back with nothing.
   /** @param {Tab} tab @param {string} id @param {{ empty: boolean, failed: boolean }} how */
   function settleFolded(tab, id, { empty, failed }) {
     const fold = foldingOf(tab);
@@ -4047,13 +4144,14 @@
     if (d === null) return false;
     setCall(fold, id, failed ? 'failed' : 'done');
     const [kind] = splitId(id);
-    const comesOut = isRound(kind) && !empty && !failed && !fold.relevant.has(d);
+    const skipped = !failed && skipsAt(runTab(tab).run, id).length > 0;
+    const comesOut = ((isRound(kind) && !empty && !failed) || skipped) && !fold.relevant.has(d);
     const goesIn = kind === roundKind(1) && empty && !failed && fold.kept.has(d);
+    const folders = skipped ? folderPaths(fold.files[d]).filter((path) => !fold.sourced.has(path)) : [];
     if (comesOut) fold.relevant.add(d);
-    if (comesOut || goesIn) {
-      fold.kept.delete(d);
-      refoldSoon(tab);
-    }
+    for (const path of folders) fold.sourced.add(path);
+    if (comesOut || goesIn) fold.kept.delete(d);
+    if (comesOut || goesIn || folders.length) refoldSoon(tab);
     return Boolean(showFolded(tab, id));
   }
 
@@ -4092,27 +4190,41 @@
   // shown each row's, and one shown the others' snippets, each relevant document's, which has a row of its own. The
   // documents of an opened fold draw no faint lines, in or out, so that opening hundreds doesn't draw a line from
   // each to each: their fold draws theirs while closed.
-  /** @param {RunTab} tab @param {string} id */
-  function shownInputs(tab, id) {
+  // `context`, contextShown's, is passed by a pass that draws many calls' lines.
+  /** @param {RunTab} tab @param {string} id @param {string[] | null} [context] */
+  function shownInputs(tab, id, context = null) {
     const { run, fold } = tab;
     if (!fold) return inputsOf(run, id);
     const [kind, i] = splitId(id);
-    /** @param {number} d */
-    const opened = (d) => fold.opened.has(d) && !fold.relevant.has(d);
-    if (isPerDocument(kind) && opened(i)) return [];
-    const context = contextRound(run);
+    if (isPerDocument(kind) && openedIn(fold, i)) return [];
     /** @param {PerDocumentKind} step @param {(docs: number[]) => boolean} [keep] */
     const eachRow = (step, keep = () => true) =>
       fold.rows.flatMap((row) => {
-        if ('doc' in row) return !opened(row.doc) && keep([row.doc]) ? [`${step}-${row.doc}`] : [];
+        if ('doc' in row) return !openedIn(fold, row.doc) && keep([row.doc]) ? [`${step}-${row.doc}`] : [];
         return !row.open && keep(foldDocs(row)) ? [foldId(step, row)] : [];
       });
-    if (kind === 'parsed' || kind === 'schema') return eachRow(context);
-    if (kind === 'answer') return [...eachRow(context), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
+    if (kind === 'parsed' || kind === 'schema') return context ?? contextShown(tab);
+    if (kind === 'answer') return [...(context ?? contextShown(tab)), ...eachRow('parsed', (docs) => docs.some((d) => hasRecords(run.parsed[d])))];
     const previous = previousRound(kind);
     if (!previous) return [];
     const shown = [...fold.relevant].filter((j) => j !== i && summariesIn(run, previous)[j]?.summary);
     return shown.sort((a, b) => a - b).map((j) => `${previous}-${j}`);
+  }
+
+  /** @param {Folding} fold @param {number} d */
+  const openedIn = (fold, d) => fold.opened.has(d) && !fold.relevant.has(d);
+
+  // What a call shown the relevant context was shown, on a folded panel: each document row's notes, and each closed fold.
+  /** @param {RunTab} tab */
+  function contextShown(tab) {
+    const { run } = tab;
+    const fold = foldingOf(tab);
+    const context = contextRound(run);
+    const k = roundOf(context);
+    return fold.rows.flatMap((row) => {
+      if ('doc' in row) return openedIn(fold, row.doc) ? [] : contextNodes(run, notesOf(run, [row.doc], k), k);
+      return row.open ? [] : [foldId(context, row)];
+    });
   }
 
   // Every line a folded run draws: into each node, from what its call was shown, and from what each call back cites.
@@ -4120,16 +4232,17 @@
   function foldedLines(tab) {
     const { run } = tab;
     const fold = foldingOf(tab);
+    const context = contextShown(tab);
     /** @type {Line[]} */
     const lines = [];
     // A fold's, or a folder's, are its first and last document's: each was shown all but itself.
     for (const node of tab.nodes.values()) {
       const docs = node.fold ? new Set([node.fold.start, node.fold.end]) : [docOf(tab, node.id)];
-      if (isPerDocument(node.kind)) for (const d of docs) lines.push(...linesInto(tab, `${node.kind}-${d}`));
+      if (isPerDocument(node.kind)) for (const d of docs) lines.push(...linesInto(tab, `${node.kind}-${d}`, context));
     }
-    if (tab.nodes.has('schema')) lines.push(...linesInto(tab, 'schema'));
+    if (tab.nodes.has('schema')) lines.push(...linesInto(tab, 'schema', context));
     const lit = run.lit ?? RUN_ANSWER;
-    if (tab.nodes.has(lit)) lines.push(...shownInputs(tab, lit).map((from) => /** @type {Line} */ ([from, lit, 'context'])));
+    if (tab.nodes.has(lit)) lines.push(...shownInputs(tab, lit, context).map((from) => /** @type {Line} */ ([from, lit, 'context'])));
     for (const [id, call] of fold.calls) if (call === 'done' && splitId(id)[0] !== 'doc') lines.push(...citeLines(tab, id));
     for (const node of tab.nodes.values()) if (node.kind === 'answer' && landed(tab, node.id)) lines.push(...citeLines(tab, node.id));
     return lines;
@@ -4591,13 +4704,35 @@
     ];
   }
 
+  // At the top of a skipped call's popup, tinted: what happened, a line for each part r3con skipped.
+  /** @param {Skip[]} skips */
+  function skipNote(skips) {
+    if (!skips.length) return null;
+    /** @param {Skip} skip */
+    const said = (skip) => {
+      const text = skipSaid(skip);
+      const why = Object.hasOwn(SKIP_WHY, skip.reason) && ` ${SKIP_WHY[skip.reason]}`;
+      return h('p', {}, h('strong', {}, `${text[0].toUpperCase()}${text.slice(1)}.`), why);
+    };
+    return h('div', { class: 'skip-note' }, skipBadge(), h('div', {}, skips.map(said)));
+  }
+
+  // A call r3con skipped, with no other part's output, has only what happened to show.
+  /** @param {Run} run @param {string} id */
+  function skippedBody(run, id) {
+    const [, d] = splitId(id);
+    return [skipNote(skipsAt(run, id)), row('read', refs([docId(run.docs[d])])), callMeta(run, id), openFileButton(run.docs[d], 'open document ›')];
+  }
+
   // Round 1 reads each document alone, so only a later round's snippet has provenance.
   /** @param {RunTab} tab @param {RoundKind} kind @param {number} d */
   function snippetBody(tab, kind, d) {
     const { run } = tab;
     const id = `${kind}-${d}`;
+    const { summary, skipped } = summariesIn(run, kind)[d];
     return [
-      textBlock(summariesIn(run, kind)[d].summary),
+      skipNote(skipped),
+      textBlock(summary),
       trailLine(tab, id),
       row('read', refs([docId(run.docs[d])])),
       quotesFold(tab, kind, d),
@@ -4616,6 +4751,7 @@
     const { run } = tab;
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
     if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
+    if (skipsAt(run, id).length && isVoid(run, id)) return skippedBody(run, id);
     if (isRound(kind)) return snippetBody(tab, kind, d);
     if (kind === 'schema') {
       const schema = /** @type {Schema} */ (run.schema);
@@ -4626,8 +4762,10 @@
       ];
     }
     if (kind === 'parsed') {
-      const filled = Object.entries(run.parsed[d].parse).filter(([, records]) => records.length > 0);
+      const { parse, skipped } = run.parsed[d];
+      const filled = Object.entries(parse).filter(([, records]) => records.length > 0);
       return [
+        skipNote(skipped),
         filled.length ? jsonBlock(Object.fromEntries(filled)) : textBlock('', 'nothing parsed'),
         row('read', refs([docId(run.docs[d])])),
         provenanceFold(run, id),
@@ -5083,24 +5221,25 @@
     const [kind, i] = splitId(id);
     /** @param {string} step @param {(j: number) => unknown} [keep] */
     const every = (step, keep = () => true) => range(run.docs.length).filter(keep).map((j) => `${step}-${j}`);
-    const context = contextRound(run);
-    if (kind === 'parsed' || kind === 'schema') return every(context);
-    if (kind === 'answer') return [...every(context), ...every('parsed', (j) => hasRecords(run.parsed[j]))];
-    const previous = previousRound(kind);
-    return previous ? every(previous, (j) => j !== i && summariesIn(run, previous)[j]?.summary) : [];
+    if (isRound(kind)) {
+      const previous = previousRound(kind);
+      return previous ? every(previous, (j) => j !== i && summariesIn(run, previous)[j]?.summary) : [];
+    }
+    const context = contextNodes(run, notesOf(run, range(run.docs.length)));
+    return kind === 'answer' ? [...context, ...every('parsed', (j) => hasRecords(run.parsed[j]))] : context;
   }
 
   // The lines into a node as its call starts: a flow from its document or, for a parse, the structure; dotted, the
   // call's own document, read again; faint, the other outputs it was shown.
-  /** @param {RunTab} tab @param {string} id @returns {Line[]} */
-  function linesInto(tab, id) {
+  /** @param {RunTab} tab @param {string} id @param {string[] | null} [context] @returns {Line[]} */
+  function linesInto(tab, id, context = null) {
     const [kind, i] = splitId(id);
     if (kind === roundKind(1)) return [[docId(tab.run.docs[i]), id, 'flow', 'draw']];
     const own = ownDocument(tab.run, id);
     /** @type {Line[]} */
     const lines = kind === 'parsed' ? [['schema', id, 'flow', 'draw']] : [];
     if (own) lines.push([own, id, 'self', 'fade']);
-    return [...lines, ...shownInputs(tab, id).map((from) => /** @type {Line} */ ([from, id, 'context']))];
+    return [...lines, ...shownInputs(tab, id, context).map((from) => /** @type {Line} */ ([from, id, 'context']))];
   }
 
   /** @param {RunTab} tab @param {string} to @returns {Line[]} */
@@ -5161,9 +5300,18 @@
   /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
-    if (isRound(kind)) return `${docLabel(run, i)} — ${summariesIn(run, kind)[i].summary ? 'snippet ready' : 'nothing relevant'}`;
     if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'structure ready';
-    return `${docLabel(run, i)} — ${hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed'}`;
+    const done = isRound(kind) ? (summariesIn(run, kind)[i].summary ? 'snippet ready' : 'nothing relevant') : hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed';
+    const said = skippedWhole(run, id) ? [] : [done];
+    return `${docLabel(run, i)} — ${[...said, ...skipsAt(run, id).map(skipSaid)].join(' · ')}`;
+  }
+
+  // Whether r3con skipped every part of node `id`'s call; a parse's parts show only in its records.
+  /** @param {Run} run @param {string} id */
+  function skippedWhole(run, id) {
+    const [kind, d] = splitId(id);
+    if (!skipsAt(run, id).length) return false;
+    return isRound(kind) ? [...partsOf(run, roundOf(kind), d).values()].every((part) => part.skipped.length > 0) : !hasRecords(run.parsed[d]);
   }
 
   // Draws a node's call as finished; again, for a document read in parts, as each later part adds to it.
@@ -5193,9 +5341,26 @@
     const flag = answer.simulated ? narr.say('main', h('span', { class: 'flag' }, SIMULATED_LABEL)) : null;
     const said = narr.say('answer', answer.text, { node: id, name: answerName(answer) });
     tab.chatAnswer = flag ?? said;
-    const sentences = sentenceList(tab, id);
-    if (sentences) said.after(sentences);
+    said.after(...flatChildren([sentenceList(tab, id), skippedLine(tab.run)]));
     updateComposer();
+  }
+
+  // Under an answer: what its run skipped, the first SKIPS_NAMED named, each a link to its node.
+  /** @param {Run} run */
+  function skippedLine(run) {
+    const skips = skipsOf(run);
+    if (!skips.length) return null;
+    const named = skips.slice(0, SKIPS_NAMED).map(({ id, skip }, i) => [i ? ', ' : '', h('button', { class: 'ref', type: 'button', 'data-node': id }, skipName(run, id, skip)), ` (${skip.reason})`]);
+    const more = skips.length - SKIPS_NAMED;
+    return h('div', { class: 'skips' }, `${skips.length} skipped: `, named, more > 0 && ` and ${more} more`, '.');
+  }
+
+  // Which call r3con skipped, of which part of which document.
+  /** @param {Run} run @param {string} id @param {Skip} skip */
+  function skipName(run, id, { part }) {
+    const [kind, d] = splitId(id);
+    const call = isRound(kind) ? `round-${roundOf(kind)} note` : 'parsing';
+    return `${call} of ${part === null ? '' : `part ${part} of `}${docLabel(run, d)}`;
   }
 
   /** @param {LoadedFile} file @param {Child} said */
@@ -5230,7 +5395,9 @@
   function startLinking(tab, id) {
     const said = saidAnswer(tab, id);
     if (!said) return;
-    const under = said.nextElementSibling?.matches('.sentences') ? said.nextElementSibling : said;
+    /** @type {Element} */
+    let under = said;
+    while (under.nextElementSibling?.matches('.sentences, .skips')) under = under.nextElementSibling;
     const mark = h('span', { class: 'g log-spin', 'aria-hidden': 'true' }, MARK);
     under.after(h('div', { class: 'line sub linking', 'data-linking': id }, mark, h('span', { class: 't' }, LINKING)));
     scrollChat(tab);
@@ -5568,7 +5735,8 @@
         appear(tab, `parsed-${doc(event.doc_id)}`);
         break;
       case 'parsing_finished':
-        run.parsed[doc(event.doc_id)] = { parse: event.parse, provenance: docIndices(run, event.provenance) };
+        // A continue replays the events of a run folder, which r3con wrote without skips before it skipped.
+        run.parsed[doc(event.doc_id)] = { parse: event.parse, provenance: event.provenance, skipped: event.skipped ?? [] };
         settle(tab, narr, `parsed-${doc(event.doc_id)}`);
         break;
       case 'reasoning_finished':
@@ -5600,24 +5768,42 @@
     sayPruned(tab, narr, round);
   }
 
-  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part's
-  // quotes are placed in the whole document, so they add up as they are, each with its part's trail node. A part
+  // A document read in parts finishes once per part: each adds to its node, drawn again from all of them. A part
   // reported again, as a continued run replays what it reuses, takes its own place.
   /** @param {RunTab} tab @param {Narrator} narr @param {number} i @param {Extract<ServerEvent, { type: 'relevance_finished' }>} event */
-  function addSnippet(tab, narr, i, { round, doc_id, part, summary, provenance, quotes }) {
+  function addSnippet(tab, narr, i, { round, doc_id, part, ...snippet }) {
     const { run } = tab;
     const summaries = run.rounds[round - 1];
-    const node = summaryNode(round, part == null ? doc_id : `${doc_id}.${part}`);
-    const placed = quotesInUnits(run.docs[i].text, quotes).map((q) => ({ ...q, summary: node }));
-    const parts = new Map(summaries[i]?.parts).set(node, { summary, provenance: docIndices(run, provenance), quotes: placed });
+    const id = part == null ? doc_id : `${doc_id}.${part}`;
+    summaries[i] = joined(new Map(summaries[i]?.parts).set(...partNote(run, run.docs[i].text, round, { id, ...snippet })));
+    settle(tab, narr, `${roundKind(round)}-${i}`);
+  }
+
+  // A part's note as r3con gives it, by its snippet id, its quotes placed in its whole document, in `text`'s code units.
+  /** @param {Pick<Run, 'indexes'>} run @param {string} text @param {number} round @param {Snippet} snippet @returns {[string, Snippets]} */
+  function partNote(run, text, round, { id, summary, quotes, provenance, skipped }) {
+    const [, part] = id.split('.');
+    return [
+      id,
+      {
+        summary,
+        provenance: docIndices(run, provenance),
+        quotes: quotesInUnits(text, quotes).map((q) => ({ ...q, summary: summaryNode(round, id) })),
+        skipped: skipped ? [{ part: part === undefined ? null : Number(part), reason: skipped }] : [],
+      },
+    ];
+  }
+
+  /** @param {Map<string, Snippets>} parts @returns {Summary} */
+  function joined(parts) {
     const all = [...parts.values()];
-    summaries[i] = {
+    return {
       summary: all.map((p) => p.summary).filter(Boolean).join('\n\n'),
       provenance: [...new Set(all.flatMap((p) => p.provenance))],
       quotes: all.flatMap((p) => p.quotes),
+      skipped: all.flatMap((p) => p.skipped),
       parts,
     };
-    settle(tab, narr, `${roundKind(round)}-${i}`);
   }
 
   // Should a live run's first event name other rounds than it asked for, it is planned again before any is drawn.
@@ -7372,6 +7558,7 @@
     summary: 'string',
     quotes: [{ text: 'string', start: orNull(isCount), end: orNull(isCount), [OTHER_KEYS]: anything }],
     provenance: ['string'],
+    'skipped?': orNull('string'),
     [OTHER_KEYS]: anything,
   };
   /** @type {Record<string, Shape>} */
@@ -7401,7 +7588,13 @@
         [OTHER_KEYS]: anything,
       },
       'structuring/schema/result.json': { schema_code: 'string', thought: orNull('string'), [OTHER_KEYS]: anything },
-      'structuring/parsing/result.json': { parsed: recordOf(Array.isArray), source_docs: recordOf((docs) => fits(docs, [isCount])), provenance: [['string']], [OTHER_KEYS]: anything },
+      'structuring/parsing/result.json': {
+        parsed: recordOf(Array.isArray),
+        source_docs: recordOf((docs) => fits(docs, [isCount])),
+        provenance: [['string']],
+        'skipped?': [[{ part: orNull(isCount), reason: 'string', [OTHER_KEYS]: anything }]],
+        [OTHER_KEYS]: anything,
+      },
     },
   });
   // Each version this page reads, by its number.
@@ -7418,10 +7611,10 @@
     const named = Object.keys(r['names.json']).length === n && Object.keys(ids).every((id) => Object.hasOwn(r['names.json'], id));
     const { rounds } = r['relevance/result.json'];
     const snippets = rounds.flatMap((round) => round.snippets).every((s) => Object.hasOwn(ids, s.id.split('.')[0]));
-    const { parsed, source_docs: sources, provenance } = r['structuring/parsing/result.json'];
+    const { parsed, source_docs: sources, provenance, skipped } = r['structuring/parsing/result.json'];
     const sourced = Object.entries(parsed).every(([field, records]) => Object.hasOwn(sources, field) && sources[field].length === records.length && sources[field].every((d) => d < n));
     const cited = run.answers.flatMap((a) => /** @type {Provenance} */ (a.provenance)).flatMap((p) => [...p.summary_ids, ...p.parse_ids]);
-    const perDocument = order.length === n && order.every((d, i) => d === i) && provenance.length === n;
+    const perDocument = order.length === n && order.every((d, i) => d === i) && provenance.length === n && (skipped?.length ?? n) === n;
     const after = Object.entries(r['relevance/result.json'].pruned_after ?? {});
     const pruned = after.every(([id, round]) => Object.hasOwn(ids, id) && round >= FIRST_PRUNING_ROUND && round <= rounds.length);
     const claimed = run.answers.every((a) => claimsFit(/** @type {string} */ (a.text), a.claims ?? [], ids));
@@ -7449,16 +7642,17 @@
     for (const [id, round] of Object.entries(relevance.pruned_after ?? {})) pruned.set(/** @type {number} */ (docIndex(indexed, id)), round);
     // As in a live run, a document r3con pruned has no summary in a round that did not read it, nor a parse.
     /** @param {Snippet[]} snippets @param {number} round @returns {Summary[]} */
-    const summaries = (snippets, round) =>
-      sparse(docs.length, (d) => isRead({ pruned }, roundKind(round), d), (d) => {
-        const parts = snippets.filter((s) => s.id.split('.')[0] === ids[d]);
-        return {
-          summary: parts.map((s) => s.summary).filter(Boolean).join('\n\n'),
-          provenance: [...new Set(parts.flatMap((s) => docIndices(indexed, s.provenance)))],
-          quotes: parts.flatMap((s) => quotesInUnits(docs[d].text, s.quotes).map((q) => ({ ...q, summary: summaryNode(round, s.id) }))),
-        };
-      });
-    const { parsed, source_docs: sources, provenance } = r['structuring/parsing/result.json'];
+    const summaries = (snippets, round) => {
+      /** @type {Map<number, Map<string, Snippets>>} */
+      const notes = new Map();
+      for (const snippet of snippets) {
+        const d = /** @type {number} */ (docIndex(indexed, snippet.id));
+        notes.set(d, (notes.get(d) ?? new Map()).set(...partNote(indexed, docs[d].text, round, snippet)));
+      }
+      return sparse(docs.length, (d) => isRead({ pruned }, roundKind(round), d), (d) => joined(notes.get(d) ?? new Map()));
+    };
+    // A run's folder written before r3con skipped lists no skips.
+    const { parsed, source_docs: sources, provenance, skipped } = r['structuring/parsing/result.json'];
     /** @param {number} d */
     const parseOf = (d) => Object.fromEntries(Object.entries(parsed).map(([field, records]) => [field, records.filter((_, i) => sources[field][i] === d)]));
     const schema = r['structuring/schema/result.json'];
@@ -7468,7 +7662,7 @@
       ...indexed,
       rounds: relevance.rounds.map(({ snippets }, k) => summaries(snippets, k + 1)),
       schema: { code: schema.schema_code, thought: schema.thought ?? '' },
-      parsed: sparse(docs.length, (d) => isRead({ pruned }, 'parsed', d), (d) => ({ parse: parseOf(d), provenance: docIndices(indexed, provenance[d]) })),
+      parsed: sparse(docs.length, (d) => isRead({ pruned }, 'parsed', d), (d) => ({ parse: parseOf(d), provenance: provenance[d], skipped: skipped?.[d] ?? [] })),
       pruned,
       answers: [own],
       calls: null,
