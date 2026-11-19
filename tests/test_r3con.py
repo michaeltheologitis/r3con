@@ -984,6 +984,20 @@ def test_trace_of_an_asks_folder_follows_the_asks_citations_through_the_runs_rec
     assert asked.provenance["trail"] != cited_run.provenance["trail"]
 
 
+def test_trace_reads_an_older_folder_whose_answer_cites_a_note_outside_its_context(
+    cited_run,
+):
+    stray = f"{cited_run.document_ids[0]}.1"
+
+    def citing_a_stray_note(result: dict) -> None:
+        result["provenance"]["summary_ids"].append(stray)
+
+    in_json("reasoning/result.json", citing_a_stray_note)(cited_run.run_dir)
+    traced = trace(cited_run.run_dir)
+    assert traced["summary_ids"][-1] == stray
+    assert ["answer", f"summary:2:{stray}", "cites"] in traced["trail"]["edges"]
+
+
 def test_trace_of_a_folder_whose_snippets_have_no_quotes_quotes_nothing(cited_run):
     assert cited_run.provenance["quotes"]
     in_json("relevance/result.json", snippets_without_quotes)(cited_run.run_dir)

@@ -42,6 +42,8 @@ from r3con.runs import StageRun, TaskLogger
 from r3con.runtime.codeact import CodeActResult, CodeActTurn
 from r3con.runtime.llm import (
     Cancelled,
+    EmptyReply,
+    UnfitReply,
     UnusableReply,
     litellm_chat_completion,
     litellm_chat_completion_full,
@@ -76,6 +78,7 @@ __all__ = [
     "Cancelled",
     "CodeActResult",
     "CodeActTurn",
+    "EmptyReply",
     "ParseResult",
     "ProposalAttempt",
     "ProposalResult",
@@ -86,6 +89,7 @@ __all__ = [
     "Skip",
     "StageRun",
     "TaskLogger",
+    "UnfitReply",
     "UnusableReply",
     "ask",
     "check_schema",
