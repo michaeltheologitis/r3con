@@ -102,6 +102,7 @@ from r3con.stages.relevance import (
     draw_document_ids,
     join_parts,
     part_ids,
+    part_number,
     relevance_call,
     surface_relevance,
 )
@@ -218,26 +219,35 @@ def _cites_nothing() -> AnswerProvenance:
     return AnswerProvenance(**provenance, claims=[])
 
 
+RELEVANCE_STAGE = "relevance"
+PARSING_STAGE = "parsing"
+NO_NOTE = "no note"
+NO_RECORDS = "no records"
+
+
+def kept_note(round_: int) -> str:
+    """What stands for a note of the relevant context skipped in its round, round
+    ``round_``'s note of the part kept in its place."""
+    return f"kept its round-{round_} note"
+
+
 @dataclass(frozen=True)
 class Skip:
     """A note or parse the run skipped, its reply still unusable once its resends and
-    re-rolls were spent (:class:`~r3con.runtime.llm.UnusableReply`), as
-    ``skipped.json`` and :attr:`Answer.skipped` list it.
+    re-rolls were spent, as ``skipped.json`` and :attr:`Answer.skipped` list it.
 
-    - ``stage`` — ``"relevance"`` or ``"parsing"``.
+    - ``stage`` — :data:`RELEVANCE_STAGE` or :data:`PARSING_STAGE`.
     - ``round`` — the relevance round, from 1; ``None`` for parsing.
     - ``doc_id``, ``doc_name`` — the document's id and name.
     - ``part`` — the ``k`` of the part's snippet id ``<id>.<k>``, or ``None`` for a
-      document read whole.
-    - ``reason`` — ``"output context length"`` when the last reply was cut off at the
-      model's output limit, ``"schema error"`` when it otherwise did not fit its
-      schema, ``"empty reply"`` when it was still empty after its re-rolls.
+      document read whole (:func:`~r3con.stages.relevance.part_number`).
+    - ``reason`` — why, as :class:`~r3con.runtime.llm.UnusableReply` gives it.
     - ``call`` — the call's kind, as its stage's ``calls.json`` records it
       (``relevance-r2-d14``, ``parse-d3c1``), its resends with ``-retry-<n>`` added.
-    - ``used_instead`` — ``"kept its round-<k> note"`` for a note of the relevant
-      context that gave way to an earlier round's
-      (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`), ``"no note"`` for
-      any other note, and ``"no records"`` for a parse.
+    - ``used_instead`` — :func:`kept_note` for a note of the relevant context that
+      gave way to an earlier round's
+      (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`), :data:`NO_NOTE`
+      for any other note, and :data:`NO_RECORDS` for a parse.
     """
 
     stage: str
@@ -330,10 +340,11 @@ class Answer:
       ids in ``provenance``, in ``relevance_provenance``, in ``parsing_provenance`` and
       in the run folder's ``relevance/result.json``, where a part's id is ``<id>.<k>``
       and matching uses the part before the dot.
-    - ``skipped`` — every note and parse the run skipped, as its ``skipped.json``
-      lists them (:class:`Skip`): relevance's, round by round, in document order,
-      then parsing's. Empty when nothing was skipped, and for an ask over a run
-      folder without ``skipped.json``, as one written before r3con skipped.
+    - ``skipped`` — every note and parse the run skipped (:class:`Skip`), as its
+      ``skipped.json`` lists them: relevance's, round by round, in document order,
+      then parsing's. Empty when nothing was skipped. An ask builds its run's from
+      the stages' ``result.json``, so a run that stopped after parsing has them, and
+      one written before r3con skipped has none.
     """
 
     answer: str
@@ -1159,7 +1170,7 @@ def _refuse_other_documents(
     }
     if any(differences.values()):
         listed = "; ".join(
-            f"{what} {_some(names)}" for what, names in differences.items() if names
+            f"{what} {first_few(names)}" for what, names in differences.items() if names
         )
         raise OtherDocuments(f"{run_dir}: these are not the run's documents: {listed}.")
     if list(given) != list(run):
@@ -1169,7 +1180,7 @@ def _refuse_other_documents(
         )
 
 
-def _some(names: Sequence[str], shown: int = 3) -> str:
+def first_few(names: Sequence[str], shown: int = 3) -> str:
     """The first ``shown`` of ``names``, and how many more there are."""
     listed = ", ".join(names[:shown])
     more = len(names) - shown
@@ -1566,7 +1577,7 @@ def _fitting_parses(
         except ValidationError:
             continue
         skipped = [SkippedPart(part=s.part, reason=s.reason) for s in event.skipped]
-        parses[doc] = (parse, event.provenance, skipped)
+        parses[doc] = Parsed(parse, event.provenance, skipped)
         positions.append(at)
     return parses, positions
 
@@ -1575,13 +1586,19 @@ def _extraction(result: Mapping[str, Any], parse_cls: type[BaseModel]) -> ParseR
     """What the parsing stage's ``result.json``, ``result``, holds, its parse read as
     JSON into ``parse_cls``, and no part skipped when it lists none, as one written
     before r3con skipped."""
-    provenance = result["provenance"]
     return ParseResult(
         parse=parse_cls.model_validate_json(json.dumps(result["parsed"])),
         source_docs=result["source_docs"],
-        provenance=provenance,
-        skipped=result.get("skipped", [[] for _ in provenance]),
+        provenance=result["provenance"],
+        skipped=_parts_skipped(result),
     )
+
+
+def _parts_skipped(result: Mapping[str, Any]) -> list[list[SkippedPart]]:
+    """Each document's parts whose parse was skipped, as the parsing stage's
+    ``result.json``, ``result``, lists them: none for one written before r3con
+    skipped."""
+    return result.get("skipped", [[] for _ in result["provenance"]])
 
 
 def _parse_of(result: Mapping[str, Any], doc: int) -> tuple[dict[str, Any], list[str]]:
@@ -1739,7 +1756,7 @@ def _read_built(run_dir: Path) -> Representation:
         parsed=parsing["parsed"],
         source_docs=parsing["source_docs"],
         parsing_provenance=parsing["provenance"],
-        skipped=_read_skips(run_dir),
+        skipped=_skips(relevance, _parts_skipped(parsing), names),
     )
 
 
@@ -2086,50 +2103,46 @@ def _skips(
     document order; ``names`` gives each document's name by its id, in document
     order."""
     ids = list(names)
-    kept = relevance.note_rounds
-
-    def note(k: int, d: int, part: int | None, id_: str, reason: str) -> Skip:
-        j = kept.get(id_, k) if k == relevance.context_round else k
-        return Skip(
-            stage="relevance",
-            round=k,
-            doc_id=ids[d],
-            doc_name=names[ids[d]],
-            part=part,
-            reason=reason,
-            call=call_kind(relevance_call(k), d, part),
-            used_instead=f"kept its round-{j} note" if j < k else "no note",
+    context, rounds = relevance.context_round, relevance.note_rounds
+    found = [
+        (
+            RELEVANCE_STAGE,
+            k,
+            relevance_call(k),
+            d,
+            part_number(p, len(parts)),
+            record.skipped,
+            _instead_of_note(k, rounds[record.id] if k == context else k),
         )
-
-    notes = [
-        note(k, d, p + 1 if len(parts) > 1 else None, record.id, record.skipped)
         for k, round_ in enumerate(relevance.records, start=1)
         for d, parts in enumerate(round_)
         for p, record in enumerate(parts)
         if record.skipped is not None
     ]
-    parses = [
-        Skip(
-            stage="parsing",
-            round=None,
-            doc_id=id_,
-            doc_name=names[id_],
-            part=part["part"],
-            reason=part["reason"],
-            call=call_kind(PARSE_CALL, d, part["part"]),
-            used_instead="no records",
-        )
-        for d, (id_, parts) in enumerate(zip(ids, parts_skipped, strict=True))
+    found += [
+        (PARSING_STAGE, None, PARSE_CALL, d, part["part"], part["reason"], NO_RECORDS)
+        for d, parts in enumerate(parts_skipped)
         for part in parts
     ]
-    return notes + parses
+    return [
+        Skip(
+            stage=stage,
+            round=k,
+            doc_id=ids[d],
+            doc_name=names[ids[d]],
+            part=part,
+            reason=reason,
+            call=call_kind(call, d, part),
+            used_instead=used_instead,
+        )
+        for stage, k, call, d, part, reason, used_instead in found
+    ]
 
 
-def _read_skips(run_dir: Path) -> list[Skip]:
-    """What the run in ``run_dir`` skipped, as its ``skipped.json`` lists it: nothing
-    for a run folder without one, as one written before r3con skipped."""
-    path = run_dir / "skipped.json"
-    return [Skip(**entry) for entry in _read_json(path)] if path.is_file() else []
+def _instead_of_note(k: int, kept: int) -> str:
+    """What stands for a note skipped in round ``k``, its part's note in the relevant
+    context being round ``kept``'s."""
+    return kept_note(kept) if kept < k else NO_NOTE
 
 
 def _read_json(path: Path) -> Any:

@@ -21,12 +21,11 @@ from pydantic import BaseModel, create_model
 
 from r3con.config import EvidenceLevel, PromptStage
 from r3con.logging_setup import get_logger
-from r3con.masking import one_line
 from r3con.prompts import load_prompt
 from r3con.provenance import Claim, NamedQuote, Provenance, QuotePlace
 from r3con.quotes import locate_quotes
 from r3con.runs import StageRun
-from r3con.runtime.llm import schema_as_sent, send_until_valid
+from r3con.runtime.llm import error_line, schema_as_sent, send_until_valid
 from r3con.splitting import Splits
 from r3con.stages.citing import cited, ids_field, lenient_list
 from r3con.stages.relevance import RelevantContext, SnippetRecord
@@ -126,7 +125,7 @@ def find_claims(
         )
     # A cancel included: once reasoning has answered, the run finishes with it.
     except Exception as error:  # noqa: BLE001
-        _log.warning("claims: none, as their call failed: %s", one_line(error))
+        _log.warning("claims: none, as their call failed: %s", error_line(error))
         return []
     found = cast(BaseModel, reply).model_dump()["claims"]
     return _claims(found, answer, evidence, level.ids_key)

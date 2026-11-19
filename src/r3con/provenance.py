@@ -219,11 +219,13 @@ def build_graph(
     context and the parses ``citations`` lists, over its run's ``relevance``, each
     document's parse citing the summaries of the relevant context its
     ``parsing_provenance`` lists, ``names`` giving each document's name by its id, in
-    document order."""
+    document order. Each summary cited is one of the relevant context's, as reasoning
+    and parsing cite no other, and leads to its round's node
+    (:attr:`~r3con.stages.relevance.RelevantContext.note_rounds`)."""
     rounds = relevance.note_rounds
 
     def note(id_: str) -> str:
-        return _summary(rounds.get(id_, relevance.context_round), id_)
+        return _summary(rounds[id_], id_)
 
     edges = [[ANSWER, note(id_), CITES] for id_ in citations["summary_ids"]]
     edges += [[ANSWER, _parse(id_), CITES] for id_ in citations["parse_ids"]]

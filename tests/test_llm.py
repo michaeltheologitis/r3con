@@ -41,7 +41,8 @@ from r3con.runtime.llm import (
     EMPTY_REPLY,
     SCHEMA_ERROR,
     Cancelled,
-    UnusableReply,
+    EmptyReply,
+    UnfitReply,
     _sleep,
     litellm_chat_completion,
     litellm_chat_completion_full,
@@ -50,7 +51,7 @@ from r3con.runtime.llm import (
     schema_as_sent,
     send_until_valid,
 )
-from tests.fakes import DIGITS_KEY, CutOff, GatewayKey, on_your_data
+from tests.fakes import DIGITS_KEY, GatewayKey, Raw, on_your_data
 
 MODEL = "openai/gpt-6-luna"
 VLLM = "hosted_vllm/fake"
@@ -430,7 +431,7 @@ def send(llm, *replies, max_attempts=2, **kwargs):
 @pytest.mark.parametrize(
     ("last", "reason"),
     [
-        (CutOff('{"x": 7'), CUT_OFF),
+        (Raw('{"x": 7', "length"), CUT_OFF),
         ('{"x": "seven"}', SCHEMA_ERROR),
         ('{"x": 7', SCHEMA_ERROR),
     ],
@@ -439,16 +440,17 @@ def send(llm, *replies, max_attempts=2, **kwargs):
 def test_a_last_reply_that_does_not_fit_is_unusable_for_why_the_model_stopped(
     llm, last, reason
 ):
-    with pytest.raises(UnusableReply) as unusable:
+    with pytest.raises(UnfitReply) as unfit:
         send(llm, '{"x": "seven"}', last)
-    assert unusable.value.reason == reason
-    assert isinstance(unusable.value.__cause__, ValidationError)
-    assert str(unusable.value) == str(unusable.value.__cause__)
+    assert unfit.value.reason == reason
+    assert isinstance(unfit.value.error, ValidationError)
+    assert unfit.value.__cause__ is unfit.value.error
+    assert str(unfit.value) == str(unfit.value.error)
     assert len(llm.requests) == 2
 
 
 def test_a_reply_cut_off_before_the_last_send_is_sent_again_as_any_unfit_one(llm):
-    assert send(llm, CutOff('{"x": 7'), '{"x": 7}') == Number(x=7)
+    assert send(llm, Raw('{"x": 7', "length"), '{"x": 7}') == Number(x=7)
     resent = llm.requests[1]["messages"][1]["content"]
     assert resent.startswith(
         "u\n\n---\n\nYour previous response failed schema validation:\n\n"
@@ -461,14 +463,31 @@ def test_a_reply_cut_off_before_the_last_send_is_sent_again_as_any_unfit_one(llm
     )
 
 
-def test_a_reply_still_empty_after_its_rerolls_is_unusable_and_not_sent_again(llm):
-    with pytest.raises(UnusableReply, match=r"empty text after 2 attempt") as unusable:
-        send(llm, "", "", max_attempts=3, max_empty_retries=1)
-    assert unusable.value.reason == EMPTY_REPLY
+@pytest.mark.parametrize(
+    ("replies", "reason"),
+    [
+        (["", ""], EMPTY_REPLY),
+        ([Raw("", "length"), Raw("", "length")], CUT_OFF),
+        ([Raw("", "length"), ""], EMPTY_REPLY),
+    ],
+    ids=["empty", "empty-at-the-output-limit", "an-earlier-one-at-the-limit"],
+)
+def test_a_reply_still_empty_after_its_rerolls_is_unusable_and_not_sent_again(
+    llm, replies, reason
+):
+    with pytest.raises(EmptyReply, match=r"empty text after 2 attempt") as empty:
+        send(llm, *replies, max_attempts=3, max_empty_retries=1)
+    assert empty.value.reason == reason
     assert [request["messages"][1]["content"] for request in llm.requests] == [
         "u",
         "u",
     ]
+
+
+def test_fewer_than_one_send_is_refused_before_any_request(llm):
+    with pytest.raises(ValueError, match=r"max_attempts must be >= 1, got 0\."):
+        send(llm, max_attempts=0)
+    assert llm.requests == []
 
 
 def test_an_empty_plain_reply_is_returned_as_it_is(llm):

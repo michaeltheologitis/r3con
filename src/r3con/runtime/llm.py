@@ -18,8 +18,8 @@ a ``schema`` is given, re-rolling the same request if the model answers with emp
 content (a 200 with no JSON, which transport retries never see).
 :func:`send_until_valid` sends a structured request again, with the validator's error,
 when its reply does not fit the schema. A structured reply still empty after its
-re-rolls, or still unfit after the last send, raises :class:`UnusableReply`, which says
-why; the relevance and parsing stages skip the note or parse it was for.
+re-rolls, or still unfit after the last send, raises an :class:`UnusableReply`, which
+says why; the relevance and parsing stages skip the note or parse it was for.
 
 Structured output goes out in OpenAI strict mode, which demands more of a JSON schema than
 Pydantic emits; :func:`_enforce_strict_objects` closes that gap, and
@@ -198,19 +198,40 @@ class Cancelled(Exception):
 
 
 class UnusableReply(ValueError):
-    """A structured reply r3con cannot use once its re-rolls and resends are spent.
+    """A structured reply r3con cannot use once its re-rolls and resends are spent:
+    :class:`EmptyReply` or :class:`UnfitReply`. ``reason`` says why, one of three:
 
-    ``reason`` says why: :data:`EMPTY_REPLY` (``"empty reply"``) when it is still empty
-    after its re-rolls (:func:`litellm_chat_completion`); and, when the last send's reply
-    does not fit its schema (:func:`send_until_valid`), :data:`CUT_OFF` (``"output
-    context length"``) if the model stopped at its output limit, else
-    :data:`SCHEMA_ERROR` (``"schema error"``). An unfit one is raised from the
-    validator's ``ValidationError``, whose message it carries. It is a ``ValueError``,
-    as the error of an empty reply was before it had a reason."""
+    - :data:`CUT_OFF`, ``"output context length"``: the last reply stopped at the
+      model's output limit (its ``finish_reason`` is ``length``), empty or cut off;
+    - :data:`EMPTY_REPLY`, ``"empty reply"``: it is otherwise empty;
+    - :data:`SCHEMA_ERROR`, ``"schema error"``: it otherwise does not fit its schema.
+
+    It is a ``ValueError``, as the error of an empty reply was before it had a
+    reason."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
         self.reason = reason
+
+
+class EmptyReply(UnusableReply):
+    """A structured reply still empty after its re-rolls
+    (:func:`litellm_chat_completion`)."""
+
+
+class UnfitReply(UnusableReply):
+    """The last reply :func:`send_until_valid` got, which does not fit its schema:
+    ``error`` is the validator's ``ValidationError``, whose message it carries."""
+
+    def __init__(self, reason: str, error: ValidationError) -> None:
+        super().__init__(reason, str(error))
+        self.error = error
+
+
+def error_line(error: BaseException) -> str:
+    """``error`` on one line (:func:`r3con.masking.one_line`), an :class:`UnfitReply` as
+    the validator's ``ValidationError`` it carries."""
+    return one_line(error.error if isinstance(error, UnfitReply) else error)
 
 
 def raise_if_cancelled(cancel: threading.Event | None) -> None:
@@ -446,10 +467,9 @@ def litellm_chat_completion(
     Each re-roll re-sends the same request, so it is an independent sample (a ``seed``
     the caller passes in ``kwargs`` is re-sent unchanged). This recovers the common
     transient case where a reasoning model spent its budget on the thinking block; a
-    *deterministic* empty still raises :class:`UnusableReply`, a ``ValueError``, with
-    the reason :data:`EMPTY_REPLY`, after the re-rolls. (A non-empty-but-malformed
-    JSON raises a Pydantic ``ValidationError`` instead — that's the *caller's* retry to
-    handle, e.g. :func:`send_until_valid`.)
+    *deterministic* empty still raises :class:`EmptyReply`, a ``ValueError``, after the
+    re-rolls. (A non-empty-but-malformed JSON raises a Pydantic ``ValidationError``
+    instead — that's the *caller's* retry to handle, e.g. :func:`send_until_valid`.)
     """
     response = _answered(
         system_prompt=system_prompt,
@@ -477,7 +497,8 @@ def _answered(
     :func:`litellm_chat_completion` says.
 
     Raises:
-        UnusableReply: with the reason :data:`EMPTY_REPLY`, once the re-rolls run out.
+        EmptyReply: once the re-rolls run out, its reason the last reply's
+            (:class:`UnusableReply`).
     """
     if max_empty_retries is None:
         max_empty_retries = settings.LLM_EMPTY_CONTENT_RETRIES
@@ -488,8 +509,8 @@ def _answered(
             return response
         attempt += 1
         if attempt > max_empty_retries:
-            raise UnusableReply(
-                EMPTY_REPLY,
+            raise EmptyReply(
+                _why(response, EMPTY_REPLY),
                 f"The model returned empty text after {attempt} attempt(s). For a "
                 "reasoning model this usually means thinking consumed the response — "
                 "try a no-thinking config, a higher max_tokens, or raising "
@@ -500,6 +521,12 @@ def _answered(
 
 def _content(response: Any) -> str:
     return response.choices[0].message.content or ""
+
+
+def _why(response: Any, otherwise: str) -> str:
+    """Why ``response`` is unusable: :data:`CUT_OFF` when it stopped at the model's
+    output limit, else ``otherwise``."""
+    return CUT_OFF if response.choices[0].finish_reason == _LENGTH_LIMIT else otherwise
 
 
 def _read(response: Any, schema: type[BaseModel] | None) -> str | BaseModel:
@@ -543,26 +570,26 @@ def send_until_valid(
     :func:`litellm_chat_completion` does, and one still empty is not sent again.
 
     Raises:
-        UnusableReply: when a reply is still empty after its re-rolls
-            (:data:`EMPTY_REPLY`), or the last send's does not fit ``schema``:
-            :data:`CUT_OFF` if its ``finish_reason`` is ``length``, else
-            :data:`SCHEMA_ERROR`, raised from the validator's ``ValidationError``.
+        EmptyReply: when a reply is still empty after its re-rolls.
+        UnfitReply: when the last send's reply does not fit ``schema``, its ``error``
+            the validator's ``ValidationError``, which this raised in its place before
+            r3con skipped unusable replies.
+        ValueError: if ``max_attempts`` is below 1.
     """
-
-    def send(text: str, attempt: int) -> Any:
-        return _answered(
+    text = user_prompt
+    for attempt in range(1, max_attempts + 1):
+        response = _answered(
             system_prompt=system_prompt,
             user_prompt=text,
             schema=schema,
             kind=kind if attempt == 1 else f"{kind}-retry-{attempt - 1}",
             **llm_call,
         )
-
-    text = user_prompt
-    for attempt in range(1, max_attempts):
         try:
-            return _read(send(text, attempt), schema)
+            return _read(response, schema)
         except ValidationError as e:
+            if attempt == max_attempts:
+                raise UnfitReply(_why(response, SCHEMA_ERROR), e) from e
             error = f"{type(e).__name__}: {e}"
             _log.warning(
                 "%s: sending again (%d/%d) after %s",
@@ -572,12 +599,7 @@ def send_until_valid(
                 error,
             )
             text = _retry_prompt(user_prompt, error, rewrite)
-    response = send(text, max_attempts)
-    try:
-        return _read(response, schema)
-    except ValidationError as e:
-        cut_off = response.choices[0].finish_reason == _LENGTH_LIMIT
-        raise UnusableReply(CUT_OFF if cut_off else SCHEMA_ERROR, str(e)) from e
+    raise ValueError(f"max_attempts must be >= 1, got {max_attempts}.")
 
 
 @contextlib.contextmanager

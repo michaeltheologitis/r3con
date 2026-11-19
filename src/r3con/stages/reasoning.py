@@ -67,8 +67,7 @@ from r3con.runtime.codeact import (
     run_codeact,
 )
 from r3con.runtime.llm import (
-    EMPTY_REPLY,
-    UnusableReply,
+    UnfitReply,
     count_tokens,
     schema_as_sent,
     send_until_valid,
@@ -451,16 +450,13 @@ def _reason_directly(
             "instead"
         )
         return {"cause": "refusal", "error": masked(str(refusal))}
-    except UnusableReply as unusable:
-        # An empty reply fails the run, as it always has; only an unfit one falls back.
-        if unusable.reason == EMPTY_REPLY:
-            raise
+    except UnfitReply as unfit:
         _log.warning(
             "reasoning's direct reply did not fit its schema in %d send(s); reasoning "
             "with code instead",
             max_attempts,
         )
-        return {"cause": "invalid", "error": one_line(unusable.__cause__ or unusable)}
+        return {"cause": "invalid", "error": one_line(unfit.error)}
     reply = cast(_DirectReply, reply)
     return ReasoningResult(
         answer=reply.answer.strip(),

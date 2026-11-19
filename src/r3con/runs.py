@@ -75,17 +75,12 @@ Layout per ``logs/<run-folder>/``:
   :attr:`r3con.pipeline.Answer.provenance` gives them, none when their call is not
   sent, fails or is cancelled: :func:`r3con.stages.claims.find_claims`) +
   ``calls.json`` + ``transcript.yaml``.
-- ``skipped.json`` — written when the run finishes: every relevance note and parse it
-  skipped, as its reply stayed unusable once its resends and re-rolls were spent,
-  ``[]`` for none, relevance's round by round in document order, then parsing's, each
-  ``{stage, round, doc_id, doc_name, part, reason, call, used_instead}``
-  (:class:`r3con.pipeline.Skip`): ``stage`` ``relevance`` or ``parsing``; ``round``
-  from 1, ``null`` for parsing; ``part`` the ``k`` of a part's snippet id
-  ``<id>.<k>``, ``null`` for a document read whole; ``reason`` ``output context
-  length`` (the last reply was cut off at the model's output limit), ``schema error``
-  or ``empty reply``; ``call`` the call's kind in its stage's ``calls.json``; and
-  ``used_instead`` ``kept its round-<k> note``, ``no note`` or ``no records``. A
-  resumed run's lists the skips from before the resume too.
+- ``skipped.json`` — written when the run finishes, for reading only: every relevance
+  note and parse it skipped, as its reply stayed unusable once its resends and
+  re-rolls were spent, ``[]`` for none, each a :class:`r3con.pipeline.Skip` as JSON,
+  in the order :attr:`r3con.pipeline.Answer.skipped` gives them, which a resumed
+  run's include from before the resume too. r3con reads none back: an ask builds its
+  run's skips from the stages' ``result.json``.
 - ``splits.json`` — only when a document was read in parts or splitting stopped
   (:mod:`r3con.splitting`): the model's window, and per document its cuts, the parts
   each call read, and every split and stop with its cause.

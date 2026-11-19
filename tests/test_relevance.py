@@ -22,12 +22,13 @@ from r3con.stages.relevance import (
     surface_relevance,
 )
 from tests.fakes import (
-    CutOff,
     Raw,
     bad_key,
     is_later_round,
     quote,
     quoting_its_first_line_and_citing_all_shown,
+    replying_when,
+    too_long,
 )
 
 MODEL = "openai/gpt-6-luna"
@@ -554,31 +555,37 @@ def unusable_in(round_: int, unusable, reading="DOC0"):
     ``reading`` in round ``round_``, its resends and re-rolls included, and of
     :func:`note_of_its_round` to every other."""
 
-    def reply(request):
+    def when(request) -> bool:
         text = request["messages"][1]["content"]
-        if text.startswith(reading) and round_of(request) == round_:
-            return unusable
-        return note_of_its_round(request)
+        return text.startswith(reading) and round_of(request) == round_
 
-    return reply
+    return replying_when(when, unusable, note_of_its_round)
 
 
-UNUSABLE = pytest.mark.parametrize(
-    ("unusable", "reason", "sends"),
-    [
-        (CutOff('{"summary": "N(DOC0,r2) and on and'), "output context length", 3),
-        (MALFORMED, "schema error", 3),
-        # One send, re-rolled 3 times, and not sent again with an error.
-        (Raw(""), "empty reply", 4),
-    ],
-    ids=["cut-off", "schema-error", "empty"],
-)
+def skip_warnings(caplog) -> list[str]:
+    return [message for message in caplog.messages if ": skipped: " in message]
+
+
 THREE = ["DOC0", "DOC1", "DOC2"]
 
 
-@UNUSABLE
+@pytest.mark.parametrize(
+    ("unusable", "reason", "error", "sends"),
+    [
+        (
+            Raw('{"summary": "N(DOC0,r2) and on and', "length"),
+            "output context length",
+            "ValidationError: Invalid JSON: EOF while parsing a string",
+            3,
+        ),
+        (MALFORMED, "schema error", "ValidationError: summary: Field required", 3),
+        # One send, re-rolled 3 times, and not sent again with an error.
+        (Raw(""), "empty reply", "EmptyReply: The model returned empty text", 4),
+    ],
+    ids=["cut-off", "schema-error", "empty"],
+)
 def test_a_last_round_note_whose_reply_stays_unusable_gives_way_to_its_earlier_one(
-    llm, caplog, unusable, reason, sends
+    llm, caplog, unusable, reason, error, sends
 ):
     caplog.set_level(logging.WARNING, logger="r3con.relevance")
     result = surface(llm, THREE, rounds=2, reply=unusable_in(2, unusable))
@@ -591,7 +598,28 @@ def test_a_last_round_note_whose_reply_stays_unusable_gives_way_to_its_earlier_o
     assert result.note_rounds == {IDS[0]: 1, IDS[1]: 2, IDS[2]: 2}
     assert result.pruned == frozenset()
     assert len([r for r in sends_of(llm, "DOC0") if round_of(r) == 2]) == sends
-    assert f"relevance-r2-d0: skipped: {reason}" in caplog.messages
+    [warning] = skip_warnings(caplog)
+    assert warning.startswith(f"relevance-r2-d0: skipped: {reason}: {error}")
+
+
+def test_a_skipped_part_is_logged_once_though_a_refusal_discards_it_and_reads_again(
+    llm, caplog, window
+):
+    caplog.set_level(logging.WARNING, logger="r3con.relevance")
+    second_half = LONG[LONG.index("P10. ") :]
+
+    def reply(request):
+        text = request["messages"][1]["content"]
+        if text in (LONG, second_half):
+            raise too_long(READ_IN_HALVES, len(text), QWEN)
+        return MALFORMED if text.startswith("P0.") else note_of_its_round(request)
+
+    # A window this wide splits only on a refusal, and never stops for the prompt.
+    model = window(1_000_000)
+    result = surface(llm, ["DOC0", LONG], rounds=1, model=model, reply=reply)
+    assert by_round(result, "skipped")[0][1] == ["schema error", None, None, None]
+    warning = "relevance-r1-d1c0: skipped: schema error: ValidationError: summary"
+    assert skip_warnings(caplog) == [f"{warning}: Field required"]
 
 
 @pytest.mark.parametrize(("rounds", "skipped_in"), [(2, 1), (3, 2)])

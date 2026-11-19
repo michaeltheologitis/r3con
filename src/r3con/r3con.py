@@ -188,9 +188,9 @@ def run(
         schema proposed for this question (``.schema_code``), where the artifacts
         were written (``.run_dir``), and what the run skipped (``.skipped``, each a
         :class:`~r3con.pipeline.Skip`): a relevance note or a parse whose reply stayed
-        unusable once its resends were spent, cut off at the model's output limit,
-        unfit for its schema or empty, which the run goes on without, never failing
-        for it; the run folder's ``skipped.json`` lists the same.
+        unusable once its resends were spent
+        (:class:`~r3con.runtime.llm.UnusableReply`), which the run goes on without,
+        never failing for it; the run folder's ``skipped.json`` lists the same.
 
     Raises:
         TypeError: if ``documents`` is not a mapping of names to strings or a sequence

@@ -29,8 +29,8 @@ from r3con.stages.structuring.parsing import SchemaError
 from r3con.stages.structuring.schema import no_fields_schema
 from tests.fakes import (
     ANSWERING,
+    MERROW_CUT_OFF,
     TWO_LINE_MEMOS,
-    CutOff,
     Raw,
     citable_lists,
     citing,
@@ -42,8 +42,8 @@ from tests.fakes import (
     quoting_its_first_line_and_citing_all_shown,
     reading,
     reading_in_round,
+    replying_when,
     silent_when,
-    unusable_when,
     without_trail,
 )
 
@@ -1230,7 +1230,7 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
 
 
 @pytest.mark.parametrize(
-    ("cap", "stage", "reply", "error"),
+    ("cap", "stage", "reply", "outcome"),
     [
         (
             "SCHEMA_MAX_ATTEMPTS",
@@ -1242,10 +1242,10 @@ def test_a_turn_cap_bounds_the_run_and_is_recorded(
     ],
 )
 def test_an_attempt_cap_set_in_settings_bounds_its_stage(
-    answering_llm, monkeypatch, cap, stage, reply, error
+    answering_llm, monkeypatch, cap, stage, reply, outcome
 ):
     monkeypatch.setattr(settings, cap, 2)
-    with error:
+    with outcome:
         answer(answering_llm.answers(**{stage: reply}), documents=DOCS[:1])
     assert len(answering_llm.requests_for(stage)) == 2
 
@@ -1331,16 +1331,12 @@ def test_a_relevance_attempt_cap_set_in_settings_bounds_its_resends(
     assert read_json(logger, "manifest")["settings"]["relevance_max_attempts"] == 2
 
 
-MERROW_LATE = reading("Merrow memo", later_round=True)
-CUT_OFF_NOTE = CutOff('{"summary": "Notes on Merrow memo and on and on and')
-
-
 def test_a_last_round_note_skipped_keeps_its_earlier_one_and_the_trail_leads_there(
     answering_llm, tmp_path
 ):
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(
-        relevance=unusable_when(MERROW_LATE, CUT_OFF_NOTE, ANSWERING["relevance"]),
+        relevance=MERROW_CUT_OFF,
         reasoning=citing("Merrow memo", summaries=slice(None)),
     )
     result = answer(llm, logger, documents=THREE)
@@ -1381,7 +1377,7 @@ def test_with_one_round_a_skipped_note_leaves_no_note_and_the_memo_is_parsed(
 ):
     no_summary = {"quotes": []}
     llm = answering_llm.answers(
-        relevance=unusable_when(
+        relevance=replying_when(
             reading("Merrow memo"), no_summary, ANSWERING["relevance"]
         )
     )
@@ -1402,7 +1398,7 @@ def test_a_skipped_parse_leaves_no_records_and_its_note_still_reaches_reasoning(
 ):
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(
-        parsing=unusable_when(reading("Merrow memo"), Raw(""), ANSWERING["parsing"])
+        parsing=replying_when(reading("Merrow memo"), Raw(""), ANSWERING["parsing"])
     )
     result = answer(llm, logger, documents=THREE)
     ids = result.document_ids
@@ -1434,8 +1430,8 @@ def test_each_skipped_part_names_the_call_its_stages_calls_record(
 
     logger = TaskLogger("run", root=tmp_path)
     llm = answering_llm.answers(
-        relevance=unusable_when(a_later_part, {"quotes": []}, ANSWERING["relevance"]),
-        parsing=unusable_when(a_later_part, {"rows": 7}, ANSWERING["parsing"]),
+        relevance=replying_when(a_later_part, {"quotes": []}, ANSWERING["relevance"]),
+        parsing=replying_when(a_later_part, {"rows": 7}, ANSWERING["parsing"]),
     )
     documents = memos_with(grown_registry(40_000))
     result = answer(llm.refuses_over(16_000), logger, documents=documents, model=QWEN)

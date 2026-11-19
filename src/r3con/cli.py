@@ -41,10 +41,12 @@ from r3con.logging_setup import configure_logging, get_logger
 from r3con.masking import masked, masked_values
 from r3con.pipeline import (
     ASKS_FOLDER,
+    PARSING_STAGE,
     Answer,
     Skip,
     ask_config,
     ask_pipeline,
+    first_few,
     read_representation,
     read_resume,
     refuse_masked,
@@ -348,14 +350,14 @@ def _report_skipped(result: Answer) -> None:
     folder lists it."""
     if not result.skipped:
         return
-    listed = ", ".join(map(_skipped, result.skipped))
+    listed = first_few([_describe(skip) for skip in result.skipped])
     where = "" if result.run_dir is None else f". See {result.run_dir / 'skipped.json'}"
     print(f"{len(result.skipped)} skipped: {listed}{where}", file=sys.stderr)
 
 
-def _skipped(skip: Skip) -> str:
+def _describe(skip: Skip) -> str:
     """``skip`` in a few words: which call it was, of which document, and why."""
-    call = "parsing" if skip.round is None else f"relevance round {skip.round}"
+    call = "parsing" if skip.stage == PARSING_STAGE else f"relevance round {skip.round}"
     part = "" if skip.part is None else f"part {skip.part} of "
     return f"{call} of {part}{skip.doc_name} ({skip.reason})"
 

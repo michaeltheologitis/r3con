@@ -9,7 +9,7 @@ from r3con import settings
 from r3con.config import REASONING_PATHS
 from r3con.runs import StageRun, TaskLogger
 from r3con.stages.reasoning import _sample_record_per_field, reason
-from tests.fakes import CutOff, citable_lists
+from tests.fakes import Raw, citable_lists
 
 MODEL = "openai/gpt-6-luna"
 PROMPTS = {"reasoning/direct": "v4", "reasoning/coding": "v4"}
@@ -377,7 +377,7 @@ def test_direct_replies_that_never_fit_go_to_the_coding_path_with_the_view_it_pi
 
 
 def test_direct_replies_cut_off_at_the_output_limit_go_to_the_coding_path(llm):
-    cut_off = CutOff('{"answer": "Halloran and Merrow and Merrow and')
+    cut_off = Raw('{"answer": "Halloran and Merrow and Merrow and', "length")
     result = ask(llm, cut_off, cut_off, cut_off, citing("coding"))
     assert (result.answer, result.path) == ("ok", "coding")
     assert result.fallback is not None and result.fallback["cause"] == "invalid"

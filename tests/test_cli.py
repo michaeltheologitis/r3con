@@ -31,15 +31,16 @@ from r3con.runs import run_lock
 from tests.fakes import (
     ANSWERING,
     KEYRING_FILE,
-    CutOff,
+    Raw,
     a_parse_citation_short,
     bad_key,
     failing_once,
+    first_line,
     in_json,
     predating_resume,
     reading,
     reading_moved_prompts,
-    unusable_when,
+    replying_when,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -47,6 +48,8 @@ MEMOS = REPO / "examples" / "memos"
 ANSWER = "; ".join(memo.splitlines()[0] for memo in read_documents(MEMOS).values())
 RIVERSIDE = "MEMO — Riverside site, Q3 operations review"
 EASTFIELD = "MEMO — Eastfield site, Q3 operations review"
+NORTHGATE = "MEMO — Northgate site, Q3 operations review"
+CAFETERIA = "MEMO — Cafeteria refurbishment, phase 2"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
 KEY = "not-a-real-key-q7RkT2mXv9LpA4sW"
 GATEWAY = "https://gateway.example"
@@ -120,13 +123,23 @@ def test_a_run_prints_the_answer_alone_on_stdout(answering, capsys):
     assert (path_after("artifacts: ", err) / "manifest.json").is_file()
 
 
-def test_a_run_that_skipped_says_what_in_one_line_after_the_answer(answering, capsys):
+def skipping(llm, *unparsed: str) -> None:
+    """``llm`` answering as ``answering`` does, but cutting off the Riverside memo's
+    note in round 2, and failing the schema in each parse of the ``unparsed`` memos."""
+    cut_off = Raw('{"summary": "Riverside logged and logged and', "length")
     riverside_late = reading(RIVERSIDE, later_round=True)
-    cut_off = CutOff('{"summary": "Riverside logged and logged and')
-    answering.answers(
-        relevance=unusable_when(riverside_late, cut_off, ANSWERING["relevance"]),
-        parsing=unusable_when(reading(EASTFIELD), {"rows": 7}, ANSWERING["parsing"]),
+    llm.answers(
+        relevance=replying_when(riverside_late, cut_off, ANSWERING["relevance"]),
+        parsing=replying_when(
+            lambda request: first_line(request) in unparsed,
+            {"rows": 7},
+            ANSWERING["parsing"],
+        ),
     )
+
+
+def test_a_run_that_skipped_says_what_in_one_line_after_the_answer(answering, capsys):
+    skipping(answering, EASTFIELD)
     assert r3con("run", "Who?", str(MEMOS)) == 0
     out, err = capsys.readouterr()
     assert out == f"{ANSWER.replace(f'{EASTFIELD}; ', '')}\n"
@@ -136,6 +149,18 @@ def test_a_run_that_skipped_says_what_in_one_line_after_the_answer(answering, ca
         f"parsing of 02_eastfield.txt (schema error). See {run_dir / 'skipped.json'}"
     )
     assert len(json.loads((run_dir / "skipped.json").read_text())) == 2
+
+
+def test_the_skip_line_names_the_first_three_and_counts_the_rest(answering, capsys):
+    skipping(answering, NORTHGATE, EASTFIELD, CAFETERIA)
+    assert r3con("run", "Who?", str(MEMOS)) == 0
+    err = capsys.readouterr().err
+    run_dir = path_after("artifacts: ", err)
+    assert err.splitlines()[-1] == (
+        "4 skipped: relevance round 2 of 03_riverside.txt (output context length), "
+        "parsing of 01_northgate.txt (schema error), parsing of 02_eastfield.txt "
+        f"(schema error) and 1 more. See {run_dir / 'skipped.json'}"
+    )
 
 
 def test_a_run_that_skipped_nothing_says_nothing_of_skips(answering, capsys):

@@ -30,9 +30,9 @@ from tests.fakes import (
     ANSWERING,
     ANSWERING_SCHEMA,
     FINGERPRINT,
+    MERROW_CUT_OFF,
     TWO_LINE_MEMOS,
     USAGE,
-    CutOff,
     Raw,
     a_parse_citation_short,
     asks_for_quotes,
@@ -50,11 +50,11 @@ from tests.fakes import (
     reading,
     reading_in_round,
     reading_moved_prompts,
+    replying_when,
     silent_when,
     snippets_without_quotes,
     stage_of,
     the_runs_own_files,
-    unusable_when,
     without_trail,
 )
 
@@ -2500,14 +2500,6 @@ def test_a_folder_resume_cannot_carry_on_is_refused_before_any_request_or_write(
     assert the_runs_own_files(run_dir) == before
 
 
-MERROW_LATE = reading("Merrow memo", later_round=True)
-MERROW_CUT_OFF = unusable_when(
-    MERROW_LATE,
-    CutOff('{"summary": "Notes on Merrow memo and on and on and'),
-    ANSWERING["relevance"],
-)
-
-
 def skipped_json(run_dir: Path) -> list[dict[str, Any]]:
     return json.loads((run_dir / "skipped.json").read_text())
 
@@ -2539,7 +2531,7 @@ def test_skipped_json_lists_the_skips_from_before_a_resume_and_after_it(
     def calder_or_easton(request) -> bool:
         return first_line(request) in ("Calder memo", "Easton memo")
 
-    parsing = unusable_when(calder_or_easton, Raw(""), ANSWERING["parsing"])
+    parsing = replying_when(calder_or_easton, Raw(""), ANSWERING["parsing"])
     llm = answering_llm.answers(parsing=failing_once(reading("Dunmore memo"), parsing))
     run_dir = failed_run(llm, tmp_path)
     answer, requests = resumed(llm, run_dir)
@@ -2556,15 +2548,52 @@ def test_skipped_json_lists_the_skips_from_before_a_resume_and_after_it(
     assert skipped_json(run_dir) == [asdict(skip) for skip in answer.skipped]
 
 
-def test_an_ask_carries_its_runs_skips_and_none_over_a_run_from_before_skipping(
+CALDER_UNPARSED = replying_when(reading("Calder memo"), Raw(""), ANSWERING["parsing"])
+
+
+def test_an_ask_carries_the_skips_its_runs_results_hold(answering_llm, tmp_path):
+    llm = answering_llm.answers(relevance=MERROW_CUT_OFF, parsing=CALDER_UNPARSED)
+    answer = finished_run(llm, tmp_path, MEMOS_BY_NAME)
+    assert [(s.stage, s.doc_name) for s in answer.skipped] == [
+        ("relevance", "memos/merrow.txt"),
+        ("parsing", "memos/calder.txt"),
+    ]
+    assert ask(answer, "Who else?", completion=llm).skipped == answer.skipped
+
+
+def test_an_ask_over_a_run_stopped_in_reasoning_carries_its_skips(
     answering_llm, tmp_path
 ):
-    llm = answering_llm.answers(relevance=MERROW_CUT_OFF)
-    answer = finished_run(llm, tmp_path, MEMOS_BY_NAME)
-    assert [skip.doc_name for skip in answer.skipped] == ["memos/merrow.txt"]
-    assert ask(answer, "Who else?", completion=llm).skipped == answer.skipped
-    (answer.run_dir / "skipped.json").unlink()
-    assert ask(answer, "Who else?", completion=llm).skipped == []
+    llm = answering_llm.answers(
+        relevance=MERROW_CUT_OFF, parsing=CALDER_UNPARSED, reasoning=bad_key()
+    )
+    run_dir = failed_run(llm, tmp_path)
+    assert not (run_dir / "skipped.json").exists()
+    llm.answers(reasoning=ANSWERING["reasoning"])
+    asked = ask(run_dir, "Who else?", completion=llm)
+    assert [(s.stage, s.round, s.doc_name, s.used_instead) for s in asked.skipped] == [
+        ("relevance", 2, "memos/merrow.txt", "kept its round-1 note"),
+        ("parsing", None, "memos/calder.txt", "no records"),
+    ]
+
+
+def without_skipped(result: dict) -> None:
+    """A stage's ``result.json`` as r3con wrote it before it skipped."""
+    result.pop("skipped", None)
+    for round_ in result.get("rounds", []):
+        for snippet in round_["snippets"]:
+            del snippet["skipped"]
+
+
+@pytest.mark.parametrize(
+    "stage", ["relevance/result.json", "structuring/parsing/result.json"]
+)
+def test_an_ask_over_a_run_from_before_skipping_carries_no_skips(
+    answering_llm, tmp_path, stage
+):
+    answer = finished_run(answering_llm, tmp_path, MEMOS_BY_NAME)
+    in_json(stage, without_skipped)(answer.run_dir)
+    assert ask(answer, "Who else?", completion=answering_llm).skipped == []
 
 
 def test_a_finished_run_is_not_resumed_but_asked(answering_llm, tmp_path):

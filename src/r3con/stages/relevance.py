@@ -69,6 +69,7 @@ kept for inspection and for the answer's trail back through them
 
 from __future__ import annotations
 
+import logging
 import random
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -84,14 +85,15 @@ from r3con.parallel import parallel_map
 from r3con.prompts import load_prompt
 from r3con.quotes import Quote, locate_quotes
 from r3con.runs import Emit, StageRun, no_events
-from r3con.runtime.llm import UnusableReply
+from r3con.runtime.llm import UnusableReply, error_line
 from r3con.settings import active_doc_workers
-from r3con.splitting import Splits
+from r3con.splitting import Splits, call_kind
 from r3con.stages.citing import (
     CitingRequest,
     citing_schema,
     lenient_list,
     read_citing,
+    read_or_skip,
 )
 
 _log = get_logger("relevance")
@@ -197,25 +199,25 @@ class RelevantContext:
         """Each document's notes in the relevant context, each with its round."""
         if not self.records:
             return []
+        k = self.context_round
         return [
-            [self._kept(d, p) for p in range(len(parts))]
-            for d, parts in enumerate(self.records[self.context_round - 1])
+            [self._kept(k, d, p) for p in range(len(parts))]
+            for d, parts in enumerate(self.records[k - 1])
         ]
 
-    def _kept(self, d: int, p: int) -> tuple[int, SnippetRecord]:
-        """Part ``p`` of document ``d``'s note in the relevant context, and its round,
-        as :attr:`note_rounds` says."""
-        k = self.context_round
+    def _kept(self, k: int, d: int, p: int) -> tuple[int, SnippetRecord]:
+        """Part ``p`` of document ``d``'s note in the relevant context, round ``k``'s,
+        and its round, as :attr:`note_rounds` says. An earlier round that read the
+        document in as many parts read the same spans, since a document's cuts only
+        ever accumulate (:mod:`r3con.splitting`)."""
         parts = self.records[k - 1][d]
-        earlier = (
-            (j, self.records[j - 1][d][p])
-            for j in range(k - 1, 0, -1)
-            if len(self.records[j - 1][d]) == len(parts)
-        )
-        kept = next(((j, note) for j, note in earlier if note.skipped is None), None)
-        if parts[p].skipped is None or kept is None or not kept[1].summary:
+        if parts[p].skipped is None:
             return k, parts[p]
-        return kept
+        for j in range(k - 1, 0, -1):
+            earlier = self.records[j - 1][d]
+            if len(earlier) == len(parts) and earlier[p].skipped is None:
+                return (j, earlier[p]) if earlier[p].summary else (k, parts[p])
+        return k, parts[p]
 
 
 def _pruned(round_: Sequence[Sequence[SnippetRecord]]) -> frozenset[int]:
@@ -247,6 +249,28 @@ def part_ids(document_id: str, n_parts: int) -> list[str]:
     if n_parts == 1:
         return [document_id]
     return [f"{document_id}.{k}" for k in range(1, n_parts + 1)]
+
+
+def part_number(p: int, n_parts: int) -> int | None:
+    """The number of part ``p``, from 0, of a document read in ``n_parts``: the ``k``
+    of its snippet id ``<id>.<k>`` (:func:`part_ids`), or ``None`` for a document read
+    whole."""
+    return None if n_parts == 1 else p + 1
+
+
+def warn_of_skips(
+    log: logging.Logger, call: str, doc: int, skips: Sequence[UnusableReply | None]
+) -> None:
+    """Warn on ``log`` of each part of document ``doc`` that ``call`` skipped, once its
+    parts are final, ``skips`` holding each part's
+    :class:`~r3con.runtime.llm.UnusableReply`, or ``None``: by the part's call, as
+    ``calls.json`` names it, with why and the last error on one line."""
+    for p, unusable in enumerate(skips):
+        if unusable is not None:
+            kind = call_kind(call, doc, part_number(p, len(skips)))
+            log.warning(
+                "%s: skipped: %s: %s", kind, unusable.reason, error_line(unusable)
+            )
 
 
 def join_parts(snippet: Snippet) -> str:
@@ -393,31 +417,17 @@ def _read(
     return summary, getattr(reply, "quotes", []) if summary else [], provenance
 
 
-def _read_or_skip(
-    request: CitingRequest, part: str, *, kind: str, **read: Any
-) -> tuple[str, list[str], list[str], str | None]:
-    """``part`` read as :func:`_read` reads it, and ``None``; or, when its reply stays
-    unusable, nothing, and why, with a warning that the note is skipped."""
-    try:
-        return *_read(request, part, kind=kind, **read), None
-    except UnusableReply as unusable:
-        _log.warning("%s: skipped: %s", kind, unusable.reason)
-        return "", [], [], unusable.reason
-
-
 def _report_snippets(
     emit: Emit, round_: int, document_id: str, records: list[SnippetRecord]
 ) -> None:
     """Emit ``relevance_finished`` for each of a document's final ``records`` in round
-    ``round_``, its ``part`` the ``k`` of the record's id ``<id>.<k>``, or ``None`` for
-    a document read whole."""
-    for record in records:
-        k = record.id.partition(".")[2]
+    ``round_``, its ``part`` as :func:`part_number` gives it."""
+    for p, record in enumerate(records):
         emit(
             "relevance_finished",
             round=round_,
             doc_id=document_id,
-            part=int(k) if k else None,
+            part=part_number(p, len(records)),
             summary=record.summary,
             quotes=record.quotes,
             provenance=record.provenance,
@@ -536,9 +546,9 @@ def surface_relevance(
     nothing.
 
     A part whose reply stays unusable (:class:`~r3con.runtime.llm.UnusableReply`) is
-    skipped, as the module says: logged as ``<kind>: skipped: <reason>``, its record
-    empty with the reason in :attr:`SnippetRecord.skipped`. Any other exception
-    raised by a call passes through.
+    skipped, as the module says, its record empty with the reason in
+    :attr:`SnippetRecord.skipped`, and logged once its document's parts are final
+    (:func:`warn_of_skips`). Any other exception raised by a call passes through.
 
     ``emit`` reports ``relevance_started`` before each document is read in a round, and
     ``relevance_finished`` for each of its final parts once it is read; once a round
@@ -603,7 +613,9 @@ def surface_relevance(
                 call=relevance_call(round_idx),
                 rest=request.system_prompt,
                 schema=request.schema,
-                send=lambda part, kind: _read_or_skip(
+                send=lambda part, kind: read_or_skip(
+                    ("", [], []),
+                    _read,
                     request,
                     part,
                     kind=kind,
@@ -620,12 +632,14 @@ def surface_relevance(
                     summary=summary,
                     quotes=locate_quotes(quotes, part, start),
                     provenance=provenance,
-                    skipped=skipped,
+                    skipped=None if unusable is None else unusable.reason,
                 )
-                for id_, part, start, (summary, quotes, provenance, skipped) in zip(
+                for id_, part, start, ((summary, quotes, provenance), unusable) in zip(
                     ids, reader.parts(i), reader.starts(i), replies, strict=True
                 )
             ]
+            skips = [unusable for _, unusable in replies]
+            warn_of_skips(_log, relevance_call(round_idx), i, skips)
             _report_snippets(emit, round_idx, document_ids[i], records)
             return records
 

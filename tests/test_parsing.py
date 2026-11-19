@@ -9,15 +9,17 @@ import pytest
 from pydantic import ValidationError
 
 from r3con.runs import StageRun, TaskLogger
-from r3con.runtime.llm import UnusableReply
+from r3con.runtime.llm import UnfitReply
 from r3con.splitting import Splits
 from r3con.stages.structuring.parsing import (
+    Parsed,
     SchemaError,
+    SkippedPart,
     check_schema,
     parse_documents,
     parse_one_document,
 )
-from tests.fakes import CutOff, Raw
+from tests.fakes import Raw, replying_when
 
 MODEL = "openai/gpt-6-luna"
 QWEN = "hosted_vllm/Qwen/Qwen3.5-35B-A3B"
@@ -457,7 +459,7 @@ def test_a_document_that_parses_first_time_is_sent_once_as_it_is(llm):
 
 def test_a_document_that_never_validates_stops_after_max_attempts(llm):
     llm.answers(parsing={"rows": "not-a-list"})
-    with pytest.raises(UnusableReply, match="rows") as unusable:
+    with pytest.raises(UnfitReply, match="rows") as unusable:
         parse_one(llm, max_attempts=3)
     assert unusable.value.reason == "schema error"
     assert len(llm.requests) == 3
@@ -683,24 +685,32 @@ def test_one_documents_failure_is_raised_from_the_whole_parse(llm):
 def unusable_for(text: str, unusable, otherwise=a_row_named_by_the_first_word):
     """A parse reply of ``unusable`` to each send of the document or part that starts
     with ``text``, resends and re-rolls included, and of ``otherwise`` to the rest."""
-
-    def reply(request):
-        return unusable if parsed(request).startswith(text) else otherwise(request)
-
-    return reply
+    return replying_when(
+        lambda request: parsed(request).startswith(text), unusable, otherwise
+    )
 
 
 @pytest.mark.parametrize(
-    ("unusable", "reason", "sends"),
+    ("unusable", "reason", "error", "sends"),
     [
-        (CutOff('{"parse": {"rows": [{"who": "Be'), "output context length", 3),
-        ({"rows": "not-a-list"}, "schema error", 3),
-        (Raw(""), "empty reply", 4),
+        (
+            Raw('{"parse": {"rows": [{"who": "Be', "length"),
+            "output context length",
+            "ValidationError: Invalid JSON: EOF while parsing a string",
+            3,
+        ),
+        (
+            {"rows": "not-a-list"},
+            "schema error",
+            "ValidationError: parse.rows: Input should be a valid array",
+            3,
+        ),
+        (Raw(""), "empty reply", "EmptyReply: The model returned empty text", 4),
     ],
     ids=["cut-off", "schema-error", "empty"],
 )
 def test_a_document_whose_reply_stays_unusable_is_skipped_with_no_records(
-    llm, caplog, unusable, reason, sends
+    llm, caplog, unusable, reason, error, sends
 ):
     caplog.set_level(logging.WARNING, logger="r3con.structuring.parsing")
     events = []
@@ -716,7 +726,8 @@ def test_a_document_whose_reply_stays_unusable_is_skipped_with_no_records(
     assert finished[IDS[1]]["skipped"] == [{"part": None, "reason": reason}]
     assert (finished[IDS[1]]["n_records"], finished[IDS[0]]["skipped"]) == (0, [])
     assert sum(parsed(r).startswith(DOCS[1]) for r in llm.requests) == sends
-    assert f"parse-d1: skipped: {reason}" in caplog.messages
+    [warning] = [message for message in caplog.messages if ": skipped: " in message]
+    assert warning.startswith(f"parse-d1: skipped: {reason}: {error}")
 
 
 def test_a_part_whose_reply_stays_unusable_is_skipped_and_its_other_part_kept(llm):
@@ -728,7 +739,8 @@ def test_a_part_whose_reply_stays_unusable_is_skipped_and_its_other_part_kept(ll
 
 
 def test_a_saved_parse_keeps_its_skipped_parts_and_is_not_parsed_again(llm):
-    saved = {1: (Parse(rows=[]), [], [{"part": None, "reason": "empty reply"}])}
+    skipped = [SkippedPart(part=None, reason="empty reply")]
+    saved = {1: Parsed(Parse(rows=[]), [], skipped)}
     llm.answers(parsing=a_row_named_by_the_first_word)
     result = parse_all(llm, DOCS, saved=saved)
     assert result.skipped == [[], [{"part": None, "reason": "empty reply"}], []]
