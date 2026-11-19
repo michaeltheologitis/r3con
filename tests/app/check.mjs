@@ -590,13 +590,18 @@ function popup(page) {
   });
 }
 
-// Drags the open popup by its header so its top left lands on `target`, and returns where it is then.
-async function dragPopupTo(page, target) {
+// Drags popup `selector` by its header so its top left lands on `target`.
+async function dragByHeader(page, selector, target) {
   // Unrounded, so the drag's own rounding is the only one.
-  const exact = await rect(page, '#inspector');
-  const head = await rect(page, '#inspector .insp-head');
+  const exact = await rect(page, selector);
+  const head = await rect(page, `${selector} .insp-head`);
   const grab = { x: head.left + HEADER_GRAB_PX, y: head.top + head.height / 2 };
   await drag(page, grab, { x: grab.x + target.left - exact.left, y: grab.y + target.top - exact.top });
+}
+
+// Drags the open popup by its header so its top left lands on `target`, and returns where it is then.
+async function dragPopupTo(page, target) {
+  await dragByHeader(page, '#inspector', target);
   return popup(page);
 }
 
@@ -4105,7 +4110,7 @@ function claimNote() {
   const lit = document.querySelector('.transcript:not([hidden]) .claim.lit')?.getBoundingClientRect();
   const box = note.getBoundingClientRect();
   return {
-    line: note.querySelector('.k').textContent,
+    line: note.querySelector('.insp-title').textContent,
     groups: [...note.querySelectorAll('.quoted')].map((g) => [g.querySelector('.quoted-name').textContent, ...[...g.querySelectorAll('.sentence, .doc-summary')].map((el) => el.textContent)]),
     name: note.getAttribute('aria-label'),
     focused: note.contains(document.activeElement),
@@ -4138,6 +4143,8 @@ const CLAIM_NOTE_MIN_PX = 120;
 // How far the chat is scrolled, and the window narrowed, with a sentence's popup open.
 const SCROLL_BY_PX = 20;
 const NARROWED_BY_PX = 240;
+// Where a sentence's popup is dropped: over the panel, clear of the chat.
+const CLAIM_DROP = { left: 200, top: 60 };
 
 // Hovers the shown chat's first linked sentence, then moves away; what the panel lit then, and once restored.
 async function hoverClaim(page) {
@@ -4170,6 +4177,19 @@ function claimNoteBoxes() {
   const rounded = (r) => Object.fromEntries(['left', 'top', 'right', 'bottom', 'height'].map((k) => [k, Math.round(r[k])]));
   return { note: rounded(note.getBoundingClientRect()), sentence: rounded(lit.getBoundingClientRect()), view: innerHeight };
 }
+
+// In-page: the open sentence popup's header: its title, and its button's text and name; null while closed.
+function claimHead() {
+  const head = document.querySelector('#claim-note:popover-open .insp-head');
+  const button = head?.querySelector('button');
+  return head && { title: head.querySelector('.insp-title').textContent, button: button.textContent, name: button.getAttribute('aria-label') };
+}
+
+// In-page: which linked sentence has the focus, by its index; null if none.
+const focusedClaim = () => document.activeElement.closest('.claim')?.dataset.claim ?? null;
+
+// Whether a sentence's popup sits as it opens: CLAIM_NOTE_GAP under its sentence, or over it.
+const placedFresh = (b) => Boolean(b) && (b.note.top - b.sentence.bottom === CLAIM_NOTE_GAP || b.sentence.top - b.note.bottom === CLAIM_NOTE_GAP);
 
 // Opens the first linked sentence's popup from the keyboard, the chat scrolled as it is.
 async function openClaimByKey(page) {
@@ -4388,6 +4408,84 @@ async function claimsArea() {
     const tall = boxes && boxes.sentence.top < 0 && boxes.sentence.bottom > boxes.view;
     const inView = boxes && boxes.note.top >= 0 && boxes.note.bottom <= boxes.view && boxes.note.height >= CLAIM_NOTE_MIN_PX;
     check('claims', `a sentence taller than the window opens its popup in view, at least ${CLAIM_NOTE_MIN_PX}px tall`, tall && inView, JSON.stringify(boxes));
+  });
+
+  // The claim cut in two after its comma, each half with all its evidence: two linked sentences in one answer.
+  const withTwoClaims = withClaims(([c]) => {
+    const cut = Array.from(c.text).indexOf(',') + 1;
+    return [{ ...c, text: codePoints(c.text, 0, cut), end: c.start + cut }, { ...c, text: codePoints(c.text, cut + 1), start: c.start + cut + 1 }];
+  });
+  await withPage('claims', { layout: short, before: serving(withTwoClaims) }, async (page) => {
+    const sentence = (k) => page.locator(`${CHAT} .claim`).nth(k);
+    await sentence(0).click();
+    const head = await page.evaluate(claimHead);
+    await page.keyboard.press('Tab');
+    const reached = await page.evaluate(() => document.activeElement.matches('#claim-note .insp-head button:focus-visible'));
+    const headName = "a sentence's popup has a node popup's header: its evidence line as its title, and an esc button named close, which Tab reaches";
+    check('claims', headName, isDeepStrictEqual(head, { title: evidence, button: 'esc', name: 'close' }) && reached, JSON.stringify({ head, reached }));
+
+    // Each closes it, and Enter on the sentence, which has the focus back, opens it again.
+    const closings = { 'Enter on its esc': () => page.keyboard.press('Enter'), 'a click on its esc': () => page.click('#claim-note .insp-head button'), Escape: () => page.keyboard.press('Escape') };
+    const closed = {};
+    for (const [how, close] of Object.entries(closings)) {
+      await close();
+      closed[how] = { note: await page.evaluate(claimNote), focus: await page.evaluate(focusedClaim) };
+      await page.keyboard.press('Enter');
+    }
+    const closedName = 'its esc, pressed or clicked, and Escape each close it, giving the focus back to its sentence';
+    check('claims', closedName, Object.values(closed).every((c) => isDeepStrictEqual(c, { note: null, focus: '0' })), JSON.stringify(closed));
+
+    const panel = await rect(page, '#panel');
+    await page.mouse.click(panel.left + BLANK_INSET_PX, panel.top + BLANK_INSET_PX);
+    const afterBlank = (await page.evaluate(claimNote)) !== null;
+    await clickNode(page, 'r2-1');
+    const afterNode = { note: (await page.evaluate(claimNote)) !== null, node: (await popup(page))?.title };
+    await page.keyboard.press('Escape');
+    const afterEscape = { note: (await page.evaluate(claimNote)) !== null, node: (await popup(page))?.title };
+    await page.keyboard.press('Escape');
+    const elsewhereName = "a click elsewhere, on the panel or on a node, leaves it open, as it leaves a node's popup open; Escape closes it first, then the node's";
+    check('claims', elsewhereName, afterBlank && afterNode.note && Boolean(afterNode.node) && isDeepStrictEqual(afterEscape, { note: false, node: afterNode.node }), JSON.stringify({ afterBlank, afterNode, afterEscape }));
+
+    await sentence(0).click();
+    await dragByHeader(page, '#claim-note', CLAIM_DROP);
+    const dropped = await page.evaluate(claimNoteBoxes);
+    await page.$eval(CHAT, (chat, by) => (chat.scrollTop += by), SCROLL_BY_PX);
+    await nextFrame(page);
+    const scrolled = await page.evaluate(claimNoteBoxes);
+    await page.setViewportSize({ width: SHORT_DESKTOP.width - NARROWED_BY_PX, height: SHORT_DESKTOP.height });
+    await nextFrame(page);
+    const narrowed = await page.evaluate(claimNoteBoxes);
+    const stayed = [dropped, scrolled, narrowed].every((b) => b?.note.left === CLAIM_DROP.left && b.note.top === CLAIM_DROP.top);
+    const sentenceMoved = scrolled?.sentence.top === dropped?.sentence.top - SCROLL_BY_PX && narrowed?.sentence.left === scrolled?.sentence.left - NARROWED_BY_PX;
+    const droppedName = "dragging its header moves it, and it stays where it was dropped as the chat scrolls and the window narrows";
+    check('claims', droppedName, stayed && sentenceMoved, JSON.stringify({ dropped, scrolled, narrowed }));
+
+    const view = page.viewportSize();
+    await dragByHeader(page, '#claim-note', { left: view.width, top: view.height });
+    const edge = await page.evaluate(claimNoteBoxes);
+    const inside = edge?.note.right === view.width - POPOVER_MARGIN_PX && edge.note.bottom === view.height - POPOVER_MARGIN_PX;
+    check('claims', `dragged past the window's corner, it stops ${POPOVER_MARGIN_PX}px inside it`, inside, JSON.stringify(edge));
+
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Enter');
+    const reopened = await page.evaluate(claimNoteBoxes);
+    await dragByHeader(page, '#claim-note', CLAIM_DROP);
+    await sentence(1).click();
+    const other = await page.evaluate(claimNoteBoxes);
+    const freshName = 'opening its sentence again once it is closed, or another sentence, places it fresh, under or over that sentence';
+    check('claims', freshName, placedFresh(reopened) && placedFresh(other) && other.sentence.top !== reopened.sentence.top, JSON.stringify({ reopened, other }));
+
+    // Each takes the sentence out of view; the chat and the first tab are shown again before the next.
+    const leavings = { 'showing the files': '#tab-files', 'a new tab': '#new-tab-btn', 'a replay': '#replay-btn' };
+    const left = {};
+    for (const [how, selector] of Object.entries(leavings)) {
+      await page.click('.run-tab');
+      await page.click('#tab-chat');
+      await sentence(0).click();
+      await page.click(selector);
+      left[how] = await page.evaluate(claimNote);
+    }
+    check('claims', 'showing the files, a new tab or a replay closes it, its sentence gone from view', Object.values(left).every((note) => note === null), JSON.stringify(left));
   });
 
   // The claim stripped of its evidence, then none, then none at all, as an answer saved before r3con linked them.

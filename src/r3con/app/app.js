@@ -2217,7 +2217,7 @@
 
   /**
    * @type {{ tabs: Tab[], shown: Tab, streams: Set<Stream>,
-   *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
+   *   selected: string | null, hovered: string | null, droppedAt: Map<HTMLElement, Offset> }}
    */
   const state = {
     // Every tab, in order; init lists the first, the shown tab: empty, or in the prototype the sample memos, which its
@@ -2229,7 +2229,8 @@
     streams: new Set(),
     selected: null,
     hovered: null,
-    inspectorDroppedAt: null,
+    // Where each popup was dragged to by its header; a sentence's popup forgets it each time it opens.
+    droppedAt: new Map(),
   };
 
   // The recorded replay needs the whole sample set.
@@ -4797,6 +4798,12 @@
     box.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
   }
 
+  // A popup's header: its title, and an esc button that closes it; dragging the header moves the popup.
+  /** @param {Child} title @param {Props} close the esc button's own attributes, its onclick among them */
+  function popupHead(title, close) {
+    return h('div', { class: 'insp-head' }, h('div', { class: 'insp-title' }, title), h('button', { class: 'btn', type: 'button', ...close }, 'esc'));
+  }
+
   /** @param {TextRange | null} [at] a sentence to show, if the popup is a document's */
   function renderInspector(at = null) {
     const id = state.selected;
@@ -4804,16 +4811,8 @@
     const [kind] = splitId(id);
     inspector.setAttribute('aria-label', nodeName(state.shown, id));
     inspector.classList.toggle('wide', kind === 'schema' || kind === 'parsed');
-    fill(
-      inspector,
-      h(
-        'div',
-        { class: 'insp-head' },
-        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)),
-        h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
-      ),
-      inspectorBody(id, at),
-    );
+    const title = [h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)];
+    fill(inspector, popupHead(title, { id: 'inspector-close', onclick: () => closeInspector(true) }), inspectorBody(id, at));
     positionInspector();
     /** @type {HTMLElement | null} */
     const flashed = inspector.querySelector('.flash');
@@ -4847,7 +4846,8 @@
   function positionInspector() {
     const { view } = state.shown;
     if (inspector.hidden) return;
-    if (state.inspectorDroppedAt) return placeInspector(state.inspectorDroppedAt);
+    const dropped = state.droppedAt.get(inspector);
+    if (dropped) return placePopup(inspector, dropped);
     const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     if (!node) return;
     const w = inspector.offsetWidth;
@@ -4856,15 +4856,17 @@
     const cy = view.y + node.y * view.k;
     let left = cx + halfW + POPOVER_GAP;
     if (left + w > panel.clientWidth - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
-    placeInspector({ left, top: cy - iconHalf(node.kind) * view.k - 6 });
+    placePopup(inspector, { left, top: cy - iconHalf(node.kind) * view.k - 6 });
   }
 
-  /** @param {Offset} offset */
-  function placeInspector({ left, top }) {
-    const maxLeft = panel.clientWidth - inspector.offsetWidth - POPOVER_MARGIN;
-    const maxTop = panel.clientHeight - inspector.offsetHeight - POPOVER_MARGIN;
-    inspector.style.left = `${clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft))}px`;
-    inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
+  // At `left`, `top`, kept POPOVER_MARGIN inside what holds the popup: the panel, or for one in the top layer the window.
+  /** @param {HTMLElement} popup @param {Offset} offset */
+  function placePopup(popup, { left, top }) {
+    const { clientWidth, clientHeight } = popup.offsetParent ?? root;
+    const maxLeft = clientWidth - popup.offsetWidth - POPOVER_MARGIN;
+    const maxTop = clientHeight - popup.offsetHeight - POPOVER_MARGIN;
+    popup.style.left = `${clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft))}px`;
+    popup.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
   /** @param {string} id @param {TextRange | null} [at] */
@@ -5532,20 +5534,33 @@
     const groups = link.sentences.length
       ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
       : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
-    fill(note, h('div', { class: 'k' }, evidenceLine(link)), groups);
+    fill(note, popupHead(evidenceLine(link), { 'aria-label': 'close', onclick: closeClaim }), groups);
     note.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
     if (note.matches(':popover-open')) note.hidePopover();
     note.showPopover();
     setClaim('open', ref);
+    state.droppedAt.delete(note);
     placeClaimNote();
     note.focus({ preventScroll: true });
   }
 
-  // Under its sentence if it fits there, else over it, else on the roomier side, scrolling; always in view.
+  // Gives the focus back to the sentence if the popup held it, which a manual popover doesn't do on its own.
+  function closeClaim() {
+    const note = $('claim-note');
+    if (!note.matches(':popover-open')) return;
+    const had = note.contains(document.activeElement);
+    note.hidePopover();
+    if (had) litClaims.open?.el.focus({ preventScroll: true });
+  }
+
+  // Under its sentence if it fits there, else over it, else on the roomier side, scrolling; always in view. Once
+  // dragged, it stays where it was dropped.
   function placeClaimNote() {
     const note = $('claim-note');
     const ref = litClaims.open;
     if (!ref || !note.matches(':popover-open')) return;
+    const dropped = state.droppedAt.get(note);
+    if (dropped) return placePopup(note, dropped);
     note.style.maxHeight = '';
     const box = ref.el.getBoundingClientRect();
     const below = box.bottom + CLAIM_NOTE_GAP;
@@ -5957,6 +5972,7 @@
     cancelTimers(tab);
     clearPanel(tab);
     fadeFaint(tab, tab.run.docs.length);
+    closeClaim();
     tab.turn.replaceChildren();
     tab.userMoved = false;
     const narr = (tab.narr = narrator(tab, tab.turn, 'starting'));
@@ -6108,6 +6124,7 @@
     // A drawing taken out of the page mid-animation never hears the animation end.
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
+    closeClaim();
     endGesture();
     state.hovered = null;
     state.shown.chat.hidden = true;
@@ -6184,6 +6201,7 @@
       $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
       $(`${tab}-pane`).hidden = tab !== name;
     }
+    if (name !== 'chat') closeClaim();
     revealChat(state.shown);
   }
 
@@ -7128,25 +7146,28 @@
     state.shown.userMoved = true;
   }
 
-  const inspectorGrab = { x: 0, y: 0, left: 0, top: 0 };
+  const popupGrab = { x: 0, y: 0, left: 0, top: 0 };
 
   /** @param {PointerEvent} e */
-  function onInspectorGrab(e) {
+  function onPopupGrab(e) {
+    const popup = /** @type {HTMLElement} */ (e.currentTarget);
     if (!targetOf(e).closest('.insp-head') || targetOf(e).closest('button')) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    Object.assign(inspectorGrab, { x: e.clientX, y: e.clientY, left: inspector.offsetLeft, top: inspector.offsetTop });
-    inspector.setPointerCapture(e.pointerId);
+    Object.assign(popupGrab, { x: e.clientX, y: e.clientY, left: popup.offsetLeft, top: popup.offsetTop });
+    popup.setPointerCapture(e.pointerId);
   }
 
   /** @param {PointerEvent} e */
-  function onInspectorMove(e) {
-    if (!inspector.hasPointerCapture(e.pointerId)) return;
-    const dx = e.clientX - inspectorGrab.x;
-    const dy = e.clientY - inspectorGrab.y;
-    if (!inspector.classList.contains('moving') && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-    inspector.classList.add('moving');
-    state.inspectorDroppedAt = { left: inspectorGrab.left + dx, top: inspectorGrab.top + dy };
-    placeInspector(state.inspectorDroppedAt);
+  function onPopupMove(e) {
+    const popup = /** @type {HTMLElement} */ (e.currentTarget);
+    if (!popup.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - popupGrab.x;
+    const dy = e.clientY - popupGrab.y;
+    if (!popup.classList.contains('moving') && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    popup.classList.add('moving');
+    const dropped = { left: popupGrab.left + dx, top: popupGrab.top + dy };
+    state.droppedAt.set(popup, dropped);
+    placePopup(popup, dropped);
   }
 
   /** @param {Event} e */
@@ -7239,9 +7260,11 @@
     panel.addEventListener('pointerup', onPointerEnd);
     panel.addEventListener('pointercancel', onPointerEnd);
     panel.addEventListener('wheel', onWheel, { passive: false });
-    inspector.addEventListener('pointerdown', onInspectorGrab);
-    inspector.addEventListener('pointermove', onInspectorMove);
-    inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
+    for (const popup of [inspector, $('claim-note')]) {
+      popup.addEventListener('pointerdown', onPopupGrab);
+      popup.addEventListener('pointermove', onPopupMove);
+      popup.addEventListener('lostpointercapture', () => popup.classList.remove('moving'));
+    }
     resizer.addEventListener('pointerdown', onResizerGrab);
     resizer.addEventListener('pointermove', onResizerMove);
     resizer.addEventListener('lostpointercapture', onResizerDrop);
@@ -7283,9 +7306,10 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      // The platform closes an open popover on this same Escape.
-      if (e.key !== 'Escape' || document.querySelector(':popover-open')) return;
-      if (!inspector.hidden) closeInspector(true);
+      // The platform closes an open popover on this same Escape, but for a sentence's, which is manual.
+      if (e.key !== 'Escape' || document.querySelector(':popover-open:not(#claim-note)')) return;
+      if ($('claim-note').matches(':popover-open')) closeClaim();
+      else if (!inspector.hidden) closeInspector(true);
       else if (!$('file-view').hidden) closeFile();
     });
 
@@ -7323,7 +7347,7 @@
     $('chat-pane').addEventListener('focusin', onClaimFocus);
     $('chat-pane').addEventListener('focusout', onClaimFocus);
     // A quote or a document's name opens the document's popup, so the sentence's own popup closes first.
-    $('claim-note').addEventListener('click', (e) => targetOf(e).closest('button') && $('claim-note').hidePopover(), true);
+    $('claim-note').addEventListener('click', (e) => targetOf(e).closest('.quoted button') && closeClaim(), true);
     $('claim-note').addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
     $('chat-pane').addEventListener('scroll', placeClaimNote, { capture: true, passive: true });
     window.addEventListener('resize', placeClaimNote);
