@@ -1799,7 +1799,8 @@
   const TREE_GAP = 3;
   // The folder is drawn this much larger than its markup, about the icon's centre.
   const FOLDER_SCALE = 1.3;
-  // An icon's 32 units, in a document node's pixels.
+  // An icon's 32 units, in a node's pixels and in a document node's.
+  const ICON_UNIT = ICON_PX / 32;
   const DOC_ICON_UNIT = DOC_ICON_PX / 32;
   // Each icon's left edge from its centre, by its markup: a page, a fold's dots, turned once open, and a folder.
   const PAGE_LEFT = (16 - 6.5 + DOC_ICON_STROKE / 2) * DOC_ICON_UNIT;
@@ -1808,13 +1809,10 @@
   const FOLDER_LEFT = 11.5 * FOLDER_SCALE * DOC_ICON_UNIT;
   // A folder's chevron is centred this far left of it, and a line into the folder stops as far left again.
   const CHEVRON_GAP = 8;
-  // A folded row's round or parse is a stack of its icon: copies behind the front one, each a step up and right in
-  // the icon's 32 units, and each cut out of those behind it by its own shape drawn this much wider.
+  // A stack's copies, the step up and right between them in icon units, and its back copy's rise in pixels.
   const STACK_COPIES = 3;
   const STACK_STEP = 3;
-  const STACK_HALO = 4.2;
-  // How far the back copy reaches up and right, in pixels: a stack's spinner moves out as far, to sit on its corner.
-  const STACK_RISE = ((STACK_COPIES - 1) * STACK_STEP * ICON_PX) / 32;
+  const STACK_RISE = (STACK_COPIES - 1) * STACK_STEP * ICON_UNIT;
   const FIT_MARGIN = 28;
   const WHEEL_ZOOM_RATE = 0.004;
   const WHEEL_LINE_PX = 16;
@@ -3136,15 +3134,14 @@
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
-  // A folded row's icon, stacked to say it stands for many: the front copy is the node's own icon, those behind plain.
   /** @param {StageKind} kind @param {boolean} settled */
   function stackIcon(kind, settled) {
     const plain = iconFor(kind, false);
     const copies = Array.from({ length: STACK_COPIES }, (_, i) => {
       const behind = STACK_COPIES - 1 - i;
       const step = behind * STACK_STEP;
-      const icon = behind ? plain : iconFor(kind, settled);
-      return `<g transform="translate(${step} ${-step})"><g class="stack-cut" stroke-width="${STACK_HALO}">${plain}</g>${icon}</g>`;
+      const cut = i ? `<g class="stack-cut">${plain}</g>` : '';
+      return `<g transform="translate(${step} ${-step})">${cut}${behind ? plain : iconFor(kind, settled)}</g>`;
     });
     return `<svg class="stack" viewBox="0 0 32 32" aria-hidden="true">${copies.join('')}</svg>`;
   }
@@ -3377,7 +3374,9 @@
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = MARK;
     });
-    if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = (node.fold ? stackIcon : iconFor)('parsed', true);
+    const icon = /** @type {Element} */ (node.el.querySelector('.icon'));
+    // A fold's parse may have been drawn settled already, when its node was made.
+    if (node.kind === 'parsed' && !empty && !failed && !icon.querySelector('.ink')) icon.innerHTML = node.fold ? stackIcon('parsed', true) : iconFor('parsed', true);
     if (!node.fold) {
       showSkips(node, tab.run && !failed ? skipsAt(tab.run, node.id) : []);
       node.el.setAttribute('aria-label', ariaName(tab, node));
@@ -4010,11 +4009,12 @@
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {FoldRow} row @param {Point} pos @param {boolean} enter */
   function createFoldNode(tab, id, kind, row, pos, enter) {
     const head = kind === 'doc';
+    const { working, failed, empty } = foldCalls(tab, kind, foldDocs(row));
     const chevron = `left: calc(50% - ${FOLDER_LEFT + CHEVRON_GAP}px)`;
     const el = h(
       'div',
       { class: ['node', row.folder ? 'folder' : 'fold', kind, enter && animates(tab) && 'enter'].filter(Boolean).join(' '), tabindex: '0', role: 'button', 'data-id': id },
-      h('span', { class: 'icon', html: !head ? stackIcon(kind, false) : row.folder ? ICONS.folder : ICONS.fold }),
+      h('span', { class: 'icon', html: !head ? stackIcon(kind, !working && !failed && !empty) : row.folder ? ICONS.folder : ICONS.fold }),
       head && row.folder ? h('span', { class: 'chevron', style: chevron, html: ICONS.chevron }) : null,
       h('span', { class: 'spin', 'aria-hidden': 'true', style: !head && `translate: ${STACK_RISE}px ${-STACK_RISE}px` }, MARK),
       h('span', { class: 'label name' }),
@@ -4088,20 +4088,27 @@
   }
 
   // A fold's node is working while any of its calls is, stopped if any stopped, and empty only if each came back
-  // empty. A node drawn as it stands already isn't drawn again, so that its open popup isn't built again.
+  // empty, or none has started.
+  /** @param {Tab} tab @param {NodeKind} kind @param {number[]} docs */
+  function foldCalls(tab, kind, docs) {
+    const fold = foldingOf(tab);
+    const calls = docs.map((d) => fold.calls.get(callId(fold, kind, d)));
+    const failed = calls.includes('failed');
+    const back = (/** @type {number} */ d, /** @type {number} */ k) => calls[k] !== 'done' || isVoid(runTab(tab).run, `${kind}-${d}`);
+    const working = calls.includes('working');
+    return { started: calls.some(Boolean), working, failed, empty: !working && !failed && kind !== 'doc' && docs.every(back) };
+  }
+
+  // A node drawn as it stands already isn't drawn again, so that its open popup isn't built again.
   /** @param {Tab} tab @param {PanelNode} node @param {boolean} [fresh] */
   function paintNode(tab, node, fresh = false) {
-    const fold = foldingOf(tab);
     const docs = node.fold ? foldDocs(node.fold) : [/** @type {number} */ (docOf(tab, node.id))];
-    const calls = docs.map((d) => fold.calls.get(callId(fold, node.kind, d)));
+    const { started, working, failed, empty } = foldCalls(tab, node.kind, docs);
     const classes = node.el.classList;
-    if (calls.includes('working')) {
+    if (working) {
       classes.remove('void', 'failed');
       classes.add('working');
-    } else if (calls.some(Boolean)) {
-      const failed = calls.includes('failed');
-      const back = (/** @type {number} */ d, /** @type {number} */ k) => calls[k] !== 'done' || isVoid(runTab(tab).run, `${node.kind}-${d}`);
-      const empty = !failed && node.kind !== 'doc' && docs.every(back);
+    } else if (started) {
       const changed = fresh || classes.contains('working') || classes.contains('void') !== empty || classes.contains('failed') !== failed;
       if (changed) drawSettled(tab, node, { empty, failed });
     }

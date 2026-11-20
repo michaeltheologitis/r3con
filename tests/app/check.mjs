@@ -1398,6 +1398,8 @@ async function beforeRun() {
 const FOLD_FROM_DOCS = 10;
 const CONTEXT_DOCS = 3;
 const FOLDED_FILES = 30;
+// The page's STACK_RISE: a stack's back copy, and so its spinner, sit this far up and right of a single icon's.
+const STACK_RISE_PX = 5.25;
 const memoStem = (i) => `memo_${String(i).padStart(3, '0')}`;
 const memoNamed = (i) => memo(`${memoStem(i)}.txt`, `Memo ${i}.\n`);
 const memosFrom = (from, to) => Array.from({ length: to - from }, (_, i) => memoNamed(from + i));
@@ -1425,6 +1427,20 @@ function foldInk() {
   };
   const noFoldToken = getComputedStyle(document.documentElement).getPropertyValue('--fold') === '';
   return { dim, noFoldToken, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
+}
+
+// A file's round 1 and a fold's are both working.
+const bothSpinning = () => Boolean(document.querySelector('#world .node.r1.working:not(.fold, .folder)') && document.querySelector('#world .node.fold.r1.working'));
+
+// Where a working file's round-1 spinner starts, then a working fold's, each from its icon's centre, in the panel's units.
+function spinnersAt() {
+  const k = parseFloat(document.getElementById('world').style.getPropertyValue('--k'));
+  const from = (el) => {
+    const icon = el.querySelector('.icon').getBoundingClientRect();
+    const spin = el.querySelector('.spin').getBoundingClientRect();
+    return { x: (spin.left - icon.left - icon.width / 2) / k, y: (spin.top - icon.top - icon.height / 2) / k };
+  };
+  return ['#world .node.r1.working:not(.fold, .folder)', '#world .node.fold.r1.working'].map((selector) => from(document.querySelector(selector)));
 }
 
 const filesCounted = (page, n) => page.waitForFunction((k) => document.getElementById('files-count').textContent === String(k), n);
@@ -1631,8 +1647,7 @@ function folderLook(selector) {
   };
 }
 
-// A node's icon as drawn: how many copies of it, each one's stroke from back to front, and, in the panel's units, its
-// box's centre and its front copy's first shape, each from the node's point.
+// A node's icon copies, back to front, with their strokes and fills, and its box and front shape from its point.
 function iconCopies(selector) {
   const el = document.querySelector(selector);
   const world = document.getElementById('world');
@@ -1651,6 +1666,7 @@ function iconCopies(selector) {
   return {
     copies: copies.length,
     strokes: copies.map((copy) => getComputedStyle(copy.querySelector(SHAPE)).stroke),
+    fills: copies.map((copy) => copy.querySelectorAll('[class^="fill-"]').length),
     centre: fromPoint(icon.getBoundingClientRect()),
     front: fromPoint(copies.at(-1).querySelector(SHAPE).getBoundingClientRect()),
   };
@@ -1816,6 +1832,10 @@ async function folders() {
     const frontLit = litStacks.length >= 2 && litStacks.every((id) => isDeepStrictEqual(stacks[id].strokes, [dim, dim, accent]));
     const frontName = "on the trail through a closed folder, its round and parse stacks light only their front copy, in the accent; the two behind stay dim";
     check('folders', frontName, frontLit && litStacks.some((id) => id.startsWith('parsed-')), JSON.stringify({ accent, dim, lit: litStacks.map((id) => [id, stacks[id].strokes]) }));
+    const filledName = "a closed folder's settled parse fills its front copy's shapes in colour, as a file's does; the two copies behind stay unfilled";
+    const [behindFills, nextFills, frontFills] = stacks[letterStages[2]].fills;
+    const parseFills = Object.fromEntries(Object.entries(stacks).filter(([id]) => id.startsWith('parsed-')).map(([id, look]) => [id, look.fills]));
+    check('folders', filledName, frontFills > 0 && behindFills === 0 && nextFills === 0, JSON.stringify(parseFills));
     const near = (a, b) => ['x', 'y', 'width', 'height'].every((key) => Math.abs(a[key] - b[key]) <= ALIGNED_PX);
     const [memoRound, memoParse] = single;
     const [lettersRound, , lettersParse] = letterStages.map((id) => stacks[id]);
@@ -7011,6 +7031,11 @@ async function liveFolds(url, server) {
     const waiting = [ends[0], `${rest} files · reading…`, ends[1]].flat();
     const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
     check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
+    const spinning = await becomes(page, bothSpinning, null, LIVE_RUN_MS);
+    const [single, stacked] = spinning ? await page.evaluate(spinnersAt) : [];
+    const risen = spinning && Math.abs(stacked.x - single.x - STACK_RISE_PX) <= ALIGNED_PX && Math.abs(stacked.y - single.y + STACK_RISE_PX) <= ALIGNED_PX;
+    const spinName = `a working fold's spinner sits on its stack's corner: ${STACK_RISE_PX}px up and right of where a file's sits, as far as the stack's back copy is from its front`;
+    check('live', spinName, risen, JSON.stringify({ single, stacked }));
 
     server.release();
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
