@@ -428,8 +428,8 @@ p { margin: 0; }
 .inspector.wide { width: min(84ch, calc(100% - 20px)); }
 .inspector > .btn { align-self: flex-start; }
 .insp-head { display: flex; justify-content: space-between; align-items: baseline; gap: 2ch; }
-.inspector .insp-head { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
-.inspector.moving .insp-head { cursor: grabbing; }
+.grip { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+.moving > .grip { cursor: grabbing; }
 .insp-title { font-weight: 600; overflow-wrap: anywhere; }
 .insp-title .g { color: var(--fg); }
 .insp-title .g.accent { color: var(--accent); }
