@@ -7156,7 +7156,7 @@
   /** @param {PointerEvent} e */
   function onPopupGrab(e) {
     const popup = targetOf(e).closest('.grip')?.parentElement;
-    if (!popup || targetOf(e).closest('button')) return;
+    if (!popup || popupGrabs.has(popup) || targetOf(e).closest('button')) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     popupGrabs.set(popup, { x: e.clientX, y: e.clientY, left: popup.offsetLeft, top: popup.offsetTop });
     popup.setPointerCapture(e.pointerId);

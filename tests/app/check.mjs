@@ -4475,6 +4475,8 @@ async function claimsArea() {
 
     await sentence(0).click();
     const clickedAgain = await page.evaluate(claimNoteBoxes);
+    // The click gave the popup the focus, so the sentence takes it back before Enter.
+    await sentence(0).evaluate((el) => el.focus({ preventScroll: true }));
     await page.keyboard.press('Enter');
     const enteredAgain = await page.evaluate(claimNoteBoxes);
     const againName = 'clicking its own sentence again, or pressing Enter on it, leaves it where it was dropped';
@@ -4485,6 +4487,7 @@ async function claimsArea() {
     await nextFrame(page);
     const shorter = await page.evaluate(claimNoteBoxes);
     await page.setViewportSize({ width, height: SHORT_DESKTOP.height });
+    await nextFrame(page);
     const grown = dropped && anchored && dropped.note.height > anchored.note.height;
     const inside = shorter && shorter.note.top >= POPOVER_MARGIN_PX && shorter.note.bottom <= SHORTER_PX - POPOVER_MARGIN_PX;
     const capName = `dropped, it is no longer held to the room under its sentence: it grows, and in a window ${SHORTER_PX}px tall it stays inside`;
