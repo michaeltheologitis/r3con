@@ -230,7 +230,11 @@ p { margin: 0; }
 .node.enter { animation: node-in 0.35s ease-out; }
 .node.doc { --node-icon: var(--doc-icon-size); }
 .node .icon { width: var(--node-icon); height: var(--node-icon); color: var(--fg); transition: color 0.4s; }
-.node .icon svg { display: block; width: var(--node-icon); height: var(--node-icon); overflow: visible; }
+.node .icon > svg { display: block; width: var(--node-icon); height: var(--node-icon); }
+.node .icon svg { overflow: visible; }
+/* A stack's copies behind are dim; each copy is cut out of those behind it by its shape, filled and widened to its halo. */
+.stack > g:not(:last-child) { color: var(--dim); }
+.stack-cut * { fill: var(--panel); stroke: var(--panel); stroke-width: inherit; stroke-linecap: round; }
 .node .label { line-height: 1.5; background: var(--panel); }
 .node .spin { position: absolute; top: -0.7em; left: calc(50% + var(--node-icon) / 2 - 2px); color: var(--accent); display: none; }
 .node.working .spin { display: block; }

@@ -1808,6 +1808,13 @@
   const FOLDER_LEFT = 11.5 * FOLDER_SCALE * DOC_ICON_UNIT;
   // A folder's chevron is centred this far left of it, and a line into the folder stops as far left again.
   const CHEVRON_GAP = 8;
+  // A folded row's round or parse is a stack of its icon: copies behind the front one, each a step up and right in
+  // the icon's 32 units, and each cut out of those behind it by its own shape drawn this much wider.
+  const STACK_COPIES = 3;
+  const STACK_STEP = 3;
+  const STACK_HALO = 4.2;
+  // How far the back copy reaches up and right, in pixels: a stack's spinner moves out as far, to sit on its corner.
+  const STACK_RISE = ((STACK_COPIES - 1) * STACK_STEP * ICON_PX) / 32;
   const FIT_MARGIN = 28;
   const WHEEL_ZOOM_RATE = 0.004;
   const WHEEL_LINE_PX = 16;
@@ -3125,6 +3132,19 @@
     return ICONS.tree(kind === 'parsed' && settled);
   }
 
+  // A folded row's icon, stacked to say it stands for many: the front copy is the node's own icon, those behind plain.
+  /** @param {StageKind} kind @param {boolean} settled */
+  function stackIcon(kind, settled) {
+    const plain = iconFor(kind, false);
+    const copies = Array.from({ length: STACK_COPIES }, (_, i) => {
+      const behind = STACK_COPIES - 1 - i;
+      const step = behind * STACK_STEP;
+      const icon = behind ? plain : iconFor(kind, settled);
+      return `<g transform="translate(${step} ${-step})"><g class="stack-cut" stroke-width="${STACK_HALO}">${plain}</g>${icon}</g>`;
+    });
+    return `<svg class="stack" viewBox="0 0 32 32" aria-hidden="true">${copies.join('')}</svg>`;
+  }
+
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {LoadedFile | null} file */
   function nodeLabels(tab, id, kind, file) {
     if (kind === 'schema' || kind === 'answer') return [nodeName(tab, id)];
@@ -3353,7 +3373,7 @@
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = MARK;
     });
-    if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = iconFor('parsed', true);
+    if (node.kind === 'parsed' && !empty && !failed) /** @type {Element} */ (node.el.querySelector('.icon')).innerHTML = (node.fold ? stackIcon : iconFor)('parsed', true);
     if (!node.fold) {
       showSkips(node, tab.run && !failed ? skipsAt(tab.run, node.id) : []);
       node.el.setAttribute('aria-label', ariaName(tab, node));
@@ -3989,9 +4009,9 @@
     const el = h(
       'div',
       { class: ['node', row.folder ? 'folder' : 'fold', kind, enter && animates(tab) && 'enter'].filter(Boolean).join(' '), tabindex: '0', role: 'button', 'data-id': id },
-      h('span', { class: 'icon', html: !head ? iconFor(kind, false) : row.folder ? ICONS.folder : ICONS.fold }),
+      h('span', { class: 'icon', html: !head ? stackIcon(kind, false) : row.folder ? ICONS.folder : ICONS.fold }),
       head && row.folder ? h('span', { class: 'chevron', style: chevron, html: ICONS.chevron }) : null,
-      h('span', { class: 'spin', 'aria-hidden': 'true' }, MARK),
+      h('span', { class: 'spin', 'aria-hidden': 'true', style: !head && `translate: ${STACK_RISE}px ${-STACK_RISE}px` }, MARK),
       h('span', { class: 'label name' }),
       h('span', { class: 'label' }),
       head && row.folder ? h('span', { class: 'pill', hidden: true }) : null,

@@ -1626,6 +1626,31 @@ function folderLook(selector) {
   };
 }
 
+// A node's icon as drawn: how many copies of it, each one's stroke from back to front, and, in the panel's units, its
+// box's centre and its front copy's first shape, each from the node's point.
+function iconCopies(selector) {
+  const el = document.querySelector(selector);
+  const world = document.getElementById('world');
+  const k = parseFloat(world.style.getPropertyValue('--k'));
+  const origin = world.getBoundingClientRect();
+  const fromPoint = (box) => ({
+    x: (box.left + box.width / 2 - origin.left) / k - parseFloat(el.style.left),
+    y: (box.top + box.height / 2 - origin.top) / k - parseFloat(el.style.top),
+    width: box.width / k,
+    height: box.height / k,
+  });
+  const SHAPE = ':is(path, circle, rect)';
+  const icon = el.querySelector('.icon > svg');
+  const inside = [...icon.querySelectorAll('svg')].filter((svg) => !svg.closest('.stack-cut'));
+  const copies = inside.length ? inside : [icon];
+  return {
+    copies: copies.length,
+    strokes: copies.map((copy) => getComputedStyle(copy.querySelector(SHAPE)).stroke),
+    centre: fromPoint(icon.getBoundingClientRect()),
+    front: fromPoint(copies.at(-1).querySelector(SHAPE).getBoundingClientRect()),
+  };
+}
+
 // The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them.
 function standIns(id) {
   const index = id.slice('doc-'.length);
@@ -1767,6 +1792,32 @@ async function folders() {
     const [doc, parsed, , r2] = columns;
     const litThrough = isDeepStrictEqual(stand.onPath, [doc, parsed, r2]) && isDeepStrictEqual(stand.lit, [`${doc}>${r2}`, `${parsed}>answer-0`, `${r2}>answer-0`]);
     check('folders', standName, isDeepStrictEqual(stand.nodes, columns) && inside.length === 0 && one && stand.lines.length >= 3 && litThrough, JSON.stringify({ stand, inside }));
+
+    // Letters, closed, is on the trail; archive, open, holds a fold of its quiet files; memo is a file of its own.
+    const lettersId = await folderId(page, 'letters');
+    const stackIds = await page.$$eval('#world .node:is(.folder, .fold):not(.doc)', (els) => els.map((el) => el.dataset.id));
+    const stacks = Object.fromEntries(await Promise.all(stackIds.map(async (id) => [id, await page.evaluate(iconCopies, nodeSel(id))])));
+    const letterStages = ['r1', 'r2', 'parsed'].map((kind) => `${kind}-${lettersId.slice('doc-'.length)}`);
+    const inFold = await count(page, '#world .node.fold:not(.doc)');
+    const threeName = "a closed folder's round and parse nodes, and a fold's, each draw three copies of their icon, stacked to say they stand for many";
+    const threes = letterStages.every((id) => id in stacks) && inFold > 0 && Object.values(stacks).every((look) => look.copies === 3);
+    check('folders', threeName, threes, JSON.stringify(Object.fromEntries(Object.entries(stacks).map(([id, look]) => [id, look.copies]))));
+    const singles = ['#world .node.r1[aria-label^="memo,"]', '#world .node.parsed[aria-label^="memo,"]', '#world .node.schema', folderSel('reports'), '#world .node.fold.doc'];
+    const single = await Promise.all(singles.map((selector) => page.evaluate(iconCopies, selector)));
+    const oneName = "a file's own round and parse nodes, the structure, and a folder's or a fold's first node each still draw one icon";
+    check('folders', oneName, single.every((look) => look.copies === 1), single.map((look) => look.copies).join(' '));
+    const [accent, dim] = [await page.evaluate(tokenColour, '--accent'), await page.evaluate(tokenColour, '--dim')];
+    const litStacks = (await page.evaluate(standIns, lettersId)).onPath.filter((id) => id in stacks);
+    const frontLit = litStacks.length >= 2 && litStacks.every((id) => isDeepStrictEqual(stacks[id].strokes, [dim, dim, accent]));
+    const frontName = "on the trail through a closed folder, its round and parse stacks light only their front copy, in the accent; the two behind stay dim";
+    check('folders', frontName, frontLit && litStacks.some((id) => id.startsWith('parsed-')), JSON.stringify({ accent, dim, lit: litStacks.map((id) => [id, stacks[id].strokes]) }));
+    const near = (a, b) => ['x', 'y', 'width', 'height'].every((key) => Math.abs(a[key] - b[key]) <= ALIGNED_PX);
+    const [memoRound, memoParse] = single;
+    const [lettersRound, , lettersParse] = letterStages.map((id) => stacks[id]);
+    const centred = Object.values(stacks).every((look) => near(look.centre, memoRound.centre));
+    const inPlace = near(lettersRound.front, memoRound.front) && near(lettersParse.front, memoParse.front);
+    const placeName = "a stack's box is the single icon's, centred on its node's point, and its front copy is drawn where a file's own icon is, so its lines and labels stay put";
+    check('folders', placeName, centred && Math.abs(memoRound.centre.x) <= ALIGNED_PX && Math.abs(memoRound.centre.y) <= ALIGNED_PX && inPlace, JSON.stringify({ memo: [memoRound, memoParse], letters: [lettersRound, lettersParse] }));
 
     const archive = await page.evaluate(folderLook, folderSel('archive'));
     const memoOpacity = await page.$eval('#world .node.doc[aria-label^="memo.txt,"]', (el) => Number(getComputedStyle(el).opacity));
