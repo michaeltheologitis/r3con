@@ -1537,8 +1537,8 @@ const WIDTH_SLACK_PX = 0.01;
 const ZOOM_IN_DELTA = -300;
 const TREE_GEOMETRY = { indent: TREE_INDENT, aligned: ALIGNED_PX, onSpine: ON_SPINE_PX };
 const FOLDER_FILLS = {
-  light: { normal: ['#2f6f9f', '#6aaed6'], lit: ['#93442a', '#c15f3c'], unused: ['#8a8075', '#b8afa4'] },
-  dark: { normal: ['#2d6a96', '#5a9cc6'], lit: ['#a5523a', '#d77757'], unused: ['#5a534c', '#857c72'] },
+  light: { normal: ['#2f6f9f', '#6aaed6'], lit: ['#93442a', '#c15f3c'], claim: ['#1d4596', '#2459c8'], unused: ['#8a8075', '#b8afa4'] },
+  dark: { normal: ['#2d6a96', '#5a9cc6'], lit: ['#a5523a', '#d77757'], claim: ['#4f7fd9', '#7ea6ff'], unused: ['#5a534c', '#857c72'] },
 };
 const rgbOf = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(', ')})`;
 const fillsOf = (theme, state) => FOLDER_FILLS[theme][state].map(rgbOf);
@@ -4181,6 +4181,32 @@ function claimLight() {
   };
 }
 
+// In-page, with a sentence lit: how the panel paints its path over the trail. The looks, as opacity and stroke, of its
+// lines and of the trail's other lines; whether its lines are the heavier and the last in the page, so painted over the
+// rest; its nodes' icon colours; the trail's other nodes' looks, as opacity and icon colour; and the sentence's underline
+// and background in the chat.
+function claimPaint() {
+  const lines = [...document.querySelectorAll('#world .edge')];
+  const own = lines.filter((el) => el.classList.contains('on-claim'));
+  const rest = lines.filter((el) => el.classList.contains('lit') && !el.classList.contains('on-claim'));
+  const looks = (els, look) => [...new Set(els.map(look))];
+  const lineLook = (el) => `${getComputedStyle(el).opacity} ${getComputedStyle(el).stroke}`;
+  const width = (el) => parseFloat(getComputedStyle(el).strokeWidth);
+  const icon = (el) => getComputedStyle(el.querySelector('.icon')).color;
+  const others = [...document.querySelectorAll('#world .node.on-path:not(.on-claim)')];
+  const sentence = getComputedStyle(document.querySelector('.transcript:not([hidden]) .claim.lit'));
+  return {
+    own: looks(own, lineLook),
+    rest: looks(rest, lineLook),
+    heavier: own.length > 0 && Math.min(...own.map(width)) > Math.max(...rest.map(width)),
+    last: own.length > 0 && lines.slice(-own.length).every((el) => own.includes(el)),
+    icons: looks([...document.querySelectorAll('#world .node.on-claim')], icon),
+    others: others.length > 0 ? looks(others, (el) => `${getComputedStyle(el).opacity} ${icon(el)}`) : [],
+    underline: [sentence.textDecorationLine, sentence.textDecorationStyle, sentence.textDecorationThickness, sentence.textDecorationColor].join(' '),
+    background: sentence.backgroundColor,
+  };
+}
+
 // In-page: the open popup of a sentence's evidence: its line, each document's name then what it shows of it, its name,
 // whether it holds the focus, and whether it sits clear of the sentence; null while closed.
 function claimNote() {
@@ -4344,6 +4370,19 @@ async function claimsArea() {
     const leftName = 'leaving it restores the whole trail, and the pills count the trail again';
     check('claims', leftName, isDeepStrictEqual(left, restored) && isDeepStrictEqual(await litOnPanel(page), trail), JSON.stringify(left));
 
+    await page.hover(`${CHAT} .claim`);
+    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
+    const paint = await page.evaluate(claimPaint);
+    await page.mouse.move(0, 0);
+    await becomes(page, () => document.querySelector('#world .has-claim') === null);
+    const [accent, blue, tint] = await Promise.all(['--accent', '--claim', '--claim-mark'].map((token) => page.evaluate(tokenColour, token)));
+    const overName = "a hovered sentence's lines are drawn in the claim's blue, heavier and after every other line, so over the trail, whose other lines stay lit in the accent at full strength";
+    check('claims', overName, isDeepStrictEqual([paint.own, paint.rest], [[`1 ${blue}`], [`1 ${accent}`]]) && paint.heavier && paint.last, JSON.stringify(paint));
+    const iconsName = "its nodes' icons, the answer's mark among them, take the claim's blue, and the trail's other nodes keep their accent at full strength";
+    check('claims', iconsName, isDeepStrictEqual([paint.icons, paint.others], [[blue], [`1 ${accent}`]]), JSON.stringify(paint));
+    const sentenceName = "the hovered sentence is underlined solid, 2px, in the claim's blue, over the claim's tint";
+    check('claims', sentenceName, paint.underline === `underline solid 2px ${blue}` && paint.background === tint, `${paint.underline}; ${paint.background}`);
+
     await page.focus(ANSWER_MARK);
     await page.keyboard.press('Tab');
     const focused = await page.evaluate(() => ({ claim: document.activeElement.matches('.claim'), ring: document.activeElement.matches(':focus-visible') && getComputedStyle(document.activeElement).outlineStyle !== 'none' }));
@@ -4435,6 +4474,15 @@ async function claimsArea() {
     const lit = await pill();
     const counts = [SAMPLE_QUOTED.pills[3], SAMPLE_CLAIM_PILLS[3]].map(String);
     check('claims', "a closed folder's pill counts the lit sentence's quotes in it while it is lit, and the trail's otherwise", isDeepStrictEqual([onTrail, lit], counts), `${onTrail} → ${lit}`);
+
+    const index = (await folderId(page, 'registry')).slice('doc-'.length);
+    const look = await page.evaluate(folderLook, folderSel('registry'));
+    const stages = await page.$$eval('#world .node.on-claim:not(.doc)', (els, i) => els.map((el) => el.dataset.id).filter((id) => id.endsWith(`-${i}`)), index);
+    const stacks = await Promise.all(stages.map(async (id) => [id, (await page.evaluate(iconCopies, nodeSel(id))).strokes]));
+    const [dim, blue] = await Promise.all(['--dim', '--claim'].map((token) => page.evaluate(tokenColour, token)));
+    const blueName = "a closed folder on the lit sentence's path takes the claim's blue pair and counts its sources in that blue, and its round stacks on the path light only their front copy in it";
+    const stacked = stages.length >= 2 && stacks.every(([, strokes]) => isDeepStrictEqual(strokes, [dim, dim, blue]));
+    check('claims', blueName, isDeepStrictEqual(look.fills, fillsOf('light', 'claim')) && look.sources?.color === blue && stacked, JSON.stringify({ look, stacks }));
   });
 
   // The claim with a second copy of its first quote, cut short: the two overlap, so they are one sentence.

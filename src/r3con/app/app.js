@@ -196,7 +196,7 @@
    * @property {HTMLElement | null} turn
    * @property {(string | Node)[]} status
    * @property {HTMLElement} drawing
-   * @property {{ base: SVGGElement, mid: SVGGElement, lit: SVGGElement }} layers
+   * @property {{ base: SVGGElement, mid: SVGGElement, lit: SVGGElement, claim: SVGGElement }} layers
    * @property {HTMLElement} nodesEl
    * @property {Map<string, PanelNode>} nodes
    * @property {Map<string, PanelEdge>} edges
@@ -2173,13 +2173,13 @@
   /** @param {LoadedFile[]} files @param {View} [view] */
   function newTab(files, view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
-    const layers = { base: group(), mid: group(), lit: group() };
+    const layers = { base: group(), mid: group(), lit: group(), claim: group() };
     const tree = document.createElementNS(SVG_NS, 'path');
     tree.classList.add('tree-lines');
     const edges = document.createElementNS(SVG_NS, 'svg');
     edges.classList.add('edges');
     edges.setAttribute('aria-hidden', 'true');
-    edges.append(tree, layers.base, layers.mid, layers.lit);
+    edges.append(tree, layers.base, layers.mid, layers.lit, layers.claim);
     const nodesEl = h('div');
     const id = nextTab++;
     /** @type {Tab} */
@@ -3591,12 +3591,7 @@
       n.el.classList.toggle('on-path', nodes.has(id));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    for (const e of tab.edges.values()) {
-      const on = edges.has(e.key);
-      const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
-      e.el.classList.toggle('lit', on);
-      if (e.el.parentNode !== layer) layer.append(e.el);
-    }
+    for (const e of tab.edges.values()) e.el.classList.toggle('lit', edges.has(e.key));
     showTrail(tab);
     lightClaim(tab);
   }
@@ -3661,7 +3656,7 @@
   const litClaims = { hovered: null, focused: null, open: null };
 
   // Lights the path of the tab's hovered or focused sentence, or else of the one whose evidence is open, while its answer
-  // is the lit one: the rest of the trail dims, and each document, or closed folder, counts that sentence's quotes.
+  // is the lit one, over the trail; each document, or closed folder, counts that sentence's quotes.
   /** @param {RunTab} tab */
   function lightClaim(tab) {
     const { run, trail } = tab;
@@ -3674,7 +3669,13 @@
       n.el.classList.toggle('on-claim', nodes.has(id));
       if (n.fold?.folder && n.kind === 'doc') labelFold(tab, n);
     }
-    for (const e of tab.edges.values()) e.el.classList.toggle('on-claim', edges.has(e.key));
+    for (const e of tab.edges.values()) {
+      const on = edges.has(e.key);
+      e.el.classList.toggle('on-claim', on);
+      // SVG paints in page order: the sentence's lines go over the trail's, and the trail's over the rest.
+      const layer = on ? tab.layers.claim : e.el.classList.contains('lit') ? tab.layers.lit : layerFor(tab, e.kind);
+      if (e.el.parentNode !== layer) layer.append(e.el);
+    }
     for (const el of tab.chat.querySelectorAll('.claim')) el.classList.toggle('lit', el === claim?.el);
     run.docs.forEach((file, d) => {
       const node = tab.nodes.get(docId(file));
