@@ -1817,6 +1817,8 @@
   const CLAIM_NOTE_GAP = POPOVER_GAP / 2;
   const CLAIM_NOTE_MIN_PX = 120;
   const POPOVER_MARGIN = 10;
+  // A node's popup starts this far above its icon's top.
+  const INSPECTOR_ABOVE_ICON_PX = 6;
   const JUMP_MARGIN = 40;
   const GLIDE_MS = 350;
 
@@ -2107,6 +2109,7 @@
   const panel = $('panel');
   const world = $('world');
   const inspector = $('inspector');
+  const claimNote = $('claim-note');
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelAdd = $('model-add', HTMLInputElement);
@@ -2217,7 +2220,7 @@
 
   /**
    * @type {{ tabs: Tab[], shown: Tab, streams: Set<Stream>,
-   *   selected: string | null, hovered: string | null, inspectorDroppedAt: Offset | null }}
+   *   selected: string | null, hovered: string | null, droppedAt: Map<HTMLElement, Offset> }}
    */
   const state = {
     // Every tab, in order; init lists the first, the shown tab: empty, or in the prototype the sample memos, which its
@@ -2229,7 +2232,8 @@
     streams: new Set(),
     selected: null,
     hovered: null,
-    inspectorDroppedAt: null,
+    // Where each popup was dragged to by its header; a sentence's popup forgets it each time it opens.
+    droppedAt: new Map(),
   };
 
   // The recorded replay needs the whole sample set.
@@ -3695,6 +3699,7 @@
   // Only the lit answer draws faint lines from what it was shown; every answer keeps its cite lines.
   /** @param {RunTab} tab @param {string} id */
   function lightAnswer(tab, id) {
+    if (litClaims.open?.tab === tab && litClaims.open.answer !== id) closeClaim();
     refoldNow(tab);
     for (const e of [...tab.edges.values()]) {
       if (e.kind === 'context' && e.to !== id && splitId(e.to)[0] === 'answer') dropEdge(tab, e);
@@ -4797,6 +4802,12 @@
     box.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
   }
 
+  // Dragging a popup's header moves the popup.
+  /** @param {Child} title @param {() => void} onclose */
+  function popupHead(title, onclose) {
+    return h('div', { class: 'insp-head grip' }, h('div', { class: 'insp-title' }, title), h('button', { class: 'btn', type: 'button', 'aria-label': 'esc: close', onclick: onclose }, 'esc'));
+  }
+
   /** @param {TextRange | null} [at] a sentence to show, if the popup is a document's */
   function renderInspector(at = null) {
     const id = state.selected;
@@ -4804,16 +4815,8 @@
     const [kind] = splitId(id);
     inspector.setAttribute('aria-label', nodeName(state.shown, id));
     inspector.classList.toggle('wide', kind === 'schema' || kind === 'parsed');
-    fill(
-      inspector,
-      h(
-        'div',
-        { class: 'insp-head' },
-        h('div', { class: 'insp-title' }, h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)),
-        h('button', { class: 'btn', type: 'button', id: 'inspector-close', onclick: () => closeInspector(true) }, 'esc'),
-      ),
-      inspectorBody(id, at),
-    );
+    const title = [h('span', { class: kind === 'answer' ? 'g accent' : 'g' }, '● '), nodeName(state.shown, id)];
+    fill(inspector, popupHead(title, () => closeInspector(true)), inspectorBody(id, at));
     positionInspector();
     /** @type {HTMLElement | null} */
     const flashed = inspector.querySelector('.flash');
@@ -4847,7 +4850,8 @@
   function positionInspector() {
     const { view } = state.shown;
     if (inspector.hidden) return;
-    if (state.inspectorDroppedAt) return placeInspector(state.inspectorDroppedAt);
+    const dropped = state.droppedAt.get(inspector);
+    if (dropped) return placePopup(inspector, dropped);
     const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     if (!node) return;
     const w = inspector.offsetWidth;
@@ -4856,15 +4860,19 @@
     const cy = view.y + node.y * view.k;
     let left = cx + halfW + POPOVER_GAP;
     if (left + w > panel.clientWidth - POPOVER_MARGIN) left = cx - halfW - POPOVER_GAP - w;
-    placeInspector({ left, top: cy - iconHalf(node.kind) * view.k - 6 });
+    placePopup(inspector, { left, top: cy - iconHalf(node.kind) * view.k - INSPECTOR_ABOVE_ICON_PX });
   }
 
-  /** @param {Offset} offset */
-  function placeInspector({ left, top }) {
-    const maxLeft = panel.clientWidth - inspector.offsetWidth - POPOVER_MARGIN;
-    const maxTop = panel.clientHeight - inspector.offsetHeight - POPOVER_MARGIN;
-    inspector.style.left = `${clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft))}px`;
-    inspector.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
+  // At `left`, `top`, kept POPOVER_MARGIN inside what holds the popup: the panel, or for one in the top layer the window.
+  /** @param {HTMLElement} popup @param {Offset} offset */
+  function placePopup(popup, { left, top }) {
+    // Dropped, a sentence's popup is no longer held to the room by its sentence.
+    popup.style.maxHeight = '';
+    const { clientWidth, clientHeight } = popup.offsetParent ?? root;
+    const maxLeft = clientWidth - popup.offsetWidth - POPOVER_MARGIN;
+    const maxTop = clientHeight - popup.offsetHeight - POPOVER_MARGIN;
+    popup.style.left = `${clamp(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft))}px`;
+    popup.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
   /** @param {string} id @param {TextRange | null} [at] */
@@ -5523,39 +5531,49 @@
   // A sentence's evidence in a popup under it, by document: its quotes, or at the document level each one's summary.
   /** @param {ClaimRef} ref */
   function openClaim(ref) {
-    const note = $('claim-note');
     const { tab, link } = ref;
     const { run } = tab;
+    // The toggle event that clears litClaims.open comes a task after a close, so the popup says whether it is open.
+    if (!claimNote.matches(':popover-open') || litClaims.open?.el !== ref.el) state.droppedAt.delete(claimNote);
     if (run.lit !== ref.answer) lightAnswer(tab, ref.answer);
     /** @param {number} d */
     const sentences = (d) => link.sentences.filter((q) => q.document === d);
     const groups = link.sentences.length
       ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
       : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
-    fill(note, h('div', { class: 'k' }, evidenceLine(link)), groups);
-    note.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
-    if (note.matches(':popover-open')) note.hidePopover();
-    note.showPopover();
+    fill(claimNote, popupHead(evidenceLine(link), closeClaim), groups);
+    claimNote.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
+    if (claimNote.matches(':popover-open')) claimNote.hidePopover();
+    claimNote.showPopover();
     setClaim('open', ref);
     placeClaimNote();
-    note.focus({ preventScroll: true });
+    claimNote.focus({ preventScroll: true });
+  }
+
+  // Gives the focus back to the sentence if the popup held it, which a manual popover doesn't do on its own.
+  function closeClaim() {
+    if (!claimNote.matches(':popover-open')) return;
+    const had = claimNote.contains(document.activeElement);
+    claimNote.hidePopover();
+    if (had) litClaims.open?.el.focus({ preventScroll: true });
   }
 
   // Under its sentence if it fits there, else over it, else on the roomier side, scrolling; always in view.
   function placeClaimNote() {
-    const note = $('claim-note');
     const ref = litClaims.open;
-    if (!ref || !note.matches(':popover-open')) return;
-    note.style.maxHeight = '';
+    if (!ref || !claimNote.matches(':popover-open')) return;
+    const dropped = state.droppedAt.get(claimNote);
+    if (dropped) return placePopup(claimNote, dropped);
+    claimNote.style.maxHeight = '';
     const box = ref.el.getBoundingClientRect();
     const below = box.bottom + CLAIM_NOTE_GAP;
     const above = box.top - CLAIM_NOTE_GAP;
     const room = { below: innerHeight - POPOVER_MARGIN - below, above: above - POPOVER_MARGIN };
-    const under = note.offsetHeight <= room.below || (note.offsetHeight > room.above && room.below >= room.above);
-    note.style.maxHeight = `${Math.max(CLAIM_NOTE_MIN_PX, under ? room.below : room.above)}px`;
-    const top = under ? below : above - note.offsetHeight;
-    note.style.left = `${clamp(box.left, POPOVER_MARGIN, frame.getBoundingClientRect().right - note.offsetWidth)}px`;
-    note.style.top = `${clamp(top, POPOVER_MARGIN, innerHeight - POPOVER_MARGIN - note.offsetHeight)}px`;
+    const under = claimNote.offsetHeight <= room.below || (claimNote.offsetHeight > room.above && room.below >= room.above);
+    claimNote.style.maxHeight = `${Math.max(CLAIM_NOTE_MIN_PX, under ? room.below : room.above)}px`;
+    const top = under ? below : above - claimNote.offsetHeight;
+    claimNote.style.left = `${clamp(box.left, POPOVER_MARGIN, frame.getBoundingClientRect().right - claimNote.offsetWidth)}px`;
+    claimNote.style.top = `${clamp(top, POPOVER_MARGIN, innerHeight - POPOVER_MARGIN - claimNote.offsetHeight)}px`;
   }
 
   /** @param {RunTab} tab @param {Narrator} narr @param {number} round */
@@ -5957,6 +5975,7 @@
     cancelTimers(tab);
     clearPanel(tab);
     fadeFaint(tab, tab.run.docs.length);
+    closeClaim();
     tab.turn.replaceChildren();
     tab.userMoved = false;
     const narr = (tab.narr = narrator(tab, tab.turn, 'starting'));
@@ -6108,6 +6127,7 @@
     // A drawing taken out of the page mid-animation never hears the animation end.
     for (const el of state.shown.drawing.querySelectorAll('.enter, .draw, .fade')) endAnimation(el);
     closeInspector();
+    closeClaim();
     endGesture();
     state.hovered = null;
     state.shown.chat.hidden = true;
@@ -6184,6 +6204,7 @@
       $(`tab-${tab}`).setAttribute('aria-selected', String(tab === name));
       $(`${tab}-pane`).hidden = tab !== name;
     }
+    if (name !== 'chat') closeClaim();
     revealChat(state.shown);
   }
 
@@ -7128,25 +7149,36 @@
     state.shown.userMoved = true;
   }
 
-  const inspectorGrab = { x: 0, y: 0, left: 0, top: 0 };
+  // Where each popup being dragged was grabbed: the pointer, and the popup's own place.
+  /** @type {Map<Element, Offset & { x: number, y: number }>} */
+  const popupGrabs = new Map();
 
   /** @param {PointerEvent} e */
-  function onInspectorGrab(e) {
-    if (!targetOf(e).closest('.insp-head') || targetOf(e).closest('button')) return;
+  function onPopupGrab(e) {
+    const popup = targetOf(e).closest('.grip')?.parentElement;
+    if (!popup || popupGrabs.has(popup) || targetOf(e).closest('button')) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    Object.assign(inspectorGrab, { x: e.clientX, y: e.clientY, left: inspector.offsetLeft, top: inspector.offsetTop });
-    inspector.setPointerCapture(e.pointerId);
+    popupGrabs.set(popup, { x: e.clientX, y: e.clientY, left: popup.offsetLeft, top: popup.offsetTop });
+    popup.setPointerCapture(e.pointerId);
   }
 
   /** @param {PointerEvent} e */
-  function onInspectorMove(e) {
-    if (!inspector.hasPointerCapture(e.pointerId)) return;
-    const dx = e.clientX - inspectorGrab.x;
-    const dy = e.clientY - inspectorGrab.y;
-    if (!inspector.classList.contains('moving') && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
-    inspector.classList.add('moving');
-    state.inspectorDroppedAt = { left: inspectorGrab.left + dx, top: inspectorGrab.top + dy };
-    placeInspector(state.inspectorDroppedAt);
+  function onPopupMove(e) {
+    const popup = /** @type {HTMLElement} */ (e.target);
+    const grab = popupGrabs.get(popup);
+    if (!grab || !popup.hasPointerCapture(e.pointerId)) return;
+    const dx = e.clientX - grab.x;
+    const dy = e.clientY - grab.y;
+    if (!popup.classList.contains('moving') && Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+    popup.classList.add('moving');
+    const dropped = { left: grab.left + dx, top: grab.top + dy };
+    state.droppedAt.set(popup, dropped);
+    placePopup(popup, dropped);
+  }
+
+  /** @param {PointerEvent} e */
+  function onPopupDrop(e) {
+    if (popupGrabs.delete(targetOf(e))) targetOf(e).classList.remove('moving');
   }
 
   /** @param {Event} e */
@@ -7239,9 +7271,9 @@
     panel.addEventListener('pointerup', onPointerEnd);
     panel.addEventListener('pointercancel', onPointerEnd);
     panel.addEventListener('wheel', onWheel, { passive: false });
-    inspector.addEventListener('pointerdown', onInspectorGrab);
-    inspector.addEventListener('pointermove', onInspectorMove);
-    inspector.addEventListener('lostpointercapture', () => inspector.classList.remove('moving'));
+    document.addEventListener('pointerdown', onPopupGrab);
+    document.addEventListener('pointermove', onPopupMove);
+    document.addEventListener('lostpointercapture', onPopupDrop);
     resizer.addEventListener('pointerdown', onResizerGrab);
     resizer.addEventListener('pointermove', onResizerMove);
     resizer.addEventListener('lostpointercapture', onResizerDrop);
@@ -7283,9 +7315,10 @@
     });
 
     document.addEventListener('keydown', (e) => {
-      // The platform closes an open popover on this same Escape.
-      if (e.key !== 'Escape' || document.querySelector(':popover-open')) return;
-      if (!inspector.hidden) closeInspector(true);
+      // The platform closes an open popover on this same Escape, except a sentence's, which is manual.
+      if (e.key !== 'Escape' || document.querySelector(':popover-open:not(#claim-note)')) return;
+      if (claimNote.matches(':popover-open')) closeClaim();
+      else if (!inspector.hidden) closeInspector(true);
       else if (!$('file-view').hidden) closeFile();
     });
 
@@ -7323,8 +7356,8 @@
     $('chat-pane').addEventListener('focusin', onClaimFocus);
     $('chat-pane').addEventListener('focusout', onClaimFocus);
     // A quote or a document's name opens the document's popup, so the sentence's own popup closes first.
-    $('claim-note').addEventListener('click', (e) => targetOf(e).closest('button') && $('claim-note').hidePopover(), true);
-    $('claim-note').addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
+    claimNote.addEventListener('click', (e) => targetOf(e).closest('.quoted button') && closeClaim(), true);
+    claimNote.addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
     $('chat-pane').addEventListener('scroll', placeClaimNote, { capture: true, passive: true });
     window.addEventListener('resize', placeClaimNote);
     $('theme-btn').addEventListener('click', toggleTheme);
@@ -7414,6 +7447,8 @@
       positionInspector();
     }).observe(panel);
     new ResizeObserver(fitSideToFrame).observe(frame);
+    // Resizing the chat reflows its sentences.
+    new ResizeObserver(placeClaimNote).observe(side);
     new ResizeObserver(positionInspector).observe(inspector);
   }
 
