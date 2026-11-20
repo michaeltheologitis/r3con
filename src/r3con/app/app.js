@@ -3655,14 +3655,14 @@
     return drawn;
   }
 
-  /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null }} */
-  const litClaims = { hovered: null, focused: null, open: null };
+  /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null, inspected: ClaimRef | null }} */
+  const litClaims = { hovered: null, focused: null, open: null, inspected: null };
 
-  // Draws the lit sentence's path over the trail, restacks every line by what it is on, and counts that sentence's quotes.
+  // Draws the lit sentence's path over the trail, restacks every line by what it is on, and counts and marks its quotes.
   /** @param {RunTab} tab */
   function lightClaim(tab) {
     const { run, trail } = tab;
-    const claims = [litClaims.hovered, litClaims.focused, litClaims.open];
+    const claims = [litClaims.hovered, litClaims.focused, litClaims.open, litClaims.inspected];
     const claim = trail ? claims.find((c) => c?.tab === tab && c.el.isConnected && c.answer === run.lit) : null;
     tab.litLink = claim?.link ?? null;
     const { nodes, edges } = shownPath(tab, claim ? claimPath(run, claim.answer, claim.link) : null);
@@ -3684,11 +3684,15 @@
       const node = tab.nodes.get(docId(file));
       if (node) countSentences(tab, node, highlighted(tab, d));
     });
+    for (const { light } of trailPartsOf(tab)) light?.();
   }
 
   // How many sentences of document d the panel highlights: the lit sentence's quotes there, else the trail's.
   /** @param {Tab} tab @param {number} d */
-  const highlighted = (tab, d) => (tab.litLink ? tab.litLink.sentences.filter((q) => q.document === d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
+  const highlighted = (tab, d) => (tab.litLink ? quotesIn(tab.litLink, d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
+
+  /** @param {Link | null} link @param {number} d */
+  const quotesIn = (link, d) => link?.sentences.filter((q) => q.document === d) ?? [];
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
   function countSentences(tab, node, sentences) {
@@ -3704,24 +3708,36 @@
     pill.title = plural(sentences, 'highlighted sentence');
   }
 
-  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
+  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child, light?: () => void }>} */
   const trailParts = new Map();
 
   // Fills `el` from the tab's trail now, and again in place as the trail changes, so that what is open, scrolled or
   // focused in it stays.
-  /** @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw @returns {T} */
-  function trailPart(tab, el, draw) {
-    trailParts.set(el, { tab, draw });
+  /**
+   * @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw
+   * @param {() => void} [light] relights `el` in place as the lit sentence changes
+   * @returns {T}
+   */
+  function trailPart(tab, el, draw, light) {
+    trailParts.set(el, { tab, draw, light });
     fill(el, draw(tab.trail));
     return el;
   }
 
+  // A tab's trail parts still in the page; the rest go, so that closed popups' parts don't pile up.
   /** @param {Tab} tab */
-  function showTrail(tab) {
+  function trailPartsOf(tab) {
+    const parts = [];
     for (const [el, part] of trailParts) {
       if (!el.isConnected) trailParts.delete(el);
-      else if (part.tab === tab) fill(el, part.draw(tab.trail));
+      else if (part.tab === tab) parts.push({ el, ...part });
     }
+    return parts;
+  }
+
+  /** @param {Tab} tab */
+  function showTrail(tab) {
+    for (const { el, draw } of trailPartsOf(tab)) fill(el, draw(tab.trail));
     if (tab === state.shown) markFiles();
   }
 
@@ -4643,6 +4659,7 @@
   }
 
   // `text` from `from` to `to`, each span in `spans` marked, titled by `title`, and `at` flashed.
+  // Each mark keeps where it is in data-start and data-end, for lightQuotes.
   /**
    * @param {string} text @param {number} from @param {number} to @param {Span[]} spans @param {(span: Span) => string} title
    * @param {TextRange | null} at
@@ -4655,7 +4672,8 @@
       const flash = at && at.start <= cuts[i] && at.end >= end;
       if (!span && !flash) return text.slice(cuts[i], end);
       const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
-      return h(span ? 'mark' : 'span', { class: classes || null, title: span ? title(span) : null }, text.slice(cuts[i], end));
+      const props = { class: classes || null, title: span ? title(span) : null, 'data-start': span && cuts[i], 'data-end': span && end };
+      return h(span ? 'mark' : 'span', props, text.slice(cuts[i], end));
     });
   }
 
@@ -4665,8 +4683,9 @@
     const cut = cutOf(file.text);
     const past = at && at.end > cut ? at.start : null;
     let end = past === null ? cut : file.text.length;
+    const indexInRun = () => tab.run?.docs.indexOf(file) ?? -1;
     /** @param {Trail | null} trail */
-    const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
+    const quotedOf = (trail) => trail?.quoted[indexInRun()];
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
@@ -4680,15 +4699,26 @@
     /** @param {number} from @param {number} to */
     const block = (from, to) => {
       const { trail } = tab;
-      const spans = quotedOf(trail)?.spans ?? [];
-      return h('span', {}, markedText(file.text, from, to, spans, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at));
+      const d = indexInRun();
+      const spans = trail?.quoted[d]?.spans ?? [];
+      return lightQuotes(tab, h('span', {}, markedText(file.text, from, to, spans, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at)), d);
     };
     const blocks = textBlocks(pre, file.text, block, end, past);
     const openInFull = () => {
       end = file.text.length;
       blocks.open();
     };
-    return [meta, trailPart(tab, pre, () => [blocks.draw(), end < file.text.length && cutLine(pre, openInFull)])];
+    return [meta, trailPart(tab, pre, () => [blocks.draw(), end < file.text.length && cutLine(pre, openInFull)], () => lightQuotes(tab, pre, indexInRun()))];
+  }
+
+  /** @template {Element} T @param {Tab} tab @param {T} el @param {number} d @returns {T} */
+  function lightQuotes(tab, el, d) {
+    const quotes = quotesIn(tab.litLink, d);
+    for (const mark of el.querySelectorAll('mark')) {
+      const [start, end] = [Number(mark.dataset.start), Number(mark.dataset.end)];
+      mark.classList.toggle('on-claim', quotes.some((q) => q.start < end && q.end > start));
+    }
+    return el;
   }
 
   /** @param {string} summary @param {Child} body @param {string} [className] */
@@ -4702,9 +4732,9 @@
     return fold(`provenance ${provenance.length}`, refs(provenance), 'fold provenance');
   }
 
-  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
-  function sentenceButton(file, at, className, text = null) {
-    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, text);
+  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] @param {ClaimRef | null} [claim] */
+  function sentenceButton(file, at, className, text = null, claim = null) {
+    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), { at, claim }) }, text);
   }
 
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
@@ -4862,14 +4892,15 @@
   }
 
   // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
-  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null }} [options] */
-  function openInspector(id, { focus = false, at = null } = {}) {
+  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null, claim?: ClaimRef | null }} [options] */
+  function openInspector(id, { focus = false, at = null, claim = null } = {}) {
     const fold = state.shown.nodes.get(id)?.fold;
     if (fold) return toggleFold(state.shown, fold);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
     renderInspector(at);
+    setClaim('inspected', claim);
     if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(runTab(state.shown), id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
@@ -4881,6 +4912,7 @@
     const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     inspector.hidden = true;
     state.selected = null;
+    setClaim('inspected', null);
     refreshHighlight();
     if (restoreFocus && had && node) node.el.focus({ preventScroll: true });
   }
@@ -4913,8 +4945,8 @@
     popup.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
-  /** @param {string} id @param {TextRange | null} [at] */
-  function jumpTo(id, at = null) {
+  /** @param {string} id @param {{ at?: TextRange | null, claim?: ClaimRef | null }} [options] */
+  function jumpTo(id, options = {}) {
     const { view } = state.shown;
     refoldNow(state.shown);
     // A node in a fold is shown by opening the fold first, and each folder it is in.
@@ -4933,7 +4965,7 @@
       glide();
       applyView();
     }
-    openInspector(id, { at });
+    openInspector(id, options);
     node.el.focus({ preventScroll: true });
   }
 
@@ -5409,14 +5441,14 @@
     return `${call} of ${part === null ? '' : `part ${part} of `}${docLabel(run, d)}`;
   }
 
-  /** @param {LoadedFile} file @param {Child} said */
-  function docGroup(file, said) {
-    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name), said);
+  /** @param {LoadedFile} file @param {Child} said @param {ClaimRef | null} [claim] the sentence whose evidence it is */
+  function docGroup(file, said, claim = null) {
+    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file), { claim }) }, file.name), said);
   }
 
-  /** @param {LoadedFile} file @param {TextRange[]} sentences */
-  function quotedGroup(file, sentences) {
-    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))));
+  /** @param {LoadedFile} file @param {TextRange[]} sentences @param {ClaimRef | null} [claim] */
+  function quotedGroup(file, sentences, claim = null) {
+    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)), claim)), claim);
   }
 
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
@@ -5574,11 +5606,9 @@
     // The toggle event that clears litClaims.open comes a task after a close, so the popup says whether it is open.
     if (!claimNote.matches(':popover-open') || litClaims.open?.el !== ref.el) state.droppedAt.delete(claimNote);
     if (run.lit !== ref.answer) lightAnswer(tab, ref.answer);
-    /** @param {number} d */
-    const sentences = (d) => link.sentences.filter((q) => q.document === d);
     const groups = link.sentences.length
-      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
-      : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
+      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], quotesIn(link, d), ref))
+      : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d)), ref));
     fill(claimNote, popupHead(evidenceLine(link), closeClaim), groups);
     claimNote.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
     if (claimNote.matches(':popover-open')) claimNote.hidePopover();

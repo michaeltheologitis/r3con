@@ -3718,8 +3718,10 @@ function quotesListed(docs, ids, quotes) {
 // The sample with `prefix` before its first memo, its quotes moved by the prefix's code points, as r3con would place them.
 const prefixed = (prefix) => (sample) => {
   const shift = prefix.length - (prefix.match(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g)?.length ?? 0);
+  const moved = (q) => ({ ...q, start: q.start + shift, end: q.end + shift });
   sample.docs[0].text = prefix + sample.docs[0].text;
-  for (const summaries of sample.rounds) summaries[0].quotes = summaries[0].quotes.map((q) => ({ ...q, start: q.start + shift, end: q.end + shift }));
+  for (const summaries of sample.rounds) summaries[0].quotes = summaries[0].quotes.map(moved);
+  for (const claim of sample.answer.provenance.claims) claim.quotes = claim.quotes.map((q) => (q.document === sample.ids[0] ? moved(q) : q));
   return sample;
 };
 // An emoji, two UTF-16 code units and one code point, then lines enough to scroll the memo's popup.
@@ -3828,9 +3830,9 @@ function flashed() {
   if (!el) return null;
   const r = el.getBoundingClientRect();
   const within = (box) => r.top >= box.top && r.bottom <= box.bottom;
-  const { animationName, outlineStyle } = getComputedStyle(el);
+  const { animationName, outlineStyle, outlineColor } = getComputedStyle(el);
   const inView = within(el.closest('pre').getBoundingClientRect()) && within(document.getElementById('inspector').getBoundingClientRect());
-  return { text: el.textContent, marked: el.tagName === 'MARK', animationName, outlineStyle, inView };
+  return { text: el.textContent, marked: el.tagName === 'MARK', animationName, outlineStyle, outlineColor, inView };
 }
 
 // In-page: whether any text in view says null or undefined, where a field was empty.
@@ -4249,6 +4251,7 @@ const SAMPLE_DOCUMENTS_PATH = {
   nodes: ['answer-0', 'doc-0', 'doc-1', 'doc-2', 'doc-3', 'r2-0', 'r2-1', 'r2-2', 'r2-3'],
   edges: ['doc-0>r2-0', 'doc-1>r2-1', 'doc-2>r2-2', 'doc-3>r2-3', 'r2-0>answer-0', 'r2-1>answer-0', 'r2-2>answer-0', 'r2-3>answer-0'],
 };
+const OFF_TRAIL_QUOTE_LENGTH = 20;
 // A copy of a quote of the claim's in the first memo, cut short, so that the two overlap.
 const OVERLAP_CUT = 20;
 // The sample's answer said this many times over, as one claim: taller than SHORT_DESKTOP's whole page.
@@ -4256,6 +4259,9 @@ const LONG_CLAIM_TIMES = 12;
 // The page's CLAIM_NOTE_GAP and CLAIM_NOTE_MIN_PX: a sentence's popup sits this far from it, and is never shorter.
 const CLAIM_NOTE_GAP = 6;
 const CLAIM_NOTE_MIN_PX = 120;
+// The page's CLAIM_LEAVE_MS: a sentence the pointer leaves stays lit this long.
+const CLAIM_LEAVE_MS = 80;
+const PAST_CLAIM_LEAVE_MS = 2 * CLAIM_LEAVE_MS;
 // How far the chat is scrolled, and the window narrowed, with a sentence's popup open.
 const SCROLL_BY_PX = 20;
 const NARROWED_BY_PX = 240;
@@ -4265,6 +4271,51 @@ const CLAIM_DROP = { left: 200, top: 16 };
 const SHORTER_PX = 320;
 // The name of a popup's esc button.
 const ESC_NAME = 'esc: close';
+
+// In-page: each mark in `selector` as its text, whether two summaries quote it, and its background and line colours.
+function markLooks(selector = '#inspector') {
+  return [...document.querySelectorAll(`${selector} mark`)].map((m) => {
+    const { backgroundColor, boxShadow } = getComputedStyle(m);
+    return { text: m.textContent, multi: m.classList.contains('multi'), back: backgroundColor, line: boxShadow.split(' 0px')[0] };
+  });
+}
+
+function holdMarks() {
+  window.heldMarks = [...document.querySelectorAll('#inspector pre mark')];
+  getSelection().selectAllChildren(window.heldMarks.at(-1));
+  return String(getSelection());
+}
+
+// In-page: the open popup's marks as markLooks reads them, whether they are the very ones held, and what is selected.
+function marksHeld() {
+  const pre = document.querySelector('#inspector pre');
+  const marks = [...pre.querySelectorAll('mark')];
+  const looks = marks.map((m) => {
+    const { backgroundColor, boxShadow } = getComputedStyle(m);
+    return { text: m.textContent, multi: m.classList.contains('multi'), back: backgroundColor, line: boxShadow.split(' 0px')[0] };
+  });
+  const same = marks.length === window.heldMarks.length && marks.every((m, i) => m === window.heldMarks[i]);
+  return { looks, same, selected: String(getSelection()), scrollTop: pre.scrollTop };
+}
+
+// In-page: whether a flash is playing, or with `want` false whether none is.
+function flashPlaying(want = true) {
+  return document.getAnimations().some((a) => a.animationName === 'flash') === want;
+}
+
+async function markColours(page) {
+  const tokens = ['--mark', '--mark-strong', '--accent', '--claim-mark', '--claim-mark-strong', '--claim'];
+  const [back, strong, line, claimBack, claimStrong, claimLine] = await Promise.all(tokens.map((token) => page.evaluate(tokenColour, token)));
+  return { trail: { back, strong, line }, claim: { back: claimBack, strong: claimStrong, line: claimLine } };
+}
+
+// Marks, each { text, multi }, as markLooks would read them painted in `colours`: the lit sentence's where `isClaimed`.
+function expectedLooks(marks, colours, isClaimed) {
+  return marks.map((mark, i) => {
+    const { back, strong, line } = colours[isClaimed(mark, i) ? 'claim' : 'trail'];
+    return { text: mark.text, multi: mark.multi, back: mark.multi ? strong : back, line };
+  });
+}
 
 // Hovers the shown chat's first linked sentence, then moves away; what in-page `read` finds then, and once restored.
 async function hoverClaim(page, read = claimLight) {
@@ -4382,7 +4433,10 @@ async function claimsArea() {
     check('claims', leftName, isDeepStrictEqual(left, restored) && isDeepStrictEqual(await litOnPanel(page), trail), JSON.stringify(left));
 
     const { hovered: paint, left: unpainted } = await hoverClaim(page, claimPaint);
-    const [accent, ink, blue, tint] = await Promise.all(['--accent', '--accent-ink', '--claim', '--claim-mark'].map((token) => page.evaluate(tokenColour, token)));
+    const colours = await markColours(page);
+    const ink = await page.evaluate(tokenColour, '--accent-ink');
+    const { line: accent } = colours.trail;
+    const { line: blue, back: tint } = colours.claim;
     const overName = "a hovered sentence's lines are drawn in the claim's blue, heavier and after every other line, so over the trail, whose other lines stay lit in the accent at full strength";
     check('claims', overName, isDeepStrictEqual([paint.own, paint.rest], [[`1 ${blue}`], [`1 ${accent}`]]) && paint.heavier && paint.last, JSON.stringify(paint));
     const iconsName = "its nodes' icons, the answer's mark among them, take the claim's blue, and the trail's other nodes keep their accent at full strength";
@@ -4402,6 +4456,15 @@ async function claimsArea() {
     const focusName = "Tab from the answer's mark reaches the sentence, its focus ring showing, and lights its path as a hover does; Shift+Tab away restores the trail";
     check('claims', focusName, focused.claim && focused.ring && isDeepStrictEqual(byFocus, own) && isDeepStrictEqual(unfocused, restored), JSON.stringify({ focused, byFocus: byFocus.edges.length }));
 
+    await openSentences(page);
+    await page.focus(`${CHAT} .claim`);
+    const listLit = (await page.evaluate(claimLight)).lit;
+    const listLooks = await page.evaluate(markLooks, `${CHAT} .sentences`);
+    await page.click(`${CHAT} .sentences > summary`);
+    const listName = "the answer's folded list of sentences marks each one in the accent even while a sentence is lit";
+    const inAccent = isDeepStrictEqual(listLooks, expectedLooks(listLooks, colours, () => false));
+    check('claims', listName, listLit && listLooks.length === SAMPLE_QUOTED.pills.reduce((sum, n) => sum + n, 0) && inAccent, JSON.stringify(listLooks));
+
     await page.click(`${CHAT} .claim`);
     await page.mouse.move(0, 0);
     const note = await page.evaluate(claimNote);
@@ -4409,12 +4472,56 @@ async function claimsArea() {
     const listed = { line: evidence, groups: quotesListed(sample.docs, sample.ids, claim.quotes), name: "the sentence's quotes", focused: true, clear: true };
     const noteName = "a click on it opens a popup clear of it, holding the focus: its quotes by document, as the answer's sentences list them; it stays lit while the popup is open";
     check('claims', noteName, isDeepStrictEqual(note, listed) && isDeepStrictEqual(openLight, own), JSON.stringify(note));
+    const noteLooks = await page.evaluate(markLooks, '#claim-note');
+    const allClaimed = (looks, inColours) => isDeepStrictEqual(looks, expectedLooks(looks, inColours, () => true));
+    const blueName = "every quote in the sentence's popup is marked as the sentence's own: the claim's tint, over a line in its blue";
+    check('claims', blueName, noteLooks.length === claim.quotes.length && allClaimed(noteLooks, colours), JSON.stringify(noteLooks));
     await page.click('#claim-note .sentence >> nth=0');
     const flash = await page.evaluate(flashed);
     const [firstDoc] = listed.groups;
     const opened = { note: await page.evaluate(claimNote), title: (await popup(page))?.title, flash: flash?.text, marked: flash?.marked };
     const quoteName = "a quote in it closes it and opens its document's popup there, the quote marked";
     check('claims', quoteName, isDeepStrictEqual(opened, { note: null, title: `● ${firstDoc[0]}`, flash: firstDoc[1], marked: true }), JSON.stringify(opened));
+    // Only the document's popup keeps the sentence lit by now.
+    await page.waitForTimeout(PAST_CLAIM_LEAVE_MS);
+    const kept = await page.evaluate(claimLight);
+    await page.keyboard.press('Escape');
+    const unlit = await page.evaluate(claimLight);
+    const keptName = "the document's popup a quote opened keeps the sentence lit, its path drawn over the trail, while it is open; closing it unlights them";
+    check('claims', keptName, isDeepStrictEqual(kept, own) && isDeepStrictEqual(unlit, restored), JSON.stringify({ kept, unlit }));
+
+    // The registry memo: the trail quotes it three times, the sentence only twice.
+    const registry = SAMPLE_QUOTED.marks[REGISTRY].map(([start, end, multi]) => ({ start, text: codePoints(sample.docs[REGISTRY].text, start, end), multi }));
+    const claimed = claim.quotes.filter((q) => q.document === sample.ids[REGISTRY]).map((q) => q.start);
+    const isClaimed = (mark) => claimed.includes(mark.start);
+    await page.click(`${CHAT} .claim`);
+    await page.click('#theme-btn');
+    const dark = { colours: await markColours(page), note: await page.evaluate(markLooks, '#claim-note') };
+    await page.click(`#claim-note .quoted >> nth=${REGISTRY} >> .sentence >> nth=0`);
+    dark.looks = await page.evaluate(markLooks);
+    dark.flash = (await page.evaluate(flashed))?.outlineColor;
+    await page.click('#theme-btn');
+    const fromQuote = await page.evaluate(markLooks);
+    const flashLine = (await page.evaluate(flashed))?.outlineColor;
+    const ownName = "a document's popup opened from a sentence's quote marks the sentence's quotes there in its blue, the one both rounds quote in its stronger tint, and the answer's other quote there in the accent";
+    check('claims', ownName, isDeepStrictEqual(fromQuote, expectedLooks(registry, colours, isClaimed)), JSON.stringify(fromQuote));
+    const darkName = "in the dark theme the sentence's popup and the document's popup one of its quotes opened mark in the claim's dark blue and tints";
+    const darkBlue = allClaimed(dark.note, dark.colours) && isDeepStrictEqual(dark.looks, expectedLooks(registry, dark.colours, isClaimed)) && dark.colours.claim.line !== colours.claim.line;
+    check('claims', darkName, darkBlue, JSON.stringify(dark));
+    const flashName = "the quote it opened at flashes in its mark's line colour, the claim's blue, in both themes";
+    check('claims', flashName, flashLine === colours.claim.line && dark.flash === dark.colours.claim.line, `${flashLine}; ${dark.flash}`);
+
+    await page.click(nodeSel(`doc-${REGISTRY}`));
+    await becomes(page, () => document.querySelector('#world .on-claim') === null);
+    const fromNode = await page.evaluate(markLooks);
+    const fromNodeName = "opening that document's popup again from its node unlights the sentence, and a popup opened so, no sentence lit, marks every quote in the accent";
+    check('claims', fromNodeName, isDeepStrictEqual(fromNode, expectedLooks(registry, colours, () => false)) && isDeepStrictEqual(await page.evaluate(claimLight), restored), JSON.stringify(fromNode));
+    await page.evaluate(countPopupBuilds);
+    const { hovered: whileHovered, left: afterLeave } = await hoverClaim(page, markLooks);
+    const builds = await page.evaluate(() => window.popupBuilds);
+    const followName = "with that popup open, hovering the sentence marks its quotes there in its blue, in place, and leaving it marks them in the accent again";
+    const follows = isDeepStrictEqual(whileHovered, expectedLooks(registry, colours, isClaimed)) && isDeepStrictEqual(afterLeave, fromNode);
+    check('claims', followName, follows && builds === 0, JSON.stringify({ builds, whileHovered }));
 
     await page.keyboard.press('Escape');
     await page.focus(`${CHAT} .claim`);
@@ -4467,6 +4574,42 @@ async function claimsArea() {
     check('claims', selectName, nothing && byAskMark === `● ${ASK_LABEL}`, `${JSON.stringify(selected)}; ${JSON.stringify(after)}; ${byAskMark}`);
     await page.keyboard.press('Escape');
 
+  });
+
+  // After an emoji, a quote of the sentence's off the trail from where one of the trail's ends: a boundary in code units.
+  const withQuoteAfter = withSample((sample) => {
+    prefixed(EMOJI_PREFIX)(sample);
+    const [sentence] = sample.answer.provenance.claims;
+    const [first, second, ...rest] = sentence.quotes;
+    sentence.quotes = [first, { ...second, start: second.end, end: second.end + OFF_TRAIL_QUOTE_LENGTH }, ...rest];
+    return sample;
+  });
+  await withPage('claims', { before: serving(withQuoteAfter) }, async (page) => {
+    const colours = await markColours(page);
+    await openSentences(page);
+    await page.click(`${CHAT} .sentences .sentence >> nth=0`);
+    const flashLine = (await page.evaluate(flashed))?.outlineColor;
+    const held = await page.evaluate(holdMarks);
+    const before = await page.evaluate(marksHeld);
+    // Opened with motion reduced, so that it scrolled to the sentence at once; with motion on, its flash plays once.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const played = await becomes(page, flashPlaying);
+    await becomes(page, flashPlaying, false);
+    const { hovered: lit, left } = await hoverClaim(page, marksHeld);
+    const replayed = await page.evaluate(flashPlaying);
+    const unlitLooks = expectedLooks(before.looks, colours, () => false);
+    const firstLitLooks = expectedLooks(before.looks, colours, (mark, i) => i === 0);
+    const flashName = "a document's popup opened from the answer's list of sentences flashes the sentence in its mark's line colour, the accent";
+    check('claims', flashName, flashLine === colours.trail.line, flashLine);
+    const still = before.scrollTop > 0 && lit.scrollTop === before.scrollTop && left.scrollTop === before.scrollTop;
+    const relit = before.looks.length === SAMPLE_QUOTED.marks[0].length && isDeepStrictEqual(before.looks, unlitLooks) && isDeepStrictEqual(lit.looks[0], firstLitLooks[0]) && isDeepStrictEqual(left.looks, unlitLooks);
+    const placeName = "with that popup open and scrolled, hovering a sentence marks its quote there in its blue on the very marks drawn, at the same scroll, and leaving it marks it in the accent again";
+    check('claims', placeName, relit && lit.same && left.same && still, JSON.stringify({ before, lit, left }));
+    const keptName = "that hover and leave play no flash again, and text selected in the popup stays selected";
+    const kept = played && !replayed && held.length > 0 && [lit, left].every((shown) => shown.selected === held);
+    check('claims', keptName, kept, JSON.stringify({ played, replayed, held, selected: [lit.selected, left.selected] }));
+    const unitsName = "a mark is the sentence's only where it overlaps one of its quotes, both in code units: after an emoji, the trail's quote that ends where one of the sentence's starts stays in the accent";
+    check('claims', unitsName, isDeepStrictEqual(lit.looks, firstLitLooks), JSON.stringify(lit.looks));
   });
 
   // The registry memo, quoted three times on the trail and twice by the claim, alone in a folder closed before the run.
