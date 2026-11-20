@@ -22,9 +22,11 @@
   --accent-ink: light-dark(#b65534, #d77757);
   --mark: light-dark(rgba(193, 95, 60, 0.2), rgba(215, 119, 87, 0.24));
   --mark-strong: light-dark(rgba(193, 95, 60, 0.38), rgba(215, 119, 87, 0.45));
+  --mark-line: var(--accent);
   /* A lit sentence and its path, drawn over the trail; its text meets 4.5:1 on the panel. */
   --claim: light-dark(#2459c8, #7ea6ff);
   --claim-mark: light-dark(rgba(36, 89, 200, 0.18), rgba(126, 166, 255, 0.24));
+  --claim-mark-strong: light-dark(rgba(36, 89, 200, 0.34), rgba(126, 166, 255, 0.45));
   --ok: light-dark(#3f7d4e, #7fb38a);
   --err: light-dark(#b1452f, #e2806d);
   /* A skipped call's red, apart from the accent's orange; its text at 4.5:1 or more on its tint. */
@@ -483,8 +485,10 @@ p { margin: 0; }
 .code .gap, .code.near > span { display: block; }
 .used { color: var(--accent-ink); }
 .trail-line:empty { display: none; }
-mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--accent); }
+mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--mark-line); }
 mark.multi { background: var(--mark-strong); }
+/* The lit sentence's own quotes: every one in its popup, and those it quoted in a document's text. */
+.claim-note mark, mark.on-claim { --mark: var(--claim-mark); --mark-strong: var(--claim-mark-strong); --mark-line: var(--claim); }
 mark[title] { cursor: help; }
 .flash { animation: flash 1.2s ease-out; }
 .fold > summary { color: var(--dim); list-style: none; cursor: pointer; }

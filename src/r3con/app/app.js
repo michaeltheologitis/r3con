@@ -3655,16 +3655,20 @@
     return drawn;
   }
 
-  /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null }} */
-  const litClaims = { hovered: null, focused: null, open: null };
+  // The sentence hovered, the one focused, the one whose popup is open, and the one whose evidence the node popup shows.
+  /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null, inspected: ClaimRef | null }} */
+  const litClaims = { hovered: null, focused: null, open: null, inspected: null };
 
-  // Draws the lit sentence's path over the trail, restacks every line by what it is on, and counts that sentence's quotes.
+  // Draws the lit sentence's path over the trail, restacks every line by what it is on, counts that sentence's quotes,
+  // and marks them in what the trail fills.
   /** @param {RunTab} tab */
   function lightClaim(tab) {
     const { run, trail } = tab;
-    const claims = [litClaims.hovered, litClaims.focused, litClaims.open];
+    const claims = [litClaims.hovered, litClaims.focused, litClaims.open, litClaims.inspected];
     const claim = trail ? claims.find((c) => c?.tab === tab && c.el.isConnected && c.answer === run.lit) : null;
-    tab.litLink = claim?.link ?? null;
+    const link = claim?.link ?? null;
+    const relit = link !== tab.litLink;
+    tab.litLink = link;
     const { nodes, edges } = shownPath(tab, claim ? claimPath(run, claim.answer, claim.link) : null);
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-claim', nodes.has(id));
@@ -3684,6 +3688,7 @@
       const node = tab.nodes.get(docId(file));
       if (node) countSentences(tab, node, highlighted(tab, d));
     });
+    if (relit) showTrail(tab);
   }
 
   // How many sentences of document d the panel highlights: the lit sentence's quotes there, else the trail's.
@@ -3707,8 +3712,8 @@
   /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
   const trailParts = new Map();
 
-  // Fills `el` from the tab's trail now, and again in place as the trail changes, so that what is open, scrolled or
-  // focused in it stays.
+  // Fills `el` from the tab's trail now, and again in place as the trail or its lit sentence changes, so that what is
+  // open, scrolled or focused in it stays.
   /** @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw @returns {T} */
   function trailPart(tab, el, draw) {
     trailParts.set(el, { tab, draw });
@@ -4642,19 +4647,21 @@
     return { draw, open };
   }
 
-  // `text` from `from` to `to`, each span in `spans` marked, titled by `title`, and `at` flashed.
+  // `text` from `from` to `to`, each span in `spans` marked, as the lit sentence's where it overlaps one of `claimed`,
+  // titled by `title`, and `at` flashed.
   /**
-   * @param {string} text @param {number} from @param {number} to @param {Span[]} spans @param {(span: Span) => string} title
-   * @param {TextRange | null} at
+   * @param {string} text @param {number} from @param {number} to @param {Span[]} spans @param {TextRange[]} claimed
+   * @param {(span: Span) => string} title @param {TextRange | null} at
    */
-  function markedText(text, from, to, spans, title, at) {
+  function markedText(text, from, to, spans, claimed, title, at) {
     const inside = spans.filter((r) => r.end > from && r.start < to);
     const cuts = cutsOf([{ start: from, end: to }, ...inside, ...(at ? [at] : [])]).filter((cut) => cut >= from && cut <= to);
     return cuts.slice(1).map((end, i) => {
       const span = inside.find((r) => r.start <= cuts[i] && r.end >= end);
       const flash = at && at.start <= cuts[i] && at.end >= end;
       if (!span && !flash) return text.slice(cuts[i], end);
-      const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
+      const onClaim = span && claimed.some((q) => q.start < span.end && q.end > span.start);
+      const classes = [span && span.by.length > 1 && 'multi', onClaim && 'on-claim', flash && 'flash'].filter(Boolean).join(' ');
       return h(span ? 'mark' : 'span', { class: classes || null, title: span ? title(span) : null }, text.slice(cuts[i], end));
     });
   }
@@ -4679,9 +4686,11 @@
     // Spans come only with a trail.
     /** @param {number} from @param {number} to */
     const block = (from, to) => {
-      const { trail } = tab;
+      const { trail, litLink } = tab;
       const spans = quotedOf(trail)?.spans ?? [];
-      return h('span', {}, markedText(file.text, from, to, spans, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at));
+      const d = tab.files.indexOf(file);
+      const claimed = litLink?.sentences.filter((q) => q.document === d) ?? [];
+      return h('span', {}, markedText(file.text, from, to, spans, claimed, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at));
     };
     const blocks = textBlocks(pre, file.text, block, end, past);
     const openInFull = () => {
@@ -4702,9 +4711,9 @@
     return fold(`provenance ${provenance.length}`, refs(provenance), 'fold provenance');
   }
 
-  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] */
-  function sentenceButton(file, at, className, text = null) {
-    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at) }, text);
+  /** @param {LoadedFile} file @param {TextRange} at @param {string} className @param {Child} [text] @param {ClaimRef | null} [claim] */
+  function sentenceButton(file, at, className, text = null, claim = null) {
+    return h('button', { class: `ref ${className}`, type: 'button', title: 'show in the document', onclick: () => jumpTo(docId(file), at, claim) }, text);
   }
 
   // A summary's quotes, marked while it is on the lit answer's trail; each one r3con found opens its document there.
@@ -4861,14 +4870,16 @@
     if (flashed) scrollToMiddle(flashed);
   }
 
-  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
-  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null }} [options] */
-  function openInspector(id, { focus = false, at = null } = {}) {
+  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone. A popup
+  // opened as a sentence's evidence keeps that sentence lit until it closes or shows something else.
+  /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null, claim?: ClaimRef | null }} [options] */
+  function openInspector(id, { focus = false, at = null, claim = null } = {}) {
     const fold = state.shown.nodes.get(id)?.fold;
     if (fold) return toggleFold(state.shown, fold);
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
+    setClaim('inspected', claim);
     renderInspector(at);
     if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(runTab(state.shown), id);
     refreshHighlight();
@@ -4881,6 +4892,7 @@
     const node = state.shown.nodes.get(/** @type {string} */ (state.selected));
     inspector.hidden = true;
     state.selected = null;
+    setClaim('inspected', null);
     refreshHighlight();
     if (restoreFocus && had && node) node.el.focus({ preventScroll: true });
   }
@@ -4913,8 +4925,8 @@
     popup.style.top = `${clamp(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxTop))}px`;
   }
 
-  /** @param {string} id @param {TextRange | null} [at] */
-  function jumpTo(id, at = null) {
+  /** @param {string} id @param {TextRange | null} [at] @param {ClaimRef | null} [claim] */
+  function jumpTo(id, at = null, claim = null) {
     const { view } = state.shown;
     refoldNow(state.shown);
     // A node in a fold is shown by opening the fold first, and each folder it is in.
@@ -4933,7 +4945,7 @@
       glide();
       applyView();
     }
-    openInspector(id, { at });
+    openInspector(id, { at, claim });
     node.el.focus({ preventScroll: true });
   }
 
@@ -5409,14 +5421,14 @@
     return `${call} of ${part === null ? '' : `part ${part} of `}${docLabel(run, d)}`;
   }
 
-  /** @param {LoadedFile} file @param {Child} said */
-  function docGroup(file, said) {
-    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file)) }, file.name), said);
+  /** @param {LoadedFile} file @param {Child} said @param {ClaimRef | null} [claim] the sentence whose evidence it is */
+  function docGroup(file, said, claim = null) {
+    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file), null, claim) }, file.name), said);
   }
 
-  /** @param {LoadedFile} file @param {TextRange[]} sentences */
-  function quotedGroup(file, sentences) {
-    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)))));
+  /** @param {LoadedFile} file @param {TextRange[]} sentences @param {ClaimRef | null} [claim] */
+  function quotedGroup(file, sentences, claim = null) {
+    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)), claim)), claim);
   }
 
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
@@ -5577,8 +5589,8 @@
     /** @param {number} d */
     const sentences = (d) => link.sentences.filter((q) => q.document === d);
     const groups = link.sentences.length
-      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d)))
-      : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d))));
+      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], sentences(d), ref))
+      : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d)), ref));
     fill(claimNote, popupHead(evidenceLine(link), closeClaim), groups);
     claimNote.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
     if (claimNote.matches(':popover-open')) claimNote.hidePopover();
