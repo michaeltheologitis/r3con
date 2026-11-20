@@ -487,7 +487,6 @@ p { margin: 0; }
 .trail-line:empty { display: none; }
 mark { color: inherit; background: var(--mark); box-shadow: inset 0 -1.5px 0 var(--mark-line); }
 mark.multi { background: var(--mark-strong); }
-/* The lit sentence's own quotes: every one in its popup, and those it quoted in a document's text. */
 .claim-note mark, mark.on-claim { --mark: var(--claim-mark); --mark-strong: var(--claim-mark-strong); --mark-line: var(--claim); }
 mark[title] { cursor: help; }
 .flash { animation: flash 1.2s ease-out; }
