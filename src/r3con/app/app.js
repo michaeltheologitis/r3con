@@ -3374,14 +3374,20 @@
     node.el.querySelectorAll('.spin, .glyph').forEach((g) => {
       g.textContent = MARK;
     });
-    const icon = /** @type {Element} */ (node.el.querySelector('.icon'));
-    // A fold's parse may have been drawn settled already, when its node was made.
-    if (node.kind === 'parsed' && !empty && !failed && !icon.querySelector('.ink')) icon.innerHTML = node.fold ? stackIcon('parsed', true) : iconFor('parsed', true);
+    showParse(node, !empty && !failed);
     if (!node.fold) {
       showSkips(node, tab.run && !failed ? skipsAt(tab.run, node.id) : []);
       node.el.setAttribute('aria-label', ariaName(tab, node));
     }
     rerenderIfOpen(tab, node.id);
+  }
+
+  // A parse's tree is filled once it is back with records; it is drawn again only when that changes.
+  /** @param {PanelNode} node @param {boolean} filled */
+  function showParse(node, filled) {
+    const icon = /** @type {Element} */ (node.el.querySelector('.icon'));
+    if (node.kind !== 'parsed' || Boolean(icon.querySelector('.ink')) === filled) return;
+    icon.innerHTML = node.fold ? stackIcon('parsed', filled) : iconFor('parsed', filled);
   }
 
   /** @param {PanelNode} node @param {Skip[]} skips */
@@ -4108,6 +4114,7 @@
     if (working) {
       classes.remove('void', 'failed');
       classes.add('working');
+      showParse(node, false);
     } else if (started) {
       const changed = fresh || classes.contains('working') || classes.contains('void') !== empty || classes.contains('failed') !== failed;
       if (changed) drawSettled(tab, node, { empty, failed });

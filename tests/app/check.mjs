@@ -1398,8 +1398,6 @@ async function beforeRun() {
 const FOLD_FROM_DOCS = 10;
 const CONTEXT_DOCS = 3;
 const FOLDED_FILES = 30;
-// The page's STACK_RISE: a stack's back copy, and so its spinner, sit this far up and right of a single icon's.
-const STACK_RISE_PX = 5.25;
 const memoStem = (i) => `memo_${String(i).padStart(3, '0')}`;
 const memoNamed = (i) => memo(`${memoStem(i)}.txt`, `Memo ${i}.\n`);
 const memosFrom = (from, to) => Array.from({ length: to - from }, (_, i) => memoNamed(from + i));
@@ -1429,18 +1427,28 @@ function foldInk() {
   return { dim, noFoldToken, count: ink('.node.fold.doc .name'), dots: ink('.node.fold.doc .icon').color, name: ink('.node.doc:not(.fold) .name') };
 }
 
-// A file's round 1 and a fold's are both working.
-const bothSpinning = () => Boolean(document.querySelector('#world .node.r1.working:not(.fold, .folder)') && document.querySelector('#world .node.fold.r1.working'));
+// A working file's round 1, and a working fold's.
+const SPINNING = ['#world .node.r1.working:not(.fold, .folder)', '#world .node.fold.r1.working'];
 
-// Where a working file's round-1 spinner starts, then a working fold's, each from its icon's centre, in the panel's units.
-function spinnersAt() {
+// Both are working, and done easing in or changing colour.
+function bothSpinning(selectors) {
+  const nodes = selectors.map((selector) => document.querySelector(selector));
+  return nodes.every((el) => el && el.getAnimations({ subtree: true }).every((a) => a.playState !== 'running'));
+}
+
+// Where each one's spinner starts from its icon's centre, and how far the fold's back copy sits from its front, in
+// the panel's units.
+function spinnersAt(selectors) {
   const k = parseFloat(document.getElementById('world').style.getPropertyValue('--k'));
+  const box = (el) => el.getBoundingClientRect();
+  const [single, fold] = selectors.map((selector) => document.querySelector(selector));
   const from = (el) => {
-    const icon = el.querySelector('.icon').getBoundingClientRect();
-    const spin = el.querySelector('.spin').getBoundingClientRect();
+    const [icon, spin] = [box(el.querySelector('.icon')), box(el.querySelector('.spin'))];
     return { x: (spin.left - icon.left - icon.width / 2) / k, y: (spin.top - icon.top - icon.height / 2) / k };
   };
-  return ['#world .node.r1.working:not(.fold, .folder)', '#world .node.fold.r1.working'].map((selector) => from(document.querySelector(selector)));
+  const copies = [...fold.querySelectorAll('.stack svg')].filter((svg) => !svg.closest('.stack-cut'));
+  const [back, front] = [copies[0], copies.at(-1)].map((copy) => box(copy.querySelector('path')));
+  return { single: from(single), stacked: from(fold), rise: { x: (back.left - front.left) / k, y: (back.top - front.top) / k } };
 }
 
 const filesCounted = (page, n) => page.waitForFunction((k) => document.getElementById('files-count').textContent === String(k), n);
@@ -1833,14 +1841,14 @@ async function folders() {
     const frontName = "on the trail through a closed folder, its round and parse stacks light only their front copy, in the accent; the two behind stay dim";
     check('folders', frontName, frontLit && litStacks.some((id) => id.startsWith('parsed-')), JSON.stringify({ accent, dim, lit: litStacks.map((id) => [id, stacks[id].strokes]) }));
     const filledName = "a closed folder's settled parse fills its front copy's shapes in colour, as a file's does; the two copies behind stay unfilled";
-    const [behindFills, nextFills, frontFills] = stacks[letterStages[2]].fills;
+    const [behindFills, nextFills, frontFills] = stacks[letterStages[2]]?.fills ?? [];
     const parseFills = Object.fromEntries(Object.entries(stacks).filter(([id]) => id.startsWith('parsed-')).map(([id, look]) => [id, look.fills]));
     check('folders', filledName, frontFills > 0 && behindFills === 0 && nextFills === 0, JSON.stringify(parseFills));
     const near = (a, b) => ['x', 'y', 'width', 'height'].every((key) => Math.abs(a[key] - b[key]) <= ALIGNED_PX);
     const [memoRound, memoParse] = single;
     const [lettersRound, , lettersParse] = letterStages.map((id) => stacks[id]);
     const centred = Object.values(stacks).every((look) => near(look.centre, memoRound.centre));
-    const inPlace = near(lettersRound.front, memoRound.front) && near(lettersParse.front, memoParse.front);
+    const inPlace = Boolean(lettersRound && lettersParse) && near(lettersRound.front, memoRound.front) && near(lettersParse.front, memoParse.front);
     const placeName = "a stack's box is the single icon's, centred on its node's point, and its front copy is drawn where a file's own icon is, so its lines and labels stay put";
     check('folders', placeName, centred && Math.abs(memoRound.centre.x) <= ALIGNED_PX && Math.abs(memoRound.centre.y) <= ALIGNED_PX && inPlace, JSON.stringify({ memo: [memoRound, memoParse], letters: [lettersRound, lettersParse] }));
 
@@ -7031,11 +7039,12 @@ async function liveFolds(url, server) {
     const waiting = [ends[0], `${rest} files · reading…`, ends[1]].flat();
     const readingName = `while a run reads, the ${rest} documents between the first and last ${CONTEXT_DOCS} wait in one fold, reading…`;
     check('live', readingName, isDeepStrictEqual(reading, waiting), reading.join(', '));
-    const spinning = await becomes(page, bothSpinning, null, LIVE_RUN_MS);
-    const [single, stacked] = spinning ? await page.evaluate(spinnersAt) : [];
-    const risen = spinning && Math.abs(stacked.x - single.x - STACK_RISE_PX) <= ALIGNED_PX && Math.abs(stacked.y - single.y + STACK_RISE_PX) <= ALIGNED_PX;
-    const spinName = `a working fold's spinner sits on its stack's corner: ${STACK_RISE_PX}px up and right of where a file's sits, as far as the stack's back copy is from its front`;
-    check('live', spinName, risen, JSON.stringify({ single, stacked }));
+    const spinning = await becomes(page, bothSpinning, SPINNING, LIVE_RUN_MS);
+    const spinners = spinning ? await page.evaluate(spinnersAt, SPINNING) : null;
+    const offBy = (axis) => spinners.stacked[axis] - spinners.single[axis] - spinners.rise[axis];
+    const risen = spinners !== null && spinners.rise.x > 0 && spinners.rise.y < 0 && Math.abs(offBy('x')) <= ALIGNED_PX && Math.abs(offBy('y')) <= ALIGNED_PX;
+    const spinName = "a working fold's spinner sits on its stack's corner: up and right of where a file's sits by as far as the stack's back copy is from its front";
+    check('live', spinName, risen, JSON.stringify(spinners));
 
     server.release();
     const done = await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
@@ -7137,6 +7146,13 @@ async function liveFolds(url, server) {
 }
 
 // Long tasks, as the page records them.
+// The folded parse nodes drawn filled when not back with records, or plain when back with them, and how many are filled.
+function misfilledParses() {
+  const parses = [...document.querySelectorAll('#world .node.parsed:is(.fold, .folder)')];
+  const filled = (el) => el.querySelector('.stack > g:last-child .ink') !== null;
+  return { wrong: parses.filter((el) => filled(el) === el.matches('.void, .failed, .working')).map((el) => el.dataset.id), filled: parses.filter(filled).length };
+}
+
 function recordLongTasks() {
   window.longTasks = [];
   new PerformanceObserver((list) => list.getEntries().forEach((entry) => window.longTasks.push(entry.duration))).observe({ type: 'longtask', buffered: true });
@@ -7163,6 +7179,9 @@ async function liveFoldsParsed(url) {
     const folds = await count(page, '.node.fold.doc');
     const name = `a run of ${PARSED_RUN.docs} memos whose quiet ones parse to records keeps those folded, but for the trail's, with no task over ${LONG_TASK_MS} ms`;
     check('live', name, done && longest <= LONG_TASK_MS && folds > 0 && outside.length === 0, `longest task ${Math.round(longest)} ms; ${folds} folds; ${own.length} own rows; ${outside.length} out without a snippet: ${outside.slice(0, 5).join(' ')}`);
+    const fills = await page.evaluate(misfilledParses);
+    const fillsName = "once its folds have formed and re-formed over the run, each fold's parse is filled exactly when it is back with records, none stopped";
+    check('live', fillsName, done && fills.filled > 0 && fills.wrong.length === 0, JSON.stringify(fills));
   });
 }
 

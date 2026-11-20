@@ -41,6 +41,8 @@
   --tab-row-height: 2.55em;
   --icon-size: 28px;
   --doc-icon-size: 46px;
+  /* How much wider a stack's cut-out is than its icon's strokes, in the icon's 32 units. */
+  --stack-halo: 4.2px;
   --trash-size: 32px;
   --trash-icon-size: 24px;
 }
@@ -234,7 +236,7 @@ p { margin: 0; }
 .node .icon svg { overflow: visible; }
 /* A stack's copies behind are dim; each copy is cut out of those behind it by its shape, filled and widened in the panel's colour. */
 .stack > g:not(:last-child) { color: var(--dim); }
-.stack .stack-cut * { fill: var(--panel); stroke: var(--panel); stroke-width: 4.2px; stroke-linecap: round; }
+.stack .stack-cut * { fill: var(--panel); stroke: var(--panel); stroke-width: var(--stack-halo); stroke-linecap: round; }
 .node .label { line-height: 1.5; background: var(--panel); }
 .node .spin { position: absolute; top: -0.7em; left: calc(50% + var(--node-icon) / 2 - 2px); color: var(--accent); display: none; }
 .node.working .spin { display: block; }
