@@ -196,7 +196,7 @@
    * @property {HTMLElement | null} turn
    * @property {(string | Node)[]} status
    * @property {HTMLElement} drawing
-   * @property {{ base: SVGGElement, mid: SVGGElement, lit: SVGGElement }} layers
+   * @property {{ base: SVGGElement, mid: SVGGElement, lit: SVGGElement, claim: SVGGElement }} layers
    * @property {HTMLElement} nodesEl
    * @property {Map<string, PanelNode>} nodes
    * @property {Map<string, PanelEdge>} edges
@@ -2173,13 +2173,13 @@
   /** @param {LoadedFile[]} files @param {View} [view] */
   function newTab(files, view = { x: 0, y: 0, k: 1 }) {
     const group = () => document.createElementNS(SVG_NS, 'g');
-    const layers = { base: group(), mid: group(), lit: group() };
+    const layers = { base: group(), mid: group(), lit: group(), claim: group() };
     const tree = document.createElementNS(SVG_NS, 'path');
     tree.classList.add('tree-lines');
     const edges = document.createElementNS(SVG_NS, 'svg');
     edges.classList.add('edges');
     edges.setAttribute('aria-hidden', 'true');
-    edges.append(tree, layers.base, layers.mid, layers.lit);
+    edges.append(tree, layers.base, layers.mid, layers.lit, layers.claim);
     const nodesEl = h('div');
     const id = nextTab++;
     /** @type {Tab} */
@@ -3452,17 +3452,20 @@
     return `M${sx} ${pa.y} Q${sx + ramp} ${top} ${sx + 2 * ramp} ${top} H${tx - 2 * ramp} Q${tx - ramp} ${top} ${tx} ${pb.y}`;
   }
 
-  /** @param {Tab} tab @param {EdgeKind} kind */
-  function layerFor(tab, kind) {
-    return kind === 'context' || kind === 'self' ? tab.layers.base : tab.layers.mid;
+  // SVG paints in page order: a lit sentence's lines go over the trail's, and the trail's over the rest.
+  /** @param {Tab} tab @param {PanelEdge} edge */
+  function layerFor(tab, edge) {
+    if (edge.el.classList.contains('on-claim')) return tab.layers.claim;
+    if (edge.el.classList.contains('lit')) return tab.layers.lit;
+    return edge.kind === 'context' || edge.kind === 'self' ? tab.layers.base : tab.layers.mid;
   }
 
   // A tab drawn while hidden would play every animation at once when shown.
   /** @param {Tab} tab */
   const animates = (tab) => tab === state.shown && !reduceMotion();
 
-  // An element put back in the page plays its animation again while the class is on: a line moved to the
-  // lit layer, or a drawing shown again.
+  // An element put back in the page plays its animation again while the class is on: a line moved to another
+  // layer, or a drawing shown again.
   /** @param {Element} el */
   function endAnimation(el) {
     el.classList.remove('enter', 'draw', 'fade');
@@ -3508,7 +3511,7 @@
     edge.el.classList.remove(edge.kind);
     edge.kind = kind;
     edge.el.classList.add(kind);
-    layerFor(tab, kind).append(edge.el);
+    layerFor(tab, edge).append(edge.el);
     edge.el.setAttribute('d', edgePath(tab, drawnNode(tab, from), drawnNode(tab, to)));
     if (how) animateEdge(tab, edge.el, how);
     edge.el.classList.toggle('hl', lightsWith(tab, edge));
@@ -3591,12 +3594,7 @@
       n.el.classList.toggle('on-path', nodes.has(id));
       if (n.kind === 'answer') n.el.setAttribute('aria-pressed', String(id === run.lit));
     }
-    for (const e of tab.edges.values()) {
-      const on = edges.has(e.key);
-      const layer = on ? tab.layers.lit : layerFor(tab, e.kind);
-      e.el.classList.toggle('lit', on);
-      if (e.el.parentNode !== layer) layer.append(e.el);
-    }
+    for (const e of tab.edges.values()) e.el.classList.toggle('lit', edges.has(e.key));
     showTrail(tab);
     lightClaim(tab);
   }
@@ -3660,8 +3658,7 @@
   /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null }} */
   const litClaims = { hovered: null, focused: null, open: null };
 
-  // Lights the path of the tab's hovered or focused sentence, or else of the one whose evidence is open, while its answer
-  // is the lit one: the rest of the trail dims, and each document, or closed folder, counts that sentence's quotes.
+  // Draws the lit sentence's path over the trail, restacks every line by what it is on, and counts that sentence's quotes.
   /** @param {RunTab} tab */
   function lightClaim(tab) {
     const { run, trail } = tab;
@@ -3669,12 +3666,19 @@
     const claim = trail ? claims.find((c) => c?.tab === tab && c.el.isConnected && c.answer === run.lit) : null;
     tab.litLink = claim?.link ?? null;
     const { nodes, edges } = shownPath(tab, claim ? claimPath(run, claim.answer, claim.link) : null);
-    tab.drawing.classList.toggle('has-claim', nodes.size > 0);
     for (const [id, n] of tab.nodes) {
       n.el.classList.toggle('on-claim', nodes.has(id));
       if (n.fold?.folder && n.kind === 'doc') labelFold(tab, n);
     }
-    for (const e of tab.edges.values()) e.el.classList.toggle('on-claim', edges.has(e.key));
+    for (const e of tab.edges.values()) {
+      const from = e.el.parentNode;
+      e.el.classList.toggle('on-claim', edges.has(e.key));
+      const layer = layerFor(tab, e);
+      if (from === layer) continue;
+      // A line moved for a sentence mid-draw would draw again; one lit as its answer lands still draws in.
+      if (from === tab.layers.claim || layer === tab.layers.claim) endAnimation(e.el);
+      layer.append(e.el);
+    }
     for (const el of tab.chat.querySelectorAll('.claim')) el.classList.toggle('lit', el === claim?.el);
     run.docs.forEach((file, d) => {
       const node = tab.nodes.get(docId(file));
