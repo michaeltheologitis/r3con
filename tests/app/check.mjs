@@ -3828,9 +3828,9 @@ function flashed() {
   if (!el) return null;
   const r = el.getBoundingClientRect();
   const within = (box) => r.top >= box.top && r.bottom <= box.bottom;
-  const { animationName, outlineStyle } = getComputedStyle(el);
+  const { animationName, outlineStyle, outlineColor } = getComputedStyle(el);
   const inView = within(el.closest('pre').getBoundingClientRect()) && within(document.getElementById('inspector').getBoundingClientRect());
-  return { text: el.textContent, marked: el.tagName === 'MARK', animationName, outlineStyle, inView };
+  return { text: el.textContent, marked: el.tagName === 'MARK', animationName, outlineStyle, outlineColor, inView };
 }
 
 // In-page: whether any text in view says null or undefined, where a field was empty.
@@ -4279,6 +4279,22 @@ function markLooks(selector = '#inspector') {
   });
 }
 
+// In-page: holds the open popup's marks, in window.heldMarks, and selects the text of the last; what is selected.
+function holdMarks() {
+  window.heldMarks = [...document.querySelectorAll('#inspector pre mark')];
+  getSelection().selectAllChildren(window.heldMarks.at(-1));
+  return String(getSelection());
+}
+
+// In-page: whether the open popup's marks are the very ones held, what is selected, whether a flash is playing, and how
+// far its text is scrolled.
+function marksHeld() {
+  const pre = document.querySelector('#inspector pre');
+  const marks = [...pre.querySelectorAll('mark')];
+  const same = marks.length === window.heldMarks.length && marks.every((m, i) => m === window.heldMarks[i]);
+  return { same, selected: String(getSelection()), flashing: document.getAnimations().some((a) => a.animationName === 'flash'), scrollTop: pre.scrollTop };
+}
+
 // The page's mark colours in its theme now: the trail's, in the accent, and the lit sentence's, in the claim's blue.
 async function markColours(page) {
   const tokens = ['--mark', '--mark-strong', '--accent', '--claim-mark', '--claim-mark-strong', '--claim'];
@@ -4472,13 +4488,17 @@ async function claimsArea() {
     const dark = { colours: await markColours(page), note: await page.evaluate(markLooks, '#claim-note') };
     await page.click('#claim-note .quoted >> nth=3 >> .sentence >> nth=0');
     dark.looks = await page.evaluate(markLooks);
+    dark.flash = (await page.evaluate(flashed))?.outlineColor;
     await page.click('#theme-btn');
     const fromQuote = await page.evaluate(markLooks);
+    const flashLine = (await page.evaluate(flashed))?.outlineColor;
     const ownName = "a document's popup opened from a sentence's quote marks the sentence's quotes there in its blue, the one both rounds quote in its stronger tint, and the answer's other quote there in the accent";
     check('claims', ownName, isDeepStrictEqual(fromQuote, marksLooked(sample, 3, colours, claimed)), JSON.stringify(fromQuote));
     const darkName = "in the dark theme the sentence's popup and the document's popup one of its quotes opened mark in the claim's dark blue and tints";
     const darkBlue = inBlue(dark.note, dark.colours) && isDeepStrictEqual(dark.looks, marksLooked(sample, 3, dark.colours, claimed)) && dark.colours.claim.line !== colours.claim.line;
     check('claims', darkName, darkBlue, JSON.stringify(dark));
+    const flashName = "the quote it opened at flashes in its mark's line colour, the claim's blue, in both themes";
+    check('claims', flashName, flashLine === colours.claim.line && dark.flash === dark.colours.claim.line, `${flashLine}; ${dark.flash}`);
 
     await page.click(nodeSel('doc-3'));
     await becomes(page, () => document.querySelector('#world .on-claim') === null);
@@ -4557,11 +4577,17 @@ async function claimsArea() {
   });
   await withPage('claims', { before: serving(withQuoteAfter) }, async (page) => {
     const colours = await markColours(page);
-    await inspect(page, 'doc-0');
-    await page.$eval('#inspector pre', (el) => (el.scrollTop = el.scrollHeight / 3));
+    await openSentences(page);
+    await page.click(`${CHAT} .sentences .sentence >> nth=0`);
+    const flashLine = (await page.evaluate(flashed))?.outlineColor;
     await page.evaluate(countPopupBuilds);
-    const shown = async () => ({ looks: await page.evaluate(markLooks), scrollTop: await page.$eval('#inspector pre', (el) => el.scrollTop) });
+    const held = await page.evaluate(holdMarks);
+    const shown = async () => ({ looks: await page.evaluate(markLooks), ...(await page.evaluate(marksHeld)) });
     const before = await shown();
+    // Opened with motion reduced, so that it scrolled to the sentence at once; with motion on, its flash plays, once.
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    const played = await becomes(page, () => document.getAnimations().some((a) => a.animationName === 'flash'));
+    await becomes(page, () => !document.getAnimations().some((a) => a.animationName === 'flash'));
     await page.hover(`${CHAT} .claim`);
     await becomes(page, () => document.querySelector('#inspector mark.on-claim') !== null);
     const lit = await shown();
@@ -4573,10 +4599,15 @@ async function claimsArea() {
       const { back, strong, line } = colours[claimedFirst && i === 0 ? 'claim' : 'trail'];
       return { text, multi, back: multi ? strong : back, line };
     });
+    const flashName = "a document's popup opened from the answer's list of sentences flashes the sentence in its mark's line colour, the accent";
+    check('claims', flashName, flashLine === colours.trail.line, flashLine);
     const still = before.scrollTop > 0 && lit.scrollTop === before.scrollTop && left.scrollTop === before.scrollTop;
     const relit = before.looks.length === 2 && isDeepStrictEqual(before.looks, looked(false)) && isDeepStrictEqual(lit.looks[0], looked(true)[0]) && isDeepStrictEqual(left.looks, before.looks);
-    const placeName = "with a document's popup open from its node and scrolled, hovering a sentence marks its quote there in its blue in place, at the same scroll, and leaving it marks it in the accent again";
-    check('claims', placeName, relit && still && builds === 0, JSON.stringify({ before, lit, left, builds }));
+    const placeName = "with that popup open and scrolled, hovering a sentence marks its quote there in its blue on the very marks drawn, at the same scroll, and leaving it marks it in the accent again";
+    check('claims', placeName, relit && lit.same && left.same && still && builds === 0, JSON.stringify({ before, lit, left, builds }));
+    const keptName = "that hover and leave play no flash again, and text selected in the popup stays selected";
+    const kept = played && held.length > 0 && [lit, left].every((s) => !s.flashing && s.selected === held);
+    check('claims', keptName, kept, JSON.stringify({ played, held, lit: [lit.flashing, lit.selected], left: [left.flashing, left.selected] }));
     const unitsName = "a mark is the sentence's only where it overlaps one of its quotes, both in code units: after an emoji, the trail's quote that ends where one of the sentence's starts stays in the accent";
     check('claims', unitsName, isDeepStrictEqual(lit.looks, looked(true)), JSON.stringify(lit.looks));
   });

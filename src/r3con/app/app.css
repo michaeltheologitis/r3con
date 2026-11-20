@@ -724,8 +724,8 @@ mark[title] { cursor: help; }
 @keyframes node-in { from { opacity: 0; scale: 0.8; } }
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes fade { from { opacity: 0; } }
-@keyframes flash { from { outline: 2px solid var(--accent); outline-offset: 2px; } to { outline: 2px solid transparent; outline-offset: 6px; } }
+@keyframes flash { from { outline: 2px solid var(--mark-line); outline-offset: 2px; } to { outline: 2px solid transparent; outline-offset: 6px; } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
-  .flash { outline: 2px solid var(--accent); }
+  .flash { outline: 2px solid var(--mark-line); }
 }

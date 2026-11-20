@@ -3655,12 +3655,10 @@
     return drawn;
   }
 
-  // The sentence hovered, the one focused, the one whose popup is open, and the one whose evidence the node popup shows.
   /** @type {{ hovered: ClaimRef | null, focused: ClaimRef | null, open: ClaimRef | null, inspected: ClaimRef | null }} */
   const litClaims = { hovered: null, focused: null, open: null, inspected: null };
 
-  // Draws the lit sentence's path over the trail, restacks every line by what it is on, counts that sentence's quotes,
-  // and marks them in what the trail fills.
+  // Draws the lit sentence's path over the trail, restacks every line by what it is on, and counts and marks its quotes.
   /** @param {RunTab} tab */
   function lightClaim(tab) {
     const { run, trail } = tab;
@@ -3688,12 +3686,15 @@
       const node = tab.nodes.get(docId(file));
       if (node) countSentences(tab, node, highlighted(tab, d));
     });
-    if (relit) showTrail(tab);
+    if (relit) for (const [el, part] of trailParts) if (part.tab === tab && el.isConnected) part.light?.();
   }
 
   // How many sentences of document d the panel highlights: the lit sentence's quotes there, else the trail's.
   /** @param {Tab} tab @param {number} d */
-  const highlighted = (tab, d) => (tab.litLink ? tab.litLink.sentences.filter((q) => q.document === d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
+  const highlighted = (tab, d) => (tab.litLink ? litQuotes(tab, d).length : (tab.trail?.quoted[d].sentences.length ?? 0));
+
+  /** @param {Tab} tab @param {number} d */
+  const litQuotes = (tab, d) => tab.litLink?.sentences.filter((q) => q.document === d) ?? [];
 
   /** @param {Tab} tab @param {PanelNode} node @param {number} sentences */
   function countSentences(tab, node, sentences) {
@@ -3709,14 +3710,18 @@
     pill.title = plural(sentences, 'highlighted sentence');
   }
 
-  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child }>} */
+  /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child, light?: () => void }>} */
   const trailParts = new Map();
 
-  // Fills `el` from the tab's trail now, and again in place as the trail or its lit sentence changes, so that what is
-  // open, scrolled or focused in it stays.
-  /** @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw @returns {T} */
-  function trailPart(tab, el, draw) {
-    trailParts.set(el, { tab, draw });
+  // Fills `el` from the tab's trail now, and again in place as the trail changes, so that what is open, scrolled or
+  // focused in it stays.
+  /**
+   * @template {Element} T @param {Tab} tab @param {T} el @param {(trail: Trail | null) => Child} draw
+   * @param {() => void} [light] relights `el` in place as the lit sentence changes
+   * @returns {T}
+   */
+  function trailPart(tab, el, draw, light) {
+    trailParts.set(el, { tab, draw, light });
     fill(el, draw(tab.trail));
     return el;
   }
@@ -4647,22 +4652,21 @@
     return { draw, open };
   }
 
-  // `text` from `from` to `to`, each span in `spans` marked, as the lit sentence's where it overlaps one of `claimed`,
-  // titled by `title`, and `at` flashed.
+  // `text` from `from` to `to`, each span in `spans` marked, titled by `title`, and `at` flashed.
   /**
-   * @param {string} text @param {number} from @param {number} to @param {Span[]} spans @param {TextRange[]} claimed
-   * @param {(span: Span) => string} title @param {TextRange | null} at
+   * @param {string} text @param {number} from @param {number} to @param {Span[]} spans @param {(span: Span) => string} title
+   * @param {TextRange | null} at
    */
-  function markedText(text, from, to, spans, claimed, title, at) {
+  function markedText(text, from, to, spans, title, at) {
     const inside = spans.filter((r) => r.end > from && r.start < to);
     const cuts = cutsOf([{ start: from, end: to }, ...inside, ...(at ? [at] : [])]).filter((cut) => cut >= from && cut <= to);
     return cuts.slice(1).map((end, i) => {
       const span = inside.find((r) => r.start <= cuts[i] && r.end >= end);
       const flash = at && at.start <= cuts[i] && at.end >= end;
       if (!span && !flash) return text.slice(cuts[i], end);
-      const onClaim = span && claimed.some((q) => q.start < span.end && q.end > span.start);
-      const classes = [span && span.by.length > 1 && 'multi', onClaim && 'on-claim', flash && 'flash'].filter(Boolean).join(' ');
-      return h(span ? 'mark' : 'span', { class: classes || null, title: span ? title(span) : null }, text.slice(cuts[i], end));
+      const classes = [span && span.by.length > 1 && 'multi', flash && 'flash'].filter(Boolean).join(' ');
+      const props = { class: classes || null, title: span ? title(span) : null, 'data-start': span && cuts[i], 'data-end': span && end };
+      return h(span ? 'mark' : 'span', props, text.slice(cuts[i], end));
     });
   }
 
@@ -4672,8 +4676,9 @@
     const cut = cutOf(file.text);
     const past = at && at.end > cut ? at.start : null;
     let end = past === null ? cut : file.text.length;
+    const index = () => tab.run?.docs.indexOf(file) ?? -1;
     /** @param {Trail | null} trail */
-    const quotedOf = (trail) => trail?.quoted[tab.files.indexOf(file)];
+    const quotedOf = (trail) => trail?.quoted[index()];
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
@@ -4686,18 +4691,26 @@
     // Spans come only with a trail.
     /** @param {number} from @param {number} to */
     const block = (from, to) => {
-      const { trail, litLink } = tab;
+      const { trail } = tab;
       const spans = quotedOf(trail)?.spans ?? [];
-      const d = tab.files.indexOf(file);
-      const claimed = litLink?.sentences.filter((q) => q.document === d) ?? [];
-      return h('span', {}, markedText(file.text, from, to, spans, claimed, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at));
+      return lightQuotes(tab, h('span', {}, markedText(file.text, from, to, spans, (span) => quotedBy(tab, /** @type {Trail} */ (trail), span), at)), index());
     };
     const blocks = textBlocks(pre, file.text, block, end, past);
     const openInFull = () => {
       end = file.text.length;
       blocks.open();
     };
-    return [meta, trailPart(tab, pre, () => [blocks.draw(), end < file.text.length && cutLine(pre, openInFull)])];
+    return [meta, trailPart(tab, pre, () => [blocks.draw(), end < file.text.length && cutLine(pre, openInFull)], () => lightQuotes(tab, pre, index()))];
+  }
+
+  /** @template {Element} T @param {Tab} tab @param {T} el @param {number} d @returns {T} */
+  function lightQuotes(tab, el, d) {
+    const quotes = litQuotes(tab, d);
+    for (const mark of el.querySelectorAll('mark')) {
+      const [start, end] = [Number(mark.dataset.start), Number(mark.dataset.end)];
+      mark.classList.toggle('on-claim', quotes.some((q) => q.start < end && q.end > start));
+    }
+    return el;
   }
 
   /** @param {string} summary @param {Child} body @param {string} [className] */
@@ -4870,8 +4883,7 @@
     if (flashed) scrollToMiddle(flashed);
   }
 
-  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone. A popup
-  // opened as a sentence's evidence keeps that sentence lit until it closes or shows something else.
+  // Selecting an answer that has landed also lights it, once its popup is built, which the light leaves alone.
   /** @param {string} id @param {{ focus?: boolean, at?: TextRange | null, claim?: ClaimRef | null }} [options] */
   function openInspector(id, { focus = false, at = null, claim = null } = {}) {
     const fold = state.shown.nodes.get(id)?.fold;
@@ -4879,8 +4891,8 @@
     state.selected = id;
     inspector.hidden = false;
     inspector.scrollTop = 0;
-    setClaim('inspected', claim);
     renderInspector(at);
+    setClaim('inspected', claim);
     if (splitId(id)[0] === 'answer' && landed(state.shown, id)) lightAnswer(runTab(state.shown), id);
     refreshHighlight();
     if (focus) inspector.focus({ preventScroll: true });
