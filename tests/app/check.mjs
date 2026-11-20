@@ -1210,6 +1210,12 @@ function linesReplayed(id) {
   return document.getAnimations().filter(replays).length;
 }
 
+// Answer `id`'s own solid lines, and how many of them are playing their draw.
+function linesDrawing(id) {
+  const own = [...document.querySelectorAll(`#world .edge:not(.context)[data-key$=">${id}"]`)];
+  return { lines: own.length, drawing: document.getAnimations().filter((a) => a.animationName === 'draw' && own.includes(a.effect?.target)).length };
+}
+
 function answerWorking() {
   return document.querySelector('#world .node.answer.working') !== null;
 }
@@ -1680,13 +1686,15 @@ function iconCopies(selector) {
   };
 }
 
-// The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them.
+// The nodes in the panel standing for folder `id`'s documents, its own in every column, and the lines between them; the
+// lit lines touching them, and those nodes on the trail and on the lit sentence's path.
 function standIns(id) {
   const index = id.slice('doc-'.length);
   const own = [...document.querySelectorAll('#world .node')].map((el) => el.dataset.id).filter((nodeId) => nodeId.endsWith(`-${index}`));
   const keys = [...document.querySelectorAll('#world .edge')].map((el) => el.dataset.key);
   const lines = keys.filter((key) => key.split('>').every((end) => own.includes(end)));
-  return { nodes: own.sort(), lines: lines.sort(), lit: [...document.querySelectorAll('#world .edge.lit')].map((el) => el.dataset.key).filter((key) => key.split('>').some((end) => own.includes(end))).sort(), onPath: own.filter((nodeId) => document.querySelector(`.node[data-id="${nodeId}"]`).classList.contains('on-path')).sort() };
+  const marked = (name) => own.filter((nodeId) => document.querySelector(`.node[data-id="${nodeId}"]`).classList.contains(name)).sort();
+  return { nodes: own.sort(), lines: lines.sort(), lit: [...document.querySelectorAll('#world .edge.lit')].map((el) => el.dataset.key).filter((key) => key.split('>').some((end) => own.includes(end))).sort(), onPath: marked('on-path'), onClaim: marked('on-claim') };
 }
 
 async function folders() {
@@ -4172,19 +4180,20 @@ function claimsShown() {
 function claimLight() {
   const keys = (selector, key) => [...document.querySelectorAll(selector)].map((el) => el.dataset[key]).sort();
   const pill = (el) => (el.querySelector('.pill').hidden ? 0 : Number(el.querySelector('.pill').textContent));
+  const nodes = keys('#world .node.on-claim', 'id');
   return {
-    lit: document.querySelector('#world .has-claim') !== null,
-    nodes: keys('#world .node.on-claim', 'id'),
+    lit: nodes.length > 0,
+    nodes,
     edges: keys('#world .edge.on-claim', 'key'),
     pills: [...document.querySelectorAll('#world .node.doc')].map(pill),
     sentences: [...document.querySelectorAll('.transcript:not([hidden]) .claim.lit')].map((el) => el.textContent),
   };
 }
 
-// In-page, with a sentence lit: how the panel paints its path over the trail. The looks, as opacity and stroke, of its
-// lines and of the trail's other lines; whether its lines are the heavier and the last in the page, so painted over the
-// rest; its nodes' icon colours; the trail's other nodes' looks, as opacity and icon colour; and the sentence's underline
-// and background in the chat.
+// In-page: how the panel paints a lit sentence's path over the trail. The looks, as opacity and stroke, of its lines and
+// of the trail's other lines; whether its lines are the heavier and the last in the page, so painted over the rest; its
+// nodes' icon colours; the trail's other nodes' looks, as opacity and icon colour; the pills' colours; and the sentence's
+// underline and background in the chat, null while none is lit.
 function claimPaint() {
   const lines = [...document.querySelectorAll('#world .edge')];
   const own = lines.filter((el) => el.classList.contains('on-claim'));
@@ -4194,16 +4203,18 @@ function claimPaint() {
   const width = (el) => parseFloat(getComputedStyle(el).strokeWidth);
   const icon = (el) => getComputedStyle(el.querySelector('.icon')).color;
   const others = [...document.querySelectorAll('#world .node.on-path:not(.on-claim)')];
-  const sentence = getComputedStyle(document.querySelector('.transcript:not([hidden]) .claim.lit'));
+  const lit = document.querySelector('.transcript:not([hidden]) .claim.lit');
+  const sentence = lit && getComputedStyle(lit);
   return {
     own: looks(own, lineLook),
     rest: looks(rest, lineLook),
     heavier: own.length > 0 && Math.min(...own.map(width)) > Math.max(...rest.map(width)),
     last: own.length > 0 && lines.slice(-own.length).every((el) => own.includes(el)),
     icons: looks([...document.querySelectorAll('#world .node.on-claim')], icon),
-    others: others.length > 0 ? looks(others, (el) => `${getComputedStyle(el).opacity} ${icon(el)}`) : [],
-    underline: [sentence.textDecorationLine, sentence.textDecorationStyle, sentence.textDecorationThickness, sentence.textDecorationColor].join(' '),
-    background: sentence.backgroundColor,
+    others: looks(others, (el) => `${getComputedStyle(el).opacity} ${icon(el)}`),
+    pills: looks([...document.querySelectorAll('#world .node .pill:not([hidden])')], (el) => getComputedStyle(el).backgroundColor),
+    underline: sentence && [sentence.textDecorationLine, sentence.textDecorationStyle, sentence.textDecorationThickness, sentence.textDecorationColor].join(' '),
+    background: sentence && sentence.backgroundColor,
   };
 }
 
@@ -4255,14 +4266,14 @@ const SHORTER_PX = 320;
 // The name of a popup's esc button.
 const ESC_NAME = 'esc: close';
 
-// Hovers the shown chat's first linked sentence, then moves away; what the panel lit then, and once restored.
-async function hoverClaim(page) {
+// Hovers the shown chat's first linked sentence, then moves away; what in-page `read` finds then, and once restored.
+async function hoverClaim(page, read = claimLight) {
   await page.hover(`${CHAT} .claim`);
-  await becomes(page, () => document.querySelector('#world .has-claim') !== null);
-  const hovered = await page.evaluate(claimLight);
+  await becomes(page, () => document.querySelector('#world .on-claim') !== null);
+  const hovered = await page.evaluate(read);
   await page.mouse.move(0, 0);
-  await becomes(page, () => document.querySelector('#world .has-claim') === null);
-  return { hovered, left: await page.evaluate(claimLight) };
+  await becomes(page, () => document.querySelector('#world .on-claim') === null);
+  return { hovered, left: await page.evaluate(read) };
 }
 
 // Drags along the first line of `selector`'s text from its start, selecting some of it, and gives what is selected.
@@ -4364,24 +4375,23 @@ async function claimsArea() {
     const { hovered, left } = await hoverClaim(page);
     const own = { lit: true, ...SAMPLE_CLAIM_PATH, pills: SAMPLE_CLAIM_PILLS, sentences: [expected[0].text] };
     const within = own.edges.every((key) => trail.edges.includes(key)) && own.edges.length < trail.edges.length;
-    const hoverName = "hovering the linked sentence lights only its path, for each quote the trail's summaries nearest the answer that quote it and its document, and each pill counts its quotes";
+    const hoverName = "hovering the linked sentence marks only its path, drawn over the trail: for each quote the trail's summaries nearest the answer that quote it and its document, and each pill counts its quotes";
     check('claims', hoverName, isDeepStrictEqual(hovered, own) && within, JSON.stringify(hovered));
     const restored = { lit: false, nodes: [], edges: [], pills: SAMPLE_QUOTED.pills, sentences: [] };
-    const leftName = 'leaving it restores the whole trail, and the pills count the trail again';
+    const leftName = 'leaving it clears its path, the trail stays as it was, and the pills count the trail again';
     check('claims', leftName, isDeepStrictEqual(left, restored) && isDeepStrictEqual(await litOnPanel(page), trail), JSON.stringify(left));
 
-    await page.hover(`${CHAT} .claim`);
-    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
-    const paint = await page.evaluate(claimPaint);
-    await page.mouse.move(0, 0);
-    await becomes(page, () => document.querySelector('#world .has-claim') === null);
-    const [accent, blue, tint] = await Promise.all(['--accent', '--claim', '--claim-mark'].map((token) => page.evaluate(tokenColour, token)));
+    const { hovered: paint, left: unpainted } = await hoverClaim(page, claimPaint);
+    const [accent, ink, blue, tint] = await Promise.all(['--accent', '--accent-ink', '--claim', '--claim-mark'].map((token) => page.evaluate(tokenColour, token)));
     const overName = "a hovered sentence's lines are drawn in the claim's blue, heavier and after every other line, so over the trail, whose other lines stay lit in the accent at full strength";
     check('claims', overName, isDeepStrictEqual([paint.own, paint.rest], [[`1 ${blue}`], [`1 ${accent}`]]) && paint.heavier && paint.last, JSON.stringify(paint));
     const iconsName = "its nodes' icons, the answer's mark among them, take the claim's blue, and the trail's other nodes keep their accent at full strength";
     check('claims', iconsName, isDeepStrictEqual([paint.icons, paint.others], [[blue], [`1 ${accent}`]]), JSON.stringify(paint));
     const sentenceName = "the hovered sentence is underlined solid, 2px, in the claim's blue, over the claim's tint";
     check('claims', sentenceName, paint.underline === `underline solid 2px ${blue}` && paint.background === tint, `${paint.underline}; ${paint.background}`);
+    const pillsName = "while it is lit the pills, counting its quotes, are the claim's blue; left, they count the trail's again in the accent ink, every lit line back in the accent";
+    const accentAgain = isDeepStrictEqual([unpainted.own, unpainted.rest, unpainted.pills], [[], [`1 ${accent}`], [ink]]);
+    check('claims', pillsName, isDeepStrictEqual(paint.pills, [blue]) && accentAgain, JSON.stringify({ hovered: paint.pills, left: unpainted }));
 
     await page.focus(ANSWER_MARK);
     await page.keyboard.press('Tab');
@@ -4469,20 +4479,35 @@ async function claimsArea() {
     await runSample(page);
     const pill = async () => (await pillsByName(page))['registry folder']?.[0];
     const onTrail = await pill();
-    await page.hover(`${CHAT} .claim`);
-    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
-    const lit = await pill();
+    const lit = async () => {
+      await page.hover(`${CHAT} .claim`);
+      await becomes(page, () => document.querySelector('#world .on-claim') !== null);
+    };
+    await lit();
+    const onClaimPill = await pill();
     const counts = [SAMPLE_QUOTED.pills[3], SAMPLE_CLAIM_PILLS[3]].map(String);
-    check('claims', "a closed folder's pill counts the lit sentence's quotes in it while it is lit, and the trail's otherwise", isDeepStrictEqual([onTrail, lit], counts), `${onTrail} → ${lit}`);
+    check('claims', "a closed folder's pill counts the lit sentence's quotes in it while it is lit, and the trail's otherwise", isDeepStrictEqual([onTrail, onClaimPill], counts), `${onTrail} → ${onClaimPill}`);
 
-    const index = (await folderId(page, 'registry')).slice('doc-'.length);
+    // The sentence's path through the registry memo, SAMPLE_CLAIM_PATH's doc-3, r1-3 and r2-3, as the closed folder draws it.
+    const id = await folderId(page, 'registry');
+    const path = ['doc', 'r1', 'r2'].map((kind) => id.replace('doc-', `${kind}-`));
+    const { onClaim } = await page.evaluate(standIns, id);
     const look = await page.evaluate(folderLook, folderSel('registry'));
-    const stages = await page.$$eval('#world .node.on-claim:not(.doc)', (els, i) => els.map((el) => el.dataset.id).filter((id) => id.endsWith(`-${i}`)), index);
-    const stacks = await Promise.all(stages.map(async (id) => [id, (await page.evaluate(iconCopies, nodeSel(id))).strokes]));
+    const stacks = await Promise.all(path.slice(1).map(async (stage) => (await page.evaluate(iconCopies, nodeSel(stage))).strokes));
     const [dim, blue] = await Promise.all(['--dim', '--claim'].map((token) => page.evaluate(tokenColour, token)));
-    const blueName = "a closed folder on the lit sentence's path takes the claim's blue pair and counts its sources in that blue, and its round stacks on the path light only their front copy in it";
-    const stacked = stages.length >= 2 && stacks.every(([, strokes]) => isDeepStrictEqual(strokes, [dim, dim, blue]));
-    check('claims', blueName, isDeepStrictEqual(look.fills, fillsOf('light', 'claim')) && look.sources?.color === blue && stacked, JSON.stringify({ look, stacks }));
+    const blueText = ['#world .node.on-claim .pill:not([hidden])', '#world .node.on-claim .label.sources:not([hidden])'];
+    const contrasts = { light: await page.evaluate(lowestContrasts, blueText) };
+    const blueName = "a closed folder on the lit sentence's path takes the claim's blue pair and counts its sources in that blue, and the path's round-1 and round-2 stacks in it light only their front copy in it";
+    const stacked = stacks.every((strokes) => isDeepStrictEqual(strokes, [dim, dim, blue]));
+    check('claims', blueName, isDeepStrictEqual(onClaim, path) && isDeepStrictEqual(look.fills, fillsOf('light', 'claim')) && look.sources?.color === blue && stacked, JSON.stringify({ onClaim, look, stacks }));
+
+    await page.click('#theme-btn');
+    await lit();
+    const dark = { look: await page.evaluate(folderLook, folderSel('registry')), blue: await page.evaluate(tokenColour, '--claim') };
+    contrasts.dark = await page.evaluate(lowestContrasts, blueText);
+    check('claims', "in the dark theme it takes the claim's dark pair, its sources counted in the dark blue", isDeepStrictEqual(dark.look.fills, fillsOf('dark', 'claim')) && dark.look.sources?.color === dark.blue, JSON.stringify(dark));
+    const legible = Object.values(contrasts).flatMap(Object.values).every((ratio) => Number.isFinite(ratio) && ratio >= MIN_TEXT_CONTRAST);
+    check('claims', `the blue pills' text and the blue sources count meet ${MIN_TEXT_CONTRAST}:1 in both themes`, legible, JSON.stringify(contrasts));
   });
 
   // The claim with a second copy of its first quote, cut short: the two overlap, so they are one sentence.
@@ -4490,7 +4515,7 @@ async function claimsArea() {
   await withPage('claims', { before: serving(withOverlap) }, async (page) => {
     const name = await page.getAttribute(`${CHAT} .claim`, 'aria-label');
     await page.hover(`${CHAT} .claim`);
-    await becomes(page, () => document.querySelector('#world .has-claim') !== null);
+    await becomes(page, () => document.querySelector('#world .on-claim') !== null);
     const { pills } = await page.evaluate(claimLight);
     await page.click(`${CHAT} .claim`);
     const note = await page.evaluate(claimNote);
@@ -5484,7 +5509,9 @@ async function tabs() {
     await becomes(page, panelStill);
     await send(page, asks[0].question);
     const replayed = await page.evaluate(linesReplayed, 'answer-1');
+    const landing = await page.evaluate(linesDrawing, 'answer-1');
     check('tabs', 'lighting a new answer moves lines between layers without playing how they were drawn again', replayed === 0, `${replayed} replayed`);
+    check('tabs', "a new answer's own lines still draw in as it lands lit, moved to the lit layer", landing.lines > 0 && landing.drawing === landing.lines, JSON.stringify(landing));
 
     await askInNewTab(page, NEW_QUESTION);
     await page.waitForSelector('#world .edge.draw', { state: 'attached' });
