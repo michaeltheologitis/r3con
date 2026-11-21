@@ -354,7 +354,7 @@ p { margin: 0; }
   color: var(--dim);
 }
 
-.inspector, .settings, .save-note, .claim-note {
+.inspector, .settings, .save-note, .claim-note, .ask-note {
   overflow: auto;
   padding: 0.9em 2ch 1em;
   background: var(--bg);
@@ -390,6 +390,9 @@ p { margin: 0; }
   max-height: calc(100vh - 2 * var(--gutter));
   color: var(--fg);
 }
+.ask-note { inset: auto; margin: 0; color: var(--fg); }
+.ask-note p + p { margin-top: 0.6em; }
+.ask-note strong { font-weight: 600; }
 .save-actions { display: flex; justify-content: flex-end; gap: 2ch; margin-top: 0.7em; }
 .save-actions .btn { min-height: 24px; }
 .keys {
@@ -574,6 +577,8 @@ mark[title] { cursor: help; }
   border-radius: 4px;
 }
 .line.user .g { color: var(--dim); }
+.line.user.follow-up .g { color: var(--accent); }
+.log-head .follow-up { color: var(--accent-ink); }
 .line.answer .g { color: var(--accent); }
 .line.answer .t { font-weight: 600; }
 .sentences, .skips { margin: 0.3em 0 0 2ch; }
@@ -659,6 +664,9 @@ mark[title] { cursor: help; }
 #model-hint { align-self: flex-start; }
 .ask-actions { display: flex; gap: 2ch; margin-left: auto; }
 .run-btn { font-weight: 600; }
+/* A 24px target that keeps the glyph's place in the row. */
+#ask-note-btn { display: grid; place-items: center; width: 24px; height: 24px; margin: calc((1lh - 24px) / 2) calc((1ch - 24px) / 2); }
+#ask-note-btn[aria-expanded="true"] { color: var(--fg); }
 .note { padding: 0 2ch 0.7em; color: var(--dim); }
 
 .files {
