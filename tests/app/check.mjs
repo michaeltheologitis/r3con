@@ -60,7 +60,7 @@ const SAMPLE_QUOTED = {
     [],
   ],
   pills: [2, 2, 2, 3, 0],
-  line: '9 sentences from 4 documents',
+  line: '9 quotes from 4 documents',
   title: [0, 'quoted by\n01_northgate · round 1 (cited by 04_contractor_registry · round 2)\n01_northgate · round 2 (cited by the answer)'],
   lines: {
     'r2-0': "on the answer's trail · cited by the answer",
@@ -149,7 +149,7 @@ const perDocument = (kind) => Array(SAMPLE_DOCS).fill(kind).join(' ');
 const RUN_STEPS = [
   ['round 1 · extracting relevance', SAMPLE_DOCS, perDocument('r1')],
   ['round 2 · extracting relevance', SAMPLE_DOCS, perDocument('r2')],
-  ['proposing a structure', 1, 'schema'],
+  ['proposing a schema', 1, 'schema'],
   [`parsing ${SAMPLE_DOCS} documents`, SAMPLE_DOCS, perDocument('parsed')],
   ['reasoning', 0, ''],
 ];
@@ -235,7 +235,7 @@ const MORE_ROUNDS = 3;
 const OTHER_ROUNDS = [FEWER_ROUNDS, MORE_ROUNDS, MAX_ROUNDS];
 // The kinds of node of `rounds` relevance rounds, r1 on.
 const roundKinds = (rounds) => Array.from({ length: rounds }, (_, k) => `r${k + 1}`);
-// Besides its rounds' nodes, a run draws a document and a parse per document, then one structure and one answer.
+// Besides its rounds' nodes, a run draws a document and a parse per document, then one schema and one answer.
 const DOCUMENT_AND_PARSE = 2;
 const STRUCTURE_AND_ANSWER = 2;
 const ROUNDS_KEY = 'r3con-proto-rounds';
@@ -255,7 +255,7 @@ const SCRIPTED_LINKED = "The check's scripted model answers this.";
 const SCRIPTED_UNLINKED = 'Nothing backs this second sentence.';
 const SCRIPTED_ANSWER = `${SCRIPTED_LINKED} ${SCRIPTED_UNLINKED}`;
 // The scripted answer cites the first two documents' summaries, and each quotes one line of its document.
-const SCRIPTED_SENTENCES = '2 sentences from 2 documents';
+const SCRIPTED_SENTENCES = '2 quotes from 2 documents';
 const LIVE_DONE = /^● done · openai\/gpt-6-luna · [\d,]+ tokens · \$[\d.]+$/;
 const LIVE_READY = /^ready · openai\/gpt-6-luna · \$[\d.]+$/;
 const LIVE_ERROR = "RuntimeError: the check's model is down";
@@ -1239,7 +1239,7 @@ function recordStatuses() {
   new MutationObserver(() => window.statuses.push(status.textContent)).observe(status, { childList: true, characterData: true, subtree: true });
 }
 
-// Records each frame the structure's spinner is given while it works, not the mark it is drawn with.
+// Records each frame the schema's spinner is given while it works, not the mark it is drawn with.
 function recordSpins() {
   window.spins = [];
   new MutationObserver((records) => {
@@ -1309,7 +1309,7 @@ function columnsDrawn() {
 }
 
 // Whether `columns`, as columnsDrawn gives them, are a whole run of `rounds` rounds: the documents', each round's in
-// turn, the structure's, the parses' and the answers', each kind of node in a column of its own.
+// turn, the schema's, the parses' and the answers', each kind of node in a column of its own.
 function runOfRounds(columns, rounds) {
   const kinds = ['doc', ...roundKinds(rounds), 'schema', 'parsed', 'answer'];
   return isDeepStrictEqual(columns.map(([kind]) => kind), kinds) && columns.every(([, xs]) => xs.length === 1);
@@ -1553,7 +1553,7 @@ const REPORTS = ['reports', [['config.yml', 'Config.\n'], ['contracts.txt', 'Con
 const LETTERS = ['letters', Array.from({ length: 5 }, (_, i) => [`letter_${i}.txt`, `Letter ${i}.\n`])];
 const ARCHIVE = ['archive', Array.from({ length: 12 }, (_, i) => [`old_${String(i).padStart(2, '0')}.txt`, ''])];
 const EMPTY_MEMO = ['memo.txt', ''];
-const REPORTS_TREE = ['reports · 5 files (open)', '  config', '  contracts', '  notes', '  q3 · 2 files (open)', '    incidents', '    q3-summary'];
+const REPORTS_TREE = ['reports · 5 docs (open)', '  config', '  contracts', '  notes', '  q3 · 2 docs (open)', '    incidents', '    q3-summary'];
 
 // The file column's rows, indented by depth, with their labels and a folder's "(open)", "(lit)" or "(unused)".
 function treeRows(indent) {
@@ -1566,6 +1566,10 @@ function treeRows(indent) {
     return `${'  '.repeat(Math.round(parseFloat(el.style.left) / indent))}${labels}${open}${state}`;
   });
 }
+
+// A node's label lines that show; and those of each round and parse node of the folder at index `at`.
+const linesOf = (page, selector) => page.$eval(selector, (el) => [...el.querySelectorAll('.label:not([hidden])')].map((label) => label.textContent));
+const stackLinesOf = async (page, at) => Object.fromEntries(await Promise.all(['r1', 'r2', 'parsed'].map(async (kind) => [kind, await linesOf(page, nodeSel(`${kind}-${at}`))])));
 
 const folderSel = (name) => `#world .node.folder.doc[aria-label^="${name} folder,"]`;
 const folderId = (page, name) => page.$eval(folderSel(name), (el) => el.dataset.id);
@@ -1647,16 +1651,16 @@ function tokenColour(token) {
   return color;
 }
 
-// A folder node's look: its two fills, its node's opacity, its chevron's turn, its sources' line and whether it shows a pill.
+// A folder node's look: its two fills, its node's opacity, its chevron's turn, its sources count and whether it shows a pill.
 function folderLook(selector) {
   const el = document.querySelector(selector);
   const fill = (part) => getComputedStyle(el.querySelector(`.folder-${part}`)).fill;
-  const sources = el.querySelector('.label.sources');
+  const sources = el.querySelector('.label:not([hidden]) .sources');
   return {
     fills: [fill('back'), fill('front')],
     opacity: Number(getComputedStyle(el).opacity),
     chevron: getComputedStyle(el.querySelector('.chevron svg')).rotate,
-    sources: sources && !sources.hidden ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
+    sources: sources ? { text: sources.textContent, color: getComputedStyle(sources).color } : null,
     pill: el.querySelector('.pill:not([hidden])') !== null,
   };
 }
@@ -1730,10 +1734,10 @@ async function folders() {
     await page.focus(folderSel('reports'));
     await page.keyboard.press(' ');
     const spaced = await page.evaluate(treeRows, TREE_INDENT);
-    const closedRows = [...REPORTS_TREE.slice(0, 4), '  q3 · 2 files', 'memo'];
-    const toggled = isDeepStrictEqual(shut.rows, closedRows) && shut.look.chevron === 'none' && shut.focused === 'q3 folder, 2 files, closed' && isDeepStrictEqual(reopened, rows);
+    const closedRows = [...REPORTS_TREE.slice(0, 4), '  q3 · 2 docs', 'memo'];
+    const toggled = isDeepStrictEqual(shut.rows, closedRows) && shut.look.chevron === 'none' && shut.focused === 'q3 folder, 2 docs, closed' && isDeepStrictEqual(reopened, rows);
     const toggleName = 'a click on a folder closes it, its chevron pointing right and its files gone, and keeps the focus on it; Enter opens it again, and Space closes another';
-    check('folders', toggleName, toggled && isDeepStrictEqual(spaced, ['reports · 5 files', 'memo']), `${shut.rows.join(' | ')}; ${JSON.stringify(shut.look)}; ${shut.focused}; then ${spaced.join(' | ')}`);
+    check('folders', toggleName, toggled && isDeepStrictEqual(spaced, ['reports · 5 docs', 'memo']), `${shut.rows.join(' | ')}; ${JSON.stringify(shut.look)}; ${shut.focused}; then ${spaced.join(' | ')}`);
   });
 
   const dir = mkdtempSync(join(tmpdir(), 'r3con-folders-'));
@@ -1750,7 +1754,7 @@ async function folders() {
       await filesCounted(page, 4);
       const rows = await page.evaluate(treeRows, TREE_INDENT);
       const names = (await page.evaluate(filesPane)).names;
-      const expected = ['picked · 3 files (open)', '  01_memo', '  sub · 1 file (open)', '    02_memo', '  03_memo', 'loose'];
+      const expected = ['picked · 3 docs (open)', '  01_memo', '  sub · 1 doc (open)', '    02_memo', '  03_memo', 'loose'];
       const name = 'a picked folder is a top row as a dropped one is, and a folder of its name dropped later joins it, its files kept together where it first was, ahead of a file dropped beside them';
       check('folders', name, isDeepStrictEqual(rows, expected) && isDeepStrictEqual(names, ['01_memo.txt', 'sub/02_memo.md', '03_memo.txt', 'loose.txt']), `${rows.join(' | ')}; ${names.join(' | ')}`);
     });
@@ -1762,7 +1766,7 @@ async function folders() {
     await dropBatches(page, [[REPORTS], [LETTERS], [ARCHIVE], [EMPTY_MEMO]], 23);
     const closed = await page.evaluate(treeRows, TREE_INDENT);
     const closedName = `in a tab of more than ${FOLD_FROM_DOCS} files every folder starts closed`;
-    check('folders', closedName, isDeepStrictEqual(closed, ['reports · 5 files', 'letters · 5 files', 'archive · 12 files', 'memo']), closed.join(' | '));
+    check('folders', closedName, isDeepStrictEqual(closed, ['reports · 5 docs', 'letters · 5 docs', 'archive · 12 docs', 'memo']), closed.join(' | '));
     const reports = await folderId(page, 'reports');
     const reading = (await page.$$eval('#world .node', (els) => els.map((el) => el.dataset.id))).filter((id) => !id.startsWith('doc-g'));
 
@@ -1771,7 +1775,7 @@ async function folders() {
     const opened = await page.evaluate(treeRows, TREE_INDENT);
     const letters = Array.from({ length: 5 }, (_, i) => `  letter_${i}`);
     const archiveEnds = [['00', '01', '02'], ['09', '10', '11']].map((ends) => ends.map((i) => `  old_${i}`));
-    const expected = ['reports · 5 files', 'letters · 5 files (open)', ...letters, 'archive · 12 files (open)', ...archiveEnds[0], '  6 more files', ...archiveEnds[1], 'memo'];
+    const expected = ['reports · 5 docs', 'letters · 5 docs (open)', ...letters, 'archive · 12 docs (open)', ...archiveEnds[0], '  6 more files', ...archiveEnds[1], 'memo'];
     const fold = await page.evaluate(foldInk);
     // Archive's files follow reports' 5 and letters' 5; its fold starts after its own first few.
     const archiveFold = nodeSel(`doc-f${5 + 5 + CONTEXT_DOCS}`);
@@ -1794,28 +1798,33 @@ async function folders() {
     await waitLit(page);
     const after = await page.evaluate(treeRows, TREE_INDENT);
     const landed = [
-      'reports · 5 files (open)',
+      'reports · 5 docs (open)',
       '  config',
       '  contracts',
       '  notes',
-      '  q3 · 2 files (open)',
+      '  q3 · 2 docs (open)',
       '    incidents',
       '    q3-summary',
-      'letters · 5 files · 2 sources (lit)',
-      'archive · 12 files (open) (unused)',
+      'letters · 5 docs · 2 sources (lit)',
+      'archive · 12 docs (open) (unused)',
       '  12 files · nothing relevant',
       'memo',
     ];
     const autoName = "once the answer lands, each folder holding its sources opens, with those it is in, unless the user left it closed; one the user opened stays open; a fold in it says files, nothing relevant";
     check('folders', autoName, isDeepStrictEqual(after, landed), after.join(' | '));
+    const lettersAt = (await folderId(page, 'letters')).slice('doc-'.length);
+    const labelled = { head: await linesOf(page, folderSel('letters')), ...(await stackLinesOf(page, lettersAt)), fold: await linesOf(page, '#world .node.fold.r1') };
+    const stacked = { head: ['letters', '5 docs · 2 sources'], r1: ['5 snippets', 'round 1'], r2: ['5 snippets', 'round 2'], parsed: ['5 structures'], fold: ['0 snippets', 'round 1'] };
+    const stackName = "a closed folder's node says its name over its docs and sources; its round nodes how many snippets they gave, over their round, and its parse node how many structures; a fold of files with nothing relevant gave none";
+    check('folders', stackName, isDeepStrictEqual(labelled, stacked), JSON.stringify(labelled));
 
     await pressNode(page, folderSel('q3'));
     const q3 = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('q3')), ink: await page.evaluate(tokenColour, '--accent-ink') };
     await pressNode(page, folderSel('reports'));
     const reportsLit = { rows: await page.evaluate(treeRows, TREE_INDENT), look: await page.evaluate(folderLook, folderSel('reports')), stand: await page.evaluate(standIns, reports) };
     const litLook = (look, text) => isDeepStrictEqual(look.fills, fillsOf('light', 'lit')) && look.opacity === 1 && look.chevron === 'none' && !look.pill && look.sources?.text === text && look.sources.color === q3.ink;
-    const q3Lit = q3.rows.includes('  q3 · 2 files · 2 sources (lit)') && litLook(q3.look, '2 sources');
-    const nested = reportsLit.rows[0] === 'reports · 5 files · 4 sources (lit)' && litLook(reportsLit.look, '4 sources');
+    const q3Lit = q3.rows.includes('  q3 · 2 docs · 2 sources (lit)') && litLook(q3.look, '2 sources');
+    const nested = reportsLit.rows[0] === 'reports · 5 docs · 4 sources (lit)' && litLook(reportsLit.look, '4 sources');
     const litName = "a closed folder holding the answer's sources lights terracotta, with no pill as a simulated answer quotes nothing, and counts them under its name in the accent ink, any depth in it: q3's 2, then reports' 4";
     check('folders', litName, q3Lit && nested, `${q3.rows.join(' | ')}; ${JSON.stringify(q3.look)}; ${reportsLit.rows[0]}; ${JSON.stringify(reportsLit.look)}`);
 
@@ -1841,7 +1850,7 @@ async function folders() {
     check('folders', threeName, threes, JSON.stringify(Object.fromEntries(Object.entries(stacks).map(([id, look]) => [id, look.copies]))));
     const singles = ['#world .node.r1[aria-label^="memo,"]', '#world .node.parsed[aria-label^="memo,"]', '#world .node.schema', folderSel('reports'), '#world .node.fold.doc'];
     const single = await Promise.all(singles.map((selector) => page.evaluate(iconCopies, selector)));
-    const oneName = "a file's own round and parse nodes, the structure, and a folder's or a fold's first node each still draw one icon";
+    const oneName = "a file's own round and parse nodes, the schema, and a folder's or a fold's first node each still draw one icon";
     check('folders', oneName, single.every((look) => look.copies === 1), single.map((look) => look.copies).join(' '));
     const [accent, dim] = [await page.evaluate(tokenColour, '--accent'), await page.evaluate(tokenColour, '--dim')];
     const litStacks = (await page.evaluate(standIns, lettersId)).onPath.filter((id) => id in stacks);
@@ -1875,7 +1884,7 @@ async function folders() {
     await becomes(page, (id) => document.querySelector(`.node[data-id="${id}"]`)?.classList.contains('on-path'), 'answer-1');
     const asked = await page.evaluate(treeRows, TREE_INDENT);
     const askName = "an ask landing lit leaves the folders as the user left them, each closed one counting the ask's sources in it";
-    const askRows = ['reports · 5 files · 3 sources (lit)', 'letters · 5 files · 3 sources (lit)', 'archive · 12 files (unused)', 'memo'];
+    const askRows = ['reports · 5 docs · 3 sources (lit)', 'letters · 5 docs · 3 sources (lit)', 'archive · 12 docs (unused)', 'memo'];
     check('folders', askName, isDeepStrictEqual(asked, askRows), asked.join(' | '));
 
     await page.click('#theme-btn');
@@ -1912,6 +1921,9 @@ async function folders() {
     const [r1, r2] = ['r1', 'r2'].map((kind) => `${kind}-${id.slice('doc-'.length)}`);
     const name = "a closed folder's lines stay as the run drew them once the panel folds again, among them a line from its one relevant file's snippet to the next round in it";
     check('folders', name, drawn.lines.includes(`${r1}>${r2}`) && isDeepStrictEqual(redrawn, drawn), JSON.stringify({ drawn, redrawn }));
+    const counts = await stackLinesOf(page, id.slice('doc-'.length));
+    const countsName = "a closed folder of one note and two empty files counts only what the note gave: one snippet a round, one structure";
+    check('folders', countsName, isDeepStrictEqual(counts, { r1: ['1 snippet', 'round 1'], r2: ['1 snippet', 'round 2'], parsed: ['1 structure'] }), JSON.stringify(counts));
   });
 
   await withPage('folders', { sample: false }, async (page) => {
@@ -1926,7 +1938,7 @@ async function folders() {
     // From the keyboard, as each opened folder pushes the next out of view.
     for (const name of Object.keys(sizes)) await pressNode(page, folderSel(name), { key: true });
     const filesOf = (name) => stems(name).map((stem) => `  ${stem}`);
-    const opened = (name, rows = filesOf(name)) => [`${name} · ${sizes[name]} files (open)`, ...rows];
+    const opened = (name, rows = filesOf(name)) => [`${name} · ${sizes[name]} docs (open)`, ...rows];
     const big = filesOf('big');
     /** @param {string[]} fold the rows of the folder of 12 */
     const rowsWith = (fold) => [...opened('four'), 'loose_1', 'loose_2', 'loose_3', ...opened('five'), ...opened('seven'), ...opened('big', fold), ...opened('ten')];
@@ -1951,13 +1963,13 @@ async function folders() {
     await pressNode(page, folderSel('mixed'), { key: true });
     const before = await page.evaluate(treeRows, TREE_INDENT);
     const files = (prefix, from, to) => Array.from({ length: to - from + 1 }, (_, i) => `  ${prefix}_0${from + i}`);
-    const expectedBefore = ['mixed · 28 files (open)', ...files('a', 1, 3), '  5 more files', '  a_sub · 2 files', '  8 more files', '  b_sub · 2 files', '  5 more files', ...files('c', 6, 8)];
+    const expectedBefore = ['mixed · 28 docs (open)', ...files('a', 1, 3), '  5 more files', '  a_sub · 2 docs', '  8 more files', '  b_sub · 2 docs', '  5 more files', ...files('c', 6, 8)];
     await page.click('#tab-chat');
     await send(page, 'Which memo is relevant?');
     const done = await becomes(page, statusMatches, SIMULATED_DONE.source);
     const after = (await page.evaluate(treeRows, TREE_INDENT)).map((row) => row.replace(/ \((lit|unused)\)$/, ''));
     const quiet = (n) => `  ${n} files · nothing relevant`;
-    const expectedAfter = ['mixed · 28 files (open)', quiet(8), '  a_sub · 2 files', quiet(3), '  b_04', quiet(4), '  b_sub · 2 files', quiet(8)];
+    const expectedAfter = ['mixed · 28 docs (open)', quiet(8), '  a_sub · 2 docs', quiet(3), '  b_04', quiet(4), '  b_sub · 2 docs', quiet(8)];
     const name = `a folder of more than ${FOLD_FROM_DOCS} files of its own folds its quiet runs between its subfolders, keeping its own first and last ${CONTEXT_DOCS} in view before a run, and a relevant file leaves the runs either side folded`;
     check('folders', name, done && isDeepStrictEqual(before, expectedBefore) && isDeepStrictEqual(after, expectedAfter), `${before.join(' | ')}; then ${after.join(' | ')}`);
   });
@@ -2013,8 +2025,7 @@ const pillsByName = async (page) => Object.fromEntries(Object.values(await page.
 async function folderQuotes() {
   const pills = SAMPLE_QUOTED.pills;
   const [first, second, third] = recordedSample().docs.map((doc) => doc.name);
-  const named = (n) => counted(n, 'highlighted sentence');
-  const sitesPill = (n, sources) => [String(n), named(n), `sites folder, 3 files, closed, ${counted(sources, 'source')}, ${named(n)}`];
+  const sitesPill = (n, sources) => [String(n), highlightedQuotes(n), `sites folder, 3 docs, closed, ${counted(sources, 'source')}, ${highlightedQuotes(n)}`];
   await withPage('folders', { sample: false, before: serving((script) => withMemosInFolders(withFirstMemoUnasked(script))) }, async (page) => {
     for (const name of ['river', 'sites', 'canteen']) await pressNode(page, folderSel(name));
     const unlit = await pillsByName(page);
@@ -2028,7 +2039,7 @@ async function folderQuotes() {
     const inner = await pillsByName(page);
     const total = (shown, names) => names.reduce((sum, name) => sum + Number(shown[name]?.[0]), 0);
     const added = total(opened, [first, second, 'river folder']) === Number(closed['sites folder']?.[0]) && opened['river folder']?.[0] === inner[`river/${third}`]?.[0];
-    const sumName = "a closed folder's pill counts the sentences the lit answer quotes from its files at any depth in it, what their pills add up to once it opens, a closed subfolder's among them; it is titled, and its node named, for them as a file's is";
+    const sumName = "a closed folder's pill counts the quotes the lit answer makes from its files at any depth in it, what their pills add up to once it opens, a closed subfolder's among them; it is titled, and its node named, for them as a file's is";
     check('folders', sumName, added && isDeepStrictEqual(closed['sites folder'], sitesPill(pills[0] + pills[1] + pills[2], 3)), JSON.stringify({ closed, opened, inner }));
     const openName = 'an open folder shows no pill, as its files show theirs';
     check('folders', openName, !('sites folder' in opened) && !('river folder' in inner) && [first, second, `river/${third}`].every((name) => name in inner), JSON.stringify({ opened, inner }));
@@ -2081,10 +2092,10 @@ async function sampleReplay() {
     check('sample replay', dottedName, isDeepStrictEqual(dotted, ownLines));
     const intoStructure = Object.keys(edges).filter((k) => k.endsWith('>schema'));
     const allFaint = intoStructure.length === SAMPLE_DOCS && intoStructure.every((k) => edges[k].includes('context'));
-    const faintName = `the structure gets a faint line from each of the ${SAMPLE_DOCS} round-2 summaries`;
+    const faintName = `the schema gets a faint line from each of the ${SAMPLE_DOCS} round-2 summaries`;
     check('sample replay', faintName, allFaint, intoStructure.join(' '));
-    const structureOnPath = await page.$eval(nodeSel('schema'), (el) => el.classList.contains('on-path'));
-    check('sample replay', 'the structure is not on the lit path', !structureOnPath);
+    const schemaOnPath = await page.$eval(nodeSel('schema'), (el) => el.classList.contains('on-path'));
+    check('sample replay', 'the schema is not on the lit path', !schemaOnPath);
     const filled = await page.$$eval('.node.parsed', hasFilledIcons);
     const filledName = "the parses with records have filled icons and the cafeteria's has none";
     const recordsAt = [true, true, true, true, false];
@@ -2139,7 +2150,7 @@ async function sampleReplay() {
   const withoutName = 'a page shipped with no recorded asks ends the replay with neither offers nor their header';
   check('sample replay', withoutName, isDeepStrictEqual(none, shipped.slice(0, -offers.length)), none.at(-1));
 
-  // With motion on, the structure works 1.4 s: more than one 1.12 s cycle of its spinner.
+  // With motion on, the schema works 1.4 s: more than one 1.12 s cycle of its spinner.
   await withPage('sample replay', { sample: false }, async (page) => {
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await page.evaluate(recordSpins);
@@ -2165,7 +2176,7 @@ async function chatLog() {
     check('chat log', 'once the replay ends its log is folded under one line: ready, the model and the cost', quiet, folded.folded);
     const offers = [ASKS_HEADER, ...recordedAsks().map(offerLabel)];
     const quoted = SAMPLE_QUOTED.line;
-    const underName = "outside the log the turn shows only the answer and its sentences' line, then the recorded asks on offer";
+    const underName = "outside the log the turn shows only the answer and its quotes' line, then the recorded asks on offer";
     check('chat log', underName, isDeepStrictEqual(folded.after, [sample.answer.text, quoted, ...offers]), folded.after.slice(0, 2).join(' | '));
 
     await page.click('.log-toggle');
@@ -3394,6 +3405,9 @@ async function popupArea() {
     const roundNames = (await page.$$eval('.node.r1, .node.r2', (els) => els.map((el) => el.getAttribute('aria-label')))).sort();
     const snippetNames = [1, 2].flatMap((round) => sample.docs.map((_, i) => `${stem(i)}, round ${round} relevance snippet`)).sort();
     check('popup', "each round's node is named for its document and its relevance snippet", isDeepStrictEqual(roundNames, snippetNames), roundNames[0]);
+    await inspect(page, 'schema');
+    const schema = { label: await page.textContent(`${nodeSel('schema')} .label`), title: (await popup(page))?.title, name: await page.getAttribute(nodeSel('schema'), 'aria-label') };
+    check('popup', "the proposed schema's node and popup are called schema", isDeepStrictEqual(schema, { label: 'schema', title: '● schema', name: 'schema, proposed schema' }), JSON.stringify(schema));
     const cited = citedNames(sample, sample.answer.provenance);
     await inspect(page, 'answer-0');
     const listed = await provenanceListed(page);
@@ -3433,7 +3447,7 @@ async function popupArea() {
     const json = JSON.stringify(filled, null, JSON_INDENT);
     const textName = "the parse's text, and a copy of it, is its JSON, indented, each line one line high";
     check('popup', textName, block.text === json && block.copied === json && block.oneLineEach, JSON.stringify(block.copied.slice(0, 40)));
-    check('popup', "a parsed node's popup is as wide as the structure's", parsedWidth === schemaWidth, `${parsedWidth} and ${schemaWidth}`);
+    check('popup', "a parsed node's popup is as wide as the schema's", parsedWidth === schemaWidth, `${parsedWidth} and ${schemaWidth}`);
     await page.keyboard.press('Escape');
 
     const panel = await rect(page, '#panel');
@@ -3690,6 +3704,7 @@ async function popupHuge() {
 // ---------- quotes: the sentences the lit answer's trail is based on ----------
 
 const counted = (n, one) => `${n} ${n === 1 ? one : `${one}s`}`;
+const highlightedQuotes = (n) => counted(n, 'highlighted quote');
 
 // What pinned quotes, SAMPLE_QUOTED or ASK_QUOTED, show of the recorded sample: each document's marks, as their text
 // sliced from its memo by code points and whether two summaries quote them; the pills by document node; the files
@@ -3697,11 +3712,10 @@ const counted = (n, one) => `${n} ${n === 1 ? one : `${one}s`}`;
 function quotesShown(sample, docIds, { marks, pills }) {
   const textOf = (d, [start, end]) => Array.from(sample.docs[d].text).slice(start, end).join('');
   const shown = marks.map((doc, d) => doc.map((mark) => ({ text: textOf(d, mark), multi: mark[2] })));
-  const named = (n) => counted(n, 'highlighted sentence');
   return {
     marks: shown,
-    pills: Object.fromEntries(pills.flatMap((n, d) => (n ? [[docIds[d], [String(n), named(n), `${sample.docs[d].name}, document, ${named(n)}`]]] : []))),
-    counts: pills.map((n) => (n ? [`${n} ¶`, named(n)] : null)),
+    pills: Object.fromEntries(pills.flatMap((n, d) => (n ? [[docIds[d], [String(n), highlightedQuotes(n), `${sample.docs[d].name}, document, ${highlightedQuotes(n)}`]]] : []))),
+    counts: pills.map((n) => (n ? [`${n} ¶`, highlightedQuotes(n)] : null)),
     docs: sample.docs.flatMap((doc, d) => (pills[d] ? [[doc.name, ...shown[d].map(({ text }) => text)]] : [])),
   };
 }
@@ -3713,6 +3727,13 @@ function quotesListed(docs, ids, quotes) {
     const own = quotes.filter((q) => q.document === ids[d]).sort((a, b) => a.start - b.start);
     return own.length ? [[doc.name, ...own.map((q) => Array.from(doc.text).slice(q.start, q.end).join(''))]] : [];
   });
+}
+
+// The sentence popup claimNote reads for `listed`: one document is named in its line, several head their own groups.
+function quotesNoted(listed, line) {
+  const head = ([name, ...quotes]) => `${name} — ${counted(quotes.length, 'quote')}`;
+  if (listed.length === 1) return { line: head(listed[0]), groups: [[null, ...listed[0].slice(1)]] };
+  return { line, groups: listed.map((group) => [head(group), ...group.slice(1)]) };
 }
 
 // The sample with `prefix` before its first memo, its quotes moved by the prefix's code points, as r3con would place them.
@@ -3883,7 +3904,7 @@ async function quotesArea() {
     const ask = quotesShown(sample, docIds, ASK_QUOTED);
 
     const pills = await page.evaluate(pillsOn);
-    const pillName = "each document on the lit answer's trail with quoted sentences has a pill counting them, named and titled for them; no other document has one";
+    const pillName = "each document on the lit answer's trail with quotes has a pill counting them, named and titled for them; no other document has one";
     check('quotes', pillName, isDeepStrictEqual(pills, run.pills), JSON.stringify(pills));
 
     const popups = [];
@@ -3891,7 +3912,7 @@ async function quotesArea() {
       await inspect(page, docIds[d]);
       popups.push(await page.evaluate(marksIn, '#inspector'));
     }
-    const lineOk = (meta, d) => (SAMPLE_QUOTED.pills[d] ? meta.endsWith(` · ${counted(SAMPLE_QUOTED.pills[d], 'sentence')} used`) : !meta.includes('used'));
+    const lineOk = (meta, d) => (SAMPLE_QUOTED.pills[d] ? meta.endsWith(` · ${counted(SAMPLE_QUOTED.pills[d], 'quote')} used`) : !meta.includes('used'));
     const marked = popups.every((p, d) => isDeepStrictEqual(p.marks.map(({ text, multi }) => ({ text, multi })), run.marks[d]));
     const [titled, title] = SAMPLE_QUOTED.title;
     const docName = "a document's popup marks the trail's sentences, strong where two summaries quote them, titled with who quotes each and what cites them, and its line says how many are used";
@@ -3904,7 +3925,7 @@ async function quotesArea() {
 
     await inspect(page, 'answer-0');
     const answerLine = await page.evaluate(() => document.querySelector('#inspector .used')?.textContent ?? null);
-    check('quotes', "the answer's popup says how many sentences from how many documents its trail quotes", answerLine === SAMPLE_QUOTED.line, answerLine);
+    check('quotes', "the answer's popup says how many quotes from how many documents its trail quotes", answerLine === SAMPLE_QUOTED.line, answerLine);
 
     const lines = {};
     for (const id of Object.keys(SAMPLE_QUOTED.lines)) {
@@ -3956,7 +3977,7 @@ async function quotesArea() {
     const openedList = await page.evaluate(sentenceLists);
     const foldedList = { line: SAMPLE_QUOTED.line, open: false, shown: false, marker: '"▸ "', docs: run.docs };
     const listed = isDeepStrictEqual(lists, [foldedList]) && isDeepStrictEqual(openedList, [{ ...foldedList, open: true, shown: true, marker: '"▾ "' }]);
-    const listName = "under the answer the chat lists its trail's sentences, ▸ folded: N sentences from M documents; a click opens it to each document's name and its sentences, marked";
+    const listName = "under the answer the chat lists its trail's quotes, ▸ folded: N quotes from M documents; a click opens it to each document's name and its quotes, marked";
     check('quotes', listName, listed, JSON.stringify([lists, openedList].map((l) => l[0] && [l[0].open, l[0].shown, l[0].marker])));
     const fromQuotes = quotesListed(sample.docs, sample.ids, sample.answer.provenance.quotes);
     check('quotes', "the sentences highlighted for the answer are exactly the quotes r3con recorded on its trail", isDeepStrictEqual(openedList[0]?.docs, fromQuotes), JSON.stringify(fromQuotes.map((doc) => doc.length - 1)));
@@ -3972,7 +3993,7 @@ async function quotesArea() {
     const fileView = await page.evaluate(marksIn, '#file-view');
     await page.click('#file-back');
     await page.click('#tab-chat');
-    const filesName = "the files list shows N ¶ by each file on the trail with quoted sentences, read out as highlighted sentences, dims the files off it, and a file's view marks and counts them as its popup does";
+    const filesName = "the files list shows N ¶ by each file on the trail with quotes, read out as highlighted quotes, dims the files off it, and a file's view marks and counts them as its popup does";
     const viewOk = isDeepStrictEqual(fileView.marks, popups[3].marks) && lineOk(fileView.meta, 3);
     const listOk = isDeepStrictEqual(files.map((f) => f.count), run.counts) && isDeepStrictEqual(files.map((f) => f.off), SAMPLE_QUOTED.off);
     check('quotes', filesName, listOk && viewOk, JSON.stringify(files));
@@ -3983,7 +4004,7 @@ async function quotesArea() {
     await page.click('#tab-chat');
     const askPills = await page.evaluate(pillsOn);
     const askList = (await page.evaluate(sentenceLists)).at(-1);
-    const ownName = "an ask lit shows its own trail's pills and file counts, and its chat lists its own sentences, folded";
+    const ownName = "an ask lit shows its own trail's pills and file counts, and its chat lists its own quotes, folded";
     const own = isDeepStrictEqual(askPills, ask.pills) && isDeepStrictEqual(askFiles, ask.counts) && isDeepStrictEqual(askList, { line: ASK_QUOTED.line, open: false, shown: false, marker: '"▸ "', docs: ask.docs });
     check('quotes', ownName, own, JSON.stringify({ askPills, askList: askList?.line }));
     const askQuoted = isDeepStrictEqual(askList?.docs, quotesListed(sample.docs, sample.ids, asks[0].provenance.quotes));
@@ -4075,8 +4096,8 @@ async function quotesArea() {
     await inspect(page, 'r2-0');
     const folds = (await page.evaluate(foldsIn)).map((f) => f.name.split(' ')[0]);
     const lists = (await page.evaluate(sentenceLists)).length;
-    const none = pills === 0 && marks.marks.length === 0 && !marks.meta.includes('sentence') && isDeepStrictEqual(folds, ['provenance']) && lists === 0;
-    const simulatedName = 'a simulated run, which has no quotes, marks nothing: no pill, no mark, no sentence used, no quotes fold and no list in the chat, where the recorded run had pills';
+    const none = pills === 0 && marks.marks.length === 0 && !marks.meta.includes('quote') && isDeepStrictEqual(folds, ['provenance']) && lists === 0;
+    const simulatedName = 'a simulated run, which has no quotes, marks nothing: no pill, no mark, no quotes used, no quotes fold and no list in the chat, where the recorded run had pills';
     check('quotes', simulatedName, recorded > 0 && none, JSON.stringify({ recorded, pills, meta: marks.meta, folds, lists }));
   });
 
@@ -4113,7 +4134,7 @@ async function quotesArea() {
     const pill = (await page.evaluate(pillsOn))[(await docIdsOf(page))[0]]?.[0];
     const first = (await page.evaluate(sentenceLists))[0]?.docs[0];
     const halves = String(SAMPLE_QUOTED.pills[0] + 1);
-    check('quotes', 'two quotes that only meet count as two sentences, in the pill and the chat; quotes that overlap still count as one', pill === halves && first?.length === SAMPLE_QUOTED.pills[0] + 2, `pill ${pill}; ${JSON.stringify(first)}`);
+    check('quotes', 'two quotes that only meet count as two quotes, in the pill and the chat; quotes that overlap still count as one', pill === halves && first?.length === SAMPLE_QUOTED.pills[0] + 2, `pill ${pill}; ${JSON.stringify(first)}`);
   });
 
   await withPage('quotes', { before: serving(withSample(trailBeyondPage)) }, async (page) => {
@@ -4220,8 +4241,7 @@ function claimPaint() {
   };
 }
 
-// In-page: the open popup of a sentence's evidence: its line, each document's name then what it shows of it, its name,
-// whether it holds the focus, and whether it sits clear of the sentence; null while closed.
+// In-page: the open sentence popup's line, groups, name, focus and whether it clears the sentence; null while closed.
 function claimNote() {
   const note = document.getElementById('claim-note');
   if (!note.matches(':popover-open')) return null;
@@ -4229,7 +4249,7 @@ function claimNote() {
   const box = note.getBoundingClientRect();
   return {
     line: note.querySelector('.insp-title').textContent,
-    groups: [...note.querySelectorAll('.quoted')].map((g) => [g.querySelector('.quoted-name').textContent, ...[...g.querySelectorAll('.sentence, .doc-summary')].map((el) => el.textContent)]),
+    groups: [...note.querySelectorAll('.quoted')].map((g) => [g.querySelector('.quoted-head, .quoted-name')?.textContent ?? null, ...[...g.querySelectorAll('.sentence, .doc-summary')].map((el) => el.textContent)]),
     name: note.getAttribute('aria-label'),
     focused: note.contains(document.activeElement),
     clear: Boolean(lit) && (box.top >= lit.bottom || box.bottom <= lit.top),
@@ -4469,8 +4489,9 @@ async function claimsArea() {
     await page.mouse.move(0, 0);
     const note = await page.evaluate(claimNote);
     const openLight = await page.evaluate(claimLight);
-    const listed = { line: evidence, groups: quotesListed(sample.docs, sample.ids, claim.quotes), name: "the sentence's quotes", focused: true, clear: true };
-    const noteName = "a click on it opens a popup clear of it, holding the focus: its quotes by document, as the answer's sentences list them; it stays lit while the popup is open";
+    const quoted = quotesListed(sample.docs, sample.ids, claim.quotes);
+    const listed = { ...quotesNoted(quoted, evidence), name: "the sentence's quotes", focused: true, clear: true };
+    const noteName = "a click on it opens a popup clear of it, holding the focus: its quotes by document, each headed by its name and how many it quotes there; it stays lit while the popup is open";
     check('claims', noteName, isDeepStrictEqual(note, listed) && isDeepStrictEqual(openLight, own), JSON.stringify(note));
     const noteLooks = await page.evaluate(markLooks, '#claim-note');
     const allClaimed = (looks, inColours) => isDeepStrictEqual(looks, expectedLooks(looks, inColours, () => true));
@@ -4478,7 +4499,7 @@ async function claimsArea() {
     check('claims', blueName, noteLooks.length === claim.quotes.length && allClaimed(noteLooks, colours), JSON.stringify(noteLooks));
     await page.click('#claim-note .sentence >> nth=0');
     const flash = await page.evaluate(flashed);
-    const [firstDoc] = listed.groups;
+    const [firstDoc] = quoted;
     const opened = { note: await page.evaluate(claimNote), title: (await popup(page))?.title, flash: flash?.text, marked: flash?.marked };
     const quoteName = "a quote in it closes it and opens its document's popup there, the quote marked";
     check('claims', quoteName, isDeepStrictEqual(opened, { note: null, title: `● ${firstDoc[0]}`, flash: firstDoc[1], marked: true }), JSON.stringify(opened));
@@ -4638,7 +4659,7 @@ async function claimsArea() {
     const look = await page.evaluate(folderLook, folderSel('registry'));
     const stacks = await Promise.all(path.slice(1).map(async (stage) => (await page.evaluate(iconCopies, nodeSel(stage))).strokes));
     const [dim, blue] = await Promise.all(['--dim', '--claim'].map((token) => page.evaluate(tokenColour, token)));
-    const blueText = ['#world .node.on-claim .pill:not([hidden])', '#world .node.on-claim .label.sources:not([hidden])'];
+    const blueText = ['#world .node.on-claim .pill:not([hidden])', '#world .node.on-claim .label:not([hidden]) .sources'];
     const contrasts = { light: await page.evaluate(lowestContrasts, blueText) };
     const blueName = "a closed folder on the lit sentence's path takes the claim's blue pair and counts its sources in that blue, and the path's round-1 and round-2 stacks in it light only their front copy in it";
     const stacked = stacks.every((strokes) => isDeepStrictEqual(strokes, [dim, dim, blue]));
@@ -4663,8 +4684,23 @@ async function claimsArea() {
     await page.click(`${CHAT} .claim`);
     const note = await page.evaluate(claimNote);
     const shown = { name, pills, line: note?.line, first: note?.groups[0] };
-    const once = { name: `${claim.text} · ${evidence}`, pills: SAMPLE_CLAIM_PILLS, line: evidence, first: quotesListed(sample.docs, sample.ids, claim.quotes)[0] };
+    const once = { name: `${claim.text} · ${evidence}`, pills: SAMPLE_CLAIM_PILLS, line: evidence, first: quotesNoted(quotesListed(sample.docs, sample.ids, claim.quotes), evidence).groups[0] };
     check('claims', "two of a sentence's quotes that overlap count and list as one sentence, as the trail's do", isDeepStrictEqual(shown, once), JSON.stringify(shown));
+  });
+
+  // The claim with only its quotes in the first memo.
+  const inFirstMemo = (quotes) => quotes.filter((q) => q.document === sample.ids[0]);
+  const withOneDocument = withClaims(([c]) => [{ ...c, documents: [sample.ids[0]], quotes: inFirstMemo(c.quotes) }]);
+  await withPage('claims', { before: serving(withOneDocument) }, async (page) => {
+    await page.click(`${CHAT} .claim`);
+    const note = await page.evaluate(claimNote);
+    const listed = quotesListed(sample.docs, sample.ids, inFirstMemo(claim.quotes));
+    const [[memo]] = listed;
+    const expected = quotesNoted(listed);
+    await page.click('#claim-note .insp-title .quoted-name');
+    const opened = { note: await page.evaluate(claimNote), title: (await popup(page))?.title };
+    const oneName = "a sentence's quotes from one document: the popup's header names it and counts them, its name opening it, and the quotes have no heading of their own";
+    check('claims', oneName, isDeepStrictEqual({ line: note?.line, groups: note?.groups }, expected) && isDeepStrictEqual(opened, { note: null, title: `● ${memo}` }), JSON.stringify({ note, opened }));
   });
 
   // At the document level, its claim names the memos only. Round 1 summarizes the first memo as blank space, so the
@@ -5235,7 +5271,7 @@ async function answersOnTheRun(sample, asks) {
     const askFold = { ...(await page.evaluate(provenanceFoldIn)), listed: await provenanceListed(page) };
     const citesShown = askFold.name === `provenance ${askCited.length}` && askFold.shown && isDeepStrictEqual(askFold.listed, askCited);
     const inPopup = shown.includes(asks[0].text) && shown.includes(summary) && isDeepStrictEqual(rows, POPUP_ROWS['answer-0']) && citesShown;
-    const toldName = "a recorded ask's chat gives its real answer with only its sentences' line under it, its folded log its model and cost, and its popup its citations and source";
+    const toldName = "a recorded ask's chat gives its real answer with only its quotes' line under it, its folded log its model and cost, and its popup its citations and source";
     check('answers', toldName, told && inPopup, `${askLog.folded}; ${askLog.after.join(' | ')}; ${askFold.name}: ${askFold.listed.join(' · ')}`);
     const label = await page.textContent(`${nodeSel('answer-1')} .label`);
     check('answers', 'an answer node is labelled with a short form of its question, and its model', label === ASK_LABEL, label);
@@ -6466,7 +6502,7 @@ async function liveSession(url) {
     const answered = await becomes(page, lastTurnSays, [SCRIPTED_ANSWER, `ready · ${DEFAULT_MODEL} · $`], LIVE_RUN_MS);
     const askLog = await page.evaluate(logOf);
     const told = isDeepStrictEqual(askLog.after, [SCRIPTED_ANSWER, SCRIPTED_SENTENCES]) && !askLog.open && askLog.mark === 'ok';
-    const askName = "a follow-up runs an ask and shows its answer in the chat with only its sentences' line under it, and its model and cost on its folded log";
+    const askName = "a follow-up runs an ask and shows its answer in the chat with only its quotes' line under it, and its model and cost on its folded log";
     check('live', askName, answered && told, `${askLog.folded}; ${askLog.after.join(' | ')}`);
 
     const holders = [...(await page.evaluate(placesHolding, token)), ...(await page.evaluate(placesHolding, TEST_KEY))];
@@ -6780,7 +6816,7 @@ const FROM_ROUND_1 = "nothing relevant in the end · answered from round 1's not
 // Two fading memos of a run's own `tag`: read whole once a round, both say nothing in round FADING_PRUNED_AFTER.
 const fadingMemos = (tag) => ['01_fading_memo.txt', '02_fading_memo.txt'].map((name) => fadingMemo(name, tag));
 // Their run's nodes but the documents', as stageNodes gives them: each memo's path ends empty in its last round, with
-// no structure and no parse.
+// no schema and no parse.
 const FROM_ROUND_1_NODES = ['answer-0', 'r1-0', 'r1-1', 'r2-0', 'r2-1', 'r3-0 · empty', 'r3-1 · empty'];
 // In-page: the solid lines into answer `id`, from what it cites.
 const citesInto = (page, id) => page.$$eval('.edge.cite', (els, to) => els.map((el) => el.dataset.key).filter((key) => key.endsWith(`>${to}`)).sort(), id);
@@ -6792,7 +6828,7 @@ async function litTrail(page) {
 }
 
 // Over two memos r3con prunes both of after round FADING_PRUNED_AFTER, it answers from their round-1 notes: no
-// structure nor parse is drawn, the answer's lines come from round 1, its trail lights through round 1 to the memos,
+// schema nor parse is drawn, the answer's lines come from round 1, its trail lights through round 1 to the memos,
 // and the log says so once, in the live run, an ask over it, the tab saved and opened again and an ask over that, and
 // a run continued after it failed in reasoning.
 async function liveFromRound1(url, server) {
@@ -6818,14 +6854,14 @@ async function liveFromRound1(url, server) {
       lit: await litTrail(page),
     };
     const ranExpected = { pruned: [[FADING_PRUNED_AFTER, ids]], structured: 0, nodes: FROM_ROUND_1_NODES, cites: fromRound1(0), lit };
-    const ranName = "a run r3con prunes every memo of reports no schema nor parse, draws no structure nor parse, and its answer's lines and lit trail come from round 1's notes to the memos";
+    const ranName = "a run r3con prunes every memo of reports no schema nor parse, draws no schema nor parse, and its answer's lines and lit trail come from round 1's notes to the memos";
     check('live', ranName, done && isDeepStrictEqual(ran, ranExpected), JSON.stringify(ran));
 
     await page.focus('.log-toggle');
     await page.keyboard.press('Enter');
     const steps = (await page.evaluate(logOf)).steps.map(({ step, nested }) => [step, nested]);
     const reasoning = steps.find(([step]) => step === 'reasoning')?.[1] ?? [];
-    const logged = { said: reasoning.includes(FROM_ROUND_1), structured: steps.some(([step]) => step === 'proposing a structure' || step.startsWith('parsing ')) };
+    const logged = { said: reasoning.includes(FROM_ROUND_1), structured: steps.some(([step]) => step === 'proposing a schema' || step.startsWith('parsing ')) };
     check('live', "its log says, under reasoning, that it answered from round 1's notes, and has no structuring step", isDeepStrictEqual(logged, { said: true, structured: false }), JSON.stringify(steps));
 
     await send(page, SAVED_ASK);
@@ -7269,7 +7305,7 @@ async function liveFolds(url, server) {
     const rows = await page.evaluate(panelRows);
     const readName = 'once read, each document with a snippet has a row of its own, and each run of three or more of the others is one fold, nothing relevant';
     check('live', readName, done && isDeepStrictEqual(rows, FOLD_RUN_ROWS), rows.join(', '));
-    // The answers centre on the rows rather than sit in one, and the structure heads its column.
+    // The answers centre on the rows rather than sit in one, and the schema heads its column.
     const order = await page.$$eval('#world .node:not(.answer, .schema)', (els) => els.map((el) => [el.dataset.id, parseFloat(el.style.top), parseFloat(el.style.left)]));
     const inRows = [...order].sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(([id]) => id);
     const misplaced = order.map(([id]) => id).filter((id, i) => id !== inRows[i]);
@@ -7628,7 +7664,7 @@ async function liveRoundsOf(url, rounds) {
     const placed = columns.every((xs) => xs.length === 1) && gaps.every((gap) => gap > 0 && gap === gaps[0]) && columns.at(-1)[0] > columns.at(-2)[0];
     const counted = nodes.length === SAMPLE_DOCS * (rounds + DOCUMENT_AND_PARSE) + STRUCTURE_AND_ANSWER && kinds.every((kind) => roundNodes.filter((n) => kindOf(n.id) === kind).length === SAMPLE_DOCS);
     const named = roundNodes.every((n) => isDeepStrictEqual(n.labels, [stem(docOf(n.id)), `round ${roundOf(n.id)}`]) && n.name === `${stem(docOf(n.id))}, round ${roundOf(n.id)} relevance snippet`);
-    const columnsName = `${run} draws a column of ${SAMPLE_DOCS} nodes per round, in order between the documents and the structure, each labelled and named for its round`;
+    const columnsName = `${run} draws a column of ${SAMPLE_DOCS} nodes per round, in order between the documents and the schema, each labelled and named for its round`;
     check('live', columnsName, done && counted && placed && named, `${nodes.length} nodes; columns at ${columns.map((xs) => xs.join('/')).join(', ')}`);
     const geometry = await page.evaluate(dottedLineHits);
     const clear = geometry.dotted === SAMPLE_DOCS * rounds && geometry.hits.length === 0;
@@ -7650,8 +7686,8 @@ async function liveRoundsOf(url, rounds) {
       isDeepStrictEqual(intoParses, docs.flatMap((d) => fromFinal(`parsed-${d}`)).sort()) &&
       intoAnswer.includes(final) &&
       intoAnswer.every((kind) => kind === final || kind === 'parsed');
-    const fedName = `${run}: its last round alone feeds the structure, the parses and the answer`;
-    check('live', fedName, fed, `into the structure ${intoSchema.join(' ')}; into the answer from ${[...new Set(intoAnswer)].join(' ')}`);
+    const fedName = `${run}: its last round alone feeds the schema, the parses and the answer`;
+    check('live', fedName, fed, `into the schema ${intoSchema.join(' ')}; into the answer from ${[...new Set(intoAnswer)].join(' ')}`);
 
     const [answer] = await page.evaluate(answersRead);
     const lit = await litOnPanel(page);
@@ -7798,7 +7834,7 @@ async function liveLog(url) {
     await page.evaluate(() => (window.release = true));
     await becomes(page, statusMatches, LIVE_DONE.source, LIVE_RUN_MS);
     const ended = await page.evaluate(logOf);
-    const endedName = "once it ends its folded line says ready, the model and the cost, and only its sentences' line is under its answer";
+    const endedName = "once it ends its folded line says ready, the model and the cost, and only its quotes' line is under its answer";
     check('live', endedName, !ended.open && ended.mark === 'ok' && LIVE_READY.test(ended.folded) && isDeepStrictEqual(ended.after, [SCRIPTED_ANSWER, SCRIPTED_SENTENCES]), `${ended.folded}; ${ended.after.join(' | ')}`);
     await page.focus('.log-toggle');
     await page.keyboard.press('Enter');
@@ -9656,7 +9692,7 @@ async function liveClaims(url) {
     await page.click(`${CHAT} .claim`);
     const note = await page.evaluate(claimNote);
     const docs = sampleMemos().map((m) => ({ name: m.name, text: m.buffer.toString() }));
-    const listed = { line: evidenceOf(linked), groups: quotesListed(docs, answer.ids, linked.quotes), name: "the sentence's quotes", focused: true, clear: true };
+    const listed = { ...quotesNoted(quotesListed(docs, answer.ids, linked.quotes), evidenceOf(linked)), name: "the sentence's quotes", focused: true, clear: true };
     check('live', 'a click on it lists exactly those quotes, by document', isDeepStrictEqual(note, listed), JSON.stringify(note));
     await page.keyboard.press('Escape');
 

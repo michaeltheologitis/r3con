@@ -1947,7 +1947,8 @@
   const FAINT_FADE_FROM_DOCS = 5;
   const SVG_NS = 'http://www.w3.org/2000/svg';
   const ARIA_KIND = { doc: 'document', parsed: 'parsed structure', schema: 'proposed schema' };
-  const STAGE_PHASE = { schema: 'proposing a structure', parsed: 'parsing', answer: 'reasoning' };
+  const SCHEMA_LABEL = 'schema';
+  const STAGE_PHASE = { schema: 'proposing a schema', parsed: 'parsing', answer: 'reasoning' };
   // The relevance rounds r3con's default config runs, and a run's until another count is chosen in the settings.
   const DEFAULT_ROUNDS = 2;
   // The most r3con app takes, its MAX_RELEVANCE_ROUNDS.
@@ -2301,6 +2302,8 @@
   function plural(n, one, many = `${one}s`) {
     return `${n} ${n === 1 ? one : many}`;
   }
+  /** @param {number} n */
+  const highlightedQuotes = (n) => plural(n, 'highlighted quote');
   /** @param {string} name */
   const stripExt = (name) => name.replace(/\.[^./]+$/, '') || name;
   /** @param {string} s */
@@ -2381,7 +2384,7 @@
   const roundKinds = (rounds) => range(rounds).map((k) => roundKind(k + 1));
   /** @param {Pick<Run, 'docs' | 'pruned'>} run */
   const allPruned = (run) => run.docs.length > 0 && run.pruned.size === run.docs.length;
-  // The round whose summaries the structure, the parses and the answers are shown, as r3con's context_round picks it.
+  // The round whose summaries the schema, the parses and the answers are shown, as r3con's context_round picks it.
   /** @param {Pick<Run, 'rounds' | 'docs' | 'pruned'>} run */
   const contextRound = (run) => roundKind(allPruned(run) ? 1 : run.rounds.length);
   // A round's summaries have a hole for a document not read in it: not yet, live, or ever, if r3con pruned it.
@@ -2389,7 +2392,7 @@
   const summariesIn = (run, kind) => run.rounds[roundOf(kind) - 1];
   /** @param {NodeKind} kind @returns {kind is PerDocumentKind} */
   const isPerDocument = (kind) => kind === 'parsed' || isRound(kind);
-  // A kind of node's column in a panel of `rounds` rounds: the documents', each round's, the structure's, the
+  // A kind of node's column in a panel of `rounds` rounds: the documents', each round's, the schema's, the
   // parses' and the answers'.
   /** @param {NodeKind} kind @param {number} rounds */
   const column = (kind, rounds) => (isRound(kind) ? roundOf(kind) : { doc: 0, schema: rounds + 1, parsed: rounds + 2, answer: rounds + 3 }[kind]);
@@ -2406,7 +2409,7 @@
   function nodeName(tab, id) {
     const [kind, d] = splitId(id);
     if (kind === 'doc') return tab.nodes.get(id)?.file?.name ?? 'document';
-    if (kind === 'schema') return 'structure';
+    if (kind === 'schema') return SCHEMA_LABEL;
     const { run } = runTab(tab);
     if (kind === 'answer') return answerLabel(answerAt(run, id));
     return `${docLabel(run, d)} · ${kind === 'parsed' ? 'parsed' : roundName(kind)}`;
@@ -2956,12 +2959,14 @@
     return sentences;
   }
 
+  /** @param {number} quotes @param {number} documents */
+  const quotesFrom = (quotes, documents) => `${plural(quotes, 'quote')} from ${plural(documents, 'document')}`;
+
   /** @param {Trail} trail */
   function sentencesFrom(trail) {
     const quoted = trail.quoted.filter(({ sentences }) => sentences.length);
     if (!quoted.length) return null;
-    const sentences = quoted.reduce((sum, q) => sum + q.sentences.length, 0);
-    return `${plural(sentences, 'sentence')} from ${plural(quoted.length, 'document')}`;
+    return quotesFrom(quoted.reduce((sum, q) => sum + q.sentences.length, 0), quoted.length);
   }
 
   /** @param {Tab} tab @param {string} id */
@@ -3079,7 +3084,7 @@
 
   /** @param {Tab} tab */
   function contentBounds(tab) {
-    const widest = Math.max('structure'.length, ...tab.files.map((f) => fileLabel(f).length));
+    const widest = Math.max(SCHEMA_LABEL.length, ...tab.files.map((f) => fileLabel(f).length));
     // Once there is a run, an answer's label is its question and model, often wider than any file's.
     /** @param {string} id */
     const width = (id) => (tab.run && splitId(id)[0] === 'answer' ? nodeName(tab, id).length : widest) * charPx + NODE_PAD_PX;
@@ -3161,7 +3166,7 @@
     if (!node.file) return `${nodeName(tab, node.id)}, ${what}${stopped}`;
     const skipped = node.el.classList.contains('skipped') ? `, skipped: ${reasonsOf(skipsAt(runTab(tab).run, node.id))}` : '';
     if (node.kind !== 'doc') return `${stripExt(node.file.name)}, ${what}${stopped}${skipped}`;
-    return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${plural(sentences, 'highlighted sentence')}` : ''}`;
+    return `${node.file.name}, ${ARIA_KIND.doc}${sentences ? `, ${highlightedQuotes(sentences)}` : ''}`;
   }
 
   /** @param {Tab} tab @param {string} id @param {NodeKind} kind @param {Point} pos @param {{ working?: boolean, file?: LoadedFile | null, enter?: boolean }} [options] */
@@ -3445,7 +3450,7 @@
       const c = Math.max(MIN_CURVE, Math.abs(tx - sx) / 2);
       return `M${sx} ${pa.y} C${sx + c} ${pa.y} ${tx - c} ${pb.y} ${tx} ${pb.y}`;
     }
-    // A lane for each node the longest bridge hops: a document's dotted line to its parse, over each round and the structure.
+    // A lane for each node the longest bridge hops: a document's dotted line to its parse, over each round and the schema.
     const lane = LANE_ROOM / (roundsOf(tab) + 1);
     const top = Math.min(pa.y, pb.y) - ICON_HALF - lane * hops;
     const ramp = Math.min(BRIDGE_RAMP / hops, (tx - sx) / 4);
@@ -3705,7 +3710,7 @@
     const pill = /** @type {HTMLElement} */ (node.el.querySelector('.pill'));
     pill.hidden = !sentences;
     pill.textContent = String(sentences);
-    pill.title = plural(sentences, 'highlighted sentence');
+    pill.title = highlightedQuotes(sentences);
   }
 
   /** @type {Map<Element, { tab: Tab, draw: (trail: Trail | null) => Child, light?: () => void }>} */
@@ -4066,49 +4071,53 @@
 
   /** @param {NodeKind} kind */
   const columnName = (kind) => (isRound(kind) ? roundName(kind) : kind === 'parsed' ? 'parsed' : '');
+  // A folded row's round or parse node counts what its documents gave, not its files: pruned and empty ones give none.
+  /** @param {NodeKind} kind @param {number} produced */
+  const stackLabels = (kind, produced) => [plural(produced, kind === 'parsed' ? 'structure' : 'snippet'), isRound(kind) ? roundName(kind) : ''];
 
   // Before a run a fold counts its files; in a run, its first node says whether they are read.
-  /** @param {Tab} tab @param {PanelNode} node */
-  function labelFold(tab, node) {
+  /** @param {Tab} tab @param {PanelNode} node @param {number} [produced] what a round or parse node's documents gave */
+  function labelFold(tab, node, produced = foldCalls(tab, node.kind, foldDocs(/** @type {FoldRow} */ (node.fold))).produced) {
     const row = /** @type {FoldRow} */ (node.fold);
-    if (row.folder) return labelFolder(tab, node, row.folder);
-    const count = plural(row.end - row.start + 1, tab.run ? 'file' : 'more file');
+    if (row.folder) return labelFolder(tab, node, row.folder, produced);
+    const files = plural(row.end - row.start + 1, tab.run ? 'file' : 'more file');
     const status = foldStatus(tab, row);
+    const [count, under] = node.kind === 'doc' ? [files, [status, row.open && 'fold'].filter(Boolean).join(' · ')] : stackLabels(node.kind, produced);
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
     name.textContent = count;
-    sub.textContent = node.kind === 'doc' ? [status, row.open && 'fold'].filter(Boolean).join(' · ') : isRound(node.kind) ? roundName(node.kind) : '';
-    sub.hidden = !sub.textContent;
+    sub.textContent = under;
+    sub.hidden = !under;
     const column = columnName(node.kind);
     const stopped = node.el.classList.contains('failed') && status !== 'stopped' && 'stopped';
     node.el.setAttribute('aria-label', [count, column, row.open ? 'unfolded' : 'folded', status, stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(row.open));
-    node.el.title = `${row.open ? 'fold' : 'unfold'} ${count}`;
+    node.el.title = `${row.open ? 'fold' : 'unfold'} ${files}`;
     node.el.classList.toggle('open', row.open);
   }
 
-  /** @param {Tab} tab @param {PanelNode} node @param {Folder} folder */
-  function labelFolder(tab, node, folder) {
+  /** @param {Tab} tab @param {PanelNode} node @param {Folder} folder @param {number} produced */
+  function labelFolder(tab, node, folder, produced) {
     const { open } = /** @type {FoldRow} */ (node.fold);
-    const files = plural(folder.end - folder.start + 1, 'file');
+    const docs = plural(folder.end - folder.start + 1, 'doc');
     const { trail } = tab;
     const head = node.kind === 'doc';
     const onTrail = new Set(head ? [...(trail?.nodes ?? [])].map((id) => docOf(tab, id)) : []);
     const sources = foldDocs(folder).filter((d) => onTrail.has(d)).length;
     const counted = !open && sources > 0 && plural(sources, 'source');
-    // Only a closed folder counts its documents' sentences, at any depth in it: an open one's documents show their own.
-    const sentences = counted ? foldDocs(folder).reduce((sum, d) => sum + highlighted(tab, d), 0) : 0;
+    // Only a closed folder counts its documents' quotes, at any depth in it: an open one's documents show their own.
+    const quotes = counted ? foldDocs(folder).reduce((sum, d) => sum + highlighted(tab, d), 0) : 0;
+    const [first, second] = head ? [shortLabel(folder.name), [docs, counted && [' · ', h('span', { class: 'sources' }, counted)]]] : stackLabels(node.kind, produced);
     const [name, sub] = /** @type {NodeListOf<HTMLElement>} */ (node.el.querySelectorAll('.label'));
-    name.textContent = `${shortLabel(folder.name)} · ${files}`;
-    sub.textContent = counted || (isRound(node.kind) ? roundName(node.kind) : '');
+    name.textContent = first;
+    fill(sub, second);
     sub.hidden = !sub.textContent;
-    sub.classList.toggle('sources', Boolean(counted));
     const stopped = node.el.classList.contains('failed') && 'stopped';
-    node.el.setAttribute('aria-label', [`${folder.name} folder`, files, columnName(node.kind), open ? 'open' : 'closed', counted, sentences && plural(sentences, 'highlighted sentence'), stopped].filter(Boolean).join(', '));
+    node.el.setAttribute('aria-label', [`${folder.name} folder`, head ? docs : first, columnName(node.kind), open ? 'open' : 'closed', counted, quotes && highlightedQuotes(quotes), stopped].filter(Boolean).join(', '));
     node.el.setAttribute('aria-expanded', String(open));
     node.el.title = `${open ? 'close' : 'open'} ${folder.name}`;
     node.el.classList.toggle('open', open);
     if (!head) return;
-    showPill(node, sentences);
+    showPill(node, quotes);
     node.el.classList.toggle('on-path', Boolean(counted));
     node.el.classList.toggle('unused', Boolean(trail) && !sources);
   }
@@ -4120,16 +4129,18 @@
     const fold = foldingOf(tab);
     const calls = docs.map((d) => fold.calls.get(callId(fold, kind, d)));
     const failed = calls.includes('failed');
-    const back = (/** @type {number} */ d, /** @type {number} */ k) => calls[k] !== 'done' || isVoid(runTab(tab).run, `${kind}-${d}`);
     const working = calls.includes('working');
-    return { started: calls.some(Boolean), working, failed, empty: !working && !failed && kind !== 'doc' && docs.every(back) };
+    const run = runTab(tab).run;
+    const gave = kind === 'doc' ? [] : docs.filter((d, k) => calls[k] === 'done' && !isVoid(run, `${kind}-${d}`));
+    const produced = gave.filter((d) => !skippedWhole(run, `${kind}-${d}`)).length;
+    return { started: calls.some(Boolean), working, failed, empty: !working && !failed && kind !== 'doc' && !gave.length, produced };
   }
 
   // A node drawn as it stands already isn't drawn again, so that its open popup isn't built again.
   /** @param {Tab} tab @param {PanelNode} node @param {boolean} [fresh] */
   function paintNode(tab, node, fresh = false) {
     const docs = node.fold ? foldDocs(node.fold) : [/** @type {number} */ (docOf(tab, node.id))];
-    const { started, working, failed, empty } = foldCalls(tab, node.kind, docs);
+    const { started, working, failed, empty, produced } = foldCalls(tab, node.kind, docs);
     const classes = node.el.classList;
     if (working) {
       classes.remove('void', 'failed');
@@ -4140,7 +4151,7 @@
       if (changed) drawSettled(tab, node, { empty, failed });
     }
     if (!node.fold) return;
-    labelFold(tab, node);
+    labelFold(tab, node, produced);
     const head = tab.nodes.get(foldId('doc', node.fold));
     if (head && head !== node && !node.fold.folder) labelFold(tab, head);
   }
@@ -4689,7 +4700,7 @@
     /** @param {Trail | null} trail */
     const line = (trail) => {
       const sentences = quotedOf(trail)?.sentences.length;
-      const used = sentences ? `${plural(sentences, 'sentence')} used` : trail?.nodes.has(docId(file)) && 'used';
+      const used = sentences ? `${plural(sentences, 'quote')} used` : trail?.nodes.has(docId(file)) && 'used';
       return [fmtBytes(file.size), file.sample && ' · sample memo', used && [' · ', h('span', { class: 'used' }, used)]];
     };
     const meta = trailPart(tab, h('div', { class: 'k' }), line);
@@ -5307,7 +5318,7 @@
     return kind === 'answer' ? [...context, ...every('parsed', (j) => hasRecords(run.parsed[j]))] : context;
   }
 
-  // The lines into a node as its call starts: a flow from its document or, for a parse, the structure; dotted, the
+  // The lines into a node as its call starts: a flow from its document or, for a parse, the schema; dotted, the
   // call's own document, read again; faint, the other outputs it was shown.
   /** @param {RunTab} tab @param {string} id @param {string[] | null} [context] @returns {Line[]} */
   function linesInto(tab, id, context = null) {
@@ -5378,7 +5389,7 @@
   /** @param {Run} run @param {string} id */
   function settledLine(run, id) {
     const [kind, i] = splitId(id);
-    if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'structure ready';
+    if (kind === 'schema') return schemaClasses(/** @type {Schema} */ (run.schema).code).join(', ') || 'schema ready';
     const done = isRound(kind) ? (summariesIn(run, kind)[i].summary ? 'snippet ready' : 'nothing relevant') : hasRecords(run.parsed[i]) ? 'structure ready' : 'nothing parsed';
     const said = skippedWhole(run, id) ? [] : [done];
     return `${docLabel(run, i)} — ${[...said, ...skipsAt(run, id).map(skipSaid)].join(' · ')}`;
@@ -5441,14 +5452,24 @@
     return `${call} of ${part === null ? '' : `part ${part} of `}${docLabel(run, d)}`;
   }
 
-  /** @param {LoadedFile} file @param {Child} said @param {ClaimRef | null} [claim] the sentence whose evidence it is */
+  /** @param {LoadedFile} file @param {ClaimRef | null} [claim] the sentence whose evidence it is */
+  function docButton(file, claim = null) {
+    return h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file), { claim }) }, file.name);
+  }
+
+  /** @param {LoadedFile} file @param {Child} said @param {ClaimRef | null} [claim] */
   function docGroup(file, said, claim = null) {
-    return h('div', { class: 'quoted' }, h('button', { class: 'ref quoted-name', type: 'button', onclick: () => jumpTo(docId(file), { claim }) }, file.name), said);
+    return h('div', { class: 'quoted' }, docButton(file, claim), said);
+  }
+
+  /** @param {LoadedFile} file @param {TextRange[]} sentences @param {ClaimRef | null} [claim] */
+  function quoteButtons(file, sentences, claim = null) {
+    return sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)), claim));
   }
 
   /** @param {LoadedFile} file @param {TextRange[]} sentences @param {ClaimRef | null} [claim] */
   function quotedGroup(file, sentences, claim = null) {
-    return docGroup(file, sentences.map((at) => sentenceButton(file, at, 'sentence', h('mark', {}, file.text.slice(at.start, at.end)), claim)), claim);
+    return docGroup(file, quoteButtons(file, sentences, claim), claim);
   }
 
   // Under an answer, folded until opened: the sentences its trail quotes, by document; each opens its document's popup there.
@@ -5513,8 +5534,7 @@
   // What a linked sentence's evidence is: its quotes from its documents, or at the document level the documents.
   /** @param {Link} link */
   function evidenceLine({ sentences, documents }) {
-    const from = plural(documents.length, 'document');
-    return sentences.length ? `${plural(sentences.length, 'quote')} from ${from}` : from;
+    return sentences.length ? quotesFrom(sentences.length, documents.length) : plural(documents.length, 'document');
   }
 
   // The claims have landed: the linking line goes, and each sentence with evidence becomes a control of its own.
@@ -5606,10 +5626,16 @@
     // The toggle event that clears litClaims.open comes a task after a close, so the popup says whether it is open.
     if (!claimNote.matches(':popover-open') || litClaims.open?.el !== ref.el) state.droppedAt.delete(claimNote);
     if (run.lit !== ref.answer) lightAnswer(tab, ref.answer);
+    const quoted = [...new Set(link.sentences.map((q) => q.document))];
+    /** @param {number} d */
+    const heading = (d) => [docButton(run.docs[d], ref), ` — ${plural(quotesIn(link, d).length, 'quote')}`];
+    const fromOneDocument = quoted.length === 1;
+    /** @param {number} d */
+    const quotesOf = (d) => h('div', { class: 'quoted' }, !fromOneDocument && h('div', { class: 'quoted-head' }, heading(d)), quoteButtons(run.docs[d], quotesIn(link, d), ref));
     const groups = link.sentences.length
-      ? [...new Set(link.sentences.map((q) => q.document))].map((d) => quotedGroup(run.docs[d], quotesIn(link, d), ref))
+      ? quoted.map(quotesOf)
       : link.documents.map((d) => docGroup(run.docs[d], h('p', { class: 'doc-summary' }, shownSummary(run, d)), ref));
-    fill(claimNote, popupHead(evidenceLine(link), closeClaim), groups);
+    fill(claimNote, popupHead(fromOneDocument ? heading(quoted[0]) : evidenceLine(link), closeClaim), groups);
     claimNote.setAttribute('aria-label', link.sentences.length ? "the sentence's quotes" : "the sentence's documents");
     if (claimNote.matches(':popover-open')) claimNote.hidePopover();
     claimNote.showPopover();
@@ -6304,7 +6330,7 @@
     const { files, trail } = state.shown;
     $('file-list').querySelectorAll('.file').forEach((button, d) => {
       const sentences = trail?.quoted[d].sentences.length ?? 0;
-      const named = plural(sentences, 'highlighted sentence');
+      const named = highlightedQuotes(sentences);
       button.classList.toggle('off', Boolean(trail && !trail.nodes.has(docId(files[d]))));
       fill(/** @type {Element} */ (button.querySelector('.used')), sentences ? [h('span', { 'aria-hidden': 'true', title: named }, `${sentences} ¶`), h('span', { class: 'vh' }, named)] : null);
     });
@@ -7424,7 +7450,7 @@
     $('chat-pane').addEventListener('focusin', onClaimFocus);
     $('chat-pane').addEventListener('focusout', onClaimFocus);
     // A quote or a document's name opens the document's popup, so the sentence's own popup closes first.
-    claimNote.addEventListener('click', (e) => targetOf(e).closest('.quoted button') && closeClaim(), true);
+    claimNote.addEventListener('click', (e) => targetOf(e).closest('.quoted button, .quoted-name') && closeClaim(), true);
     claimNote.addEventListener('toggle', (e) => /** @type {ToggleEvent} */ (e).newState === 'closed' && setClaim('open', null));
     $('chat-pane').addEventListener('scroll', placeClaimNote, { capture: true, passive: true });
     window.addEventListener('resize', placeClaimNote);
