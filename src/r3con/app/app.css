@@ -374,23 +374,17 @@ p { margin: 0; }
   cursor: auto;
   touch-action: pan-x pan-y;
 }
+.settings, .save-note, .claim-note, .ask-note { inset: auto; margin: 0; color: var(--fg); }
 .settings {
   --settings-width: min(60ch, calc(100vw - 2 * var(--gutter)));
-  inset: auto;
-  margin: 0;
   width: var(--settings-width);
-  color: var(--fg);
 }
 .settings-body { display: flex; flex-direction: column; gap: 0.9em; }
-.save-note { inset: auto; margin: 0; max-width: calc(100vw - 2 * var(--gutter)); color: var(--fg); }
+.save-note { max-width: calc(100vw - 2 * var(--gutter)); }
 .claim-note {
-  inset: auto;
-  margin: 0;
   width: min(46ch, calc(100vw - 2 * var(--gutter)));
   max-height: calc(100vh - 2 * var(--gutter));
-  color: var(--fg);
 }
-.ask-note { inset: auto; margin: 0; color: var(--fg); }
 .ask-note p + p { margin-top: 0.6em; }
 .ask-note strong { font-weight: 600; }
 .save-actions { display: flex; justify-content: flex-end; gap: 2ch; margin-top: 0.7em; }
@@ -599,9 +593,9 @@ mark[title] { cursor: help; }
 .line.linking { margin-top: 0.3em; }
 .log { color: var(--dim); }
 .log-head { grid-template-columns: 2ch 2ch minmax(0, 1fr); }
-/* A 24px target, centred on the glyph column, that doesn't grow its line: a log's chevron, or the mark that opens an
-   answer's node. */
-.log-toggle, .answer-mark {
+/* A 24px target, centred on the glyph column, that doesn't grow its line: a log's chevron, the mark that opens an
+   answer's node, or ⓘ. */
+.log-toggle, .answer-mark, #ask-note-btn {
   display: grid;
   place-items: center;
   width: 24px;
@@ -664,8 +658,8 @@ mark[title] { cursor: help; }
 #model-hint { align-self: flex-start; }
 .ask-actions { display: flex; gap: 2ch; margin-left: auto; }
 .run-btn { font-weight: 600; }
-/* A 24px target that keeps the glyph's place in the row. */
-#ask-note-btn { display: grid; place-items: center; width: 24px; height: 24px; margin: calc((1lh - 24px) / 2) calc((1ch - 24px) / 2); }
+/* In the row, its target keeps the glyph's own width of the gap on either side. */
+#ask-note-btn { margin: calc((1lh - 24px) / 2) calc((1ch - 24px) / 2); }
 #ask-note-btn[aria-expanded="true"] { color: var(--fg); }
 .note { padding: 0 2ch 0.7em; color: var(--dim); }
 
