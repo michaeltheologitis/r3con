@@ -309,7 +309,7 @@ p { margin: 0; }
 .folder-front { fill: var(--folder-front); }
 .drawing.is-lit .node.folder.on-path { --folder-back: var(--path-back); --folder-front: var(--path-ink); }
 .drawing.is-lit .node.folder.unused { --folder-back: var(--folder-unused-back); --folder-front: var(--folder-unused-front); }
-.drawing.is-lit .node.on-path .label.sources { color: var(--path-text); }
+.drawing.is-lit .node.on-path .label .sources { color: var(--path-text); }
 /* An open folder never lights: its files do. Holding sources, it keeps its name readable and dims its icon, as a fold. */
 .drawing.is-lit .node.folder.open:not(.unused) { opacity: 1; }
 .drawing.is-lit .node.folder.open:not(.unused) :is(.icon, .chevron) { opacity: var(--off-trail-fade); }
@@ -581,7 +581,7 @@ mark[title] { cursor: help; }
 .skips .ref { color: inherit; }
 .skips .ref:hover { color: var(--fg); }
 .quoted { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3em; margin-top: 0.6em; }
-.quoted-name { font-weight: 600; }
+.quoted-name, .quoted-head { font-weight: 600; }
 .sentence, .doc-summary { padding-left: 1.5ch; border-left: 1px solid var(--line); overflow-wrap: anywhere; }
 /* A sentence linked to its evidence: faint until hovered or focused, or while its evidence is open. */
 .claim {
