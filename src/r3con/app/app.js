@@ -179,7 +179,8 @@
    */
   /**
    * @typedef {object} Tab
-   * @property {number} id
+   * @property {number} id for its elements' ids; the number it shows is its place in the row
+   * @property {Tab | null} openedFrom the tab whose ask opened it, if one did
    * @property {LoadedFile[]} files
    * @property {Removed | null} removed while undo can put it back
    * @property {number} reading how many batches of files are being read for it, or wait to be
@@ -1975,9 +1976,15 @@
   const LOST_CONNECTION = 'lost the connection to r3con app';
   const NOT_TEXT = 'R3Con reads text, PDF, Word (.docx) and HTML files: save as one of those, then add again.';
   const OLD_WORD = "R3Con reads Word's .docx, not the older .doc: save as .docx, PDF or text, then add again.";
-  const ASK_WHEN_DONE = 'this run is still going; ask once it has finished';
+  const FOLLOW_UP_WHEN_DONE = 'this run is still going; follow up once it has finished';
+  const FOLLOW_UP = 'follow-up';
+  const FOLLOW_UP_CLASS = 'follow-up';
+  const FOLLOW_UP_MARK = '↳';
+  // Each system's name for the key that sends a follow-up with Enter: the Mac's ⌘, elsewhere Ctrl.
+  const ON_MAC = /^(Mac|iPhone|iPad)/.test(navigator.platform);
+  const FOLLOW_UP_KEYS = ON_MAC ? { hint: '⌘⏎', aria: 'Meta+Enter' } : { hint: 'Ctrl⏎', aria: 'Control+Enter' };
   /** @param {Tab} tab */
-  const tabStillGoing = (tab) => `tab ${tab.id} is still going; close it once it has finished`;
+  const tabStillGoing = (tab) => `tab ${tabNumber(tab)} is still going; close it once it has finished`;
   const ENDINGS = new Set(['run_finished', 'run_failed', 'ask_finished', 'ask_failed']);
   const STOPPING = 'stopping · the call in flight finishes first';
   const CONTINUE = 'continue';
@@ -2116,6 +2123,9 @@
   const world = $('world');
   const inspector = $('inspector');
   const claimNote = $('claim-note');
+  const askNote = $('ask-note');
+  const followUpButton = $('follow-up-btn', HTMLButtonElement);
+  const askNoteButton = $('ask-note-btn', HTMLButtonElement);
   const questionEl = $('question', HTMLTextAreaElement);
   const modelPick = $('model-pick', HTMLSelectElement);
   const modelAdd = $('model-add', HTMLInputElement);
@@ -2193,9 +2203,10 @@
       filesError: '',
       draft: '',
       adding: Promise.resolve(),
-      button: h('button', { class: 'btn run-tab', id: `run-tab-${id}`, type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) }, h('span', { class: 'num' }, `${id} `)),
+      button: h('button', { class: 'btn run-tab', id: `run-tab-${id}`, type: 'button', role: 'tab', 'aria-controls': 'panel', onclick: () => switchTab(tab) }, h('span', { class: 'num' })),
       // The tab list holds only tabs, so × is for the mouse; the keyboard closes a tab with Delete.
       close: h('button', { class: 'btn tab-close', type: 'button', tabindex: '-1', 'aria-hidden': 'true', onclick: () => closeTab(tab) }, '×'),
+      openedFrom: null,
       run: null,
       // A chat shown again isn't read out: a live region announces what changes in it, not what it holds.
       chat: h('div', { class: 'transcript', 'aria-live': 'polite', hidden: true }),
@@ -2784,7 +2795,7 @@
   // a live one also has the server's `id` for it.
   /** @param {Answer} ask */
   function askSummary({ source, model, totals }) {
-    return [`${source} ask over this run`, model, ...spendOf(source === 'simulated', totals)].join(' · ');
+    return [`${source} ${FOLLOW_UP} over this run`, model, ...spendOf(source === 'simulated', totals)].join(' · ');
   }
 
   // Answer k in run.answers is node `answer-k`; the run's own answer is the first.
@@ -4834,7 +4845,7 @@
     const tab = runTab(state.shown);
     const { run } = tab;
     if (node.el.classList.contains('working')) return [h('p', { class: 'k' }, 'working…')];
-    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the ask stopped before it answered' : 'the run stopped before this finished')];
+    if (node.el.classList.contains('failed')) return [h('p', { class: 'k' }, kind === 'answer' && d > 0 ? 'the follow-up stopped before it answered' : 'the run stopped before this finished')];
     if (skipsAt(run, id).length && isVoid(run, id)) return skippedBody(run, id);
     if (isRound(kind)) return snippetBody(tab, kind, d);
     if (kind === 'schema') {
@@ -5046,7 +5057,7 @@
     if (!link) return;
     const { node, offer } = link.dataset;
     if (node) jumpTo(node);
-    if (offer) prepareAsk(RECORDED_ASKS[Number(offer)]);
+    if (offer) followUpWith(RECORDED_ASKS[Number(offer)]);
   }
 
   // Whether a click on an answer's line, off its mark, is the end of selecting some of its text.
@@ -5060,8 +5071,8 @@
 
   let nextLog = 0;
 
-  /** @param {Tab} tab @param {HTMLElement} body @param {string} [first] */
-  function narrator(tab, body, first = '') {
+  /** @param {Tab} tab @param {HTMLElement} body @param {string} [first] @param {boolean} [followUp] */
+  function narrator(tab, body, first = '', followUp = false) {
     const id = `log-${nextLog++}`;
     const lines = h('div', { class: 'log-lines', id, hidden: true, 'aria-live': 'off' });
     const latest = h('span', { class: 't', id: `${id}-latest` }, first);
@@ -5112,6 +5123,7 @@
       // The line under the log that says why it failed, until a continue takes it back.
       /** @type {HTMLElement | null} */
       error: null,
+      followUp,
       /** @param {StageKind} kind */
       begins(kind) {
         if (begun === kind) return false;
@@ -5124,9 +5136,9 @@
         mark.className = '';
         mark.textContent = '●';
       },
-      /** @param {string} text @param {'ok' | 'err' | 'flag'} tone */
+      /** @param {Child} text @param {'ok' | 'err' | 'flag'} tone */
       finish(text, tone) {
-        latest.textContent = text;
+        fill(latest, text);
         mark.className = tone;
         mark.textContent = '●';
       },
@@ -5142,10 +5154,12 @@
     };
   }
 
-  /** @param {Tab} tab @param {string} question */
-  function addTurn(tab, question) {
+  /** @param {Tab} tab @param {string} question @param {boolean} [followUp] */
+  function addTurn(tab, question, followUp = false) {
     const body = h('div', { class: 'turn-body' });
-    tab.chat.append(h('div', { class: 'turn' }, line('user', question), body));
+    const asked = line('user', question, { glyph: followUp ? FOLLOW_UP_MARK : null });
+    asked.classList.toggle(FOLLOW_UP_CLASS, followUp);
+    tab.chat.append(h('div', { class: 'turn' }, asked, body));
     scrollChat(tab);
     return body;
   }
@@ -5165,7 +5179,8 @@
   function sayReady(narr, model, simulated, totals) {
     // The cost alone, or the tokens where it is unknown, keeps the line short.
     const spend = spendOf(simulated, totals).slice(-1);
-    narr.finish(['ready', model, ...spend].join(' · '), simulated ? 'flag' : 'ok');
+    const tag = narr.followUp && [' · ', h('span', { class: FOLLOW_UP_CLASS }, FOLLOW_UP)];
+    narr.finish([['ready', model, ...spend].join(' · '), tag], simulated ? 'flag' : 'ok');
   }
   /** @param {Narrator} narr @param {Ending} ending */
   function sayEnding(narr, { outcome, error }) {
@@ -5224,7 +5239,12 @@
     // Stop stays enabled while the shown tab has something going that it hasn't asked to stop yet.
     offer($('stop-btn', HTMLButtonElement), tabBusy(state.shown), toStop(state.shown).length > 0 || !stopping(state.shown));
     $('replay-btn').hidden = mode !== prototypeMode || !state.shown.run;
-    offer($('save-btn', HTMLButtonElement), live && landed(state.shown, RUN_ANSWER), !tabBusy(state.shown));
+    const answered = landed(state.shown, RUN_ANSWER);
+    const followable = canFollowUp(state.shown);
+    offer(followUpButton, followable, !mode.runGoing(state.shown));
+    offer(askNoteButton, followable);
+    if (!followable && askNote.matches(':popover-open')) askNote.hidePopover();
+    offer($('save-btn', HTMLButtonElement), live && answered, !tabBusy(state.shown));
   }
 
   function updateHint() {
@@ -5243,22 +5263,20 @@
     }
   }
 
-  // A question asks over the shown tab's run once its answer has landed, or waits while it is going; before any run,
-  // or after a failed one, it runs r3con on the tab's files.
-  function submitQuestion() {
+  // A follow-up reuses the run's representation once its answer is in; Enter or the ask button starts a new run.
+  function submitQuestion(followUp = false) {
     const question = questionEl.value.trim();
     if (!question) {
       questionEl.focus();
       return;
     }
-    const asks = landed(state.shown, RUN_ANSWER) || mode.runGoing(state.shown);
-    // An ask needs only the run's representation; a run needs files.
-    const refused = asks || state.shown.files.length ? refusal(asks) : null;
+    const overRun = followUp && canFollowUp(state.shown);
+    const refused = refusal(followUp, overRun);
     if (refused) {
       setStatus(refused);
       return;
     }
-    if (asks) {
+    if (overRun) {
       mode.ask(runTab(state.shown), question);
     } else if (!state.shown.files.length) {
       addTurn(state.shown, question).append(line('main', 'Drop files or folders first, then ask again.', { dim: true }));
@@ -5269,12 +5287,15 @@
     updateComposer();
   }
 
-  // Why the question can't be sent yet, if it can't; it then stays in the box.
-  /** @param {boolean} asks */
-  function refusal(asks) {
-    if (asks && mode.runGoing(state.shown)) return ASK_WHEN_DONE;
-    return asks ? null : mode.refuseFiles(state.shown.files);
+  // Follow-up keys wait while the run goes rather than start a full run; a refused question stays in the box.
+  /** @param {boolean} followUp @param {boolean} overRun */
+  function refusal(followUp, overRun) {
+    if (followUp && mode.runGoing(state.shown)) return FOLLOW_UP_WHEN_DONE;
+    return overRun || !state.shown.files.length ? null : mode.refuseFiles(state.shown.files);
   }
+
+  /** @param {Tab} tab */
+  const canFollowUp = (tab) => landed(tab, RUN_ANSWER);
 
   // ---------- replay ----------
 
@@ -6037,7 +6058,7 @@
       if (event.type === 'ask_failed') {
         const ending = endingOf(stream.stopping, event);
         failed(ending);
-        if (stream.stopping) stopped = `ask ${ending.outcome}`;
+        if (stream.stopping) stopped = `${FOLLOW_UP} ${ending.outcome}`;
       }
     };
     try {
@@ -6045,7 +6066,7 @@
       jobStarted(stream, (await asked.json()).ask_id);
       await follow(`/api/asks/${ask.id}/events`, onEvent);
     } catch (error) {
-      failed({ outcome: 'failed', error: explain(error, /** @type {Error} */ (error).message, 'the ask stopped') });
+      failed({ outcome: 'failed', error: explain(error, /** @type {Error} */ (error).message, 'the follow-up stopped') });
     } finally {
       closeStream(stream);
       stopLinking(tab, id);
@@ -6086,7 +6107,7 @@
   function startRun(question) {
     const from = state.shown;
     const at = docPositions(from);
-    const opened = from.run ? copyTab(from) : from;
+    const opened = from.run ? Object.assign(copyTab(from, lastOpenedFrom(from)), { openedFrom: from }) : from;
     const tab = Object.assign(opened, { run: { ...mode.newRun(question, opened.files), lit: null }, turn: addTurn(opened, question) });
     if (tab === from) renderFiles();
     else showTabContents(tab);
@@ -6099,7 +6120,7 @@
 
   /** @param {Tab} tab @param {string} question @param {string} model */
   function askTurn(tab, question, model) {
-    const narr = narrator(tab, addTurn(tab, question));
+    const narr = narrator(tab, addTurn(tab, question, true), '', true);
     narr.log('main', `asking · ${model}`);
     return narr;
   }
@@ -6144,25 +6165,25 @@
     lightLanded(tab, id);
   }
 
-  // After the recorded replay, each recorded ask is a click away: it fills the question and picks its model.
+  // After the recorded replay, each recorded follow-up is a click away: it picks its model and sends its question.
   /** @param {Narrator} narr */
   function offerRecordedAsks(narr) {
     if (!RECORDED_ASKS.length) return;
     /** @param {RecordedAsk} ask @param {number} i */
     const offer = (ask, i) => h('button', { class: 'ref', type: 'button', 'data-offer': i }, `${ask.question} · ${bareModel(ask.model)}`);
-    narr.say('main', 'recorded asks over this run · any other question or model is simulated', { dim: true });
+    narr.say('main', 'recorded follow-ups over this run · any other question or model is simulated', { dim: true });
     RECORDED_ASKS.forEach((ask, i) => narr.say('sub', offer(ask, i)));
   }
 
   /** @param {{ question: string, model: string }} ask */
-  function prepareAsk({ question, model }) {
+  function followUpWith({ question, model }) {
     // Remembered first, so a model the menu doesn't list joins it as the remembered one does.
     rememberModel(model);
     renderModels();
     modelPick.value = modelId(model);
-    readyStatus();
     questionEl.value = question;
     questionEl.focus();
+    $('ask-form', HTMLFormElement).requestSubmit(followUpButton);
   }
 
   // ---------- tabs ----------
@@ -6177,22 +6198,30 @@
   /** @param {Tab} tab */
   const tabBusy = (tab) => mode.runGoing(tab) || streaming('ask', tab);
 
-  // Lists the tab.
-  /** @param {Tab} tab */
-  function openTab(tab) {
-    state.tabs.push(tab);
+  // Lists the tab, last or right after `after`.
+  /** @param {Tab} tab @param {Tab | null} [after] */
+  function openTab(tab, after = null) {
+    state.tabs.splice(after ? state.tabs.indexOf(after) + 1 : state.tabs.length, 0, tab);
     tab.button.append(tabLabel(tab));
-    $('run-tabs').append(tab.button, tab.close);
+    if (after) after.close.after(tab.button, tab.close);
+    else $('run-tabs').append(tab.button, tab.close);
     $('ask-form').before(tab.chat);
     if (tab.files.length) tellChat(tab, `Loaded ${fileCount(tab.files)}.`);
     return tab;
   }
 
+  // In question order: each new tab goes after the tab it came from and those it opened before.
   /** @param {Tab} from */
-  function copyTab(from) {
+  const lastOpenedFrom = (from) => /** @type {Tab} */ (state.tabs.findLast((tab) => tab === from || tab.openedFrom === from));
+
+  /** @param {Tab} tab */
+  const tabNumber = (tab) => state.tabs.indexOf(tab) + 1;
+
+  /** @param {Tab} from @param {Tab | null} [after] */
+  function copyTab(from, after = null) {
     const tab = newTab(from.files, from.view);
     tab.folders = new Map(from.folders);
-    return openTab(tab);
+    return openTab(tab, after);
   }
 
   function updateTabs() {
@@ -6205,6 +6234,7 @@
         labelNode.textContent = label;
         if (shown) revealTab(tab);
       }
+      /** @type {Element} */ (tab.button.querySelector('.num')).textContent = `${tabNumber(tab)} `;
       tab.button.setAttribute('aria-selected', String(shown));
       tab.button.tabIndex = shown ? 0 : -1;
       tab.close.hidden = state.tabs.length === 1;
@@ -6245,8 +6275,7 @@
   /** @param {Tab} tab @param {Map<string, Point>} [at] where to draw document nodes the tab hasn't drawn yet */
   function switchTab(tab, at) {
     if (tab === state.shown) return;
-    // Each tab keeps its question. Once shown its draft is emptied: a run after a failed one opens its own tab without
-    // saving the box.
+    // Each tab keeps its question; a new run opening its own tab leaves the box it came from unsaved.
     state.shown.draft = questionEl.value;
     questionEl.value = tab.draft;
     tab.draft = '';
@@ -7464,7 +7493,7 @@
 
     $('ask-form').addEventListener('submit', (e) => {
       e.preventDefault();
-      submitQuestion();
+      submitQuestion(/** @type {SubmitEvent} */ (e).submitter === followUpButton);
     });
     $('stop-btn').addEventListener('click', () => {
       mode.stop(state.shown);
@@ -7473,8 +7502,10 @@
     questionEl.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
       e.preventDefault();
-      $('ask-form', HTMLFormElement).requestSubmit();
+      $('ask-form', HTMLFormElement).requestSubmit(e.metaKey || e.ctrlKey ? followUpButton : null);
     });
+    askNote.addEventListener('beforetoggle', onAskNoteToggle);
+    window.addEventListener('resize', () => askNote.matches(':popover-open') && placeAskNote());
     modelPick.addEventListener('change', onPick);
     modelAdd.addEventListener('input', placeModel);
     modelAdd.addEventListener('keydown', (e) => e.key === 'Enter' && !e.isComposing && addModel());
@@ -7642,6 +7673,21 @@
     } catch (error) {
       errorStatus(explain(error, CANT_SAVE));
     }
+  }
+
+  function placeAskNote() {
+    const form = $('ask-form');
+    const box = form.getBoundingClientRect();
+    const row = /** @type {Element} */ (form.querySelector('.ask-foot')).getBoundingClientRect();
+    askNote.style.left = `${box.left}px`;
+    askNote.style.width = `${box.width}px`;
+    askNote.style.bottom = `${root.clientHeight - row.top + POPOVER_GAP}px`;
+  }
+
+  /** @param {ToggleEvent} e */
+  function onAskNoteToggle(e) {
+    askNoteButton.ariaExpanded = String(e.newState === 'open');
+    if (e.newState === 'open') placeAskNote();
   }
 
   /** @param {ToggleEvent} e */
@@ -8025,6 +8071,8 @@
     refreshKeys().catch((error) => errorStatus(explain(error, "couldn't read which providers have keys")));
     $('files-locked').textContent = FILES_LOCKED;
     $('mode-note').textContent = mode.note;
+    $('follow-up-key').textContent = FOLLOW_UP_KEYS.hint;
+    followUpButton.ariaKeyShortcuts = FOLLOW_UP_KEYS.aria;
     $('mode-note').hidden = !mode.note;
     wire();
     if (!savedBlock) return;
