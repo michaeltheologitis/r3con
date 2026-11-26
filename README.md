@@ -1,17 +1,24 @@
-# r3con
+# R3Con
+
+The code of the paper [*Realize What Matters: Principled Context Representation for
+Large-Scale Reasoning*](https://arxiv.org/abs/2609.27173). Continued development lives at
+[r3trace](https://github.com/michaeltheologitis/r3trace).
 
 **Context representation for large-scale reasoning.**
 
 Ask a question whose evidence is scattered across many documents. `r3con` organizes that
 context into a representation built *for that question*, then reasons over it.
 
-![How r3con works](docs/r3con.png)
+![How r3con works](https://raw.githubusercontent.com/michaeltheologitis/r3con/main/docs/r3con.png)
 
 ## Install
 
 ```bash
 pip install r3context
 ```
+
+Version 1.0.0 is the code in this repository. It needs Python 3.11 or newer, and imports
+as `r3con`.
 
 Set the key your provider expects:
 
@@ -64,10 +71,10 @@ result = r3con.run("Which supplier missed the most delivery windows?", [doc_a, d
 
 **Notebooks**, over five short memos arranged so no single one holds the answer:
 
-- [`examples/quickstart.ipynb`](examples/quickstart.ipynb) — the whole thing end to end.
-- [`examples/options.ipynb`](examples/options.ipynb) — the settings: model, rounds,
+- [`examples/quickstart.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/quickstart.ipynb) — the whole thing end to end.
+- [`examples/options.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/options.ipynb) — the settings: model, rounds,
   generation params, run configs, your own connection, where artifacts go.
-- [`examples/vllm.ipynb`](examples/vllm.ipynb) — pointing it at a self-hosted endpoint.
+- [`examples/vllm.ipynb`](https://github.com/michaeltheologitis/r3con/blob/main/examples/vllm.ipynb) — pointing it at a self-hosted endpoint.
 
 ## What you get back
 
@@ -100,6 +107,6 @@ How r3con was evaluated, with the baselines it was compared against:
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE). `src/r3con/runtime/python_executor.py` is a modified copy of the
+MIT — see [LICENSE](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE). `src/r3con/runtime/python_executor.py` is a modified copy of the
 sandboxed interpreter from [smolagents](https://github.com/huggingface/smolagents), Apache-2.0,
-© HuggingFace Inc. See [NOTICE](NOTICE) and [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
+© HuggingFace Inc. See [NOTICE](https://github.com/michaeltheologitis/r3con/blob/main/NOTICE) and [LICENSE-APACHE-2.0](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE-APACHE-2.0).

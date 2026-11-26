@@ -56,7 +56,7 @@ try:  # the installed wheel's version is the truth; the literal is the checkout 
 
     __version__ = _pkg_version("r3context")  # the DISTRIBUTION name, not the module
 except Exception:  # noqa: BLE001 — running from a source checkout
-    __version__ = "0.1.0"
+    __version__ = "1.0.0"
 
 __all__ = [
     # the entry point
