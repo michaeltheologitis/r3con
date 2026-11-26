@@ -1,8 +1,10 @@
 # R3Con
 
-The code of the paper [*Realize What Matters: Principled Context Representation for
-Large-Scale Reasoning*](https://arxiv.org/abs/2609.27173). Continued development lives at
-[r3trace](https://github.com/michaeltheologitis/r3trace).
+[![arXiv](https://img.shields.io/badge/arXiv-2609.27173-b31b1b.svg)](https://arxiv.org/abs/2609.27173)
+![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
+[![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/michaeltheologitis/r3con/blob/main/LICENSE)
+
+Continued development at [r3trace](https://github.com/michaeltheologitis/r3trace).
 
 **Context representation for large-scale reasoning.**
 
