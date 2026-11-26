@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat \"$CLAUDE_PROJECT_DIR/../coding-skills/GUIDE.md\" 2>/dev/null || echo 'The coding guide is missing: coding-skills is not checked out next to this repo. Tell Michael before starting work.'"
+          }
+        ]
+      }
+    ]
+  }
+}
